@@ -2441,52 +2441,71 @@ weaker than a test.
   reads — `QuerySubscribe`, `Search`, `SearchSubscribe`, `HybridSearch`, `HybridSearchSubscribe`,
   `VectorSearch`, `SyncInit`, `MerkleReqBucket`, `ORMapSyncInit`, `ORMapMerkleReqBucket`,
   `ORMapDiffRequest`, `JournalRead` / `JournalSubscribe` / `ListResolvers` when they name a map,
-  `TopicSubscribe` (topic); writes — `ClientOp`, `OpBatch` (every op), `ORMapPushDiff`,
+  `TopicSubscribe` (topic), `CounterRequest` (counter name); writes — `ClientOp`, `OpBatch` (every op), `ORMapPushDiff`,
   `EntryProcess`, `EntryProcessBatch`, `RegisterResolver`, `UnregisterResolver`, `TopicPublish`
   (topic), `CounterSync` (counter name). (2) `JournalRead` and `JournalSubscribe` **without** a map
   are admitted, and the journal keeps every event of a map the principal may not read: a read
   filters before its page limit, so `has_more` and the page count only visible events; a live
   subscription is checked per event at delivery, with the principal it was made with and the
   policy in force at that moment. (3) An event of a reserved map (`_topgun_*`, `__topgun_*`)
-  reaches no client by read or by subscription, also under NO_AUTH.
+  reaches no client by read or by subscription, also under NO_AUTH. (4) A subscription belongs
+  to the connection that made it: the query, search, hybrid-search and journal registries are
+  keyed by (connection, client-chosen id), so a connection choosing an id another connection
+  already uses gets a subscription of its own, and an unsubscribe removes only the caller's own
+  subscription of that id — another connection's, or none, is a no-op with the same empty answer.
+  (5) A lock is released only by the connection holding it, with its fencing token; another
+  connection, or a caller with no connection, gets the same `success: false` as a wrong token.
 - **Exemptions, each with its reason** (the bypass group, `(None, "")`):
   - `Ping`, `PartitionMapRequest` — carry no data of any map; cluster routing under NO_AUTH depends
     on them.
   - `GarbageCollect` — not decoded from any client message; only the server issues it.
   - `QueryUnsubscribe`, `SearchUnsubscribe`, `HybridSearchUnsubscribe`, `JournalUnsubscribe` —
-    remove a subscription by its id and read nothing; the subscription was authorized when made.
-    They do not check that the id belongs to the calling connection (open, tracked in TODO-879).
+    remove only the calling connection's subscription of that id (clause 4) and read nothing; the
+    subscription was authorized when made.
   - `TopicUnsubscribe` — removes only the calling connection from the topic.
   - `LockRequest`, `LockRelease` — a lock name is not a map name and no policy names locks; a
-    release needs the lock's fencing token (open, tracked in TODO-879).
-  - `CounterRequest` — reads a counter by name and subscribes to it, unchecked, while `CounterSync`
-    is checked as a write (open, tracked in TODO-879).
+    release is held to the lock's holder and fencing token (clause 5).
   - `QuerySyncInit` — a no-op stub; it reads nothing. `SqlQuery` is classified as a read of the
     empty name, so an allow on `*` admits it across every map (tracked, TODO-444).
-- **Stated limits:** a subscription that names a map (`QuerySubscribe`, `SearchSubscribe`,
+- **Stated limits:** locks have no namespace in the policies, so `LockRequest` may name any lock;
+  a check by lock name would refuse clients whose policies name only maps. A connection that
+  reconnects is a new holder: its old lock is freed by the disconnect cleanup or its TTL, not
+  released by the new connection. A subscription that names a map (`QuerySubscribe`, `SearchSubscribe`,
   `HybridSearchSubscribe`, `JournalSubscribe`, `TopicSubscribe`) is authorized when it is made; a
   later policy change does not revoke it. Record-level policy conditions are evaluated against no
   record on every read path — `Search`, `VectorSearch` and the journal alike — so a condition on
   `data` does not filter the events or hits a read returns. The resolver list is always empty, so
   `ListResolvers` without a map has nothing to filter. The journal decides without waiting
-  (`PolicyEvaluator::may_read_now`); a policy store that cannot answer at once denies.
+  (`PolicyEvaluator::may_read_now`); a policy store that cannot answer at once denies. A journal
+  read or subscription without a map withholds events of unreadable maps but not their sequence
+  numbers, so the gaps in the sequence show that, and when, such events were written.
 - **Maintaining code:** `service/middleware/authorization.rs` `classify_operation`,
   `reserved_target_map_name`; `service/domain/journal.rs` `JournalStore::read` and
-  `subscribers_for`; `service/policy/mod.rs` `may_read_now`; the journal is given the evaluator in
-  `bin/topgun_server.rs` `build_services`.
+  `subscribers_for`, `subscribe`, `unsubscribe`; `service/domain/query.rs` `QueryRegistry`;
+  `service/domain/search/registry.rs` `SubscriptionRegistry`;
+  `service/domain/coordination_lock.rs` `LockRegistry::release`; `service/policy/mod.rs`
+  `may_read_now`; the journal is given the evaluator in `bin/topgun_server.rs` `build_services`.
 - **Enforcing test:** `vector_search_is_held_to_the_read_policy_of_its_map`,
   `resolver_operations_are_held_to_the_policy_of_their_map`,
   `topic_subscribe_is_held_to_the_read_policy_of_its_topic`,
   `journal_operations_naming_a_map_are_held_to_its_read_policy`,
   `newly_scoped_operations_cannot_name_a_reserved_map_under_no_auth`,
   `journal_read_without_a_map_returns_only_readable_maps`,
-  `journal_subscription_without_a_map_is_delivered_only_readable_maps` and
-  `reserved_map_events_reach_no_client_under_no_auth`, in `authorization.rs`'s test module; at the
+  `journal_subscription_without_a_map_is_delivered_only_readable_maps`,
+  `reserved_map_events_reach_no_client_under_no_auth` and
+  `counter_request_is_held_to_the_read_policy_of_its_counter`, in `authorization.rs`'s test
+  module; `a_connection_cannot_remove_another_connections_query_subscription` and
+  `connections_choosing_the_same_query_id_keep_separate_subscriptions` (`query.rs`),
+  `search_subscriptions_are_owned_by_the_connection_that_made_them` (`search/mod.rs`),
+  `subscriptions_with_the_same_id_on_two_connections_are_separate` (`journal.rs`),
+  `lock_release_by_a_connection_that_does_not_hold_it_keeps_the_lock` (`coordination.rs`); at the
   wire, `tests/integration-rust/journal.test.ts`.
 - **Violation consequence:** a client reads or changes data of a map the policy denies it — every
-  mutation of every map through the journal, a denied map's vectors, its resolvers.
-- **Discovered by:** the TODO-859/861 research; TODO-876.
-- **Status:** decided, **enforced** for the scoped families; the three exemptions marked open above are not enforced (TODO-879).
+  mutation of every map through the journal, a denied map's vectors, its resolvers, a denied
+  counter — or takes another client's lock away, or stops or takes over another client's live
+  subscription.
+- **Discovered by:** the TODO-859/861 research; TODO-876; TODO-879.
+- **Status:** decided, **enforced**.
 
 ### TG-KEY-001: Every write of a record holds that record's per-key writer
 
