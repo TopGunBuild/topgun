@@ -3917,3 +3917,118 @@ async fn c10_an_append_after_finish_is_refused_and_touches_no_file() {
         .is_some());
     node.close().await;
 }
+
+/// R4.2 at the edges: a 0-byte segment anywhere is an empty segment; a
+/// non-last file of 1–3 bytes or a non-last v2 file shorter than its header
+/// is refused by name; a last one is a segment with no intact frame,
+/// replaced under its name.
+#[tokio::test(flavor = "multi_thread")]
+async fn c11_short_segment_files_by_position() {
+    use super::segment::format_segment_filename;
+    let short_header = {
+        let mut bytes = SegmentHeader::new_unsealed(P, 1).encode().to_vec();
+        bytes.truncate(20);
+        bytes
+    };
+    let with_frame = |first_seq: u64| {
+        let mut bytes = SegmentHeader::new_unsealed(P, first_seq).encode().to_vec();
+        bytes.extend(
+            super::format::encode_v2(&store_frame("k", &lww("v", first_seq), first_seq)).unwrap(),
+        );
+        bytes
+    };
+
+    // 0 bytes in the middle: read as empty.
+    let root = Root::new();
+    std::fs::create_dir_all(root.wal_dir()).unwrap();
+    std::fs::write(root.wal_dir().join(format_segment_filename(P, 1)), []).unwrap();
+    std::fs::write(
+        root.wal_dir().join(format_segment_filename(P, 5)),
+        with_frame(5),
+    )
+    .unwrap();
+    let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
+    node.recover()
+        .await
+        .expect("a 0-byte middle segment is valid");
+    node.close().await;
+
+    for (case, bytes) in [
+        ("1-3 bytes", b"TGW".to_vec()),
+        ("short header", short_header),
+    ] {
+        // Not last: refused by name.
+        let root = Root::new();
+        std::fs::create_dir_all(root.wal_dir()).unwrap();
+        let name = format_segment_filename(P, 1);
+        std::fs::write(root.wal_dir().join(&name), &bytes).unwrap();
+        std::fs::write(
+            root.wal_dir().join(format_segment_filename(P, 5)),
+            with_frame(5),
+        )
+        .unwrap();
+        let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
+        let error = format!("{:#}", node.recover().await.expect_err(case));
+        assert!(error.contains(&name), "{case}: {error}");
+        node.close().await;
+
+        // Last: replaced under its name, and takes frames.
+        let root = Root::new();
+        std::fs::create_dir_all(root.wal_dir()).unwrap();
+        let path = root.wal_dir().join(&name);
+        std::fs::write(&path, &bytes).unwrap();
+        let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
+        node.recover().await.expect(case);
+        append_and_len(&node, P, 2).await;
+        assert_eq!(segment_files(&root.wal_dir(), P).len(), 1, "{case}");
+        let decoded = decode_segment(&std::fs::read(&path).unwrap());
+        assert!(
+            decoded.header.is_some() && decoded.frames == 1,
+            "{case}: replaced"
+        );
+        node.close().await;
+    }
+}
+
+/// R10.2 bound and failures: `finish` unlinks against the lower of the
+/// durable watermark and a fresh read of the store's, nothing when the store
+/// is gone, and keeps a segment it cannot unlink while unlinking the others.
+#[tokio::test(flavor = "multi_thread")]
+async fn c12_finish_unlinks_below_the_store_read_and_keeps_what_it_cannot_unlink() {
+    // A durable watermark above the store's row: the store's bounds it.
+    let root = Root::new();
+    let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
+    node.append(P, "k", &lww("v", 1), 1).await;
+    node.wal.mark_applied(P, 1).await.unwrap();
+    node.wal.finish(true).await.expect("finish");
+    node.close().await;
+    assert_eq!(frames_on_disk(&root.wal_dir(), P), BTreeSet::from([1]));
+
+    // The store gone: the hints are written, nothing is unlinked.
+    let root = Root::new();
+    let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
+    node.append(P, "k", &lww("v", 1), 1).await;
+    node.commit(&[], &[(P, 1)]).await.expect("commit");
+    let Node { engine, store, wal } = node;
+    drop(store);
+    assert_eq!(wal.finish(true).await.expect("finish"), 1);
+    assert_eq!(frames_on_disk(&root.wal_dir(), P), BTreeSet::from([1]));
+    drop(wal);
+    drop(engine);
+
+    // An unlink that fails keeps its segment; the other partition's goes.
+    let root = Root::new();
+    let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
+    node.append(P, "k", &lww("v", 1), 1).await;
+    node.append(Q, "k", &lww("v", 2), 2).await;
+    node.commit(&[], &[(P, 1), (Q, 2)]).await.expect("commit");
+    let refused = segment_files(&root.wal_dir(), P)
+        .into_values()
+        .next()
+        .unwrap();
+    node.wal.test_refuse_unlink(&refused, true);
+    node.wal.finish(true).await.expect("finish");
+    node.close().await;
+    assert!(refused.exists(), "the refused unlink kept its segment");
+    assert!(segment_files(&root.wal_dir(), Q).is_empty());
+}

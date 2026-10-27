@@ -1949,7 +1949,10 @@ impl WalWriter {
     /// lock, so no append is between its closed check and its write, and no
     /// partition opens afterwards. An append that arrived after the write
     /// path's last WAL sync is then fsynced here: the segment it is in may be
-    /// kept, and its write was acknowledged.
+    /// kept, and its write was acknowledged. A failed fsync fails the
+    /// `finish`, which then writes no hint and unlinks nothing, and the WAL
+    /// stays closed: the frame's durability is unknown, so the stop must not
+    /// look clean to a rollback.
     async fn close_to_appends(&self) -> anyhow::Result<()> {
         let _open = self.open.lock().await;
         let handles: Vec<Arc<PartitionHandle>> =
