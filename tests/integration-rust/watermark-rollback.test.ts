@@ -355,10 +355,13 @@ function refusalCase(title: string, tag: string, stop: 'SIGTERM' | 'SIGKILL'): v
     });
 
     if (stop === 'SIGTERM') {
-      test('the clean stop wrote an 8-byte rollback hint for every partition with a segment', () => {
-        expect(o.wal?.segmentPartitions.length).toBeGreaterThanOrEqual(1);
-        const withoutHint = (o.wal?.segmentPartitions ?? []).filter((p) => o.wal?.applied[p] !== 8);
-        expect(withoutHint).toEqual([]);
+      test('the clean stop wrote 8-byte rollback hints and left no segment', () => {
+        // A drained stop with nothing above the watermark unlinks every
+        // segment it covers, so the hints are what is left of the WAL.
+        const hints = Object.values(o.wal?.applied ?? {});
+        expect(hints.length).toBeGreaterThanOrEqual(1);
+        expect(hints.filter((size) => size !== 8)).toEqual([]);
+        expect(o.wal?.segmentPartitions).toEqual([]);
       });
     } else {
       test('after kill -9 the WAL directory holds no .applied file', () => {
