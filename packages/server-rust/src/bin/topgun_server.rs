@@ -2164,6 +2164,7 @@ fn build_services(
         merkle_manager,
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
+        Arc::clone(&query_registry),
     )
     // Same frontier + per-key writer as CrdtService: covering-epoch conveyance
     // reads the epoch counter CrdtService stamps, and the SYNC-leaf prune

@@ -712,6 +712,7 @@ fn build_services() -> (
         merkle_manager,
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
+        Arc::clone(&query_registry),
     ));
     let query_svc = Arc::new(QueryService::new(
         Arc::clone(&query_registry),

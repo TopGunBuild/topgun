@@ -99,6 +99,67 @@ describe('Integration: ORMap CRDT (Rust Server)', () => {
   });
 
   // ========================================
+  // OR_ADD via ORMAP_PUSH_DIFF
+  // ========================================
+  describe('OR_ADD via ORMAP_PUSH_DIFF', () => {
+    test('a pushed add reaches a subscribed client and no unsubscribed one', async () => {
+      const writer = await createRustTestClient(port, {
+        nodeId: 'or-push-writer',
+        userId: 'push-writer',
+        roles: ['ADMIN'],
+      });
+      await writer.waitForMessage('AUTH_ACK');
+
+      const observer = await createRustTestClient(port, {
+        nodeId: 'or-push-observer',
+        userId: 'push-observer',
+        roles: ['ADMIN'],
+      });
+      await observer.waitForMessage('AUTH_ACK');
+
+      const bystander = await createRustTestClient(port, {
+        nodeId: 'or-push-bystander',
+        userId: 'push-bystander',
+        roles: ['ADMIN'],
+      });
+      await bystander.waitForMessage('AUTH_ACK');
+
+      subscribeToMap(observer, 'or-push-items', 'q-or-push-obs');
+      await waitForSync(100);
+      observer.messages.length = 0;
+      bystander.messages.length = 0;
+
+      const orRecord = createORRecord('Pushed value', 'or-push-writer');
+      writer.send({
+        type: 'ORMAP_PUSH_DIFF',
+        payload: {
+          mapName: 'or-push-items',
+          entries: [{ key: 'list-push', records: [orRecord], tombstones: [] }],
+        },
+      });
+
+      const isPushedAdd = (m: TestClient['messages'][number]) =>
+        m.type === 'SERVER_EVENT' &&
+        m.payload?.eventType === 'OR_ADD' &&
+        m.payload?.mapName === 'or-push-items';
+      await waitUntil(() => observer.messages.some(isPushedAdd), 5000);
+
+      const serverEvent = observer.messages.find(isPushedAdd);
+      expect(serverEvent.payload.key).toBe('list-push');
+      expect(serverEvent.payload.orTag).toBe(orRecord.tag);
+
+      // The server sends to every recipient in one pass, so a bystander that
+      // was going to receive the event has it by the time a short wait ends.
+      await waitForSync(300);
+      expect(bystander.messages.filter(isPushedAdd)).toHaveLength(0);
+
+      writer.close();
+      observer.close();
+      bystander.close();
+    });
+  });
+
+  // ========================================
   // OR_REMOVE Tests
   // ========================================
   describe('OR_REMOVE via CLIENT_OP', () => {

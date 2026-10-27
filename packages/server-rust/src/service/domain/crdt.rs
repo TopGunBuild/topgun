@@ -61,6 +61,41 @@ fn matches_query_predicate(query: &topgun_core::messages::base::Query, data: &rm
     }
 }
 
+/// Serializes a `ServerEventPayload` as `MsgPack` and sends it only to connections
+/// with active query subscriptions for the affected map, never to the writer.
+///
+/// Every live data event goes through here, so a connection that holds no
+/// subscription on a map — and so was never authorized to read it — receives
+/// none of its events (TG-AUTHZ-001).
+///
+/// Skips serialization entirely when no subscribers exist, avoiding
+/// unnecessary `rmp_serde::to_vec_named` calls.
+pub(crate) fn broadcast_server_event(
+    query_registry: &QueryRegistry,
+    connection_registry: &ConnectionRegistry,
+    payload: &ServerEventPayload,
+    exclude_connection_id: Option<ConnectionId>,
+) -> Result<(), OperationError> {
+    let mut ids = query_registry.get_subscribed_connection_ids(&payload.map_name);
+
+    // Exclude the writing client so it does not receive its own event back
+    if let Some(exclude_id) = exclude_connection_id {
+        ids.remove(&exclude_id);
+    }
+
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let msg = Message::ServerEvent {
+        payload: payload.clone(),
+    };
+    let bytes = rmp_serde::to_vec_named(&msg)
+        .map_err(|e| OperationError::Internal(anyhow::anyhow!("serialize error: {e}")))?;
+    connection_registry.send_to_connections(&ids, &bytes);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // CrdtService
 // ---------------------------------------------------------------------------
@@ -877,42 +912,6 @@ impl CrdtService {
         }
     }
 
-    /// Serializes a `ServerEventPayload` as `MsgPack` and sends only to connections
-    /// with active query subscriptions for the affected map.
-    ///
-    /// Skips serialization entirely when no subscribers exist, avoiding
-    /// unnecessary `rmp_serde::to_vec_named` calls.
-    fn broadcast_event(
-        &self,
-        payload: &ServerEventPayload,
-        exclude_connection_id: Option<ConnectionId>,
-    ) -> Result<(), OperationError> {
-        let mut ids = self
-            .query_registry
-            .get_subscribed_connection_ids(&payload.map_name);
-
-        if ids.is_empty() {
-            return Ok(());
-        }
-
-        // Exclude the writing client so it does not receive its own event back
-        if let Some(exclude_id) = exclude_connection_id {
-            ids.remove(&exclude_id);
-        }
-
-        if ids.is_empty() {
-            return Ok(());
-        }
-
-        let msg = Message::ServerEvent {
-            payload: payload.clone(),
-        };
-        let bytes = rmp_serde::to_vec_named(&msg)
-            .map_err(|e| OperationError::Internal(anyhow::anyhow!("serialize error: {e}")))?;
-        self.connection_registry.send_to_connections(&ids, &bytes);
-        Ok(())
-    }
-
     /// Applies one op from an `OpBatch` in its own critical section.
     ///
     /// Partition is derived from the key because a batch spans many partitions.
@@ -971,7 +970,12 @@ impl CrdtService {
         let event_payload = self
             .apply_single_op(&key_guard, op, partition_id, sanitized_ts.as_ref())
             .await?;
-        self.broadcast_event(&event_payload, exclude_connection_id)?;
+        broadcast_server_event(
+            &self.query_registry,
+            &self.connection_registry,
+            &event_payload,
+            exclude_connection_id,
+        )?;
         self.broadcast_query_updates(
             &event_payload,
             old_rmpv_value.as_ref(),
@@ -3963,6 +3967,7 @@ mod tests {
                             Arc::new(MerkleSyncManager::default()),
                             Arc::clone(&factory),
                             Arc::new(ConnectionRegistry::new()),
+                            Arc::new(QueryRegistry::new()),
                         ));
                         let sink = Arc::new(IsolatedGauge::new());
                         let observer = Arc::clone(&sink);
@@ -9847,11 +9852,13 @@ mod tests {
             Arc::new(MerkleSyncManager::default()),
             Arc::clone(&factory_a),
             Arc::new(ConnectionRegistry::new()),
+            Arc::new(QueryRegistry::new()),
         ));
         let sync_b = Arc::new(SyncService::new(
             Arc::new(MerkleSyncManager::default()),
             Arc::clone(&factory_b),
             Arc::new(ConnectionRegistry::new()),
+            Arc::new(QueryRegistry::new()),
         ));
 
         let key = "conv-diff";
@@ -11887,6 +11894,7 @@ mod tests {
                     Arc::new(MerkleSyncManager::default()),
                     Arc::clone(factory),
                     Arc::new(ConnectionRegistry::new()),
+                    Arc::new(QueryRegistry::new()),
                 )
                 .with_key_writer(Arc::clone(&svc.key_writer)),
             )
@@ -11908,6 +11916,7 @@ mod tests {
                     Arc::new(MerkleSyncManager::default()),
                     Arc::clone(factory),
                     Arc::new(ConnectionRegistry::new()),
+                    Arc::new(QueryRegistry::new()),
                 )
                 .with_frontier(Arc::clone(&frontier), Arc::clone(&svc.key_writer)),
             );

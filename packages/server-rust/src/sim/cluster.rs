@@ -242,6 +242,7 @@ impl SimNode {
                     merkle_manager,
                     Arc::clone(&record_store_factory),
                     Arc::clone(&connection_registry),
+                    Arc::clone(&query_registry),
                 )
                 .with_key_writer(Arc::clone(&key_writer)),
             ),
