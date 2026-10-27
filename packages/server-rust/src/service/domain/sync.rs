@@ -5587,7 +5587,7 @@ mod tests {
         // (A)-(D) run with the gate dark: the push is merged unless refused.
         let (svc, factory, _frontier, registry) = make_gated_service();
         let (_listener, mut listener_rx) =
-            registry.register(ConnectionKind::Client, &ConnectionConfig::default());
+            register_client(&registry, &svc.query_registry, Some(MAP));
 
         // (A)-(C) The clean entry comes FIRST, so an implementation that refuses
         // only when it reaches the offending entry has already merged it.
@@ -6512,9 +6512,8 @@ mod tests {
             // `Internal`, the load log holds the offending key exactly once
             // and nothing else, and both slots are still absent.
             let probed = probed_push_service();
-            let (_listener, mut listener_rx) = probed
-                .registry
-                .register(ConnectionKind::Client, &ConnectionConfig::default());
+            let (_listener, mut listener_rx) =
+                register_client(&probed.registry, &probed.svc.query_registry, Some(MAP));
             probed.loads.set_unreadable(Some(BAD));
             let result = Arc::clone(&probed.svc).oneshot(push()).await;
 
@@ -6568,9 +6567,8 @@ mod tests {
         // silence above is not a deaf listener.
         {
             let probed = probed_push_service();
-            let (_listener, mut listener_rx) = probed
-                .registry
-                .register(ConnectionKind::Client, &ConnectionConfig::default());
+            let (_listener, mut listener_rx) =
+                register_client(&probed.registry, &probed.svc.query_registry, Some(MAP));
             let result = Arc::clone(&probed.svc)
                 .oneshot(push_entries(
                     make_ctx(service_names::SYNC),
