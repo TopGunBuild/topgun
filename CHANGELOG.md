@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Security (server):** a lock release, a counter read, and the unsubscribe operations of
+  queries, search, hybrid search and the event journal did not check the caller's ownership or
+  policy. A lock is now released only by the connection that holds it; a counter read is checked
+  as a read of the counter name, as a counter update is checked as a write; an unsubscribe removes
+  only the calling connection's subscription, and two connections that choose the same
+  subscription id now each keep their own. **Behaviour change:** under policies, reading a counter
+  needs a read permission on its name (`client.getPNCounter()` on a counter the policy does not
+  let the caller read is refused).
 - **Security (server):** vector search, journal reads and subscriptions that name a map, conflict
   resolver registration, removal and listing, and topic subscriptions were not authorized against
   their map or topic. Each is now checked by the same policies as its neighbours: vector search,

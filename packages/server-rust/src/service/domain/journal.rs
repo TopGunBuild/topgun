@@ -57,8 +57,10 @@ pub struct JournalStore {
     next_sequence: AtomicU64,
     /// Maximum number of events to retain.
     capacity: usize,
-    /// Active subscriptions keyed by subscription ID.
-    subscriptions: DashMap<String, JournalSubscription>,
+    /// Active subscriptions keyed by the owning connection and the
+    /// client-chosen subscription ID, so one connection can neither replace
+    /// nor remove another's subscription of the same ID.
+    subscriptions: DashMap<(ConnectionId, String), JournalSubscription>,
     /// When `false`, `append` is a no-op and no events are ever stored or
     /// pushed. Lets an operator turn the journal off (`TOPGUN_JOURNAL_ENABLED=false`)
     /// to shed its per-write cost. Subscriptions and reads still function; reads
@@ -147,14 +149,18 @@ impl JournalStore {
         seq
     }
 
-    /// Registers a subscription with the given ID.
+    /// Registers a subscription with the given ID, replacing one of the same
+    /// connection with the same ID.
     pub fn subscribe(&self, subscription_id: String, sub: JournalSubscription) {
-        self.subscriptions.insert(subscription_id, sub);
+        self.subscriptions
+            .insert((sub.connection_id, subscription_id), sub);
     }
 
-    /// Removes a subscription by ID.
-    pub fn unsubscribe(&self, subscription_id: &str) {
-        self.subscriptions.remove(subscription_id);
+    /// Removes `conn_id`'s subscription with the given ID; another
+    /// connection's subscription of the same ID is untouched.
+    pub fn unsubscribe(&self, conn_id: ConnectionId, subscription_id: &str) {
+        self.subscriptions
+            .remove(&(conn_id, subscription_id.to_string()));
     }
 
     /// Removes all subscriptions for the given connection.
@@ -521,19 +527,63 @@ mod tests {
             principal: None,
         };
         store.subscribe("sub-1".to_string(), sub);
+        let key = (ConnectionId(1), "sub-1".to_string());
 
         // Verify subscription exists.
-        assert!(store.subscriptions.contains_key("sub-1"));
+        assert!(store.subscriptions.contains_key(&key));
 
-        store.unsubscribe("sub-1");
-        assert!(!store.subscriptions.contains_key("sub-1"));
+        store.unsubscribe(ConnectionId(1), "sub-1");
+        assert!(!store.subscriptions.contains_key(&key));
     }
 
     #[test]
     fn unsubscribe_nonexistent_is_no_op() {
         let store = JournalStore::new(100);
         // Should not panic.
-        store.unsubscribe("nonexistent");
+        store.unsubscribe(ConnectionId(1), "nonexistent");
+    }
+
+    /// Two connections choosing the same subscription ID each keep their own
+    /// subscription, and one's unsubscribe never stops delivery to the other.
+    #[test]
+    fn subscriptions_with_the_same_id_on_two_connections_are_separate() {
+        let store = JournalStore::new(100);
+        let (a, b) = (ConnectionId(1), ConnectionId(2));
+        for connection in [a, b] {
+            store.subscribe(
+                "shared".to_string(),
+                JournalSubscription {
+                    connection_id: connection,
+                    map_name: Some("users".to_string()),
+                    types: None,
+                    principal: None,
+                },
+            );
+        }
+        store.subscribe(
+            "only-a".to_string(),
+            JournalSubscription {
+                connection_id: a,
+                map_name: Some("orders".to_string()),
+                types: None,
+                principal: None,
+            },
+        );
+        assert_eq!(
+            store.subscribers_for("users", &JournalEventType::PUT),
+            vec![a, b]
+        );
+
+        store.unsubscribe(b, "only-a");
+        store.unsubscribe(b, "shared");
+        assert_eq!(
+            store.subscribers_for("users", &JournalEventType::PUT),
+            vec![a]
+        );
+        assert_eq!(
+            store.subscribers_for("orders", &JournalEventType::PUT),
+            vec![a]
+        );
     }
 
     #[test]
@@ -569,9 +619,15 @@ mod tests {
 
         store.unsubscribe_by_connection(ConnectionId(1));
 
-        assert!(!store.subscriptions.contains_key("sub-1"));
-        assert!(!store.subscriptions.contains_key("sub-2"));
-        assert!(store.subscriptions.contains_key("sub-3"));
+        assert!(!store
+            .subscriptions
+            .contains_key(&(ConnectionId(1), "sub-1".to_string())));
+        assert!(!store
+            .subscriptions
+            .contains_key(&(ConnectionId(1), "sub-2".to_string())));
+        assert!(store
+            .subscriptions
+            .contains_key(&(ConnectionId(2), "sub-3".to_string())));
     }
 
     #[test]
@@ -585,7 +641,10 @@ mod tests {
         };
         store.subscribe("filtered-sub".to_string(), sub);
 
-        let entry = store.subscriptions.get("filtered-sub").unwrap();
+        let entry = store
+            .subscriptions
+            .get(&(ConnectionId(1), "filtered-sub".to_string()))
+            .unwrap();
         assert_eq!(entry.map_name, Some("users".to_string()));
         assert_eq!(
             entry.types,

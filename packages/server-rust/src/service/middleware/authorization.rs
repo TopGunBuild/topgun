@@ -433,6 +433,8 @@ static MAP_NAME_REFUSAL_LOG: MapNameRefusalLog = MapNameRefusalLog::new();
 ///
 /// Returns `(None, _)` for operations in the bypass group — these pass through
 /// without any policy evaluation (e.g., Ping, `PartitionMapRequest`, `GarbageCollect`).
+// One flat arm per operation variant, with no `_` arm, so a new variant must be classified here.
+#[allow(clippy::too_many_lines)]
 fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
     match op {
         // --- Write actions ---
@@ -517,6 +519,9 @@ fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
         Operation::TopicSubscribe { payload, .. } => {
             (Some(PermissionAction::Read), payload.topic.clone())
         }
+        Operation::CounterRequest { payload, .. } => {
+            (Some(PermissionAction::Read), payload.name.clone())
+        }
 
         // Without a map these span every map: they are admitted here, and the
         // journal withholds from each principal the events of the maps it may
@@ -547,8 +552,7 @@ fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
         | Operation::QueryUnsubscribe { .. }
         | Operation::SearchUnsubscribe { .. }
         | Operation::HybridSearchUnsubscribe { .. }
-        | Operation::JournalUnsubscribe { .. }
-        | Operation::CounterRequest { .. } => (None, String::new()),
+        | Operation::JournalUnsubscribe { .. } => (None, String::new()),
     }
 }
 
@@ -2117,6 +2121,30 @@ mod tests {
             }
         }
 
+        fn counter_request(name: &str, connection: ConnectionId) -> Operation {
+            let mut ctx = user_ctx(service_names::PERSISTENCE);
+            ctx.connection_id = Some(connection);
+            Operation::CounterRequest {
+                ctx,
+                payload: messaging::CounterRequestPayload {
+                    name: name.to_string(),
+                },
+            }
+        }
+
+        fn counter_sync(name: &str) -> Operation {
+            Operation::CounterSync {
+                ctx: user_ctx(service_names::PERSISTENCE),
+                payload: messaging::CounterStatePayload {
+                    name: name.to_string(),
+                    state: messaging::PNCounterState {
+                        p: std::collections::HashMap::new(),
+                        n: std::collections::HashMap::new(),
+                    },
+                },
+            }
+        }
+
         fn register_resolver(map: &str) -> Operation {
             Operation::RegisterResolver {
                 ctx: user_ctx(service_names::PERSISTENCE),
@@ -2245,6 +2273,45 @@ mod tests {
             .await;
         }
 
+        /// Reading a counter is held to the read policy of its name: a denied
+        /// counter is neither answered nor subscribed to, a readable one is both.
+        #[tokio::test]
+        async fn counter_request_is_held_to_the_read_policy_of_its_counter() {
+            let persistence = Arc::new(PersistenceService::new(
+                Arc::new(ConnectionRegistry::new()),
+                "node".to_string(),
+            ));
+            let counters = persistence.counter_registry_arc();
+            let mut svc = AuthorizationLayer::new(secret_denied_policy().await).layer(persistence);
+            let connection = ConnectionId(3);
+
+            let result = ServiceExt::ready(&mut svc)
+                .await
+                .unwrap()
+                .call(counter_request("secret", connection))
+                .await;
+            assert!(
+                matches!(result, Err(OperationError::Forbidden { ref map_name }) if map_name == "secret"),
+                "got {result:?}"
+            );
+            assert!(counters.subscribers("secret").is_empty());
+
+            let result = ServiceExt::ready(&mut svc)
+                .await
+                .unwrap()
+                .call(counter_request("public", connection))
+                .await
+                .unwrap();
+            let OperationResponse::Message(message) = result else {
+                panic!("expected a message, got {result:?}");
+            };
+            assert!(
+                matches!(*message, Message::CounterResponse { ref payload } if payload.name == "public"),
+                "got {message:?}"
+            );
+            assert_eq!(counters.subscribers("public"), vec![connection]);
+        }
+
         #[tokio::test]
         async fn journal_operations_naming_a_map_are_held_to_its_read_policy() {
             assert_scoped(vec![
@@ -2279,6 +2346,8 @@ mod tests {
                 list_resolvers(Some(reserved)),
                 journal_read(Some(reserved)),
                 journal_subscribe(Some(reserved), ConnectionId(1)),
+                counter_request(reserved, ConnectionId(1)),
+                counter_sync(reserved),
             ] {
                 let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
                 assert!(

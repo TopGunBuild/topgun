@@ -188,8 +188,8 @@ impl Service<Operation> for Arc<PersistenceService> {
                     Operation::JournalSubscribe { ctx, payload } => {
                         svc.handle_journal_subscribe(&ctx, &payload)
                     }
-                    Operation::JournalUnsubscribe { ctx: _, payload } => {
-                        svc.handle_journal_unsubscribe(&payload)
+                    Operation::JournalUnsubscribe { ctx, payload } => {
+                        svc.handle_journal_unsubscribe(&ctx, &payload)
                     }
                     Operation::JournalRead { ctx, payload } => {
                         svc.handle_journal_read(&ctx, &payload)
@@ -335,12 +335,18 @@ impl PersistenceService {
         Ok(OperationResponse::Empty)
     }
 
-    /// Handles `JournalUnsubscribe`: removes the subscription and returns `Empty`.
+    /// Handles `JournalUnsubscribe`: removes the calling connection's
+    /// subscription of that ID and returns `Empty`. An ID the caller does not
+    /// hold — another connection's, or none at all — is a no-op.
     fn handle_journal_unsubscribe(
         &self,
+        ctx: &OperationContext,
         payload: &JournalUnsubscribeData,
     ) -> Result<OperationResponse, OperationError> {
-        self.journal_store.unsubscribe(&payload.subscription_id);
+        if let Some(conn_id) = ctx.connection_id {
+            self.journal_store
+                .unsubscribe(conn_id, &payload.subscription_id);
+        }
         Ok(OperationResponse::Empty)
     }
 
