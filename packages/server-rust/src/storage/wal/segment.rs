@@ -8,19 +8,247 @@
 //! read→re-encode→rename compaction with a single `unlink` per reclaimed segment,
 //! and lets appenders run without contending on the sealed set.
 //!
-//! Segment metadata lives entirely in the **filename** (`partition-{id:03}-
-//! {first_seq:020}.log`), so recovery can discover and order a partition's
-//! segments — and GC can read a sealed segment's coverage — without opening the
-//! file or parsing an in-file header. The frame codec in `format.rs` is unchanged:
-//! each segment file is a plain stream of the same frames a single-file WAL wrote.
-//!
-//! This module is the type/trait surface the `WalWriter` rewrite builds on. The
-//! method bodies that the writer owns (the actual seal/rotate/GC I/O) are stubbed
-//! here so the surface can be reviewed before the implementation lands.
+//! The **filename** (`partition-{id:03}-{first_seq:020}.log`) names a segment's
+//! partition and lowest sequence, so recovery can discover and order a
+//! partition's segments without opening them. Every segment this binary creates
+//! also starts with a [`SegmentHeader`] that repeats both and carries a fresh
+//! random salt (`TG-ENC-003`): two files that ever carry the same name are told
+//! apart by their salt. A file without a header is a segment of an older binary,
+//! a plain stream of v1 frames, read and never appended to.
 
 use std::path::{Path, PathBuf};
 
 use tokio::io::AsyncWriteExt;
+
+// ---------------------------------------------------------------------------
+// Segment header
+// ---------------------------------------------------------------------------
+
+/// Magic of a segment header: ASCII "TGWS". A segment file is v2 iff it starts
+/// with it, v1 iff it starts with the frame magic "TGWL".
+pub const SEGMENT_MAGIC: u32 = 0x54_47_57_53;
+
+/// The only header version this binary reads or writes.
+pub const SEGMENT_HEADER_VERSION: u8 = 2;
+
+/// Header bytes the CRC32C covers: magic through `first_seq`.
+const SEGMENT_HEADER_BODY_LEN: usize = 57;
+
+/// Total bytes of a segment header: its body and a CRC32C u32 BE.
+pub const SEGMENT_HEADER_LEN: usize = SEGMENT_HEADER_BODY_LEN + 4;
+
+/// How a frame is assigned to a WAL partition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentLayout {
+    /// `fnv1a("{map}:{key}") % 271`.
+    Fnv1aMod271 = 0,
+}
+
+/// The schema of a frame's payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadSchema {
+    /// The msgpack `WalEntry` this binary reads and writes.
+    WalEntryV1 = 1,
+}
+
+/// How a segment's frame payloads are protected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentCipher {
+    /// Payloads are written as encoded.
+    None = 0,
+    /// Payloads are sealed with XChaCha20-Poly1305 under a key derived from
+    /// the header; reading them needs the key named by `key_id`.
+    XChaCha20Poly1305 = 1,
+}
+
+/// The header every segment this binary creates starts with:
+/// `MAGIC u32 ‖ header_version u8 ‖ layout u8 ‖ payload_schema u16 BE ‖
+/// cipher u8 ‖ key_id u32 BE ‖ salt [32] ‖ partition u32 BE ‖ first_seq u64 BE ‖
+/// CRC32C u32 BE`, 61 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentHeader {
+    pub layout: SegmentLayout,
+    pub payload_schema: PayloadSchema,
+    pub cipher: SegmentCipher,
+    /// The data key the segment is sealed with; 0 iff `cipher` is `None`.
+    pub key_id: u32,
+    /// Random per created file, so no two files share an identity.
+    pub salt: [u8; 32],
+    pub partition: u32,
+    pub first_seq: u64,
+}
+
+/// Why a segment header was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeaderError {
+    /// The CRC32C does not match the header body.
+    BadCrc {
+        stored: u32,
+        computed: u32,
+    },
+    UnknownVersion(u8),
+    UnknownLayout(u8),
+    UnknownPayloadSchema(u16),
+    UnknownCipher(u8),
+    /// `key_id` is 0 with a cipher, or not 0 without one.
+    KeyIdMismatch {
+        cipher: SegmentCipher,
+        key_id: u32,
+    },
+}
+
+impl std::fmt::Display for HeaderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadCrc { stored, computed } => write!(
+                f,
+                "header CRC {stored:#010x} does not match its content ({computed:#010x})"
+            ),
+            Self::UnknownVersion(v) => write!(f, "unknown header version {v}"),
+            Self::UnknownLayout(v) => write!(f, "unknown partition layout {v}"),
+            Self::UnknownPayloadSchema(v) => write!(f, "unknown payload schema {v}"),
+            Self::UnknownCipher(v) => write!(f, "unknown cipher {v}"),
+            Self::KeyIdMismatch { cipher, key_id } => {
+                write!(f, "key id {key_id} does not fit cipher {cipher:?}")
+            }
+        }
+    }
+}
+
+impl SegmentHeader {
+    /// An unsealed header for a new segment of `partition` starting at
+    /// `first_seq`, with a fresh random salt.
+    #[must_use]
+    pub fn new_unsealed(partition: u32, first_seq: u64) -> Self {
+        Self {
+            layout: SegmentLayout::Fnv1aMod271,
+            payload_schema: PayloadSchema::WalEntryV1,
+            cipher: SegmentCipher::None,
+            key_id: 0,
+            salt: rand::random(),
+            partition,
+            first_seq,
+        }
+    }
+
+    /// The header's 61 bytes.
+    #[must_use]
+    pub fn encode(&self) -> [u8; SEGMENT_HEADER_LEN] {
+        let mut out = [0u8; SEGMENT_HEADER_LEN];
+        out[0..4].copy_from_slice(&SEGMENT_MAGIC.to_be_bytes());
+        out[4] = SEGMENT_HEADER_VERSION;
+        out[5] = self.layout as u8;
+        out[6..8].copy_from_slice(&(self.payload_schema as u16).to_be_bytes());
+        out[8] = self.cipher as u8;
+        out[9..13].copy_from_slice(&self.key_id.to_be_bytes());
+        out[13..45].copy_from_slice(&self.salt);
+        out[45..49].copy_from_slice(&self.partition.to_be_bytes());
+        out[49..57].copy_from_slice(&self.first_seq.to_be_bytes());
+        let crc = crc32c::crc32c(&out[..SEGMENT_HEADER_BODY_LEN]);
+        out[SEGMENT_HEADER_BODY_LEN..].copy_from_slice(&crc.to_be_bytes());
+        out
+    }
+
+    /// Parses the header at the start of `bytes`, which must hold at least
+    /// [`SEGMENT_HEADER_LEN`] bytes and start with [`SEGMENT_MAGIC`]; the caller
+    /// classifies a shorter file.
+    ///
+    /// # Errors
+    ///
+    /// A CRC mismatch or a field value this binary does not know.
+    ///
+    /// # Panics
+    ///
+    /// Never for input of at least [`SEGMENT_HEADER_LEN`] bytes.
+    pub fn parse(bytes: &[u8]) -> Result<Self, HeaderError> {
+        let h = &bytes[..SEGMENT_HEADER_LEN];
+        let be32 =
+            |r: std::ops::Range<usize>| u32::from_be_bytes(h[r].try_into().expect("4 bytes"));
+        let stored = be32(SEGMENT_HEADER_BODY_LEN..SEGMENT_HEADER_LEN);
+        let computed = crc32c::crc32c(&h[..SEGMENT_HEADER_BODY_LEN]);
+        if stored != computed {
+            return Err(HeaderError::BadCrc { stored, computed });
+        }
+        if h[4] != SEGMENT_HEADER_VERSION {
+            return Err(HeaderError::UnknownVersion(h[4]));
+        }
+        let layout = match h[5] {
+            0 => SegmentLayout::Fnv1aMod271,
+            other => return Err(HeaderError::UnknownLayout(other)),
+        };
+        let payload_schema = match u16::from_be_bytes([h[6], h[7]]) {
+            1 => PayloadSchema::WalEntryV1,
+            other => return Err(HeaderError::UnknownPayloadSchema(other)),
+        };
+        let cipher = match h[8] {
+            0 => SegmentCipher::None,
+            1 => SegmentCipher::XChaCha20Poly1305,
+            other => return Err(HeaderError::UnknownCipher(other)),
+        };
+        let key_id = be32(9..13);
+        if (cipher == SegmentCipher::None) != (key_id == 0) {
+            return Err(HeaderError::KeyIdMismatch { cipher, key_id });
+        }
+        Ok(Self {
+            layout,
+            payload_schema,
+            cipher,
+            key_id,
+            salt: h[13..45].try_into().expect("32 bytes"),
+            partition: be32(45..49),
+            first_seq: u64::from_be_bytes(h[49..57].try_into().expect("8 bytes")),
+        })
+    }
+}
+
+/// Creates the segment file at `path` holding only `header`, durably, before
+/// any frame can be appended to it (`TG-ENC-003`, `TG-ENC-005`): the header is
+/// written to `{path}.tmp` and synced, the temporary file is renamed to `path`,
+/// and the directory is synced. Returns the open handle, positioned after the
+/// header.
+///
+/// The rename replaces a file already at `path` only when that file holds no
+/// intact frame — one a crash or a failed rotation left behind; the caller
+/// guarantees it is not the installed active segment. A file that holds a frame
+/// is refused rather than replaced.
+///
+/// # Errors
+///
+/// An I/O error, or a file at `path` that holds a frame.
+pub fn create_segment_file(path: &Path, header: &SegmentHeader) -> anyhow::Result<std::fs::File> {
+    use std::io::Write as _;
+    match std::fs::read(path) {
+        Ok(existing) => {
+            if super::format::decode_segment(&existing).frames > 0 {
+                anyhow::bail!(
+                    "Cannot create WAL segment {}: a segment holding frames is already there",
+                    path.display()
+                );
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => anyhow::bail!("Cannot read WAL segment {}: {e}", path.display()),
+    }
+    let mut tmp_name = path.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp = PathBuf::from(tmp_name);
+    let mut file = std::fs::File::create(&tmp)
+        .map_err(|e| anyhow::anyhow!("Cannot create WAL segment {}: {e}", tmp.display()))?;
+    file.write_all(&header.encode())
+        .map_err(|e| anyhow::anyhow!("Cannot write WAL segment {}: {e}", tmp.display()))?;
+    file.sync_all()
+        .map_err(|e| anyhow::anyhow!("Cannot fsync WAL segment {}: {e}", tmp.display()))?;
+    #[cfg(test)]
+    super::test_abort_if_armed(super::TestAbortPoint::CreateBeforeRename);
+    std::fs::rename(&tmp, path).map_err(|e| {
+        anyhow::anyhow!("Cannot rename {} to {}: {e}", tmp.display(), path.display())
+    })?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("WAL segment {} has no directory", path.display()))?;
+    super::fsync_dir(dir)?;
+    Ok(file)
+}
 
 // ---------------------------------------------------------------------------
 // Filename convention
@@ -116,6 +344,11 @@ pub enum SegmentState {
         /// Frames written to this handle since the last fsync, carried over from
         /// the single-file batched-fsync accounting (`u32`, a non-negative count).
         unfsynced_count: u32,
+        /// The header this process wrote when it created the file.
+        header: SegmentHeader,
+        /// Index of the next frame in this segment: the count of frames framed
+        /// before it. Taken only under the active-append lock (`TG-ENC-005`).
+        next_index: u64,
     },
     /// A frozen segment. No further frames are appended; it is reopened read-only
     /// for recovery/`unapplied` and dropped by GC with a single `unlink`.
@@ -153,24 +386,49 @@ pub struct Segment {
 }
 
 impl Segment {
-    /// Creates an active segment rooted at `path` covering sequences from
-    /// `first_seq`, taking ownership of an already-open append `file` handle.
-    ///
-    /// The caller (the writer) is responsible for having opened `path` in
-    /// create+append mode; this constructor only wires the bookkeeping. `max_seq`
-    /// is seeded to `first_seq` and advances as frames are appended.
+    /// Creates an active segment rooted at `path`, which this process has just
+    /// created with `header` ([`create_segment_file`]), taking ownership of its
+    /// open `file` handle. `max_seq` is seeded to the header's `first_seq` and
+    /// advances as frames are appended.
     #[must_use]
-    pub fn new_active(path: PathBuf, first_seq: u64, file: tokio::fs::File) -> Self {
+    pub fn new_active(path: PathBuf, header: SegmentHeader, file: tokio::fs::File) -> Self {
         Self {
             path,
             state: SegmentState::Active {
                 file,
                 unfsynced_count: 0,
+                header,
+                next_index: 0,
             },
-            first_seq,
-            max_seq: first_seq,
+            first_seq: header.first_seq,
+            max_seq: header.first_seq,
             max_seq_explicit: false,
         }
+    }
+
+    /// The header of an active segment; `None` for a sealed one.
+    #[must_use]
+    pub fn header(&self) -> Option<&SegmentHeader> {
+        match &self.state {
+            SegmentState::Active { header, .. } => Some(header),
+            SegmentState::Sealed => None,
+        }
+    }
+
+    /// Takes the index of the frame about to be written to the active segment
+    /// and advances the counter, so no index is handed out twice. Called under
+    /// the active-append lock, after the frame's payload has encoded.
+    ///
+    /// # Errors
+    ///
+    /// The segment is sealed.
+    pub fn take_frame_index(&mut self) -> anyhow::Result<u64> {
+        let SegmentState::Active { next_index, .. } = &mut self.state else {
+            anyhow::bail!("frame index of sealed WAL segment {}", self.path.display());
+        };
+        let index = *next_index;
+        *next_index += 1;
+        Ok(index)
     }
 
     /// Constructs a sealed-segment handle for an already-existing on-disk file
@@ -251,6 +509,7 @@ impl Segment {
         let SegmentState::Active {
             file,
             unfsynced_count,
+            ..
         } = &mut self.state
         else {
             anyhow::bail!("append to sealed WAL segment {}", path.display());
@@ -281,6 +540,7 @@ impl Segment {
         let SegmentState::Active {
             file,
             unfsynced_count,
+            ..
         } = &mut self.state
         else {
             anyhow::bail!("fsync of sealed WAL segment {}", path.display());
@@ -324,19 +584,6 @@ impl Segment {
         }
     }
 
-    /// Seeds an active segment reopened during recovery with the `max_seq` decoded
-    /// from its existing frames, marking the coverage as explicit (real frames).
-    ///
-    /// `max_seq` is only raised, never lowered — a recovered file already holds
-    /// those frames, so its coverage cannot retreat. A value at or below
-    /// `first_seq` means the file held no frames, leaving the empty floor intact.
-    pub fn set_recovered_max_seq(&mut self, max_seq: u64) {
-        if max_seq > self.first_seq {
-            self.max_seq = max_seq;
-            self.max_seq_explicit = true;
-        }
-    }
-
     /// Number of frames written since the last fsync (0 for a sealed segment).
     #[must_use]
     pub fn unfsynced_count(&self) -> u32 {
@@ -346,154 +593,6 @@ impl Segment {
             } => *unfsynced_count,
             SegmentState::Sealed => 0,
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SegmentSet — per-partition active + sealed segments
-// ---------------------------------------------------------------------------
-
-/// All segments of a single partition: one active segment plus an ordered list of
-/// sealed segments.
-///
-/// Invariants the writer must uphold (enforced by the methods below in G2):
-/// - exactly one active segment exists at any time;
-/// - sealed segments are ordered by ascending `first_seq` (so recovery and
-///   `unapplied` can read them in sequence order without re-sorting);
-/// - every sealed segment's range is strictly below the active segment's
-///   `first_seq` (sealing freezes the boundary before a fresh active starts);
-/// - GC only ever removes from `sealed` — the active segment is structurally
-///   unreachable from `gc_below_watermark`.
-pub struct SegmentSet {
-    /// The partition this set belongs to (mirrored in every segment filename).
-    partition: u32,
-    /// Sealed, immutable segments in ascending `first_seq` order. The front is the
-    /// oldest; GC reclaims from the front up to the watermark.
-    sealed: Vec<Segment>,
-    /// The single segment that appends currently target.
-    active: Segment,
-}
-
-impl SegmentSet {
-    /// Creates a `SegmentSet` for `partition` with `active` as its sole segment
-    /// and no sealed segments (a fresh partition).
-    #[must_use]
-    pub fn new(partition: u32, active: Segment) -> Self {
-        Self {
-            partition,
-            sealed: Vec::new(),
-            active,
-        }
-    }
-
-    /// Reconstructs a `SegmentSet` from segments discovered on disk during
-    /// recovery: the already-ordered `sealed` segments plus the `active` segment.
-    ///
-    /// `sealed` MUST be in ascending `first_seq` order and all below
-    /// `active.first_seq` — recovery builds it that way from the filename ordering.
-    #[must_use]
-    pub fn from_recovered(partition: u32, sealed: Vec<Segment>, active: Segment) -> Self {
-        Self {
-            partition,
-            sealed,
-            active,
-        }
-    }
-
-    /// The partition this set serves.
-    #[must_use]
-    pub fn partition(&self) -> u32 {
-        self.partition
-    }
-
-    /// The active segment — the append target.
-    ///
-    /// `append` writes here; this is the only segment a writer mutates outside of
-    /// seal/rotate. Returned mutably so the writer can advance `max_seq` and the
-    /// fsync accounting on append.
-    pub fn append_target(&mut self) -> &mut Segment {
-        &mut self.active
-    }
-
-    /// Seals the current active segment and rotates a fresh active segment in.
-    ///
-    /// Ordering is correctness-critical (the RULE): the current active segment is
-    /// frozen into the sealed set *before* the new active is wired in, so no window
-    /// exists in which an already-acked frame is neither in a sealed segment nor in
-    /// the active segment. `next_first_seq` is the `first_seq` of the new active
-    /// segment (`current active.max_seq + 1`), and `new_active_file` is its
-    /// already-opened append handle.
-    ///
-    /// The body (the file open + handle swap + sealed push) is owned by the writer
-    /// and lands with the G2 implementation; this G1 stub freezes `max_seq` and
-    /// installs the new active segment so the type compiles and the surface is
-    /// reviewable, but the full crash-ordered I/O path is G2's.
-    pub fn seal_active_and_rotate(
-        &mut self,
-        next_first_seq: u64,
-        new_active_file: tokio::fs::File,
-    ) {
-        let sealed_path = self.active.path().to_path_buf();
-        let sealed_first = self.active.first_seq();
-        let sealed_max = self.active.max_seq();
-        let new_path = self
-            .active
-            .path()
-            .with_file_name(format_segment_filename(self.partition, next_first_seq));
-
-        let frozen = Segment::sealed_existing(sealed_path, sealed_first, sealed_max);
-        // Freeze the current active into the sealed set BEFORE wiring the fresh
-        // active in, so no window exists where an acked frame belongs to neither.
-        self.sealed.push(frozen);
-        self.active = Segment::new_active(new_path, next_first_seq, new_active_file);
-    }
-
-    /// Selects and deletes sealed segments fully covered by the applied watermark.
-    ///
-    /// A sealed segment is reclaimable iff `max_seq <= applied_through` — every
-    /// frame it holds has been durably applied to the inner store, so dropping the
-    /// file loses nothing. The active segment is NEVER considered, regardless of
-    /// its `max_seq`: appenders may still be writing to it, so it stays until a
-    /// future seal moves its frames into the sealed set. Reclaimed segments are
-    /// removed from the front of `sealed` (oldest first) and `unlink`ed.
-    ///
-    /// Returns the paths that were deleted so the caller can log/account for them.
-    /// The actual `unlink` I/O is owned by the writer and lands with G2; this G1
-    /// stub performs the watermark **selection** (never touching `active`) so the
-    /// surface and the active-segment-exclusion invariant are reviewable, and
-    /// drains the selected handles from the sealed set.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a sealed segment file cannot be unlinked (G2).
-    pub fn gc_below_watermark(&mut self, applied_through: u64) -> anyhow::Result<Vec<PathBuf>> {
-        // Reclaimable sealed segments are a prefix of the ascending-ordered set
-        // (oldest first). The active segment is intentionally not in `sealed`, so
-        // it can never be selected here regardless of its `max_seq`.
-        let reclaim = self
-            .sealed
-            .iter()
-            .take_while(|s| s.max_seq() <= applied_through)
-            .count();
-        let drained: Vec<PathBuf> = self
-            .sealed
-            .drain(..reclaim)
-            .map(|s| s.path().to_path_buf())
-            .collect();
-        Ok(drained)
-    }
-
-    /// Every live segment in ascending sequence order: sealed segments (oldest
-    /// first) followed by the active segment last.
-    ///
-    /// Recovery and `unapplied` iterate this to decode frames across the whole
-    /// partition; the active segment is last so a `TruncatedTail` is only ever
-    /// tolerated on it (a mid-stream truncation in a sealed segment is corruption).
-    #[must_use]
-    pub fn all_segments_in_seq_order(&self) -> Vec<&Segment> {
-        let mut out: Vec<&Segment> = self.sealed.iter().collect();
-        out.push(&self.active);
-        out
     }
 }
 

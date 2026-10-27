@@ -9,9 +9,10 @@
 //! - **MAGIC** (`0x54_47_57_4C` = ASCII "TGWL"): lets recovery distinguish
 //!   a WAL frame from arbitrary bytes and from frames written by an incompatible
 //!   format. A magic mismatch is a distinct refusal, NOT a CRC mismatch.
-//! - **VERSION** (`1u8`): format-version byte. An unrecognised version produces
-//!   its own distinct error (`UnknownVersion`) so a future format change is
-//!   detectable rather than mis-reported as corruption.
+//! - **VERSION**: format-version byte — `1` in a segment without a header,
+//!   `2` in a segment that starts with a `SegmentHeader`. An unrecognised
+//!   version produces its own distinct error (`UnknownVersion`) so a future
+//!   format change is detectable rather than mis-reported as corruption.
 //! - **LENGTH** (big-endian `u32`): byte length of the `MsgPack` payload.
 //! - **CRC32C** (big-endian `u32`): Castagnoli CRC-32 of the payload bytes.
 //!   A mismatch that occurs before the last frame is `Corruption`; a mismatch on
@@ -23,8 +24,11 @@
 //! (Postgres WAL, `RocksDB` log). The `crc32c` crate provides the genuine
 //! Castagnoli polynomial.
 
-use std::io::{self, Cursor, Read};
+use std::io::{Cursor, Read};
 
+use crate::storage::wal::segment::{
+    HeaderError, SegmentCipher, SegmentHeader, SEGMENT_HEADER_LEN, SEGMENT_MAGIC,
+};
 use crate::storage::wal::WalEntry;
 
 // ---------------------------------------------------------------------------
@@ -127,6 +131,11 @@ pub const FRAME_MAGIC: u32 = 0x54_47_57_4C;
 ///   garbage-collected.
 pub const FRAME_VERSION: u8 = 1;
 
+/// Version byte of a frame in a segment that starts with a header (a v2
+/// segment); [`FRAME_VERSION`] stays the version of a headerless (v1) segment's
+/// frames, which this binary still reads and no longer writes.
+pub const FRAME_VERSION_V2: u8 = 2;
+
 /// Total header bytes: 4 (magic) + 1 (version) + 4 (length) + 4 (crc32c).
 pub const FRAME_HEADER_LEN: usize = 13;
 
@@ -202,13 +211,23 @@ pub enum FrameDecodeResult {
     },
     /// All frames decoded successfully.
     Complete(Vec<WalEntry>),
+    /// A segment header that is refused: bad CRC, or a field value this binary
+    /// does not know.
+    BadHeader(HeaderError),
+    /// A segment whose frames are sealed under data key `key_id`; decoding
+    /// them needs the key, which this layer does not hold.
+    Sealed {
+        /// The key id the header names.
+        key_id: u32,
+    },
 }
 
 // ---------------------------------------------------------------------------
 // encode
 // ---------------------------------------------------------------------------
 
-/// Encodes a `WalEntry` into a length-prefixed, CRC32C-checksummed WAL frame.
+/// Encodes a `WalEntry` into a length-prefixed, CRC32C-checksummed v1 WAL frame,
+/// the frame of a segment without a header.
 ///
 /// Uses `rmp_serde::to_vec_named()` for `MsgPack` encoding with named fields to
 /// stay wire-compatible with the rest of the `TopGun` `MsgPack` protocol.
@@ -218,6 +237,20 @@ pub enum FrameDecodeResult {
 /// Returns an error if `MsgPack` serialization fails (e.g., the entry contains
 /// a value that cannot be represented in `MsgPack`).
 pub fn encode(entry: &WalEntry) -> anyhow::Result<Vec<u8>> {
+    encode_frame(entry, FRAME_VERSION)
+}
+
+/// Encodes a `WalEntry` into a v2 frame, the frame of a segment that starts
+/// with a [`SegmentHeader`]. Same envelope as [`encode`], version byte 2.
+///
+/// # Errors
+///
+/// As [`encode`].
+pub fn encode_v2(entry: &WalEntry) -> anyhow::Result<Vec<u8>> {
+    encode_frame(entry, FRAME_VERSION_V2)
+}
+
+fn encode_frame(entry: &WalEntry, version: u8) -> anyhow::Result<Vec<u8>> {
     let payload = rmp_serde::to_vec_named(entry)
         .map_err(|e| anyhow::anyhow!("WAL encode: MsgPack serialization failed: {e}"))?;
 
@@ -228,7 +261,7 @@ pub fn encode(entry: &WalEntry) -> anyhow::Result<Vec<u8>> {
 
     let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + payload.len());
     frame.extend_from_slice(&FRAME_MAGIC.to_be_bytes());
-    frame.push(FRAME_VERSION);
+    frame.push(version);
     frame.extend_from_slice(&length.to_be_bytes());
     frame.extend_from_slice(&crc.to_be_bytes());
     frame.extend_from_slice(&payload);
@@ -240,76 +273,162 @@ pub fn encode(entry: &WalEntry) -> anyhow::Result<Vec<u8>> {
 // decode_all
 // ---------------------------------------------------------------------------
 
-/// Decodes all WAL frames from `data`, returning a typed `FrameDecodeResult`.
+/// Decodes all WAL frames of a segment file's bytes, returning a typed
+/// `FrameDecodeResult`.
 ///
 /// The caller should inspect the variant to decide how to proceed:
 /// - `Complete` → all frames healthy, replay the entries.
-/// - `CleanEof` → file is empty or ends on a frame boundary — nothing to replay.
+/// - `CleanEof` → file is empty — nothing to replay.
 /// - `TruncatedTail` → replay `complete`, discard the partial frame.
-/// - `BadMagic` / `UnknownVersion` / `Corruption` → refuse; signal operator.
+/// - `BadMagic` / `UnknownVersion` / `Corruption` / `BadHeader` → refuse; signal
+///   operator.
+/// - `Sealed` → the frames need a key this layer does not hold.
 ///
 /// This function NEVER panics on malformed input.
 #[must_use]
 pub fn decode_all(data: &[u8]) -> FrameDecodeResult {
+    decode_segment(data).result
+}
+
+/// What decoding one segment file found.
+#[derive(Debug)]
+pub struct SegmentDecode {
+    /// The file's header; `None` for a file without one (v1) or with one that
+    /// is short or refused.
+    pub header: Option<SegmentHeader>,
+    /// The frames, classified as [`decode_all`] returns them.
+    pub result: FrameDecodeResult,
+    /// Bytes of the intact prefix: the header plus every intact frame, so a
+    /// torn tail is cut at exactly this length.
+    pub intact_len: usize,
+    /// Intact frames in the file.
+    pub frames: usize,
+}
+
+/// Decodes one segment file: a v2 file (it starts with [`SEGMENT_MAGIC`]) is a
+/// header followed by v2 frames; any other file is a stream of v1 frames.
+///
+/// A v2 file shorter than its header is a truncated tail with no intact frame;
+/// a sealed (cipher 1) file has its frame envelopes checked but reports
+/// `Sealed`, since no key is held here.
+#[must_use]
+pub fn decode_segment(data: &[u8]) -> SegmentDecode {
+    if !data.starts_with(&SEGMENT_MAGIC.to_be_bytes()) {
+        let (result, intact_len, frames) = decode_frames(data, 0, FRAME_VERSION, true);
+        return SegmentDecode {
+            header: None,
+            result,
+            intact_len,
+            frames,
+        };
+    }
+    if data.len() < SEGMENT_HEADER_LEN {
+        return SegmentDecode {
+            header: None,
+            result: FrameDecodeResult::TruncatedTail {
+                complete: Vec::new(),
+            },
+            intact_len: 0,
+            frames: 0,
+        };
+    }
+    let header = match SegmentHeader::parse(data) {
+        Ok(header) => header,
+        Err(error) => {
+            return SegmentDecode {
+                header: None,
+                result: FrameDecodeResult::BadHeader(error),
+                intact_len: 0,
+                frames: 0,
+            };
+        }
+    };
+    let sealed = header.cipher != SegmentCipher::None;
+    let (mut result, intact_len, frames) =
+        decode_frames(data, SEGMENT_HEADER_LEN, FRAME_VERSION_V2, !sealed);
+    if sealed
+        && matches!(
+            result,
+            FrameDecodeResult::Complete(_) | FrameDecodeResult::TruncatedTail { .. }
+        )
+    {
+        result = FrameDecodeResult::Sealed {
+            key_id: header.key_id,
+        };
+    }
+    SegmentDecode {
+        header: Some(header),
+        result,
+        intact_len,
+        frames,
+    }
+}
+
+/// Decodes the frames of `data` from `start` on, each expected to carry
+/// `version`; payloads are deserialized only when `deserialize`. Returns the
+/// classification, the end offset of the intact prefix and the intact frame
+/// count. Offsets in the classification are from the start of `data`.
+#[allow(clippy::too_many_lines)]
+fn decode_frames(
+    data: &[u8],
+    start: usize,
+    version: u8,
+    deserialize: bool,
+) -> (FrameDecodeResult, usize, usize) {
     if data.is_empty() {
-        return FrameDecodeResult::CleanEof;
+        return (FrameDecodeResult::CleanEof, 0, 0);
     }
 
     let mut cursor = Cursor::new(data);
+    cursor.set_position(start as u64);
     let mut entries = Vec::new();
+    let mut frames = 0usize;
+    let mut intact = start;
     let total_len = data.len();
 
-    loop {
+    let result = loop {
         let offset = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
 
         // --- Check for clean EOF on a frame boundary ---
         if offset == total_len {
-            return FrameDecodeResult::Complete(entries);
+            break FrameDecodeResult::Complete(entries);
         }
 
         // --- Read magic (4 bytes) ---
+        // Could not read a full magic: the tail is truncated.
         let mut magic_buf = [0u8; 4];
-        match cursor.read_exact(&mut magic_buf) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                // Could not read a full magic — tail is truncated.
-                return FrameDecodeResult::TruncatedTail { complete: entries };
-            }
-            Err(_) => return FrameDecodeResult::TruncatedTail { complete: entries },
+        if cursor.read_exact(&mut magic_buf).is_err() {
+            break FrameDecodeResult::TruncatedTail { complete: entries };
         }
 
         let magic = u32::from_be_bytes(magic_buf);
         if magic != FRAME_MAGIC {
-            return FrameDecodeResult::BadMagic { offset };
+            break FrameDecodeResult::BadMagic { offset };
         }
 
         // --- Read version (1 byte) ---
         let mut version_buf = [0u8; 1];
-        match cursor.read_exact(&mut version_buf) {
-            Ok(()) => {}
-            Err(_) => return FrameDecodeResult::TruncatedTail { complete: entries },
+        if cursor.read_exact(&mut version_buf).is_err() {
+            break FrameDecodeResult::TruncatedTail { complete: entries };
         }
-        let version = version_buf[0];
-        if version != FRAME_VERSION {
-            return FrameDecodeResult::UnknownVersion {
-                found: version,
+        if version_buf[0] != version {
+            break FrameDecodeResult::UnknownVersion {
+                found: version_buf[0],
                 offset,
             };
         }
 
         // --- Read length (4 bytes, big-endian u32) ---
         let mut length_buf = [0u8; 4];
-        match cursor.read_exact(&mut length_buf) {
-            Ok(()) => {}
-            Err(_) => return FrameDecodeResult::TruncatedTail { complete: entries },
+        if cursor.read_exact(&mut length_buf).is_err() {
+            break FrameDecodeResult::TruncatedTail { complete: entries };
         }
         let payload_len = u32::from_be_bytes(length_buf) as usize;
 
         // --- Read CRC32C (4 bytes) ---
         let mut crc_buf = [0u8; 4];
-        match cursor.read_exact(&mut crc_buf) {
-            Ok(()) => {}
-            Err(_) => return FrameDecodeResult::TruncatedTail { complete: entries },
+        if cursor.read_exact(&mut crc_buf).is_err() {
+            break FrameDecodeResult::TruncatedTail { complete: entries };
         }
         let stored_crc = u32::from_be_bytes(crc_buf);
 
@@ -331,10 +450,10 @@ pub fn decode_all(data: &[u8]) -> FrameDecodeResult {
         let remaining =
             total_len.saturating_sub(usize::try_from(cursor.position()).unwrap_or(usize::MAX));
         if payload_len > remaining {
-            return FrameDecodeResult::TruncatedTail { complete: entries };
+            break FrameDecodeResult::TruncatedTail { complete: entries };
         }
         if payload_len > MAX_FRAME_PAYLOAD_LEN {
-            return FrameDecodeResult::Corruption {
+            break FrameDecodeResult::Corruption {
                 offset,
                 stored_crc,
                 // The frame is rejected on the length bound before its CRC is
@@ -344,27 +463,23 @@ pub fn decode_all(data: &[u8]) -> FrameDecodeResult {
         }
 
         // --- Read payload ---
+        // Partial payload at end of stream — truncated tail.
         let mut payload = vec![0u8; payload_len];
-        match cursor.read_exact(&mut payload) {
-            Ok(()) => {}
-            Err(_) => {
-                // Partial payload at end of stream — truncated tail.
-                return FrameDecodeResult::TruncatedTail { complete: entries };
-            }
+        if cursor.read_exact(&mut payload).is_err() {
+            break FrameDecodeResult::TruncatedTail { complete: entries };
         }
+        let next_offset = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
 
         // --- Verify CRC32C ---
         let computed_crc = crc32c::crc32c(&payload);
         if computed_crc != stored_crc {
-            // Determine whether this is the final frame or a mid-file corruption.
-            let next_offset = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
             if next_offset >= total_len {
                 // CRC mismatch on the last frame — treat as truncated tail since
                 // the writer may have crashed mid-checksum.
-                return FrameDecodeResult::TruncatedTail { complete: entries };
+                break FrameDecodeResult::TruncatedTail { complete: entries };
             }
             // CRC mismatch before the end of the stream — mid-file corruption.
-            return FrameDecodeResult::Corruption {
+            break FrameDecodeResult::Corruption {
                 offset,
                 stored_crc,
                 computed_crc,
@@ -372,22 +487,27 @@ pub fn decode_all(data: &[u8]) -> FrameDecodeResult {
         }
 
         // --- Deserialize payload ---
-        if let Ok(entry) = rmp_serde::from_slice::<WalEntry>(&payload) {
-            entries.push(entry);
-        } else {
-            // Deserialisation failure on a frame that passed CRC is still treated
-            // as corruption — the bytes are internally consistent but unreadable.
-            let next_offset = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
-            if next_offset >= total_len {
-                return FrameDecodeResult::TruncatedTail { complete: entries };
+        if deserialize {
+            if let Ok(entry) = rmp_serde::from_slice::<WalEntry>(&payload) {
+                entries.push(entry);
+            } else {
+                // Deserialisation failure on a frame that passed CRC is still
+                // treated as corruption — the bytes are internally consistent but
+                // unreadable.
+                if next_offset >= total_len {
+                    break FrameDecodeResult::TruncatedTail { complete: entries };
+                }
+                break FrameDecodeResult::Corruption {
+                    offset,
+                    stored_crc,
+                    computed_crc,
+                };
             }
-            return FrameDecodeResult::Corruption {
-                offset,
-                stored_crc,
-                computed_crc,
-            };
         }
-    }
+        intact = next_offset;
+        frames += 1;
+    };
+    (result, intact, frames)
 }
 
 // ===========================================================================

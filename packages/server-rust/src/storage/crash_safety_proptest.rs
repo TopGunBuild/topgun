@@ -361,13 +361,13 @@ fn segments_of(wal_dir: &Path, partition: u32) -> Vec<(u64, PathBuf)> {
     segments
 }
 
-/// Whether no segment of `partition` holds a byte: every frame it held was
+/// Whether no segment of `partition` holds a frame: every frame it held was
 /// collected, and what is left is at most the empty active segment the last
-/// seal rotated in.
+/// seal rotated in, which holds only its header.
 fn holds_no_frame(wal_dir: &Path, partition: u32) -> bool {
-    segments_of(wal_dir, partition)
-        .iter()
-        .all(|(_, path)| std::fs::metadata(path).unwrap().len() == 0)
+    segments_of(wal_dir, partition).iter().all(|(_, path)| {
+        crate::storage::wal::format::decode_segment(&std::fs::read(path).unwrap()).frames == 0
+    })
 }
 
 /// Final intended state of each key (last op wins) given a fully-acked sequence.
