@@ -252,34 +252,37 @@ impl CoordinationService {
 
     /// Handles a `LockRelease` operation.
     ///
-    /// Validates the lock name, then delegates to `LockRegistry::release`.
-    /// Emits `LOCK_RELEASED { success: true }` on valid release, or
-    /// `LOCK_RELEASED { success: false }` on stale token or unknown name.
+    /// Validates the lock name, then delegates to `LockRegistry::release` with
+    /// the calling connection as the holder. Emits `LOCK_RELEASED { success: true }`
+    /// on valid release, or `LOCK_RELEASED { success: false }` on stale token,
+    /// unknown name, a lock held by another connection, or a caller with no
+    /// connection.
     #[allow(clippy::unnecessary_wraps)]
     fn handle_lock_release(
         &self,
-        _ctx: &crate::service::operation::OperationContext,
+        ctx: &crate::service::operation::OperationContext,
         payload: messages::LockReleasePayload,
     ) -> Result<OperationResponse, OperationError> {
-        // Validate name; on failure emit denied response (invariant I1).
-        if let Err(LockError::InvalidLockName { ref name }) =
-            LockRegistry::validate_lock_name(&payload.name)
-        {
-            tracing::warn!(%name, "lock release rejected: invalid lock name");
-            return Ok(OperationResponse::Message(Box::new(
-                Message::LockReleased {
-                    payload: messages::LockReleasedPayload {
-                        request_id: payload.request_id.unwrap_or_default(),
-                        name: payload.name,
-                        success: false,
-                    },
-                },
-            )));
-        }
-
-        let success = self
-            .lock_registry
-            .release(&payload.name, payload.fencing_token);
+        let success = match (
+            ctx.connection_id,
+            LockRegistry::validate_lock_name(&payload.name),
+        ) {
+            (Some(conn_id), Ok(())) => {
+                self.lock_registry
+                    .release(&payload.name, conn_id, payload.fencing_token)
+            }
+            (None, _) => {
+                tracing::warn!(
+                    lock_name = %payload.name,
+                    "lock release has no connection_id — denying"
+                );
+                false
+            }
+            (_, Err(err)) => {
+                tracing::warn!(%err, "lock release rejected: invalid lock name");
+                false
+            }
+        };
 
         Ok(OperationResponse::Message(Box::new(
             Message::LockReleased {
@@ -647,7 +650,7 @@ mod tests {
 
         // Release.
         let release_op = Operation::LockRelease {
-            ctx: make_ctx(service_names::COORDINATION),
+            ctx: make_ctx_with_conn(service_names::COORDINATION, handle.id),
             payload: messages::LockReleasePayload {
                 request_id: Some("req-3".to_string()),
                 name: "foo".to_string(),
@@ -686,7 +689,7 @@ mod tests {
 
         // Release with wrong token.
         let release_op = Operation::LockRelease {
-            ctx: make_ctx(service_names::COORDINATION),
+            ctx: make_ctx_with_conn(service_names::COORDINATION, handle.id),
             payload: messages::LockReleasePayload {
                 request_id: None,
                 name: "bar".to_string(),
@@ -703,6 +706,69 @@ mod tests {
             },
             other => panic!("expected Message, got {other:?}"),
         }
+    }
+
+    /// A lock is released only by the connection holding it: another
+    /// connection, or a caller with no connection, presenting the right fencing
+    /// token gets the same answer as for a wrong token, and the lock stays held.
+    #[tokio::test]
+    async fn lock_release_by_a_connection_that_does_not_hold_it_keeps_the_lock() {
+        let (svc, _state, registry) = make_service_with_registry();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (holder, _rx1) = registry.register(ConnectionKind::Client, &config);
+        let (other, _rx2) = registry.register(ConnectionKind::Client, &config);
+
+        let acquire_op = Operation::LockRequest {
+            ctx: make_ctx_with_conn(service_names::COORDINATION, holder.id),
+            payload: messages::LockRequestPayload {
+                request_id: "req-a".to_string(),
+                name: "shared".to_string(),
+                ttl: Some(10000),
+            },
+        };
+        let fencing_token = match svc.clone().oneshot(acquire_op).await.unwrap() {
+            OperationResponse::Message(msg) => match *msg {
+                Message::LockGranted { payload } => payload.fencing_token,
+                other => panic!("expected LockGranted, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        };
+
+        let release = |ctx: OperationContext| Operation::LockRelease {
+            ctx,
+            payload: messages::LockReleasePayload {
+                request_id: Some("rel".to_string()),
+                name: "shared".to_string(),
+                fencing_token,
+            },
+        };
+        let released = |resp: OperationResponse| match resp {
+            OperationResponse::Message(msg) => match *msg {
+                Message::LockReleased { payload } => payload.success,
+                other => panic!("expected LockReleased, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        };
+
+        for ctx in [
+            make_ctx_with_conn(service_names::COORDINATION, other.id),
+            make_ctx(service_names::COORDINATION),
+        ] {
+            let resp = svc.clone().oneshot(release(ctx)).await.unwrap();
+            assert!(!released(resp), "a non-holder must not release the lock");
+            assert_eq!(svc.lock_registry.holder("shared"), Some(holder.id));
+        }
+
+        let resp = svc
+            .clone()
+            .oneshot(release(make_ctx_with_conn(
+                service_names::COORDINATION,
+                holder.id,
+            )))
+            .await
+            .unwrap();
+        assert!(released(resp), "the holder releases its own lock");
+        assert_eq!(svc.lock_registry.holder("shared"), None);
     }
 
     #[tokio::test]
@@ -855,7 +921,7 @@ mod tests {
 
             // Release.
             let release_op = Operation::LockRelease {
-                ctx: make_ctx(service_names::COORDINATION),
+                ctx: make_ctx_with_conn(service_names::COORDINATION, handle.id),
                 payload: messages::LockReleasePayload {
                     request_id: Some(format!("rel-{i}")),
                     name: "foo".to_string(),

@@ -299,17 +299,21 @@ impl LockRegistry {
         })
     }
 
-    /// Releases a lock if the fencing token matches the currently-held
-    /// token. Returns `true` on successful release, `false` if the name
-    /// is not held or the token does not match.
+    /// Releases a lock if `holder` holds it and the fencing token matches the
+    /// currently-held token. Returns `true` on successful release, `false` if
+    /// the name is not held, is held by another connection, or the token does
+    /// not match — the three are indistinguishable to the caller, so a release
+    /// does not reveal who holds a name.
     ///
     /// Cancels any pending TTL expiry task.
     #[must_use]
-    pub fn release(&self, name: &str, fencing_token: u64) -> bool {
-        // Use remove_if to atomically check and remove the entry.
-        let removed = self
-            .locks
-            .remove_if(name, |_, entry| entry.fencing_token == fencing_token);
+    pub fn release(&self, name: &str, holder: ConnectionId, fencing_token: u64) -> bool {
+        // Use remove_if to atomically check and remove the entry. Tokens are
+        // minted per name in sequence, so the token alone is guessable: the
+        // holder check is what keeps one connection from releasing another's lock.
+        let removed = self.locks.remove_if(name, |_, entry| {
+            entry.holder == holder && entry.fencing_token == fencing_token
+        });
 
         if let Some((_, mut entry)) = removed {
             // Cancel TTL task to prevent late-fire race.
@@ -317,7 +321,7 @@ impl LockRegistry {
                 task.abort();
             }
             // Clean up reverse-index.
-            if let Some(held) = self.held_by.get(&entry.holder) {
+            if let Some(held) = self.held_by.get(&holder) {
                 held.remove(name);
             }
             true
@@ -452,7 +456,7 @@ mod tests {
         let LockOutcome::Granted { fencing_token } = outcome else {
             panic!("expected Granted");
         };
-        assert!(reg.release("lock-a", fencing_token));
+        assert!(reg.release("lock-a", conn(1), fencing_token));
         assert_eq!(reg.lock_count(), 0);
     }
 
@@ -461,15 +465,31 @@ mod tests {
         let reg = registry();
         reg.try_acquire("lock-a", conn(1), Some(5000)).unwrap();
         // Token 999 was never issued.
-        assert!(!reg.release("lock-a", 999));
+        assert!(!reg.release("lock-a", conn(1), 999));
         // Lock is still held.
         assert_eq!(reg.lock_count(), 1);
     }
 
     #[tokio::test]
+    async fn release_by_another_connection_with_the_right_token_keeps_the_lock() {
+        let reg = registry();
+        let LockOutcome::Granted { fencing_token } =
+            reg.try_acquire("lock-a", conn(1), Some(5000)).unwrap()
+        else {
+            panic!("expected Granted");
+        };
+
+        assert!(!reg.release("lock-a", conn(2), fencing_token));
+        assert_eq!(reg.holder("lock-a"), Some(conn(1)));
+
+        assert!(reg.release("lock-a", conn(1), fencing_token));
+        assert_eq!(reg.lock_count(), 0);
+    }
+
+    #[tokio::test]
     async fn release_returns_false_for_unknown_name() {
         let reg = registry();
-        assert!(!reg.release("nonexistent", 1));
+        assert!(!reg.release("nonexistent", conn(1), 1));
     }
 
     // -- TTL tests --
@@ -500,7 +520,7 @@ mod tests {
         };
 
         // Release before TTL fires.
-        assert!(reg.release("lock-a", fencing_token));
+        assert!(reg.release("lock-a", conn(1), fencing_token));
 
         // New holder acquires with a longer TTL.
         let outcome2 = reg.try_acquire("lock-a", conn(2), Some(5000)).unwrap();
@@ -598,7 +618,7 @@ mod tests {
         let LockOutcome::Granted { fencing_token: t1 } = outcome1 else {
             panic!("expected Granted");
         };
-        assert!(reg.release("lock-a", t1));
+        assert!(reg.release("lock-a", conn(1), t1));
 
         let outcome2 = reg.try_acquire("lock-a", conn(2), Some(5000)).unwrap();
         let LockOutcome::Granted { fencing_token: t2 } = outcome2 else {
@@ -775,7 +795,7 @@ mod tests {
                 let reg_rel = Arc::clone(&reg);
                 let token = initial_token;
                 handles.push(tokio::spawn(async move {
-                    let _ = reg_rel.release("lock-a", token);
+                    let _ = reg_rel.release("lock-a", conn(1), token);
                 }));
 
                 let reg_acq = Arc::clone(&reg);
