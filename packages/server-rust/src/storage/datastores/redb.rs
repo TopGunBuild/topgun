@@ -67,6 +67,7 @@ use redb::{
 use crate::storage::map_data_store::{LeafSink, MapDataStore, MerkleLeaf, StoreErrorClass};
 #[cfg(test)]
 use crate::storage::record::RecordValue;
+use crate::storage::sealing::Encryption;
 #[cfg(test)]
 use async_trait::async_trait;
 
@@ -1440,6 +1441,28 @@ impl EngineMapDataStore<RedbKvEngine> {
         location: &StoreLocation,
         io: &MigrationIo,
     ) -> anyhow::Result<Self> {
+        Self::open_location_sealed_with(location, io, &Encryption::off())
+    }
+
+    /// [`Self::open_location`] with the keys of `encryption`: the store is
+    /// opened by [`Self::open_sealed`], and any seal or unseal pass runs to
+    /// its end after the stub is written (`TG-ENC-004`, `TG-ENC-006`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open_location`], and the refusals of [`Self::open_sealed`].
+    pub fn open_location_sealed(
+        location: &StoreLocation,
+        encryption: &Encryption,
+    ) -> anyhow::Result<Self> {
+        Self::open_location_sealed_with(location, &MigrationIo::default(), encryption)
+    }
+
+    fn open_location_sealed_with(
+        location: &StoreLocation,
+        io: &MigrationIo,
+        encryption: &Encryption,
+    ) -> anyhow::Result<Self> {
         let resolved = Self::resolve(location)?;
         let Some(paths) = resolved.paths else {
             return Self::open_by_path(&resolved.data_dir);
@@ -1460,8 +1483,8 @@ impl EngineMapDataStore<RedbKvEngine> {
                     paths.data_dir.display()
                 ),
             )),
-            DataDirState::Store => Self::open_existing(&paths, io),
-            DataDirState::Blank => Self::open_blank(&paths, io),
+            DataDirState::Store => Self::open_existing(&paths, io, encryption),
+            DataDirState::Blank => Self::open_blank(&paths, io, encryption),
         }
     }
 
@@ -1540,7 +1563,11 @@ impl EngineMapDataStore<RedbKvEngine> {
     /// Rows L4a–L7: a store in `D`. The engine opened here is the one engine
     /// of this start: a resumed migration runs on it and the store is served
     /// from it, so no other handle can write in between.
-    fn open_existing(paths: &MigrationPaths, io: &MigrationIo) -> anyhow::Result<Self> {
+    fn open_existing(
+        paths: &MigrationPaths,
+        io: &MigrationIo,
+        encryption: &Encryption,
+    ) -> anyhow::Result<Self> {
         let engine = Arc::new(open_engine(&paths.data_dir.join(ENGINE_FILE))?);
         let old = old_path_state(&paths.legacy_path)?;
         let Some(mark_bytes) = Self::read_migration_mark(&engine)? else {
@@ -1550,7 +1577,7 @@ impl EngineMapDataStore<RedbKvEngine> {
                 OldPath::Absent | OldPath::Stub | OldPath::Other => LocationRow::L4,
             };
             return match row {
-                LocationRow::L4 => Self::serve(engine, paths, old),
+                LocationRow::L4 => Self::serve(engine, paths, old, encryption),
                 LocationRow::L4a => Err(refuse(
                     Some(LocationRow::L4a),
                     format!(
@@ -1597,13 +1624,13 @@ impl EngineMapDataStore<RedbKvEngine> {
             _ => LocationRow::L7,
         };
         match row {
-            LocationRow::L5 => Self::resume(engine, &mark_bytes, &mark, paths, io),
+            LocationRow::L5 => Self::resume(engine, &mark_bytes, &mark, paths, io, encryption),
             LocationRow::L6 => {
                 let (store, _) = Self::open_for_migration(Arc::clone(&engine), &mark_bytes)?;
                 run_migration(&engine, &store, None, &mark, paths, io)?;
                 drop(store);
                 let old = old_path_state(&paths.legacy_path)?;
-                Self::serve(engine, paths, old)
+                Self::serve(engine, paths, old, encryption)
             }
             _ => Err(refuse(
                 Some(LocationRow::L7),
@@ -1648,11 +1675,14 @@ impl EngineMapDataStore<RedbKvEngine> {
     }
 
     /// Row L4: serves the store, writes the stub when `L` is absent, warns
-    /// once about other content at `L`, and logs a kept legacy file.
+    /// once about other content at `L`, logs a kept legacy file, and then
+    /// runs any seal or unseal pass, so a crash during the pass never leaves
+    /// `L` empty for an older binary.
     fn serve(
         engine: Arc<RedbKvEngine>,
         paths: &MigrationPaths,
         old: OldPath,
+        encryption: &Encryption,
     ) -> anyhow::Result<Self> {
         match old {
             OldPath::Other => tracing::warn!(
@@ -1666,7 +1696,7 @@ impl EngineMapDataStore<RedbKvEngine> {
             ),
             OldPath::Absent | OldPath::Stub => {}
         }
-        let store = Self::open(engine)?;
+        let store = Self::open_sealed(engine, encryption)?;
         if old == OldPath::Absent {
             MovedMarker::write(&paths.legacy_path, &paths.data_dir, &MigrationIo::default())
                 .with_context(|| {
@@ -1682,11 +1712,16 @@ impl EngineMapDataStore<RedbKvEngine> {
                 paths.kept_path.display()
             );
         }
+        store.run_seal_pass()?;
         Ok(store)
     }
 
     /// Rows L8–L13: no store in `D`.
-    fn open_blank(paths: &MigrationPaths, io: &MigrationIo) -> anyhow::Result<Self> {
+    fn open_blank(
+        paths: &MigrationPaths,
+        io: &MigrationIo,
+        encryption: &Encryption,
+    ) -> anyhow::Result<Self> {
         let old = old_path_state(&paths.legacy_path)?;
         let kept = exists(&paths.kept_path)?;
         let (l, d, k) = (
@@ -1703,11 +1738,11 @@ impl EngineMapDataStore<RedbKvEngine> {
             OldPath::Empty | OldPath::Other => LocationRow::L13,
         };
         match row {
-            LocationRow::L8 => Self::migrate(paths, io),
+            LocationRow::L8 => Self::migrate(paths, io, encryption),
             LocationRow::L12 => {
                 create_data_dir(&paths.data_dir)?;
                 let engine = Arc::new(open_engine(&paths.data_dir.join(ENGINE_FILE))?);
-                Self::serve(engine, paths, OldPath::Absent)
+                Self::serve(engine, paths, OldPath::Absent, encryption)
             }
             LocationRow::L9 => Err(refuse(
                 Some(LocationRow::L9),
@@ -1801,7 +1836,11 @@ impl EngineMapDataStore<RedbKvEngine> {
     }
 
     /// Row L8: a fresh migration, then the store served from the same engine.
-    fn migrate(paths: &MigrationPaths, io: &MigrationIo) -> anyhow::Result<Self> {
+    fn migrate(
+        paths: &MigrationPaths,
+        io: &MigrationIo,
+        encryption: &Encryption,
+    ) -> anyhow::Result<Self> {
         let (legacy, legacy_bytes) = Self::open_legacy(paths, io, LocationRow::L8, 0)?;
 
         // Step 3.
@@ -1831,7 +1870,7 @@ impl EngineMapDataStore<RedbKvEngine> {
         run_migration(&engine, &store, Some(legacy), &mark, paths, io)?;
         drop(store);
         let old = old_path_state(&paths.legacy_path)?;
-        Self::serve(engine, paths, old)
+        Self::serve(engine, paths, old, encryption)
     }
 
     /// Row L5: resumes a migration from its mark on the engine already open.
@@ -1841,6 +1880,7 @@ impl EngineMapDataStore<RedbKvEngine> {
         mark: &MigrationMark,
         paths: &MigrationPaths,
         io: &MigrationIo,
+        encryption: &Encryption,
     ) -> anyhow::Result<Self> {
         let engine_bytes = fs::metadata(paths.data_dir.join(ENGINE_FILE))?.len();
         let (legacy, _) = Self::open_legacy(paths, io, LocationRow::L5, engine_bytes)?;
@@ -1870,7 +1910,7 @@ impl EngineMapDataStore<RedbKvEngine> {
         run_migration(&engine, &store, Some(legacy), mark, paths, io)?;
         drop(store);
         let old = old_path_state(&paths.legacy_path)?;
-        Self::serve(engine, paths, old)
+        Self::serve(engine, paths, old, encryption)
     }
 
     /// Opens (or creates) the store in the data directory `path`, creating
