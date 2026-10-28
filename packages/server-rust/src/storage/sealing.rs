@@ -1,5 +1,6 @@
-//! Encryption at rest of record values: the keyring, the value envelope and
-//! the master-key provider (`TG-ENC-001`, `TG-ENC-002`).
+//! Encryption at rest of record values and WAL frames: the keyring, the
+//! value envelope, the segment key and the master-key provider
+//! (`TG-ENC-001`, `TG-ENC-002`, `TG-ENC-003`, `TG-ENC-005`).
 //!
 //! A record value is sealed with XChaCha20-Poly1305 under a data key (DEK)
 //! named by its key id; every DEK is kept on disk only wrapped under the
@@ -14,6 +15,14 @@
 //! AAD is the row's full engine key followed by the first 7 envelope bytes,
 //! so a sealed value opens only at the row it was sealed for, under the key
 //! id its header names.
+//!
+//! # Sealed WAL frames (`TG-ENC-003`, `TG-ENC-005`)
+//!
+//! A sealed segment's frames are sealed under its [`SegmentKey`], derived
+//! from the DEK its header names, its random salt and its other header bytes.
+//! The nonce is the frame's index in the segment, never stored; it is safe
+//! because a process appends only to segments it created, each with a fresh
+//! salt, and takes every index once under the append lock.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -722,6 +731,155 @@ pub fn open_value<'v>(
     Ok(std::borrow::Cow::Owned(plaintext))
 }
 
+/// HKDF info prefix of a WAL segment key; the header's first 57 bytes follow.
+const WAL_SEGMENT_INFO: &[u8] = b"topgun/wal-segment/1";
+/// The first 4 bytes of every frame nonce.
+const FRAME_NONCE_PREFIX: &[u8; 4] = b"WALF";
+/// Bytes a sealed frame payload adds to its plaintext: the tag.
+pub const FRAME_TAG_LEN: usize = TAG_LEN;
+/// Header bytes the segment key binds: all but its CRC.
+const SEGMENT_HEADER_BODY_LEN: usize = 57;
+
+/// A segment's key id is not in the keyring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("data key {0} is not in the keyring")]
+pub struct UnknownSegmentKey(pub u32);
+
+/// A sealed frame's tag does not match: a changed byte, or the frame opened
+/// at another index or under another segment's key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("frame authentication failed")]
+pub struct FrameAuthFailed;
+
+/// The key of one sealed WAL segment, zeroed on drop (`TG-ENC-003`,
+/// `TG-ENC-005`): HKDF-SHA256 of the segment's DEK, salted with the header's
+/// random salt, bound to every header byte but the CRC.
+pub struct SegmentKey(SecretKey);
+
+impl fmt::Debug for SegmentKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SegmentKey").finish_non_exhaustive()
+    }
+}
+
+/// The nonce of the frame at `index`: `"WALF" ‖ 12 zero bytes ‖ index u64 BE`.
+fn frame_nonce(index: u64) -> [u8; NONCE_LEN] {
+    let mut nonce = [0u8; NONCE_LEN];
+    nonce[..4].copy_from_slice(FRAME_NONCE_PREFIX);
+    nonce[16..].copy_from_slice(&index.to_be_bytes());
+    nonce
+}
+
+impl SegmentKey {
+    /// Seals `payload` in place as the frame at `index` of its segment, with
+    /// `aad` the frame's first 9 bytes, and returns the tag. The nonce is the
+    /// index, so the caller hands out each index of a segment once
+    /// (`TG-ENC-005`).
+    ///
+    /// # Errors
+    ///
+    /// The cipher's refusal of an over-long payload.
+    pub fn seal_frame(
+        &self,
+        index: u64,
+        aad: &[u8],
+        payload: &mut [u8],
+    ) -> anyhow::Result<[u8; FRAME_TAG_LEN]> {
+        let tag = cipher(&self.0)
+            .encrypt_in_place_detached(XNonce::from_slice(&frame_nonce(index)), aad, payload)
+            .map_err(|_| anyhow::anyhow!("sealing WAL frame {index} failed"))?;
+        #[cfg(test)]
+        test_frame_seals()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((self.test_fingerprint(), index));
+        Ok(tag.into())
+    }
+
+    /// The plaintext of `sealed` (`ciphertext ‖ tag`), the frame at `index`
+    /// with first 9 bytes `aad`.
+    ///
+    /// # Errors
+    ///
+    /// [`FrameAuthFailed`]; never a silent skip.
+    pub fn open_frame(
+        &self,
+        index: u64,
+        aad: &[u8],
+        sealed: &[u8],
+    ) -> Result<Vec<u8>, FrameAuthFailed> {
+        let body_len = sealed.len().checked_sub(TAG_LEN).ok_or(FrameAuthFailed)?;
+        let (body, tag) = sealed.split_at(body_len);
+        let mut plaintext = body.to_vec();
+        cipher(&self.0)
+            .decrypt_in_place_detached(
+                XNonce::from_slice(&frame_nonce(index)),
+                aad,
+                &mut plaintext,
+                Tag::from_slice(tag),
+            )
+            .map_err(|_| FrameAuthFailed)?;
+        Ok(plaintext)
+    }
+
+    /// A one-way fingerprint of the key, for the seal observer.
+    #[cfg(test)]
+    pub(crate) fn test_fingerprint(&self) -> Fingerprint {
+        let digest = Sha256::new()
+            .chain_update(b"topgun/test-segment-key-fp")
+            .chain_update(&self.0[..])
+            .finalize();
+        let mut fingerprint = [0u8; 8];
+        fingerprint.copy_from_slice(&digest[..8]);
+        fingerprint
+    }
+}
+
+/// `(segment key fingerprint, index)` of every frame sealed in this test
+/// process, oldest first.
+#[cfg(test)]
+pub(crate) fn test_frame_seals() -> &'static std::sync::Mutex<Vec<(Fingerprint, u64)>> {
+    static SEALS: std::sync::Mutex<Vec<(Fingerprint, u64)>> = std::sync::Mutex::new(Vec::new());
+    &SEALS
+}
+
+impl Keyring {
+    /// The key of the sealed segment whose header is `header`: HKDF-SHA256
+    /// with IKM the DEK the header names, salt the header's salt and info
+    /// `"topgun/wal-segment/1" ‖` the header's first 57 bytes.
+    ///
+    /// # Errors
+    ///
+    /// The header's key id is not in the keyring.
+    ///
+    /// # Panics
+    ///
+    /// Never: 32 bytes is a valid HKDF-SHA256 output length.
+    pub fn segment_key(
+        &self,
+        header: &crate::storage::wal::segment::SegmentHeader,
+    ) -> Result<SegmentKey, UnknownSegmentKey> {
+        let dek = self
+            .deks
+            .get(&header.key_id)
+            .ok_or(UnknownSegmentKey(header.key_id))?;
+        Ok(derive_segment_key(
+            dek,
+            &header.salt,
+            &header.encode()[..SEGMENT_HEADER_BODY_LEN],
+        ))
+    }
+}
+
+/// HKDF-SHA256 of `dek` with `salt`, info `"topgun/wal-segment/1" ‖ header_body`.
+fn derive_segment_key(dek: &[u8; KEY_LEN], salt: &[u8], header_body: &[u8]) -> SegmentKey {
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    hkdf::Hkdf::<Sha256>::new(Some(salt), dek)
+        .expand_multi_info(&[WAL_SEGMENT_INFO, header_body], &mut key[..])
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    SegmentKey(key)
+}
+
 #[cfg(test)]
 mod tests {
     //! `TG-ENC-001`, `TG-ENC-002`: the envelope, the keyring row and
@@ -1001,5 +1159,135 @@ mod tests {
                 Err(KeyFileError::TooPermissive { .. })
             ));
         }
+    }
+
+    /// A sealed segment header for `partition` from `first_seq` under `key_id`.
+    fn sealed_header(
+        key_id: u32,
+        partition: u32,
+        first_seq: u64,
+    ) -> crate::storage::wal::segment::SegmentHeader {
+        let mut header =
+            crate::storage::wal::segment::SegmentHeader::new_unsealed(partition, first_seq);
+        header.cipher = crate::storage::wal::segment::SegmentCipher::XChaCha20Poly1305;
+        header.key_id = key_id;
+        header
+    }
+
+    /// AC2 (`TG-ENC-003`, `TG-ENC-005`): a sealed frame opens at its index
+    /// under its segment's key, and at no other index, under no key of a
+    /// header that differs in any one byte the key binds — salt, partition,
+    /// first sequence, layout, schema, cipher, key id — and not with any
+    /// changed byte of its AAD or of the sealed payload.
+    #[test]
+    fn ac2_a_sealed_frame_opens_only_at_its_index_under_its_segment_key() {
+        let provider = provider();
+        let keyring = keyring(&provider);
+        let id = keyring.active_id().expect("active");
+        let header = sealed_header(id, 7, 42);
+        let key = keyring.segment_key(&header).expect("key");
+        let aad = b"TGWL\x02\x00\x00\x00\x20";
+        let plaintext = b"\x81\xa1k\xa3abc a frame payload".to_vec();
+        let mut sealed = plaintext.clone();
+        let tag = key.seal_frame(5, aad, &mut sealed).expect("seal");
+        assert_ne!(sealed, plaintext);
+        sealed.extend_from_slice(&tag);
+        assert_eq!(key.open_frame(5, aad, &sealed), Ok(plaintext));
+        for other in [0, 4, 6, u64::MAX] {
+            assert_eq!(key.open_frame(other, aad, &sealed), Err(FrameAuthFailed));
+        }
+
+        let dek = &keyring.deks[&id];
+        let body = header.encode();
+        let body = &body[..SEGMENT_HEADER_BODY_LEN];
+        let same = derive_segment_key(dek, &header.salt, body);
+        assert_eq!(
+            same.open_frame(5, aad, &sealed).map(|p| p.len()),
+            Ok(sealed.len() - 16)
+        );
+        // Bytes 0..5 are the magic and the header version; every byte after
+        // them names a field, and the salt is also the HKDF salt.
+        for at in 0..SEGMENT_HEADER_BODY_LEN {
+            let mut changed = body.to_vec();
+            changed[at] ^= 0x01;
+            let salt = &changed[13..45];
+            let key = derive_segment_key(dek, salt, &changed);
+            assert_eq!(
+                key.open_frame(5, aad, &sealed),
+                Err(FrameAuthFailed),
+                "header byte {at} changed"
+            );
+        }
+        // Each field through the header type too.
+        let mut fields = vec![
+            sealed_header(id, 8, 42),
+            sealed_header(id, 7, 43),
+            sealed_header(id, 7, 42),
+        ];
+        fields[2].salt = header.salt;
+        fields[2].salt[31] ^= 1;
+        for other in fields {
+            let key = keyring.segment_key(&other).expect("key");
+            assert_eq!(key.open_frame(5, aad, &sealed), Err(FrameAuthFailed));
+        }
+        // Another key id names another DEK.
+        let rotated = keyring.with_new_active(&provider).expect("new key");
+        let mut other_id = header;
+        other_id.key_id = rotated.active_id().expect("active");
+        let key = rotated.segment_key(&other_id).expect("key");
+        assert_eq!(key.open_frame(5, aad, &sealed), Err(FrameAuthFailed));
+        let key = rotated.segment_key(&header).expect("the old id opens");
+        assert!(key.open_frame(5, aad, &sealed).is_ok());
+
+        for at in 0..aad.len() {
+            let mut changed = *aad;
+            changed[at] ^= 0x01;
+            assert_eq!(key.open_frame(5, &changed, &sealed), Err(FrameAuthFailed));
+        }
+        for at in 0..sealed.len() {
+            let mut changed = sealed.clone();
+            changed[at] ^= 0x01;
+            assert_eq!(key.open_frame(5, aad, &changed), Err(FrameAuthFailed));
+        }
+        assert_eq!(key.open_frame(5, aad, &sealed[..15]), Err(FrameAuthFailed));
+        assert_eq!(
+            keyring_without(&rotated, id).segment_key(&header).err(),
+            Some(UnknownSegmentKey(id))
+        );
+    }
+
+    /// `keyring` without key `id`.
+    fn keyring_without(keyring: &Keyring, id: u32) -> Keyring {
+        let mut deks = BTreeMap::new();
+        for (k, dek) in &keyring.deks {
+            if *k != id {
+                deks.insert(*k, dek.clone());
+            }
+        }
+        Keyring {
+            row: keyring.row.clone(),
+            deks,
+        }
+    }
+
+    /// AC3 (`TG-ENC-005`): two headers created in a row for one
+    /// `(partition, first_seq)` carry different salts and derive different
+    /// keys, so a file replaced under its name never reuses a nonce.
+    #[test]
+    fn ac3_two_headers_for_one_name_have_different_salts_and_keys() {
+        let provider = provider();
+        let keyring = keyring(&provider);
+        let id = keyring.active_id().expect("active");
+        let first = sealed_header(id, 3, 0);
+        let second = sealed_header(id, 3, 0);
+        assert_ne!(first.salt, second.salt);
+        let a = keyring.segment_key(&first).expect("key");
+        let b = keyring.segment_key(&second).expect("key");
+        assert_ne!(a.test_fingerprint(), b.test_fingerprint());
+        let aad = b"TGWL\x02\x00\x00\x00\x11";
+        let mut sealed = b"one frame".to_vec();
+        let tag = a.seal_frame(0, aad, &mut sealed).expect("seal");
+        sealed.extend_from_slice(&tag);
+        assert_eq!(b.open_frame(0, aad, &sealed), Err(FrameAuthFailed));
     }
 }

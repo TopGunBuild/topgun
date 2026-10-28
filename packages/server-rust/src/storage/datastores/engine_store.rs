@@ -1842,6 +1842,10 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         true
     }
 
+    fn wal_keyring(&self) -> Option<Arc<Keyring>> {
+        self.keyring.clone()
+    }
+
     fn applied_watermarks(&self) -> anyhow::Result<Option<AppliedWatermarks>> {
         // One snapshot, so the marks and the rows are of one moment.
         let held = read_store_metadata(&*self.engine.snapshot()?)?;

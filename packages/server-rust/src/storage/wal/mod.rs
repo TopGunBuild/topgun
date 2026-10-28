@@ -31,6 +31,7 @@ use topgun_core::PARTITION_COUNT;
 
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::record::{OrMapEntry, RecordValue};
+use crate::storage::sealing::Keyring;
 
 // ---------------------------------------------------------------------------
 // WalFsyncPolicy
@@ -484,7 +485,7 @@ pub trait Wal: Send + Sync {
 // WalWriter — production file-backed implementation
 // ===========================================================================
 
-use crate::storage::wal::segment::{Segment, SegmentHeader};
+use crate::storage::wal::segment::{Segment, SegmentCipher, SegmentHeader};
 
 /// All segments of one partition, with the active segment and the sealed set
 /// guarded by **separate** locks.
@@ -507,6 +508,10 @@ struct PartitionHandle {
     /// collection tick can seal it by age. Changed only under the `active`
     /// lock.
     active_first_append: std::sync::Mutex<Option<std::time::Instant>>,
+    /// The key of the sealed active segment, with the header it was derived
+    /// from, so an append derives it once per segment. Used only under the
+    /// `active` lock.
+    active_key: std::sync::Mutex<Option<(SegmentHeader, crate::storage::sealing::SegmentKey)>>,
 }
 
 impl PartitionHandle {
@@ -687,6 +692,10 @@ pub struct WalWriter {
     /// The store that holds the watermark. Weak, so the WAL never keeps the
     /// store alive.
     store: std::sync::Weak<dyn MapDataStore>,
+    /// The store's keyring, fixed for the life of the process: new segments
+    /// are sealed under its active key, sealed segments are read with it
+    /// (`TG-ENC-005`).
+    keyring: Option<Arc<Keyring>>,
     /// The durable watermark of every WAL partition, indexed by partition:
     /// the value of its row once a commit carrying it returned. In memory
     /// only — the store's row is the durable copy.
@@ -970,6 +979,7 @@ impl WalWriter {
             wal_dir,
             policy,
             Arc::downgrade(&store),
+            store.wal_keyring(),
             durable,
             collected.into_boxed_slice(),
         );
@@ -1181,6 +1191,7 @@ impl WalWriter {
         wal_dir: PathBuf,
         policy: WalFsyncPolicy,
         store: std::sync::Weak<dyn MapDataStore>,
+        keyring: Option<Arc<Keyring>>,
         durable: Box<[AtomicU64]>,
         collected: Box<[u64]>,
     ) -> Arc<Self> {
@@ -1194,6 +1205,7 @@ impl WalWriter {
             appends_closed: AtomicBool::new(false),
             batch_flush_tx,
             store,
+            keyring,
             durable,
             collection: Collection {
                 collected: AsyncMutex::new(collected),
@@ -1364,16 +1376,19 @@ impl WalWriter {
     }
 
     /// Creates the active segment of `partition` at `path`, starting at
-    /// `first_seq`, with a fresh header (`TG-ENC-003`).
-    // `self` carries only the test observer in a test build.
-    #[cfg_attr(not(test), allow(clippy::unused_self))]
+    /// `first_seq`, with a fresh header (`TG-ENC-003`): sealed under the
+    /// keyring's active key when it has one, else unsealed.
     fn create_active(
         &self,
         path: PathBuf,
         partition: u32,
         first_seq: u64,
     ) -> anyhow::Result<Segment> {
-        let header = SegmentHeader::new_unsealed(partition, first_seq);
+        let mut header = SegmentHeader::new_unsealed(partition, first_seq);
+        if let Some(key_id) = self.keyring.as_deref().and_then(Keyring::active_id) {
+            header.cipher = SegmentCipher::XChaCha20Poly1305;
+            header.key_id = key_id;
+        }
         let file = segment::create_segment_file(&path, &header)?;
         #[cfg(test)]
         self.test_observe(WalTestEvent::Created {
@@ -1422,13 +1437,13 @@ impl WalWriter {
         let mut sealed: Vec<Segment> = Vec::new();
         let active = if let Some((last_first_seq, last_path)) = segments.pop() {
             for (first_seq, path) in segments {
-                let max_seq = Self::decode_segment_max_seq(&path).await?;
+                let max_seq = self.decode_segment_max_seq(&path).await?;
                 sealed.push(Segment::sealed_existing(path, first_seq, max_seq));
             }
             let data = tokio::fs::read(&last_path).await.map_err(|e| {
                 anyhow::anyhow!("Cannot read WAL segment {}: {e}", last_path.display())
             })?;
-            let (entries, intact_len) = Self::decode_segment_or_refuse(&last_path, &data, true)?;
+            let (entries, intact_len) = self.decode_segment_keyed(&last_path, &data, true)?;
             if let Some(max_seq) = entries.iter().map(|e| e.sequence).max() {
                 // Cut a torn tail durably before the file becomes non-last:
                 // left in place, the torn bytes would be mid-partition
@@ -1480,6 +1495,7 @@ impl WalWriter {
             sealed: AsyncMutex::new(sealed),
             active_bytes: AtomicU64::new(0),
             active_first_append: std::sync::Mutex::new(None),
+            active_key: std::sync::Mutex::new(None),
         });
         self.partitions
             .lock()
@@ -1493,11 +1509,11 @@ impl WalWriter {
     /// mid-file corruption. Returns the file's `first_seq` floor when it is empty —
     /// the caller distinguishes empty from a genuine single-frame segment via the
     /// frame count, not this value.
-    async fn decode_segment_max_seq(path: &Path) -> anyhow::Result<u64> {
+    async fn decode_segment_max_seq(&self, path: &Path) -> anyhow::Result<u64> {
         let data = tokio::fs::read(path)
             .await
             .map_err(|e| anyhow::anyhow!("Cannot read WAL segment {}: {e}", path.display()))?;
-        let (entries, _) = Self::decode_segment_or_refuse(path, &data, true)?;
+        let (entries, _) = self.decode_segment_keyed(path, &data, true)?;
         Ok(entries.iter().map(|e| e.sequence).max().unwrap_or(0))
     }
 
@@ -1507,13 +1523,39 @@ impl WalWriter {
     /// recoverable WARN (active / last segment) or a fatal refusal (a sealed,
     /// non-last segment must never be torn). A header that names another
     /// partition or first sequence than the file name, or a refused header, is
-    /// a refusal; so is a sealed segment, since no keyring is held.
+    /// a refusal. A sealed segment is opened with the WAL's keyring; one whose
+    /// key id the keyring lacks, or a frame that fails authentication, is a
+    /// refusal naming the segment (`TG-ENC-003`). Every production reader of
+    /// segment frames reads through this.
+    fn decode_segment_keyed(
+        &self,
+        path: &Path,
+        data: &[u8],
+        tolerate_truncated_tail: bool,
+    ) -> anyhow::Result<(Vec<WalEntry>, usize)> {
+        Self::entries_or_refuse(
+            path,
+            format::decode_segment_with(data, self.keyring.as_deref()),
+            tolerate_truncated_tail,
+        )
+    }
+
+    /// As [`Self::decode_segment_keyed`] with no keyring: a sealed segment is
+    /// refused.
+    #[cfg(test)]
     fn decode_segment_or_refuse(
         path: &Path,
         data: &[u8],
         tolerate_truncated_tail: bool,
     ) -> anyhow::Result<(Vec<WalEntry>, usize)> {
-        let decoded = format::decode_segment(data);
+        Self::entries_or_refuse(path, format::decode_segment(data), tolerate_truncated_tail)
+    }
+
+    fn entries_or_refuse(
+        path: &Path,
+        decoded: format::SegmentDecode,
+        tolerate_truncated_tail: bool,
+    ) -> anyhow::Result<(Vec<WalEntry>, usize)> {
         if let Some(header) = &decoded.header {
             let named = path
                 .file_name()
@@ -1586,8 +1628,83 @@ impl WalWriter {
                     path.display()
                 );
             }
+            format::FrameDecodeResult::AuthenticationFailed { offset } => {
+                anyhow::bail!(
+                    "WAL segment {} has a frame at offset {offset} that fails authentication: \
+                     its bytes were changed; refusing to start",
+                    path.display()
+                );
+            }
         };
         Ok((entries, decoded.intact_len))
+    }
+}
+
+impl WalWriter {
+    /// The frame of `entry` for `partition`'s active segment `active`, and
+    /// its index. Called under the active-append lock: the frame is encoded
+    /// and sealed there, and its index taken only once the payload has
+    /// encoded within the frame limit, so the index is always the frame's
+    /// position in the segment, is the nonce of its seal and is never handed
+    /// out twice (`TG-ENC-005`).
+    ///
+    /// # Errors
+    ///
+    /// An entry that does not encode within the frame limit; no index is
+    /// taken then. Every later failure stops the process (`TG-WAL-007`).
+    fn frame_under_lock(
+        &self,
+        partition: u32,
+        handle: &PartitionHandle,
+        active: &mut Segment,
+        entry: &WalEntry,
+    ) -> anyhow::Result<(Vec<u8>, u64)> {
+        let sealed_header = active
+            .header()
+            .filter(|header| header.cipher != SegmentCipher::None)
+            .copied();
+        let mut active_key = handle
+            .active_key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = sealed_header.map(|header| {
+            if active_key.as_ref().map(|(of, _)| of) != Some(&header) {
+                let key = self
+                    .keyring
+                    .as_deref()
+                    .ok_or(crate::storage::sealing::UnknownSegmentKey(header.key_id))
+                    .and_then(|keyring| keyring.segment_key(&header))
+                    .unwrap_or_else(|e| {
+                        wal_fail_stop(
+                            WalFailStopTier::P,
+                            &format!(
+                                "the active segment of partition={partition} is sealed with {e}"
+                            ),
+                        )
+                    });
+                *active_key = Some((header, key));
+            }
+            &active_key.as_ref().expect("set above").1
+        });
+        let payload = format::encode_v2_payload(entry, key.is_some())?;
+        let index = active.take_frame_index().unwrap_or_else(|e| {
+            wal_fail_stop(
+                WalFailStopTier::P,
+                &format!("partition={partition}, sequence={}: {e}", entry.sequence),
+            )
+        });
+        // The index is spent: a failure from here on is past the frame
+        // (`TG-WAL-007` tier (B)).
+        let frame = format::frame_v2(&payload, key.map(|key| (key, index))).unwrap_or_else(|e| {
+            wal_fail_stop(
+                WalFailStopTier::B,
+                &format!(
+                    "WAL frame seal failed: partition={partition}, sequence={}: {e}",
+                    entry.sequence
+                ),
+            )
+        });
+        Ok((frame, index))
     }
 }
 
@@ -1704,16 +1821,8 @@ impl Wal for WalWriter {
             );
         }
 
-        // Framed under the lock, and its index taken only once the payload has
-        // encoded, so the index is always the frame's position in the segment
-        // and is never handed out twice (`TG-ENC-005`).
-        let frame = format::encode_v2(entry)?;
-        let index = active.take_frame_index().unwrap_or_else(|e| {
-            wal_fail_stop(
-                WalFailStopTier::P,
-                &format!("partition={partition}, sequence={}: {e}", entry.sequence),
-            )
-        });
+        // Encoded, sealed and indexed under this lock (`TG-ENC-005`).
+        let (frame, index) = self.frame_under_lock(partition, &handle, &mut active, entry)?;
         #[cfg(test)]
         if let Some(header) = active.header() {
             self.test_observe(WalTestEvent::Framed {
@@ -1846,7 +1955,7 @@ impl Wal for WalWriter {
             // A truncated tail is tolerated ONLY on the active (last) segment; a
             // torn tail on a sealed, non-last segment is corruption.
             let tolerate_tail = idx == last_idx;
-            let (entries, _) = Self::decode_segment_or_refuse(&path, &data, tolerate_tail)?;
+            let (entries, _) = self.decode_segment_keyed(&path, &data, tolerate_tail)?;
             all.extend(entries);
         }
 
@@ -2028,7 +2137,7 @@ impl WalWriter {
             for (idx, (_, path)) in segments.into_iter().enumerate() {
                 let decoded = std::fs::read(&path)
                     .map_err(|e| anyhow::anyhow!("Cannot read WAL segment {}: {e}", path.display()))
-                    .and_then(|data| Self::decode_segment_or_refuse(&path, &data, idx == last_idx));
+                    .and_then(|data| self.decode_segment_keyed(&path, &data, idx == last_idx));
                 let entries = match decoded {
                     Ok((entries, _)) => entries,
                     Err(e) => {
@@ -2432,7 +2541,7 @@ impl WalWriter {
             let data = tokio::fs::read(&path)
                 .await
                 .map_err(|e| anyhow::anyhow!("Cannot read WAL segment {}: {e}", path.display()))?;
-            let (entries, _) = Self::decode_segment_or_refuse(&path, &data, idx == last_idx)?;
+            let (entries, _) = self.decode_segment_keyed(&path, &data, idx == last_idx)?;
             if let Some(m) = entries.iter().map(|e| e.sequence).max() {
                 global = global.max(m);
             }
@@ -6420,3 +6529,575 @@ mod store_mode_tests;
 #[cfg(test)]
 #[path = "batched_replay_tests.rs"]
 mod batched_replay_tests;
+
+#[cfg(test)]
+mod sealed_frame_tests {
+    //! Sealed WAL frames over a sealed store: no (segment key, nonce) pair is
+    //! used twice, a changed frame is refused rather than taken for a torn
+    //! tail, and every reader of segment frames opens a sealed segment with
+    //! the store's keyring (`TG-ENC-003`, `TG-ENC-005`).
+
+    use std::collections::{BTreeSet, HashSet};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use super::format::{decode_segment, FRAME_HEADER_LEN};
+    use super::segment::{SegmentCipher, SEGMENT_HEADER_LEN};
+    use super::store_mode_tests::{
+        keys_in, lww, open_engine, record_key, segment_files, store_frame, CountingEngine, Node,
+        Root,
+    };
+    use super::{Wal, WalFsyncPolicy, WalTestEvent, WalWriter, SEAL_AGE};
+    use crate::storage::datastores::engine_store::{
+        meta_key, EngineMapDataStore, KS_BACKUP, KS_PRIMARY, META_KEYRING,
+    };
+    use crate::storage::datastores::kv_engine::KvEngine;
+    use crate::storage::map_data_store::MapDataStore;
+    use crate::storage::record::RecordValue;
+    use crate::storage::sealing::{
+        self, Encryption, EncryptionMode, FileKeyProvider, Fingerprint, KeyState, KeyringRow,
+        MasterKeyProvider, SEALED_MARK,
+    };
+
+    const P: u32 = 5;
+
+    fn provider() -> Arc<dyn MasterKeyProvider> {
+        Arc::new(FileKeyProvider::from_kek(
+            sealing::generate_key().expect("random"),
+        ))
+    }
+
+    fn encryption(
+        mode: EncryptionMode,
+        provider: Option<&Arc<dyn MasterKeyProvider>>,
+    ) -> Encryption {
+        Encryption {
+            mode,
+            provider: provider.cloned(),
+            previous: None,
+        }
+    }
+
+    /// Opens `root`'s store with `encryption`, runs its seal pass and opens
+    /// the WAL over it, in the order the server starts.
+    fn open_node(
+        root: &Root,
+        encryption: &Encryption,
+        policy: WalFsyncPolicy,
+    ) -> anyhow::Result<Node> {
+        let engine = open_engine(root);
+        let store = Arc::new(EngineMapDataStore::open_sealed(
+            Arc::clone(&engine),
+            encryption,
+        )?);
+        store.run_seal_pass()?;
+        let wal = WalWriter::open_over_store(
+            root.wal_dir(),
+            policy,
+            Arc::clone(&store) as Arc<dyn MapDataStore>,
+        )?;
+        Ok(Node { engine, store, wal })
+    }
+
+    fn sealed_node(root: &Root, provider: &Arc<dyn MasterKeyProvider>) -> Node {
+        open_node(
+            root,
+            &encryption(EncryptionMode::On, Some(provider)),
+            WalFsyncPolicy::PerOp,
+        )
+        .expect("sealed open")
+    }
+
+    /// The fingerprints of the keys of the sealed segments in `wal`'s
+    /// directory; every segment there must be sealed.
+    fn key_fingerprints(wal: &WalWriter) -> BTreeSet<Fingerprint> {
+        let keyring = wal.keyring.as_deref().expect("a sealed node");
+        let mut fingerprints = BTreeSet::new();
+        for path in segment_paths(&wal.wal_dir) {
+            let header = decode_segment(&std::fs::read(&path).expect("segment"))
+                .header
+                .expect("a v2 segment");
+            assert_eq!(
+                header.cipher,
+                SegmentCipher::XChaCha20Poly1305,
+                "{} is not sealed",
+                path.display()
+            );
+            fingerprints.insert(
+                keyring
+                    .segment_key(&header)
+                    .expect("its key id is in the keyring")
+                    .test_fingerprint(),
+            );
+        }
+        fingerprints
+    }
+
+    fn segment_paths(wal_dir: &Path) -> Vec<PathBuf> {
+        (0..crate::storage::wal::PARTITION_COUNT)
+            .flat_map(|p| segment_files(wal_dir, p).into_values())
+            .collect()
+    }
+
+    /// Asserts that no `(segment key, index)` pair of a segment of `wal`'s
+    /// directory was sealed twice in this process, and returns how many
+    /// frames were sealed under those keys. Seals of other tests running in
+    /// parallel are under other keys and left out.
+    fn assert_no_pair_repeats(wal: &WalWriter) -> usize {
+        let mine = key_fingerprints(wal);
+        let seals = sealing::test_frame_seals()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut seen = HashSet::new();
+        let mut count = 0;
+        for (key, index) in seals.into_iter().filter(|(key, _)| mine.contains(key)) {
+            assert!(
+                seen.insert((key, index)),
+                "frame index {index} was sealed twice under one segment key"
+            );
+            count += 1;
+        }
+        count
+    }
+
+    async fn append(node: &Node, partition: u32, seq: u64) {
+        node.append(partition, &format!("k{seq}"), &lww("v", seq), seq)
+            .await;
+    }
+
+    async fn unapplied(node: &Node, partition: u32) -> anyhow::Result<Vec<u64>> {
+        Ok(node
+            .wal
+            .unapplied(partition)
+            .await?
+            .iter()
+            .map(|e| e.sequence)
+            .collect())
+    }
+
+    fn last_segment(wal_dir: &Path, partition: u32) -> PathBuf {
+        segment_files(wal_dir, partition)
+            .into_values()
+            .next_back()
+            .expect("a segment")
+    }
+
+    /// The offset of every frame of the segment file `data`.
+    fn frame_offsets(data: &[u8]) -> Vec<usize> {
+        let mut offsets = Vec::new();
+        let mut at = SEGMENT_HEADER_LEN;
+        while at + FRAME_HEADER_LEN <= data.len() {
+            offsets.push(at);
+            let len = u32::from_be_bytes(data[at + 5..at + 9].try_into().unwrap()) as usize;
+            at += FRAME_HEADER_LEN + len;
+        }
+        offsets
+    }
+
+    /// AC8 (`TG-ENC-005`): many tasks append to one sealed partition at
+    /// once. Each frame is sealed under the append lock with the index taken
+    /// there, so no (key, index) pair repeats and recovery opens every frame
+    /// at its position.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn ac8_concurrent_sealed_appends_seal_each_index_once() {
+        const TASKS: u64 = 8;
+        const PER_TASK: u64 = 300;
+        let root = Root::new();
+        let provider = provider();
+        let node = open_node(
+            &root,
+            &encryption(EncryptionMode::On, Some(&provider)),
+            WalFsyncPolicy::None,
+        )
+        .expect("sealed open");
+        let next = Arc::new(AtomicU64::new(1));
+        let mut tasks = Vec::new();
+        for _ in 0..TASKS {
+            let wal = Arc::clone(&node.wal);
+            let next = Arc::clone(&next);
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..PER_TASK {
+                    let seq = next.fetch_add(1, Ordering::SeqCst);
+                    wal.append(P, &store_frame(&format!("k{seq}"), &lww("v", seq), seq))
+                        .await
+                        .expect("append");
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.expect("task");
+        }
+        assert_eq!(
+            assert_no_pair_repeats(&node.wal) as u64,
+            TASKS * PER_TASK,
+            "every frame was sealed once"
+        );
+        assert_eq!(
+            unapplied(&node, P)
+                .await
+                .expect("recovery opens every frame"),
+            (1..=TASKS * PER_TASK).collect::<Vec<_>>()
+        );
+        node.close().await;
+    }
+
+    /// AC8 (`TG-ENC-005`): the first opens of a sealed partition by an
+    /// append and by the collection tick race past the installed-map miss.
+    /// The open mutex lets one of them create the new segment.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ac8_racing_first_opens_of_a_sealed_partition_create_one_segment() {
+        let root = Root::new();
+        let provider = provider();
+        let node = sealed_node(&root, &provider);
+        append(&node, P, 1).await;
+        node.close().await;
+
+        let node = sealed_node(&root, &provider);
+        let created = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&created);
+        node.wal.test_set_observer(Some(Arc::new(move |event| {
+            if matches!(event, WalTestEvent::Created { partition: P, .. }) {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        })));
+        node.wal
+            .test_set_open_barrier(Some(Arc::new(tokio::sync::Barrier::new(2))));
+        let wal = Arc::clone(&node.wal);
+        let append_task =
+            tokio::spawn(async move { wal.append(P, &store_frame("k2", &lww("v", 2), 2)).await });
+        let wal = Arc::clone(&node.wal);
+        let tick = tokio::spawn(async move { wal.test_collect_now().await });
+        append_task.await.expect("append task").expect("append");
+        tick.await.expect("tick task");
+        node.wal.test_set_open_barrier(None);
+        assert_eq!(
+            created.load(Ordering::SeqCst),
+            1,
+            "the racing opens created more than one segment"
+        );
+        assert_eq!(unapplied(&node, P).await.expect("recovery"), vec![1, 2]);
+        assert_no_pair_repeats(&node.wal);
+        node.close().await;
+        let node = sealed_node(&root, &provider);
+        assert_eq!(unapplied(&node, P).await.expect("recovery"), vec![1, 2]);
+        node.close().await;
+    }
+
+    /// AC8 (`TG-ENC-005`): a sealed segment cut at a frame boundary below its
+    /// last fsync, or inside a frame, is never appended to after the restart,
+    /// so the indices of the frames the cut removed are never sealed again
+    /// under its key; recovery reads every frame the cut left intact and
+    /// every frame appended after.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ac8_a_cut_sealed_segment_is_never_appended_to() {
+        for mid_frame in [false, true] {
+            let root = Root::new();
+            let provider = provider();
+            let node = sealed_node(&root, &provider);
+            append(&node, P, 1).await;
+            append(&node, P, 2).await;
+            let path = last_segment(&root.wal_dir(), P);
+            let boundary = std::fs::metadata(&path).unwrap().len();
+            append(&node, P, 3).await;
+            node.close().await;
+
+            let cut = if mid_frame { boundary + 5 } else { boundary };
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(cut)
+                .unwrap();
+
+            let node = sealed_node(&root, &provider);
+            append(&node, P, 4).await;
+            append(&node, P, 5).await;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                boundary,
+                "the cut segment was written after the restart (mid_frame={mid_frame})"
+            );
+            assert_eq!(segment_files(&root.wal_dir(), P).len(), 2);
+            assert_no_pair_repeats(&node.wal);
+            node.close().await;
+
+            let node = sealed_node(&root, &provider);
+            assert_eq!(
+                unapplied(&node, P).await.expect("recovery"),
+                vec![1, 2, 4, 5],
+                "mid_frame={mid_frame}"
+            );
+            node.close().await;
+        }
+    }
+
+    /// AC8 (`TG-ENC-005`): a rotation whose directory fsync fails leaves its
+    /// new sealed segment behind with no frame; the next rotation replaces or
+    /// passes it, and no (key, index) pair repeats.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ac8_a_sealed_rotation_with_a_failed_directory_fsync_then_the_next() {
+        let root = Root::new();
+        let provider = provider();
+        let node = sealed_node(&root, &provider);
+        let rotate = |fail: bool| {
+            let wal = Arc::clone(&node.wal);
+            async move {
+                if fail {
+                    wal.test_fail_next_rotation_dir_fsync();
+                }
+                wal.test_advance_clock(2 * SEAL_AGE + std::time::Duration::from_secs(1));
+                wal.test_collect_now().await;
+            }
+        };
+        append(&node, P, 1).await;
+        rotate(true).await;
+        assert_eq!(segment_files(&root.wal_dir(), P).len(), 2);
+        rotate(false).await;
+        append(&node, P, 2).await;
+        rotate(true).await;
+        append(&node, P, 3).await;
+        rotate(false).await;
+        append(&node, P, 4).await;
+        assert_no_pair_repeats(&node.wal);
+        node.close().await;
+
+        let node = sealed_node(&root, &provider);
+        assert_eq!(
+            unapplied(&node, P).await.expect("recovery"),
+            vec![1, 2, 3, 4]
+        );
+        assert_no_pair_repeats(&node.wal);
+        node.close().await;
+    }
+
+    /// R6.6 (`TG-ENC-005`, `TG-WAL-007`): an entry whose sealed frame would
+    /// exceed the frame limit is refused before any index is taken, so the
+    /// next frame is sealed at the position it is written to and recovery
+    /// opens it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_oversized_sealed_entry_is_refused_before_its_index_is_taken() {
+        let root = Root::new();
+        let provider = provider();
+        let node = sealed_node(&root, &provider);
+        append(&node, P, 1).await;
+        let huge = "x".repeat(super::format::MAX_FRAME_PAYLOAD_LEN);
+        let error = node
+            .wal
+            .append(P, &store_frame("big", &lww(&huge, 2), 2))
+            .await
+            .expect_err("an entry over the frame limit is refused");
+        assert!(format!("{error:#}").contains("frame limit"), "{error:#}");
+        append(&node, P, 3).await;
+        assert_eq!(unapplied(&node, P).await.expect("recovery"), vec![1, 3]);
+        assert_no_pair_repeats(&node.wal);
+        node.close().await;
+    }
+
+    /// Flips a byte of the payload of frame `frame` of the segment at `path`
+    /// and writes the CRC of the changed payload, so only authentication can
+    /// tell. Returns the frame's offset.
+    fn tamper(path: &Path, frame: usize) -> usize {
+        let mut data = std::fs::read(path).expect("segment");
+        let at = frame_offsets(&data)[frame];
+        let len = u32::from_be_bytes(data[at + 5..at + 9].try_into().unwrap()) as usize;
+        let payload = at + FRAME_HEADER_LEN..at + FRAME_HEADER_LEN + len;
+        data[payload.start + 1] ^= 0x01;
+        let crc = crc32c::crc32c(&data[payload]);
+        data[at + 9..at + FRAME_HEADER_LEN].copy_from_slice(&crc.to_be_bytes());
+        std::fs::write(path, data).expect("write segment");
+        at
+    }
+
+    /// AC10 (`TG-ENC-003`): a changed payload byte with its CRC fixed is
+    /// refused by recovery naming the file and the offset — in the last frame
+    /// of the last segment, where a torn tail would be tolerated, and in a
+    /// middle frame; a cut inside the last frame is tolerated as a torn tail.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ac10_a_changed_sealed_frame_is_refused_and_a_torn_one_tolerated() {
+        for case in ["last frame", "middle frame", "torn last frame"] {
+            let root = Root::new();
+            let provider = provider();
+            let node = sealed_node(&root, &provider);
+            for seq in 1..=3 {
+                append(&node, P, seq).await;
+            }
+            node.close().await;
+            let path = last_segment(&root.wal_dir(), P);
+            let offset = match case {
+                "last frame" => tamper(&path, 2),
+                "middle frame" => tamper(&path, 1),
+                _ => {
+                    let len = std::fs::metadata(&path).unwrap().len();
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path)
+                        .unwrap()
+                        .set_len(len - 3)
+                        .unwrap();
+                    0
+                }
+            };
+
+            let node = sealed_node(&root, &provider);
+            if case == "torn last frame" {
+                assert_eq!(unapplied(&node, P).await.expect("tolerated"), vec![1, 2]);
+                node.recover()
+                    .await
+                    .expect("recovery replays the intact prefix");
+            } else {
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                for error in [
+                    unapplied(&node, P).await.expect_err(case),
+                    node.recover().await.expect_err(case),
+                ] {
+                    let message = format!("{error:#}");
+                    assert!(
+                        message.contains(&name)
+                            && message.contains(&format!("offset {offset}"))
+                            && message.contains("fails authentication"),
+                        "{case}: {message}"
+                    );
+                }
+            }
+            node.close().await;
+        }
+    }
+
+    /// `AC12b` (`TG-ENC-005`): a sealed node holding a sealed segment with a
+    /// frame above the watermark in a partition not written in this run
+    /// stops through `finish(true)` before any collection tick; `finish`
+    /// reads that segment with the keyring, keeps it, and the frame replays
+    /// at the next start.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ac12b_finish_keeps_a_sealed_segment_above_the_watermark() {
+        let root = Root::new();
+        let provider = provider();
+        let node = sealed_node(&root, &provider);
+        append(&node, P, 1).await;
+        node.close().await;
+        let path = last_segment(&root.wal_dir(), P);
+
+        let node = sealed_node(&root, &provider);
+        assert!(
+            !node.wal.partitions.lock().await.contains_key(&P),
+            "the partition has an installed handle before finish"
+        );
+        node.wal.finish(true).await.expect("finish");
+        assert!(
+            path.exists(),
+            "finish unlinked a sealed segment above the watermark"
+        );
+        node.close().await;
+
+        let node = sealed_node(&root, &provider);
+        node.recover().await.expect("recovery");
+        assert_eq!(node.engine.row(P), Some(1), "the frame replayed");
+        assert!(node
+            .engine
+            .get(&record_key(&node.engine, "k1"))
+            .expect("engine read")
+            .is_some());
+        node.close().await;
+    }
+
+    /// Every record value of `engine`, primary and backup rows.
+    fn values(engine: &CountingEngine) -> Vec<Vec<u8>> {
+        engine
+            .dump()
+            .into_iter()
+            .filter(|(key, _)| matches!(key.first(), Some(&KS_PRIMARY | &KS_BACKUP)))
+            .map(|(_, value)| value)
+            .collect()
+    }
+
+    fn keyring_row(engine: &impl KvEngine) -> KeyringRow {
+        KeyringRow::decode(
+            &engine
+                .get(&meta_key(META_KEYRING))
+                .expect("engine read")
+                .expect("the keyring row is kept"),
+        )
+        .expect("a keyring row")
+    }
+
+    /// AC12 (`TG-ENC-001`, `TG-ENC-005`): with sealed values in the store and
+    /// sealed frames left unapplied by a crash, a restart with encryption off
+    /// replays the frames, ends its unseal pass with every value plain and
+    /// keeps the keyring with every key decrypt-only; a restart off with no
+    /// master key refuses; a restart on adds key 2, never reusing 1, and
+    /// seals every value under it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ac12_disable_with_sealed_frames_on_disk() {
+        let root = Root::new();
+        let provider = provider();
+        let keys = keys_in(P, 3);
+        let node = sealed_node(&root, &provider);
+        let committed: Vec<(String, RecordValue)> = ["a", "b", "c"]
+            .iter()
+            .map(|k| ((*k).to_string(), lww("sealed", 1)))
+            .collect();
+        node.commit(&committed, &[]).await.expect("commit");
+        for (seq, key) in (1..).zip(&keys) {
+            node.append(P, key, &lww("framed", seq), seq).await;
+        }
+        assert!(values(&node.engine)
+            .iter()
+            .all(|v| sealing::sealed_key_id(v) == Some(1)));
+        // A crash: no shutdown, no finish.
+        node.close().await;
+
+        let off = encryption(EncryptionMode::Off, Some(&provider));
+        let node = open_node(&root, &off, WalFsyncPolicy::PerOp).expect("open with off");
+        node.recover().await.expect("the sealed frames replay");
+        for key in &keys {
+            assert!(
+                node.engine
+                    .get(&record_key(&node.engine, key))
+                    .expect("engine read")
+                    .is_some(),
+                "{key} replayed"
+            );
+        }
+        let plain = values(&node.engine);
+        assert_eq!(plain.len(), 6);
+        assert!(plain.iter().all(|v| v.first() != Some(&SEALED_MARK)));
+        let row = keyring_row(&*node.engine);
+        assert_eq!(row.keys.len(), 1);
+        assert!(row.keys.iter().all(|k| k.state == KeyState::DecryptOnly));
+        // New segments are plain once no key is active.
+        append(&node, P, 4).await;
+        let header = decode_segment(&std::fs::read(last_segment(&root.wal_dir(), P)).unwrap())
+            .header
+            .expect("a v2 segment");
+        assert_eq!(header.cipher, SegmentCipher::None);
+        node.close().await;
+
+        let refused = open_node(
+            &root,
+            &encryption(EncryptionMode::Off, None),
+            WalFsyncPolicy::PerOp,
+        )
+        .err()
+        .expect("off with no master key refuses");
+        assert!(
+            format!("{refused:#}").contains("encryption: refusing to start:"),
+            "{refused:#}"
+        );
+
+        let node = sealed_node(&root, &provider);
+        node.recover().await.expect("recovery");
+        let row = keyring_row(&*node.engine);
+        let states: Vec<(u32, KeyState)> = row.keys.iter().map(|k| (k.id, k.state)).collect();
+        assert_eq!(
+            states,
+            vec![(1, KeyState::DecryptOnly), (2, KeyState::Active)]
+        );
+        assert_eq!(row.next_key_id, 3);
+        let sealed = values(&node.engine);
+        assert_eq!(sealed.len(), 7);
+        assert!(sealed.iter().all(|v| sealing::sealed_key_id(v) == Some(2)));
+        node.close().await;
+    }
+}

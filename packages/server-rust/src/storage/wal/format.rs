@@ -17,7 +17,12 @@
 //! - **CRC32C** (big-endian `u32`): Castagnoli CRC-32 of the payload bytes.
 //!   A mismatch that occurs before the last frame is `Corruption`; a mismatch on
 //!   the last frame that is also truncated is reported as `TruncatedTail`.
-//! - **PAYLOAD**: `rmp_serde::to_vec_named()` `MsgPack` encoding of `WalEntry`.
+//! - **PAYLOAD**: `rmp_serde::to_vec_named()` `MsgPack` encoding of `WalEntry`;
+//!   in a sealed (cipher 1) segment, that encoding sealed, `ciphertext ‖ tag`
+//!   (`TG-ENC-003`). `LENGTH` and the CRC are of the payload as written, so a
+//!   torn tail is classified by them exactly as in a plain segment, and a
+//!   frame whose CRC holds but whose tag does not is corruption, never a torn
+//!   tail.
 //!
 //! CRC32C (Castagnoli) is used rather than CRC-32 IEEE because it has hardware
 //! acceleration on modern CPUs and is the standard choice for WAL frames
@@ -26,6 +31,7 @@
 
 use std::io::{Cursor, Read};
 
+use crate::storage::sealing::{Keyring, SegmentKey, FRAME_TAG_LEN};
 use crate::storage::wal::segment::{
     HeaderError, SegmentCipher, SegmentHeader, SEGMENT_HEADER_LEN, SEGMENT_MAGIC,
 };
@@ -220,6 +226,12 @@ pub enum FrameDecodeResult {
         /// The key id the header names.
         key_id: u32,
     },
+    /// A sealed frame whose CRC is intact but whose tag does not match:
+    /// changed bytes, never a torn tail, wherever the frame is (`TG-ENC-003`).
+    AuthenticationFailed {
+        /// Offset of the frame.
+        offset: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -253,18 +265,62 @@ pub fn encode_v2(entry: &WalEntry) -> anyhow::Result<Vec<u8>> {
 fn encode_frame(entry: &WalEntry, version: u8) -> anyhow::Result<Vec<u8>> {
     let payload = rmp_serde::to_vec_named(entry)
         .map_err(|e| anyhow::anyhow!("WAL encode: MsgPack serialization failed: {e}"))?;
+    frame_payload(&payload, version, None)
+}
 
-    let length = u32::try_from(payload.len())
-        .map_err(|_| anyhow::anyhow!("WAL encode: payload too large ({} bytes)", payload.len()))?;
+/// The `MsgPack` payload of `entry` for a v2 frame, refused when the frame
+/// would exceed [`MAX_FRAME_PAYLOAD_LEN`] as written — the tag included
+/// when `sealed` — since recovery refuses such a frame.
+///
+/// # Errors
+///
+/// A serialization error, or an over-long payload.
+pub fn encode_v2_payload(entry: &WalEntry, sealed: bool) -> anyhow::Result<Vec<u8>> {
+    let payload = rmp_serde::to_vec_named(entry)
+        .map_err(|e| anyhow::anyhow!("WAL encode: MsgPack serialization failed: {e}"))?;
+    let limit = MAX_FRAME_PAYLOAD_LEN - if sealed { FRAME_TAG_LEN } else { 0 };
+    if payload.len() > limit {
+        anyhow::bail!(
+            "WAL encode: payload of {} bytes exceeds the {limit}-byte frame limit",
+            payload.len()
+        );
+    }
+    Ok(payload)
+}
 
-    let crc = crc32c::crc32c(&payload);
+/// The v2 frame of `payload`; with `seal`, the payload is sealed as the
+/// frame at that index under that segment key, its first 9 bytes the AAD
+/// (`TG-ENC-003`).
+///
+/// # Errors
+///
+/// An over-long payload, or a seal failure.
+pub fn frame_v2(payload: &[u8], seal: Option<(&SegmentKey, u64)>) -> anyhow::Result<Vec<u8>> {
+    frame_payload(payload, FRAME_VERSION_V2, seal)
+}
 
-    let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + payload.len());
+fn frame_payload(
+    payload: &[u8],
+    version: u8,
+    seal: Option<(&SegmentKey, u64)>,
+) -> anyhow::Result<Vec<u8>> {
+    let written = payload.len() + if seal.is_some() { FRAME_TAG_LEN } else { 0 };
+    let length = u32::try_from(written)
+        .map_err(|_| anyhow::anyhow!("WAL encode: payload too large ({written} bytes)"))?;
+
+    let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + written);
     frame.extend_from_slice(&FRAME_MAGIC.to_be_bytes());
     frame.push(version);
     frame.extend_from_slice(&length.to_be_bytes());
-    frame.extend_from_slice(&crc.to_be_bytes());
-    frame.extend_from_slice(&payload);
+    frame.extend_from_slice(&[0; 4]);
+    frame.extend_from_slice(payload);
+    if let Some((key, index)) = seal {
+        let (head, body) = frame.split_at_mut(FRAME_HEADER_LEN);
+        let tag = key.seal_frame(index, &head[..9], body)?;
+        frame.extend_from_slice(&tag);
+    }
+    let crc = crc32c::crc32c(&frame[FRAME_HEADER_LEN..]);
+    frame[9..FRAME_HEADER_LEN].copy_from_slice(&crc.to_be_bytes());
 
     Ok(frame)
 }
@@ -284,7 +340,8 @@ fn encode_frame(entry: &WalEntry, version: u8) -> anyhow::Result<Vec<u8>> {
 ///   operator.
 /// - `Sealed` → the frames need a key this layer does not hold.
 ///
-/// This function NEVER panics on malformed input.
+/// It holds no keyring, so it never returns `AuthenticationFailed`. This
+/// function NEVER panics on malformed input.
 #[must_use]
 pub fn decode_all(data: &[u8]) -> FrameDecodeResult {
     decode_segment(data).result
@@ -313,8 +370,17 @@ pub struct SegmentDecode {
 /// `Sealed`, since no key is held here.
 #[must_use]
 pub fn decode_segment(data: &[u8]) -> SegmentDecode {
+    decode_segment_with(data, None)
+}
+
+/// As [`decode_segment`], opening the frames of a sealed file under the key
+/// `keyring` derives from its header (`TG-ENC-003`). A sealed file still
+/// reports `Sealed` when its key id is not in `keyring`, and a frame whose
+/// CRC holds but whose tag does not is `AuthenticationFailed`.
+#[must_use]
+pub fn decode_segment_with(data: &[u8], keyring: Option<&Keyring>) -> SegmentDecode {
     if !data.starts_with(&SEGMENT_MAGIC.to_be_bytes()) {
-        let (result, intact_len, frames) = decode_frames(data, 0, FRAME_VERSION, true);
+        let (result, intact_len, frames) = decode_frames(data, 0, FRAME_VERSION, &Payloads::Plain);
         return SegmentDecode {
             header: None,
             result,
@@ -343,10 +409,18 @@ pub fn decode_segment(data: &[u8]) -> SegmentDecode {
             };
         }
     };
-    let sealed = header.cipher != SegmentCipher::None;
+    let key = match header.cipher {
+        SegmentCipher::None => None,
+        SegmentCipher::XChaCha20Poly1305 => keyring.and_then(|k| k.segment_key(&header).ok()),
+    };
+    let payloads = match (header.cipher, &key) {
+        (SegmentCipher::None, _) => Payloads::Plain,
+        (_, Some(key)) => Payloads::Sealed(key),
+        (_, None) => Payloads::Unread,
+    };
     let (mut result, intact_len, frames) =
-        decode_frames(data, SEGMENT_HEADER_LEN, FRAME_VERSION_V2, !sealed);
-    if sealed
+        decode_frames(data, SEGMENT_HEADER_LEN, FRAME_VERSION_V2, &payloads);
+    if matches!(payloads, Payloads::Unread)
         && matches!(
             result,
             FrameDecodeResult::Complete(_) | FrameDecodeResult::TruncatedTail { .. }
@@ -364,8 +438,19 @@ pub fn decode_segment(data: &[u8]) -> SegmentDecode {
     }
 }
 
+/// What [`decode_frames`] does with each payload that passes its CRC.
+enum Payloads<'k> {
+    /// Deserializes it.
+    Plain,
+    /// Opens it under the segment key at the frame's index, then
+    /// deserializes it.
+    Sealed(&'k SegmentKey),
+    /// Leaves it unread: the key is not held.
+    Unread,
+}
+
 /// Decodes the frames of `data` from `start` on, each expected to carry
-/// `version`; payloads are deserialized only when `deserialize`. Returns the
+/// `version`, treating each payload as `payloads` says. Returns the
 /// classification, the end offset of the intact prefix and the intact frame
 /// count. Offsets in the classification are from the start of `data`.
 #[allow(clippy::too_many_lines)]
@@ -373,7 +458,7 @@ fn decode_frames(
     data: &[u8],
     start: usize,
     version: u8,
-    deserialize: bool,
+    payloads: &Payloads<'_>,
 ) -> (FrameDecodeResult, usize, usize) {
     if data.is_empty() {
         return (FrameDecodeResult::CleanEof, 0, 0);
@@ -486,8 +571,24 @@ fn decode_frames(
             };
         }
 
+        // --- Open a sealed payload ---
+        let payload = match payloads {
+            Payloads::Unread => None,
+            Payloads::Plain => Some(payload),
+            Payloads::Sealed(key) => {
+                let aad = &data[offset..offset + 9];
+                match key.open_frame(u64::try_from(frames).unwrap_or(u64::MAX), aad, &payload) {
+                    Ok(plaintext) => Some(plaintext),
+                    // The CRC holds, so the bytes are as written: a tag
+                    // that does not match is tampering or corruption, never
+                    // a torn tail, even on the last frame (`TG-ENC-003`).
+                    Err(_) => break FrameDecodeResult::AuthenticationFailed { offset },
+                }
+            }
+        };
+
         // --- Deserialize payload ---
-        if deserialize {
+        if let Some(payload) = payload {
             if let Ok(entry) = rmp_serde::from_slice::<WalEntry>(&payload) {
                 entries.push(entry);
             } else {
