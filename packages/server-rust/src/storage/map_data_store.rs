@@ -18,6 +18,7 @@ use async_trait::async_trait;
 
 use super::engine::SlotCell;
 use super::record::RecordValue;
+use super::sealing::Keyring;
 use super::wal::OrDelta;
 use topgun_core::hash::{fnv1a_hash, fnv1a_update, FNV1A_OFFSET_BASIS};
 
@@ -839,6 +840,13 @@ pub trait MapDataStore: Send + Sync {
     /// opened over it.
     fn keeps_applied_watermarks(&self) -> bool {
         false
+    }
+
+    /// The unwrapped keyring a WAL opened over this store seals its frames
+    /// with and opens sealed frames under; `None` for a store that never had
+    /// encryption on (`TG-ENC-005`).
+    fn wal_keyring(&self) -> Option<Arc<Keyring>> {
+        None
     }
 
     /// The applied WAL watermarks this store holds, or `None` when it keeps
