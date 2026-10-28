@@ -96,6 +96,9 @@ use topgun_server::storage::map_data_store::MapDataStore;
 use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
 use topgun_server::storage::mutation_observer::MutationObserver;
 use topgun_server::storage::record::reconcile_tombstone_bytes;
+use topgun_server::storage::sealing::{
+    Encryption, EncryptionMode, FileKeyProvider, MasterKeyProvider,
+};
 use topgun_server::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
 
 // ---------------------------------------------------------------------------
@@ -141,6 +144,113 @@ fn choose_backend(
     }
 }
 
+const ENCRYPTION_ENV: &str = "TOPGUN_ENCRYPTION_AT_REST";
+const PROVIDER_ENV: &str = "TOPGUN_MASTER_KEY_PROVIDER";
+const KEY_FILE_ENV: &str = "TOPGUN_MASTER_KEY_FILE";
+const PREVIOUS_KEY_FILE_ENV: &str = "TOPGUN_MASTER_KEY_PREVIOUS_FILE";
+
+/// What the encryption variables ask for, read but not yet loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EncryptionConfig {
+    mode: EncryptionMode,
+    /// The `file` provider's key file; `None` when no provider is configured.
+    key_file: Option<std::path::PathBuf>,
+    /// The key a rotation re-wraps from.
+    previous_file: Option<std::path::PathBuf>,
+}
+
+impl EncryptionConfig {
+    /// The boot summary's `encryption_at_rest` field.
+    fn boot_field(&self) -> &'static str {
+        match self.mode {
+            EncryptionMode::Off => "off",
+            EncryptionMode::On => "on:file",
+        }
+    }
+}
+
+/// Pure reading of the encryption variables, kept free of the environment so
+/// it is unit-testable. A set-but-empty value, an unknown value, a key file
+/// without a provider, a provider without its key file, and `on` without a
+/// provider or over the null backend, which would seal nothing, are fatal.
+fn encryption_config(
+    var: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    backend: StorageBackend,
+) -> anyhow::Result<EncryptionConfig> {
+    let read = |name: &str| match var(name) {
+        Some(value) if value.is_empty() => anyhow::bail!("{name} is set but empty"),
+        other => Ok(other),
+    };
+    let mode = match read(ENCRYPTION_ENV)? {
+        None => EncryptionMode::Off,
+        Some(v) if v == "off" => EncryptionMode::Off,
+        Some(v) if v == "on" => EncryptionMode::On,
+        Some(v) => anyhow::bail!(
+            "{ENCRYPTION_ENV}={} is not `on` or `off`",
+            v.to_string_lossy()
+        ),
+    };
+    if mode == EncryptionMode::On && backend == StorageBackend::Null {
+        anyhow::bail!(
+            "{ENCRYPTION_ENV}=on with STORAGE_BACKEND=null: the null backend stores nothing to seal"
+        );
+    }
+    let key_file = read(KEY_FILE_ENV)?.map(std::path::PathBuf::from);
+    let previous_file = read(PREVIOUS_KEY_FILE_ENV)?.map(std::path::PathBuf::from);
+    match read(PROVIDER_ENV)? {
+        None if mode == EncryptionMode::On => {
+            anyhow::bail!("{ENCRYPTION_ENV}=on needs {PROVIDER_ENV}=file")
+        }
+        None => {
+            if let Some(name) = [
+                (KEY_FILE_ENV, &key_file),
+                (PREVIOUS_KEY_FILE_ENV, &previous_file),
+            ]
+            .iter()
+            .find_map(|(name, file)| file.as_ref().map(|_| name))
+            {
+                anyhow::bail!("{name} is set, but {PROVIDER_ENV} is not");
+            }
+        }
+        Some(v) if v == "file" => {
+            if key_file.is_none() {
+                anyhow::bail!("{PROVIDER_ENV}=file needs {KEY_FILE_ENV}");
+            }
+        }
+        Some(v) => anyhow::bail!(
+            "{PROVIDER_ENV}={} is not a provider (expected: file)",
+            v.to_string_lossy()
+        ),
+    }
+    Ok(EncryptionConfig {
+        mode,
+        key_file,
+        previous_file,
+    })
+}
+
+/// Loads the key files `config` names. A key file that cannot be used is a
+/// refusal to start, logged once (`TG-ENC-006`); the key is never logged.
+fn load_encryption(config: &EncryptionConfig) -> anyhow::Result<Encryption> {
+    let load =
+        |path: &Option<std::path::PathBuf>| -> anyhow::Result<Option<Arc<dyn MasterKeyProvider>>> {
+            let Some(path) = path else { return Ok(None) };
+            match FileKeyProvider::load(path) {
+                Ok(provider) => Ok(Some(Arc::new(provider))),
+                Err(e) => {
+                    let line = format!("encryption: refusing to start: provider file: {e}");
+                    tracing::error!("{line}");
+                    Err(anyhow::anyhow!(line))
+                }
+            }
+        };
+    Ok(Encryption {
+        mode: config.mode,
+        provider: load(&config.key_file)?,
+        previous: load(&config.previous_file)?,
+    })
+}
+
 /// Resolve the storage backend at startup.
 ///
 /// Reads `STORAGE_BACKEND` (default: `redb`) and constructs the matching
@@ -155,18 +265,23 @@ fn choose_backend(
 /// env vars gets durable embedded storage out of the box. Set
 /// `STORAGE_BACKEND=null` for ephemeral integration-test fixtures. A removed
 /// backend name or a set `DATABASE_URL` is refused before any file is opened.
-async fn select_datastore() -> anyhow::Result<(Arc<dyn MapDataStore>, StorageBackend)> {
+async fn select_datastore(
+) -> anyhow::Result<(Arc<dyn MapDataStore>, StorageBackend, EncryptionConfig)> {
     let storage_backend = std::env::var("STORAGE_BACKEND").ok();
     let database_url_set = std::env::var_os("DATABASE_URL").is_some();
     let backend = choose_backend(storage_backend.as_deref(), database_url_set)?;
+    let encryption = encryption_config(&|name| std::env::var_os(name), backend)?;
     match backend {
-        StorageBackend::Null => Ok((Arc::new(NullDataStore), StorageBackend::Null)),
+        StorageBackend::Null => Ok((Arc::new(NullDataStore), StorageBackend::Null, encryption)),
         #[cfg(feature = "redb")]
         StorageBackend::Redb => {
             let location = RedbDataStore::location_from_env()?;
-            let store = RedbDataStore::open_location(&location)?;
+            // Under `off` too, so a sealed store is refused with the
+            // fingerprint of the key it needs, and a disable unseals it.
+            let store =
+                RedbDataStore::open_location_sealed(&location, &load_encryption(&encryption)?)?;
             store.initialize().await?;
-            Ok((Arc::new(store), StorageBackend::Redb))
+            Ok((Arc::new(store), StorageBackend::Redb, encryption))
         }
         // choose_backend already bailed for Redb without the feature.
         #[cfg(not(feature = "redb"))]
@@ -282,6 +397,7 @@ fn log_boot_summary(
     eviction_config: &EvictionConfig,
     write_behind_config: &WriteBehindConfig,
     durable_backend: bool,
+    encryption_at_rest: &str,
     policies_loaded: usize,
     rbac_configured: bool,
 ) {
@@ -297,6 +413,7 @@ fn log_boot_summary(
         wal_fsync_policy = ?write_behind_config.wal_fsync_policy,
         wal_watermark_stall_bound_ms = write_behind_config.wal_watermark_stall_bound_ms,
         or_delta_wal = write_behind_config.or_delta_wal,
+        encryption_at_rest,
         allocator = %ALLOCATOR_NAME,
         policies_loaded,
         rbac_configured,
@@ -677,7 +794,7 @@ async fn main() -> anyhow::Result<()> {
     // Resolve the persistence backend once per process. The default branch
     // creates ./topgun.redb in the working directory; STORAGE_BACKEND=null
     // preserves the legacy ephemeral integration-test behavior.
-    let (inner_data_store, backend) = select_datastore().await?;
+    let (inner_data_store, backend, encryption_config) = select_datastore().await?;
 
     // Construct the policy store AFTER the backend resolves so durable backends
     // get a write-through DurablePolicyStore whose configured-marker survives
@@ -1130,6 +1247,7 @@ async fn main() -> anyhow::Result<()> {
         &eviction_config,
         &write_behind_config,
         !matches!(backend, StorageBackend::Null),
+        encryption_config.boot_field(),
         policies_loaded,
         rbac_configured,
     );
@@ -2602,6 +2720,54 @@ mod tests {
         );
     }
 
+    fn encryption_vars<'a>(
+        vars: &'a [(&'a str, &'a str)],
+    ) -> impl Fn(&str) -> Option<std::ffi::OsString> + 'a {
+        move |name| {
+            vars.iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| std::ffi::OsString::from(v))
+        }
+    }
+
+    #[test]
+    fn encryption_on_over_the_null_backend_is_a_startup_error() {
+        let vars = [
+            ("TOPGUN_ENCRYPTION_AT_REST", "on"),
+            ("TOPGUN_MASTER_KEY_PROVIDER", "file"),
+            ("TOPGUN_MASTER_KEY_FILE", "/k"),
+        ];
+        let error = super::encryption_config(&encryption_vars(&vars), super::StorageBackend::Null)
+            .expect_err("null + on");
+        assert!(
+            error.to_string().contains("STORAGE_BACKEND=null"),
+            "{error}"
+        );
+        let config = super::encryption_config(&encryption_vars(&vars), super::StorageBackend::Redb)
+            .expect("redb + on");
+        assert_eq!(config.boot_field(), "on:file");
+    }
+
+    #[test]
+    fn the_encryption_variables_refuse_every_value_they_do_not_name() {
+        let redb = super::StorageBackend::Redb;
+        let refused = |vars: &[(&str, &str)]| {
+            super::encryption_config(&encryption_vars(vars), redb)
+                .expect_err("refused")
+                .to_string()
+        };
+        assert!(refused(&[("TOPGUN_ENCRYPTION_AT_REST", "")]).contains("set but empty"));
+        assert!(refused(&[("TOPGUN_ENCRYPTION_AT_REST", "ON")]).contains("not `on` or `off`"));
+        assert!(refused(&[("TOPGUN_ENCRYPTION_AT_REST", "on")]).contains("needs"));
+        assert!(refused(&[("TOPGUN_MASTER_KEY_PROVIDER", "vault")]).contains("not a provider"));
+        assert!(refused(&[("TOPGUN_MASTER_KEY_PROVIDER", "file")]).contains("needs"));
+        assert!(refused(&[("TOPGUN_MASTER_KEY_FILE", "/k")]).contains("is not"));
+        assert!(refused(&[("TOPGUN_MASTER_KEY_PREVIOUS_FILE", "/k")]).contains("is not"));
+        let off = super::encryption_config(&encryption_vars(&[]), redb).expect("default");
+        assert_eq!(off.boot_field(), "off");
+        assert_eq!(off.key_file, None);
+    }
+
     #[test]
     fn t_choose_null() {
         assert_eq!(
@@ -2731,6 +2897,7 @@ mod tests {
                 &EvictionConfig::default(),
                 &write_behind_config,
                 true,
+                "on:file",
                 0,
                 false,
             );
@@ -2758,6 +2925,12 @@ mod tests {
         // documented mitigation for a delta-related incident. An operator who
         // cannot read its effective value off the boot line cannot tell which
         // framing the running node is using.
+        assert!(
+            rendered.contains("encryption_at_rest=\"on:file\"")
+                || rendered.contains("encryption_at_rest=on:file"),
+            "the operator-facing boot line must carry the EFFECTIVE encryption mode; \
+             captured: {rendered}"
+        );
         assert!(
             rendered.contains("or_delta_wal=false"),
             "the operator-facing boot line must carry the EFFECTIVE OR delta-framing switch; \
@@ -3473,7 +3646,7 @@ mod tests {
             return;
         }
 
-        let (inner, backend) = super::select_datastore().await.expect("select");
+        let (inner, backend, _) = super::select_datastore().await.expect("select");
         let declared = inner.scan_order().is_some();
         for key in ["k1", "k2"] {
             inner
