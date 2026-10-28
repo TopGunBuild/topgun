@@ -282,11 +282,13 @@ impl FileKeyProvider {
             path: path.to_path_buf(),
             source,
         };
-        let metadata = std::fs::metadata(path).map_err(unreadable)?;
+        // One open: the mode checked and the bytes read are those of the same
+        // file, even if the path is swapped in between.
+        let mut file = std::fs::File::open(path).map_err(unreadable)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = metadata.permissions().mode() & 0o7777;
+            let mode = file.metadata().map_err(unreadable)?.permissions().mode() & 0o7777;
             if mode & 0o077 != 0 {
                 return Err(KeyFileError::TooPermissive {
                     path: path.to_path_buf(),
@@ -294,9 +296,8 @@ impl FileKeyProvider {
                 });
             }
         }
-        #[cfg(not(unix))]
-        let _ = metadata;
-        let content = Zeroizing::new(std::fs::read(path).map_err(unreadable)?);
+        let mut content = Zeroizing::new(Vec::new());
+        std::io::Read::read_to_end(&mut file, &mut content).map_err(unreadable)?;
         let hex_part = content.strip_suffix(b"\n").unwrap_or(&content);
         let mut kek = Zeroizing::new([0u8; KEY_LEN]);
         // The decoder's own error names the offending character, which is
