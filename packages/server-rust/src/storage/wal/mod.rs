@@ -6872,6 +6872,29 @@ mod sealed_frame_tests {
         node.close().await;
     }
 
+    /// R6.6 (`TG-ENC-005`, `TG-WAL-007`): an entry whose sealed frame would
+    /// exceed the frame limit is refused before any index is taken, so the
+    /// next frame is sealed at the position it is written to and recovery
+    /// opens it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_oversized_sealed_entry_is_refused_before_its_index_is_taken() {
+        let root = Root::new();
+        let provider = provider();
+        let node = sealed_node(&root, &provider);
+        append(&node, P, 1).await;
+        let huge = "x".repeat(super::format::MAX_FRAME_PAYLOAD_LEN);
+        let error = node
+            .wal
+            .append(P, &store_frame("big", &lww(&huge, 2), 2))
+            .await
+            .expect_err("an entry over the frame limit is refused");
+        assert!(format!("{error:#}").contains("frame limit"), "{error:#}");
+        append(&node, P, 3).await;
+        assert_eq!(unapplied(&node, P).await.expect("recovery"), vec![1, 3]);
+        assert_no_pair_repeats(&node.wal);
+        node.close().await;
+    }
+
     /// Flips a byte of the payload of frame `frame` of the segment at `path`
     /// and writes the CRC of the changed payload, so only authentication can
     /// tell. Returns the frame's offset.
