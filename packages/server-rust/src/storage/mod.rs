@@ -38,6 +38,7 @@ pub mod merkle_sync;
 pub mod mutation_observer;
 pub mod record;
 pub mod record_store;
+pub mod sealing;
 pub mod tombstone_gauge;
 pub mod wal;
 

@@ -6,10 +6,10 @@
 //!
 //! | First byte | Keyspace | Key after the byte | Value |
 //! |---|---|---|---|
-//! | `0x00` | store metadata | `format`, `next_map_id`, `ack_mode`, `migration`, `wal_watermark`, `wal_import_pending` | u32 BE `1`; u32 BE; u8 `0` (local); opaque bytes; `[0x01]`; `[0x01]` |
+//! | `0x00` | store metadata | `format`, `next_map_id`, `ack_mode`, `migration`, `wal_watermark`, `wal_import_pending`, `keyring`, `seal_pass` | u32 BE `1`; u32 BE; u8 `0` (local); opaque bytes; `[0x01]`; `[0x01]`; [`KeyringRow`]; [`SealPass`] |
 //! | `0x01` | map by name | the map name, UTF-8 | map id u32 BE ‖ flags u8 |
 //! | `0x02` | map by id | map id u32 BE | the map name, UTF-8 |
-//! | `0x10` | primary records | partition u32 BE ‖ map id u32 BE ‖ user key | the record's msgpack |
+//! | `0x10` | primary records | partition u32 BE ‖ map id u32 BE ‖ user key | the record's msgpack, plain or sealed |
 //! | `0x11` | backup records | as `0x10` | as `0x10` |
 //! | `0x20` | applied WAL watermarks | WAL partition u32 BE ‖ `applied` | sequence u64 BE |
 //!
@@ -42,6 +42,16 @@
 //! deleted only in the import batch; the two are never present together.
 //! Both hold exactly `[0x01]`; a malformed `0x20` key or value is refused.
 //!
+//! # Sealed values (`TG-ENC-002`, `TG-ENC-004`)
+//!
+//! A store opened by [`EngineMapDataStore::open_sealed`] holds the unwrapped
+//! keyring of its `keyring` row. While a key is active, every record value
+//! is sealed where it enters a batch, in `write_records`; every read of a
+//! record value opens it, and a value that does not open is an error, never
+//! skipped. Turning encryption on or off writes a `seal_pass` row that
+//! [`EngineMapDataStore::run_seal_pass`] carries to its end before the store
+//! is served. [`EngineMapDataStore::open`] refuses a store holding either row.
+//!
 //! # Durability
 //!
 //! Every [`MapDataStore`] method writes with `sync = true`: the store is
@@ -66,6 +76,10 @@ use crate::storage::map_data_store::{
     StoreWrite,
 };
 use crate::storage::record::RecordValue;
+use crate::storage::sealing::{
+    self, fingerprint_hex, open_value, sealed_key_id, Encryption, EncryptionMode, Keyring,
+    KeyringRow, PassDirection, SealPass,
+};
 
 /// Store metadata.
 pub const KS_META: u8 = 0x00;
@@ -94,6 +108,10 @@ pub const META_WAL_WATERMARK: &[u8] = b"wal_watermark";
 /// Metadata name of the import-pending mark (`[0x01]`): the store was produced
 /// by a migration and its WAL sidecars have not been imported yet.
 pub const META_WAL_IMPORT_PENDING: &[u8] = b"wal_import_pending";
+/// Metadata name of the keyring ([`KeyringRow`]); never deleted once written.
+pub const META_KEYRING: &[u8] = b"keyring";
+/// Metadata name of an unfinished seal or unseal pass ([`SealPass`]).
+pub const META_SEAL_PASS: &[u8] = b"seal_pass";
 /// The one format this binary reads and writes.
 pub const FORMAT_VERSION: u32 = 1;
 
@@ -107,6 +125,16 @@ const ACK_MODE_LOCAL: u8 = 0;
 
 /// Prefix of every refusal of `open` / `open_for_migration`.
 const REFUSAL: &str = "store format: refusing to open:";
+
+/// Prefix of every refusal of `open_sealed` for want of a key.
+const KEY_REFUSAL: &str = "encryption: refusing to start:";
+
+/// Rows of one seal pass batch, as a migration batch.
+const SEAL_PASS_BATCH_ROWS: usize = 10_000;
+/// Value bytes of one seal pass batch, as a migration batch.
+const SEAL_PASS_BATCH_BYTES: usize = 8 * 1024 * 1024;
+/// How often a seal pass logs its progress.
+const SEAL_PASS_PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Number of leaves accumulated before invoking the sink once, as the redb store does.
 const LEAF_BATCH_SIZE: usize = 1024;
@@ -431,6 +459,8 @@ struct StoreMetadata {
     import_pending: bool,
     /// The applied watermark of every WAL partition; an absent row is 0.
     applied: [u64; WAL_PARTITIONS],
+    /// The keyring row, checked; a seal pass row is checked against it.
+    keyring: Option<KeyringRow>,
 }
 
 /// Refuses a one-byte mark whose value is not `[0x01]`.
@@ -440,6 +470,77 @@ fn check_flag_mark(name: &str, value: Option<&[u8]>) -> anyhow::Result<bool> {
         Some([1]) => Ok(true),
         Some(v) => bail!("{REFUSAL} the {name} mark holds {v:?}, not [1]"),
     }
+}
+
+/// The checked keyring row, after checking the seal pass row against it
+/// (`TG-ENC-004`).
+fn check_sealing_rows(
+    keyring: Option<&[u8]>,
+    seal_pass: Option<&[u8]>,
+) -> anyhow::Result<Option<KeyringRow>> {
+    let keyring = keyring
+        .map(KeyringRow::decode)
+        .transpose()
+        .map_err(|e| anyhow!("{REFUSAL} {e}"))?;
+    let seal_pass = seal_pass
+        .map(SealPass::decode)
+        .transpose()
+        .map_err(|e| anyhow!("{REFUSAL} {e}"))?;
+    if let Some(pass) = &seal_pass {
+        // Enable and disable write the key states and the pass in one batch,
+        // so none of these is a state this store produces.
+        let active = match &keyring {
+            None => bail!("{REFUSAL} a seal pass without a keyring"),
+            Some(row) => row.active_id().is_some(),
+        };
+        match pass.direction {
+            PassDirection::Seal if !active => bail!("{REFUSAL} a seal pass with no active key"),
+            PassDirection::Unseal if active => bail!("{REFUSAL} an unseal pass with an active key"),
+            _ => {}
+        }
+        if pass
+            .cursor
+            .first()
+            .is_some_and(|&b| b != KS_PRIMARY && b != KS_BACKUP)
+        {
+            bail!("{REFUSAL} a seal pass cursor outside the record keyspaces");
+        }
+    }
+    Ok(keyring)
+}
+
+/// The applied watermark rows, checked (`TG-ENG-006`); an absent row is 0.
+fn read_applied_rows(
+    snapshot: &dyn KvSnapshot,
+    imported: bool,
+) -> anyhow::Result<[u64; WAL_PARTITIONS]> {
+    let rows = KeyRange {
+        start: Some(vec![KS_PARTITION_META]),
+        end: Some(vec![KS_PARTITION_META + 1]),
+    };
+    let mut applied = [0u64; WAL_PARTITIONS];
+    let mut any_row = false;
+    for entry in snapshot.iter(rows)? {
+        let (key, value) = entry?;
+        let Some(partition) = decode_applied_row_key(&key) else {
+            bail!("{REFUSAL} a key in the reserved keyspace {KS_PARTITION_META:#04x}");
+        };
+        let Ok(word) = <[u8; 8]>::try_from(value.as_slice()) else {
+            bail!(
+                "{REFUSAL} the applied watermark row of WAL partition {partition} is {} bytes, \
+                 not 8",
+                value.len()
+            );
+        };
+        applied[partition as usize] = u64::from_be_bytes(word);
+        any_row = true;
+    }
+    // A row is only ever written with the marker, so a row without it is
+    // not a state this store produces.
+    if any_row && !imported {
+        bail!("{REFUSAL} applied watermark rows without the import marker");
+    }
+    Ok(applied)
 }
 
 /// `None` for an engine that holds no key; otherwise the checked metadata,
@@ -454,6 +555,8 @@ fn read_store_metadata(snapshot: &dyn KvSnapshot) -> anyhow::Result<Option<Store
     let mut migration = None;
     let mut marker = None;
     let mut pending = None;
+    let mut keyring = None;
+    let mut seal_pass = None;
     let meta = KeyRange {
         start: Some(vec![KS_META]),
         end: Some(vec![KS_MAP_BY_NAME]),
@@ -467,6 +570,8 @@ fn read_store_metadata(snapshot: &dyn KvSnapshot) -> anyhow::Result<Option<Store
             META_MIGRATION => migration = Some(value),
             META_WAL_WATERMARK => marker = Some(value),
             META_WAL_IMPORT_PENDING => pending = Some(value),
+            META_KEYRING => keyring = Some(value),
+            META_SEAL_PASS => seal_pass = Some(value),
             other => bail!(
                 "{REFUSAL} unknown metadata {:?}",
                 String::from_utf8_lossy(other)
@@ -494,6 +599,7 @@ fn read_store_metadata(snapshot: &dyn KvSnapshot) -> anyhow::Result<Option<Store
     if imported && import_pending {
         bail!("{REFUSAL} an import-pending mark beside the import marker");
     }
+    let keyring = check_sealing_rows(keyring.as_deref(), seal_pass.as_deref())?;
     let reserved = [
         KeyRange {
             start: Some(vec![KS_MAP_BY_ID + 1]),
@@ -513,37 +619,13 @@ fn read_store_metadata(snapshot: &dyn KvSnapshot) -> anyhow::Result<Option<Store
             bail!("{REFUSAL} a key in the reserved keyspace {:#04x}", key[0]);
         }
     }
-    let rows = KeyRange {
-        start: Some(vec![KS_PARTITION_META]),
-        end: Some(vec![KS_PARTITION_META + 1]),
-    };
-    let mut applied = [0u64; WAL_PARTITIONS];
-    let mut any_row = false;
-    for entry in snapshot.iter(rows)? {
-        let (key, value) = entry?;
-        let Some(partition) = decode_applied_row_key(&key) else {
-            bail!("{REFUSAL} a key in the reserved keyspace {KS_PARTITION_META:#04x}");
-        };
-        let Ok(word) = <[u8; 8]>::try_from(value.as_slice()) else {
-            bail!(
-                "{REFUSAL} the applied watermark row of WAL partition {partition} is {} bytes, \
-                 not 8",
-                value.len()
-            );
-        };
-        applied[partition as usize] = u64::from_be_bytes(word);
-        any_row = true;
-    }
-    // A row is only ever written with the marker, so a row without it is
-    // not a state this store produces.
-    if any_row && !imported {
-        bail!("{REFUSAL} applied watermark rows without the import marker");
-    }
+    let applied = read_applied_rows(snapshot, imported)?;
     Ok(Some(StoreMetadata {
         migration,
         imported,
         import_pending,
         applied,
+        keyring,
     }))
 }
 
@@ -631,6 +713,9 @@ pub struct EngineMapDataStore<E: KvEngine> {
     /// across a commit's check, write and update, so no row moves below the
     /// value it holds, whoever commits.
     applied: Mutex<[u64; WAL_PARTITIONS]>,
+    /// The effective unwrapped keyring: `None` for a store that never had
+    /// encryption on. Values are sealed while it has an active key.
+    keyring: Option<Arc<Keyring>>,
     #[cfg(test)]
     registry_park: Mutex<Option<RegistryPark>>,
 }
@@ -664,10 +749,16 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     ///
     /// A refusal starting `store format: refusing to open:` when the engine
     /// holds metadata this binary does not know, a key in a reserved
-    /// keyspace, or an unfinished migration (`TG-ENG-006`); an engine error.
+    /// keyspace, an unfinished migration (`TG-ENG-006`), or a keyring, which
+    /// only [`Self::open_sealed`] opens (`TG-ENC-006`); an engine error.
     pub fn open(engine: Arc<E>) -> anyhow::Result<Self> {
         let metadata = read_store_metadata(&*engine.snapshot()?)?;
         let applied = match metadata {
+            Some(StoreMetadata {
+                keyring: Some(_), ..
+            }) => {
+                bail!("{REFUSAL} the store is sealed; it opens only with its master key");
+            }
             None => {
                 let mut batch = WriteBatch::new();
                 for (key, value) in format_rows() {
@@ -683,15 +774,236 @@ impl<E: KvEngine> EngineMapDataStore<E> {
             }
             Some(StoreMetadata { applied, .. }) => applied,
         };
-        Ok(Self::over(engine, &applied))
+        Ok(Self::over(engine, &applied, None))
     }
 
-    fn over(engine: Arc<E>, applied: &[u64; WAL_PARTITIONS]) -> Self {
+    /// Opens the store over `engine` with the keys of `encryption`,
+    /// formatting an empty engine (`TG-ENC-004`, `TG-ENC-006`,
+    /// `TG-ENC-007`): the metadata checks of [`Self::open`]; every key of the
+    /// keyring unwrapped, re-wrapped first when the keyring is under
+    /// `encryption.previous` (a master-key rotation); then `On` with no active
+    /// key adds one and starts a seal pass, `Off` with an active key makes
+    /// every key decrypt-only and starts an unseal pass. Whatever changes is
+    /// one durable batch. No pass runs here: [`Self::run_seal_pass`] runs it.
+    ///
+    /// # Errors
+    ///
+    /// The refusals of [`Self::open`] except the keyring's; a refusal
+    /// starting `encryption: refusing to start:` when a key cannot be
+    /// unwrapped, with nothing written; an engine error.
+    pub fn open_sealed(engine: Arc<E>, encryption: &Encryption) -> anyhow::Result<Self> {
+        let metadata = read_store_metadata(&*engine.snapshot()?)?;
+        let mut batch = WriteBatch::new();
+        let (applied, row) = match metadata {
+            None => {
+                for (key, value) in format_rows() {
+                    batch.put(key, value);
+                }
+                ([0; WAL_PARTITIONS], None)
+            }
+            Some(StoreMetadata {
+                migration: Some(_), ..
+            }) => {
+                bail!("{REFUSAL} a migration into this store is unfinished");
+            }
+            Some(StoreMetadata {
+                applied, keyring, ..
+            }) => (applied, keyring),
+        };
+        let (mut keyring, mut row_changed) = match row {
+            Some(row) => {
+                let (keyring, rotated) = unwrap_keyring(row, encryption)?;
+                (Some(keyring), rotated)
+            }
+            None => (None, false),
+        };
+        let active = keyring.as_ref().and_then(Keyring::active_id);
+        let pass = match (encryption.mode, active) {
+            (EncryptionMode::On, None) => {
+                let Some(provider) = encryption.provider.as_deref() else {
+                    return Err(key_refusal(
+                        "encryption is on, but no master-key provider is configured",
+                    ));
+                };
+                let base = match keyring.take() {
+                    Some(keyring) => keyring,
+                    None => Keyring::empty(provider),
+                };
+                let enabled = base.with_new_active(provider)?;
+                tracing::info!(
+                    key_id = enabled.active_id(),
+                    provider = provider.name(),
+                    "encryption: enabled; new values are sealed and a seal pass seals the stored ones"
+                );
+                keyring = Some(enabled);
+                Some(PassDirection::Seal)
+            }
+            (EncryptionMode::Off, Some(_)) => {
+                keyring = keyring.map(Keyring::disabled);
+                tracing::info!(
+                    "encryption: disabled; new values are stored plain and an unseal pass unseals the stored ones"
+                );
+                Some(PassDirection::Unseal)
+            }
+            _ => None,
+        };
+        if let Some(direction) = pass {
+            row_changed = true;
+            batch.put(
+                meta_key(META_SEAL_PASS),
+                SealPass {
+                    direction,
+                    cursor: Vec::new(),
+                }
+                .encode(),
+            );
+        }
+        if row_changed {
+            if let Some(keyring) = &keyring {
+                batch.put(meta_key(META_KEYRING), keyring.row().encode()?);
+            }
+        }
+        if !batch.is_empty() {
+            engine.write(batch, WriteOptions { sync: true })?;
+        }
+        Ok(Self::over(engine, &applied, keyring.map(Arc::new)))
+    }
+
+    /// Runs a present `seal_pass` to its end (`TG-ENC-004`): walks `0x10` then
+    /// `0x11` from the cursor and rewrites every value not in the pass's
+    /// target form, in batches that each carry the new cursor, then deletes
+    /// the row. A store with no pass returns at once.
+    ///
+    /// # Errors
+    ///
+    /// An engine error, or a value that does not open; the durable cursor
+    /// is where the next run resumes.
+    pub fn run_seal_pass(&self) -> anyhow::Result<()> {
+        self.seal_pass_with(SEAL_PASS_BATCH_ROWS, SEAL_PASS_BATCH_BYTES, &mut || {})
+    }
+
+    /// [`Self::run_seal_pass`] with its batch limits, calling `after_write`
+    /// after every engine write of the pass.
+    fn seal_pass_with(
+        &self,
+        max_rows: usize,
+        max_bytes: usize,
+        after_write: &mut dyn FnMut(),
+    ) -> anyhow::Result<()> {
+        let Some(pass) = self
+            .engine
+            .get(&meta_key(META_SEAL_PASS))?
+            .map(|v| SealPass::decode(&v).map_err(|e| anyhow!("{REFUSAL} {e}")))
+            .transpose()?
+        else {
+            return Ok(());
+        };
+        let word = pass.direction.word();
+        let keyring = self.keyring.as_deref();
+        let target = match pass.direction {
+            PassDirection::Seal => Some(
+                keyring
+                    .and_then(Keyring::active_id)
+                    .ok_or_else(|| anyhow!("a seal pass with no active key"))?,
+            ),
+            PassDirection::Unseal => None,
+        };
+        tracing::info!("encryption: {word} pass started");
+        let started = std::time::Instant::now();
+        let mut logged = started;
+        let mut rows: u64 = 0;
+        let mut cursor = pass.cursor;
+        loop {
+            let snapshot = self.engine.snapshot()?;
+            let start = if cursor.is_empty() {
+                vec![KS_PRIMARY]
+            } else {
+                let mut start = cursor.clone();
+                start.push(0x00);
+                start
+            };
+            let range = KeyRange {
+                start: Some(start),
+                end: Some(vec![KS_BACKUP + 1]),
+            };
+            let mut batch = WriteBatch::new();
+            let (mut walked, mut bytes, mut last) = (0usize, 0usize, None);
+            let mut more = false;
+            for entry in snapshot.iter(range)? {
+                let (key, value) = entry?;
+                if walked >= max_rows || (walked > 0 && bytes + value.len() > max_bytes) {
+                    more = true;
+                    break;
+                }
+                walked += 1;
+                bytes += value.len();
+                let rewrite = match target {
+                    Some(active) => sealed_key_id(&value) != Some(active),
+                    None => value.first() == Some(&sealing::SEALED_MARK),
+                };
+                if rewrite {
+                    let plain = open_value(keyring, &key, &value)?;
+                    let stored = match keyring.filter(|_| target.is_some()) {
+                        Some(keyring) => keyring.seal_value(&key, &plain)?,
+                        None => plain.into_owned(),
+                    };
+                    batch.put(key.clone(), stored);
+                    rows += 1;
+                }
+                last = Some(key);
+            }
+            drop(snapshot);
+            if let Some(last) = last {
+                // The cursor rides in the batch of the rows it covers, so
+                // no crash leaves it ahead of them (TG-ENC-004).
+                batch.put(
+                    meta_key(META_SEAL_PASS),
+                    SealPass {
+                        direction: pass.direction,
+                        cursor: last.clone(),
+                    }
+                    .encode(),
+                );
+                self.engine.write(batch, WriteOptions { sync: true })?;
+                after_write();
+                cursor = last;
+            }
+            if !more {
+                break;
+            }
+            if logged.elapsed() >= SEAL_PASS_PROGRESS_EVERY {
+                logged = std::time::Instant::now();
+                tracing::info!(rows, "encryption: {word} pass progress");
+            }
+        }
+        let mut done = WriteBatch::new();
+        done.delete(meta_key(META_SEAL_PASS));
+        self.engine.write(done, WriteOptions { sync: true })?;
+        after_write();
+        tracing::info!(
+            rows,
+            elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "encryption: {word} pass complete"
+        );
+        Ok(())
+    }
+
+    /// The plaintext of the record value `value` stored at `engine_key`.
+    fn open_record<'v>(&self, engine_key: &[u8], value: &'v [u8]) -> anyhow::Result<Cow<'v, [u8]>> {
+        Ok(open_value(self.keyring.as_deref(), engine_key, value)?)
+    }
+
+    fn over(
+        engine: Arc<E>,
+        applied: &[u64; WAL_PARTITIONS],
+        keyring: Option<Arc<Keyring>>,
+    ) -> Self {
         Self {
             engine,
             registry_lock: Mutex::new(()),
             cache: RwLock::new(HashMap::new()),
             applied: Mutex::new(*applied),
+            keyring,
             #[cfg(test)]
             registry_park: Mutex::new(None),
         }
@@ -732,7 +1044,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                 "store format: refusing to resume a migration: the store has no migration mark"
             ),
         };
-        Ok((Self::over(engine, &applied), mark))
+        Ok((Self::over(engine, &applied, None), mark))
     }
 
     /// The migration mark of `engine`, read from one snapshot; writes nothing.
@@ -897,10 +1209,16 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                         plan.rows.get(map).copied().flatten().ok_or_else(|| {
                             anyhow!("map {map:?} has no registry row after its plan")
                         })?;
-                    batch.put(
-                        RecordKey::encode(RecordSpace::of(backup), map_id, key),
-                        bytes.to_vec(),
-                    );
+                    let engine_key = RecordKey::encode(RecordSpace::of(backup), map_id, key);
+                    // The one place a record value enters a batch, so the
+                    // one place it is sealed (TG-ENC-002).
+                    let value = match self.keyring.as_deref() {
+                        Some(keyring) if keyring.active_id().is_some() => {
+                            keyring.seal_value(&engine_key, bytes)?
+                        }
+                        _ => bytes.to_vec(),
+                    };
+                    batch.put(engine_key, value);
                 }
                 RecordOp::Delete { map, backup, key } => {
                     // A map without a registry row holds no record to delete.
@@ -967,6 +1285,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         for partition in 0..PARTITION_COUNT {
             for entry in snapshot.iter(partition_range(space, partition, map_id, None))? {
                 let (key, value) = entry?;
+                let value = self.open_record(&key, &value)?;
                 visit(&RecordKey::decode(&key)?.key, &value)?;
             }
         }
@@ -1028,7 +1347,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                     break 'walk;
                 }
                 accumulated += row_cost;
-                let value: RecordValue = rmp_serde::from_slice(&bytes)?;
+                let value: RecordValue = rmp_serde::from_slice(&self.open_record(&key, &bytes)?)?;
                 records.push((RecordKey::decode(&key)?.key, value));
                 last_engine_key = Some(key);
             }
@@ -1123,6 +1442,54 @@ fn resume_partition(cursor: &ScanCursor, space: RecordSpace, map_id: u32) -> any
         bail!("scan cursor is not a record key of this map");
     }
     Ok(partition)
+}
+
+/// Logs and returns a refusal of `open_sealed` for want of a key
+/// (`TG-ENC-006`).
+fn key_refusal(reason: &str) -> anyhow::Error {
+    let line = format!("{KEY_REFUSAL} {reason}");
+    tracing::error!("{line}");
+    anyhow!(line)
+}
+
+/// Every key of `row` unwrapped under `encryption.provider`, or under
+/// `encryption.previous` and then re-wrapped under the provider (a master-key
+/// rotation, `TG-ENC-007`); `true` when it was re-wrapped. Writes nothing.
+fn unwrap_keyring(row: KeyringRow, encryption: &Encryption) -> anyhow::Result<(Keyring, bool)> {
+    let expected = fingerprint_hex(&row.kek_fingerprint);
+    let first_id = row.keys.first().map_or(0, |k| k.id);
+    let Some(provider) = encryption.provider.as_deref() else {
+        return Err(key_refusal(&format!(
+            "the store is sealed; set TOPGUN_MASTER_KEY_PROVIDER to the key that sealed it (fingerprint {expected})"
+        )));
+    };
+    let name = provider.name();
+    let unwrap_with = |row: KeyringRow, kek: &dyn sealing::MasterKeyProvider, which: &str| {
+        Keyring::unwrap(row, kek).map_err(|e| {
+            key_refusal(&format!(
+                "provider {name}: key {}: the wrap does not authenticate under the {which} master key (fingerprint {expected})",
+                e.key_id
+            ))
+        })
+    };
+    if row.kek_fingerprint == provider.fingerprint() {
+        return Ok((unwrap_with(row, provider, "configured")?, false));
+    }
+    match encryption.previous.as_deref() {
+        Some(previous) if row.kek_fingerprint == previous.fingerprint() => {
+            let keyring = unwrap_with(row, previous, "previous")?.rewrapped(provider)?;
+            tracing::info!(
+                from = %expected,
+                to = %fingerprint_hex(&provider.fingerprint()),
+                "encryption: master key rotated; the keyring is re-wrapped under the new key"
+            );
+            Ok((keyring, true))
+        }
+        _ => Err(key_refusal(&format!(
+            "provider {name}: key {first_id}: the keyring is wrapped by the master key with fingerprint {expected}, but the configured key has fingerprint {}; set TOPGUN_MASTER_KEY_FILE to that key, or set TOPGUN_MASTER_KEY_PREVIOUS_FILE to it to rotate to the configured key",
+            fingerprint_hex(&provider.fingerprint())
+        ))),
+    }
 }
 
 #[async_trait]
@@ -1222,8 +1589,11 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         let Some(map_id) = self.read_map_id(&*snapshot, map)? else {
             return Ok(None);
         };
-        match snapshot.get(&RecordKey::encode(RecordSpace::Primary, map_id, key))? {
-            Some(bytes) => Ok(Some(rmp_serde::from_slice(&bytes)?)),
+        let engine_key = RecordKey::encode(RecordSpace::Primary, map_id, key);
+        match snapshot.get(&engine_key)? {
+            Some(bytes) => Ok(Some(rmp_serde::from_slice(
+                &self.open_record(&engine_key, &bytes)?,
+            )?)),
             None => Ok(None),
         }
     }
@@ -1240,10 +1610,12 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         };
         let mut found = Vec::with_capacity(keys.len());
         for key in keys {
-            if let Some(bytes) =
-                snapshot.get(&RecordKey::encode(RecordSpace::Primary, map_id, key))?
-            {
-                found.push((key.clone(), rmp_serde::from_slice(&bytes)?));
+            let engine_key = RecordKey::encode(RecordSpace::Primary, map_id, key);
+            if let Some(bytes) = snapshot.get(&engine_key)? {
+                found.push((
+                    key.clone(),
+                    rmp_serde::from_slice(&self.open_record(&engine_key, &bytes)?)?,
+                ));
             }
         }
         Ok(found)
@@ -1266,7 +1638,8 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         for partition in 0..PARTITION_COUNT {
             for entry in snapshot.iter(partition_range(space, partition, map_id, None))? {
                 let (engine_key, bytes) = entry?;
-                let value: RecordValue = rmp_serde::from_slice(&bytes)?;
+                let value: RecordValue =
+                    rmp_serde::from_slice(&self.open_record(&engine_key, &bytes)?)?;
                 let key = RecordKey::decode(&engine_key)?.key;
                 if let Some((kind, leaf_hash)) = merkle_leaf_hash(&key, &value) {
                     batch.push(MerkleLeaf {
@@ -1524,5 +1897,589 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
 fn write_map<'a>(write: &StoreWrite<'a>) -> &'a str {
     match write {
         StoreWrite::Put { map, .. } | StoreWrite::Remove { map, .. } => map,
+    }
+}
+
+#[cfg(all(test, feature = "redb"))]
+mod sealing_tests {
+    //! Sealed values in the engine store: a stolen file, a transplanted
+    //! value, a pass killed and resumed, an open without keys, and a
+    //! master-key rotation that rewrites only the keyring.
+
+    use std::collections::BTreeMap;
+
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    use super::super::kv_crash::{read_all, CrashMode, CrashTarget, MemTarget, RedbTarget};
+    use super::super::kv_engine::MemKvEngine;
+    use super::super::redb_engine::RedbKvEngine;
+    use super::*;
+    use crate::storage::sealing::{
+        generate_key, FileKeyProvider, MasterKeyProvider, ValueOpenError, SEALED_MARK,
+    };
+
+    type Rows = BTreeMap<Vec<u8>, Vec<u8>>;
+
+    fn kek() -> Arc<dyn MasterKeyProvider> {
+        Arc::new(FileKeyProvider::from_kek(generate_key().expect("random")))
+    }
+
+    fn with(mode: EncryptionMode, provider: &Arc<dyn MasterKeyProvider>) -> Encryption {
+        Encryption {
+            mode,
+            provider: Some(Arc::clone(provider)),
+            previous: None,
+        }
+    }
+
+    fn on(provider: &Arc<dyn MasterKeyProvider>) -> Encryption {
+        with(EncryptionMode::On, provider)
+    }
+
+    fn off(provider: &Arc<dyn MasterKeyProvider>) -> Encryption {
+        with(EncryptionMode::Off, provider)
+    }
+
+    fn lww(value: &str) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String(value.to_string()),
+            timestamp: Timestamp {
+                millis: 1,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
+        }
+    }
+
+    fn put(
+        store: &EngineMapDataStore<impl KvEngine>,
+        map: &str,
+        backup: bool,
+        key: &str,
+        value: &str,
+    ) {
+        let bytes = rmp_serde::to_vec_named(&lww(value)).expect("encode");
+        store
+            .write_records(
+                &[RecordOp::Put {
+                    map,
+                    backup,
+                    key,
+                    bytes: &bytes,
+                }],
+                WriteOptions { sync: true },
+            )
+            .expect("put");
+    }
+
+    fn rows(engine: &impl KvEngine) -> Rows {
+        read_all(engine).expect("read all")
+    }
+
+    fn record_rows(engine: &impl KvEngine) -> Rows {
+        rows(engine)
+            .into_iter()
+            .filter(|(k, _)| k[0] == KS_PRIMARY || k[0] == KS_BACKUP)
+            .collect()
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(future)
+    }
+
+    fn is_auth_failure(error: &anyhow::Error) -> bool {
+        matches!(
+            error.downcast_ref::<ValueOpenError>(),
+            Some(ValueOpenError::AuthenticationFailed { .. })
+        )
+    }
+
+    /// TG-ENC-002, TG-ENC-006: values written under `on` are not in the
+    /// file; a wrong master key is refused with nothing changed; the right
+    /// one reads every value back.
+    #[test]
+    fn a_stolen_engine_file_holds_no_marker_and_opens_only_with_its_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("engine.redb");
+        let right = kek();
+        let markers: Vec<String> = (0..200)
+            .map(|i| format!("MARKER-PLAINTEXT-{i:04}"))
+            .collect();
+        {
+            let engine = Arc::new(RedbKvEngine::open(&path).expect("open"));
+            let store = EngineMapDataStore::open_sealed(engine, &on(&right)).expect("enable");
+            store.run_seal_pass().expect("pass");
+            for (i, marker) in markers.iter().enumerate() {
+                put(&store, "m", i % 2 == 1, &format!("k{i}"), marker);
+            }
+        }
+        let file = std::fs::read(&path).expect("read file");
+        assert!(
+            !file
+                .windows(b"MARKER-PLAINTEXT".len())
+                .any(|w| w == b"MARKER-PLAINTEXT"),
+            "a marker is in the engine file"
+        );
+        let engine = Arc::new(RedbKvEngine::open(&path).expect("reopen"));
+        check_wrong_key_then_right_key(&engine, &right, &markers);
+    }
+
+    /// The same over the reference engine: the refusal and the read-back.
+    #[test]
+    fn a_wrong_master_key_is_refused_over_the_reference_engine_too() {
+        let engine = Arc::new(MemKvEngine::new());
+        let right = kek();
+        let markers: Vec<String> = (0..20).map(|i| format!("marker-{i}")).collect();
+        {
+            let store =
+                EngineMapDataStore::open_sealed(Arc::clone(&engine), &on(&right)).expect("enable");
+            for (i, marker) in markers.iter().enumerate() {
+                put(&store, "m", i % 2 == 1, &format!("k{i}"), marker);
+            }
+        }
+        check_wrong_key_then_right_key(&engine, &right, &markers);
+    }
+
+    fn check_wrong_key_then_right_key<E: KvEngine>(
+        engine: &Arc<E>,
+        right: &Arc<dyn MasterKeyProvider>,
+        markers: &[String],
+    ) {
+        let before = rows(&**engine);
+        let wrong = kek();
+        for encryption in [on(&wrong), off(&wrong), Encryption::off()] {
+            let error = EngineMapDataStore::open_sealed(Arc::clone(engine), &encryption)
+                .err()
+                .expect("a wrong key is refused");
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("encryption: refusing to start:"),
+                "{error}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains(&fingerprint_hex(&right.fingerprint())),
+                "the refusal names the fingerprint the keyring expects: {error}"
+            );
+            assert_eq!(rows(&**engine), before, "a refusal wrote something");
+        }
+        let store = EngineMapDataStore::open_sealed(Arc::clone(engine), &on(right)).expect("right");
+        for (i, marker) in markers.iter().enumerate() {
+            let backup = i % 2 == 1;
+            let mut found = Vec::new();
+            store
+                .visit_records("m", backup, &mut |key, bytes| {
+                    if key == format!("k{i}") {
+                        found.push(rmp_serde::from_slice::<RecordValue>(bytes)?);
+                    }
+                    Ok(())
+                })
+                .expect("visit");
+            assert_eq!(found, vec![lww(marker)]);
+        }
+        assert_eq!(
+            rows(&**engine),
+            before,
+            "an open with the right key changed a row"
+        );
+    }
+
+    struct Sink;
+
+    #[async_trait]
+    impl LeafSink for Sink {
+        async fn consume(&mut self, _batch: Vec<MerkleLeaf>) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// TG-ENC-002: a sealed value copied to another key, the same key
+    /// of another map, or the backup space fails authentication; scans fail
+    /// rather than skip.
+    fn transplant<E: KvEngine>(engine: &Arc<E>) {
+        let provider = kek();
+        let store =
+            EngineMapDataStore::open_sealed(Arc::clone(engine), &on(&provider)).expect("on");
+        put(&store, "a", false, "k1", "secret");
+        put(&store, "b", false, "other", "x");
+        let id = |map: &str| store.cached_row(map).expect("row").expect("registered").0;
+        let source = RecordKey::encode(RecordSpace::Primary, id("a"), "k1");
+        let sealed = engine.get(&source).expect("get").expect("row");
+        assert_eq!(sealed[0], SEALED_MARK);
+        let targets = [
+            RecordKey::encode(RecordSpace::Primary, id("a"), "k2"),
+            RecordKey::encode(RecordSpace::Primary, id("b"), "k1"),
+            RecordKey::encode(RecordSpace::Backup, id("a"), "k1"),
+        ];
+        let mut batch = WriteBatch::new();
+        for target in &targets {
+            batch.put(target.clone(), sealed.clone());
+        }
+        engine
+            .write(batch, WriteOptions { sync: true })
+            .expect("plant");
+
+        block_on(async {
+            assert!(is_auth_failure(
+                &store.load("a", "k2").await.expect_err("same map")
+            ));
+            assert!(is_auth_failure(
+                &store.load("b", "k1").await.expect_err("other map")
+            ));
+            assert!(is_auth_failure(
+                &store
+                    .scan_values("a", true, 0)
+                    .await
+                    .expect_err("backup scan")
+            ));
+            assert!(is_auth_failure(
+                &store
+                    .load_all("b", &["k1".to_string()])
+                    .await
+                    .expect_err("load all")
+            ));
+            assert!(is_auth_failure(
+                &store
+                    .enumerate_leaves("a", false, &mut Sink)
+                    .await
+                    .expect_err("leaves")
+            ));
+            assert!(is_auth_failure(
+                &store.scan_values("a", false, 0).await.expect_err("scan")
+            ));
+            // The source still opens.
+            assert_eq!(
+                store.load("a", "k1").await.expect("source"),
+                Some(lww("secret"))
+            );
+        });
+        for backup in [false, true] {
+            let error = store
+                .visit_records("a", backup, &mut |_, _| Ok(()))
+                .expect_err("visit");
+            assert!(is_auth_failure(&error), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_transplanted_sealed_value_fails_authentication_over_the_reference_engine() {
+        transplant(&Arc::new(MemKvEngine::new()));
+    }
+
+    #[test]
+    fn a_transplanted_sealed_value_fails_authentication_over_redb() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        transplant(&Arc::new(
+            RedbKvEngine::open(&dir.path().join("engine.redb")).expect("open"),
+        ));
+    }
+
+    /// TG-ENC-006: the plain open refuses a store with a keyring and
+    /// writes nothing.
+    #[test]
+    fn the_plain_open_refuses_a_sealed_store_and_writes_nothing() {
+        let engine = Arc::new(MemKvEngine::new());
+        let provider = kek();
+        let store =
+            EngineMapDataStore::open_sealed(Arc::clone(&engine), &on(&provider)).expect("on");
+        put(&store, "m", false, "k", "v");
+        drop(store);
+        let before = rows(&*engine);
+        let error = EngineMapDataStore::open(Arc::clone(&engine))
+            .err()
+            .expect("refused");
+        assert!(error.to_string().contains("sealed"), "{error}");
+        assert_eq!(rows(&*engine), before);
+    }
+
+    /// TG-ENC-004: a keyring or seal pass row this store does not produce is
+    /// refused at open with nothing written.
+    #[test]
+    fn a_planted_keyring_or_seal_pass_row_is_refused_at_open() {
+        let provider = kek();
+        let keyring = Keyring::empty(&*provider)
+            .with_new_active(&*provider)
+            .expect("key");
+        let active_row = keyring.row().encode().expect("encode");
+        let disabled_row = keyring.disabled().row().encode().expect("encode");
+        let pass = |direction, cursor: &[u8]| {
+            SealPass {
+                direction,
+                cursor: cursor.to_vec(),
+            }
+            .encode()
+        };
+        let cases: Vec<Vec<(&[u8], Vec<u8>)>> = vec![
+            vec![(META_SEAL_PASS, pass(PassDirection::Seal, &[]))],
+            vec![
+                (META_KEYRING, active_row.clone()),
+                (META_SEAL_PASS, vec![0x03]),
+            ],
+            vec![
+                (META_KEYRING, disabled_row.clone()),
+                (META_SEAL_PASS, pass(PassDirection::Seal, &[])),
+            ],
+            vec![
+                (META_KEYRING, active_row.clone()),
+                (META_SEAL_PASS, pass(PassDirection::Unseal, &[])),
+            ],
+            vec![
+                (META_KEYRING, active_row.clone()),
+                (META_SEAL_PASS, pass(PassDirection::Seal, &[0x20])),
+            ],
+            vec![(META_KEYRING, b"\x01".to_vec())],
+        ];
+        for planted in cases {
+            let engine = Arc::new(MemKvEngine::new());
+            drop(EngineMapDataStore::open(Arc::clone(&engine)).expect("format"));
+            let mut batch = WriteBatch::new();
+            for (name, value) in &planted {
+                batch.put(meta_key(name), value.clone());
+            }
+            engine
+                .write(batch, WriteOptions { sync: true })
+                .expect("plant");
+            let before = rows(&*engine);
+            let error = EngineMapDataStore::open_sealed(Arc::clone(&engine), &on(&provider))
+                .err()
+                .expect("refused");
+            assert!(error.to_string().starts_with(REFUSAL), "{error}");
+            assert_eq!(rows(&*engine), before);
+        }
+    }
+
+    /// TG-ENC-007: a rotation rewrites the keyring row and no other.
+    #[test]
+    fn a_master_key_rotation_rewrites_only_the_keyring_row() {
+        rotate(&Arc::new(MemKvEngine::new()));
+        let dir = tempfile::tempdir().expect("tempdir");
+        rotate(&Arc::new(
+            RedbKvEngine::open(&dir.path().join("engine.redb")).expect("open"),
+        ));
+    }
+
+    fn rotate<E: KvEngine>(engine: &Arc<E>) {
+        let old = kek();
+        let new = kek();
+        {
+            let store = EngineMapDataStore::open_sealed(Arc::clone(engine), &on(&old)).expect("on");
+            store.run_seal_pass().expect("pass");
+            for i in 0..50 {
+                put(&store, "m", i % 3 == 0, &format!("k{i}"), &format!("v{i}"));
+            }
+        }
+        let before = rows(&**engine);
+        let rotation = Encryption {
+            mode: EncryptionMode::On,
+            provider: Some(Arc::clone(&new)),
+            previous: Some(Arc::clone(&old)),
+        };
+        let store = EngineMapDataStore::open_sealed(Arc::clone(engine), &rotation).expect("rotate");
+        store.run_seal_pass().expect("no pass");
+        drop(store);
+        let after = rows(&**engine);
+        let keyring_key = meta_key(META_KEYRING);
+        assert_eq!(before.len(), after.len());
+        for (key, value) in &before {
+            if *key == keyring_key {
+                assert_ne!(after.get(key), Some(value), "the keyring was not rewritten");
+            } else {
+                assert_eq!(
+                    after.get(key),
+                    Some(value),
+                    "a row other than the keyring changed"
+                );
+            }
+        }
+        let row = KeyringRow::decode(&after[&keyring_key]).expect("keyring");
+        assert_eq!(row.kek_fingerprint, new.fingerprint());
+        // The old key alone is refused now; the new one opens every value.
+        assert!(EngineMapDataStore::open_sealed(Arc::clone(engine), &on(&old)).is_err());
+        let store = EngineMapDataStore::open_sealed(Arc::clone(engine), &on(&new)).expect("new");
+        block_on(async {
+            assert_eq!(store.load("m", "k1").await.expect("load"), Some(lww("v1")));
+        });
+        // With the new key in place the previous one is ignored.
+        drop(store);
+        let again = rows(&**engine);
+        drop(EngineMapDataStore::open_sealed(Arc::clone(engine), &rotation).expect("ignored"));
+        assert_eq!(rows(&**engine), again);
+    }
+
+    /// 30 001 records over two maps and both spaces: four batches of the pass.
+    fn populate(store: &EngineMapDataStore<impl KvEngine>) {
+        let values: Vec<(String, Vec<u8>)> = (0..30_001)
+            .map(|i| {
+                (
+                    format!("key-{i}"),
+                    rmp_serde::to_vec_named(&lww(&format!("value-{i}"))).expect("encode"),
+                )
+            })
+            .collect();
+        let ops: Vec<RecordOp<'_>> = values
+            .iter()
+            .enumerate()
+            .map(|(i, (key, bytes))| RecordOp::Put {
+                map: if i % 5 == 0 { "b" } else { "a" },
+                backup: i % 7 == 0,
+                key,
+                bytes,
+            })
+            .collect();
+        store
+            .write_records(&ops, WriteOptions { sync: true })
+            .expect("populate");
+    }
+
+    /// The pass's engine writes, as op counts relative to its start, from an
+    /// uninterrupted run.
+    fn pass_boundaries<T: CrashTarget>(
+        provider: &Arc<dyn MasterKeyProvider>,
+        direction: PassDirection,
+    ) -> Vec<u64> {
+        let target = start_pass::<T>(provider, direction);
+        let store = open_for(&target, provider, direction);
+        let base = target.ops_so_far();
+        let mut boundaries = Vec::new();
+        store
+            .seal_pass_with(SEAL_PASS_BATCH_ROWS, SEAL_PASS_BATCH_BYTES, &mut || {
+                boundaries.push(target.ops_so_far() - base);
+            })
+            .expect("pass");
+        boundaries
+    }
+
+    fn open_for<T: CrashTarget>(
+        target: &T,
+        provider: &Arc<dyn MasterKeyProvider>,
+        direction: PassDirection,
+    ) -> EngineMapDataStore<T::Engine> {
+        let encryption = match direction {
+            PassDirection::Seal => on(provider),
+            PassDirection::Unseal => off(provider),
+        };
+        EngineMapDataStore::open_sealed(target.engine(), &encryption).expect("open")
+    }
+
+    /// A store of plain values, or of values sealed by a finished pass,
+    /// whose next open starts a pass in `direction`.
+    fn start_pass<T: CrashTarget>(
+        provider: &Arc<dyn MasterKeyProvider>,
+        direction: PassDirection,
+    ) -> T {
+        let target = T::fresh();
+        let store = EngineMapDataStore::open(target.engine()).expect("plain");
+        populate(&store);
+        drop(store);
+        if direction == PassDirection::Unseal {
+            let store =
+                EngineMapDataStore::open_sealed(target.engine(), &on(provider)).expect("on");
+            store.run_seal_pass().expect("seal");
+        }
+        target
+    }
+
+    /// TG-ENC-004: a seal and an unseal pass over 30 001 rows, killed
+    /// at every batch boundary and at one point inside every batch, end
+    /// after a restart with every row in the target form and its value
+    /// unchanged, and no pass row.
+    fn pass_survives_crashes<T: CrashTarget>(modes: &[CrashMode]) {
+        let provider = kek();
+        let plain_rows = {
+            let target = T::fresh();
+            let store = EngineMapDataStore::open(target.engine()).expect("plain");
+            populate(&store);
+            record_rows(&*target.engine())
+        };
+        for direction in [PassDirection::Seal, PassDirection::Unseal] {
+            let boundaries = pass_boundaries::<T>(&provider, direction);
+            assert!(
+                boundaries.len() >= 4,
+                "{boundaries:?}: fewer than three batches"
+            );
+            let mut points = vec![0];
+            for pair in boundaries.windows(2) {
+                points.push(pair[0]);
+                points.push(u64::midpoint(pair[0], pair[1]));
+            }
+            points.push(boundaries[0] / 2);
+            points.sort_unstable();
+            points.dedup();
+            for &point in &points {
+                for &mode in modes {
+                    let target = start_pass::<T>(&provider, direction);
+                    let store = open_for(&target, &provider, direction);
+                    target.arm_death(target.ops_so_far() + point);
+                    let died = store.run_seal_pass().is_err();
+                    drop(store);
+                    let target = target.crash(mode, 0);
+                    let store = open_for(&target, &provider, direction);
+                    store.run_seal_pass().unwrap_or_else(|e| {
+                        panic!(
+                            "{} {direction:?} resume after op {point} ({died}): {e}",
+                            T::NAME
+                        )
+                    });
+                    let keyring = store.keyring.clone();
+                    let active = keyring.as_deref().and_then(Keyring::active_id);
+                    let engine = target.engine();
+                    assert_eq!(
+                        engine.get(&meta_key(META_SEAL_PASS)).expect("get"),
+                        None,
+                        "{} {direction:?} op {point}: the pass row is left",
+                        T::NAME
+                    );
+                    let now = record_rows(&*engine);
+                    assert_eq!(now.len(), plain_rows.len());
+                    for (key, plain) in &plain_rows {
+                        let stored = &now[key];
+                        match direction {
+                            PassDirection::Seal => {
+                                assert_eq!(
+                                    sealed_key_id(stored),
+                                    active,
+                                    "{} op {point}: a row is not sealed under the active key",
+                                    T::NAME
+                                );
+                                assert_eq!(
+                                    open_value(keyring.as_deref(), key, stored)
+                                        .expect("open")
+                                        .as_ref(),
+                                    plain.as_slice()
+                                );
+                            }
+                            PassDirection::Unseal => {
+                                assert_eq!(
+                                    stored,
+                                    plain,
+                                    "{} op {point}: a row is not plain",
+                                    T::NAME
+                                );
+                            }
+                        }
+                    }
+                    drop(store);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_seal_pass_resumes_to_the_same_end_after_a_crash_over_the_reference_engine() {
+        pass_survives_crashes::<MemTarget>(&[CrashMode::DropUnsynced]);
+    }
+
+    /// A crash that keeps everything synced and nothing after: the pass is
+    /// judged at the grain of its durable batches. Images that keep a random
+    /// part of the unsynced writes test redb's own recovery, not the pass.
+    #[test]
+    fn the_seal_pass_resumes_to_the_same_end_after_a_crash_over_redb() {
+        pass_survives_crashes::<RedbTarget>(&[CrashMode::DropUnsynced]);
     }
 }
