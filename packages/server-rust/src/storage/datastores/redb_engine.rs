@@ -37,7 +37,7 @@ impl RedbKvEngine {
     /// file is held open by another engine); the mapped redb error when the
     /// table cannot be created.
     pub fn open(path: &Path) -> KvResult<Self> {
-        let db = redb::Database::create(path).map_err(|e| KvError::Other(e.into()))?;
+        let db = open_redb(path, || redb::Database::create(path)).map_err(KvError::Other)?;
         Self::with_database(db)
     }
 
@@ -58,7 +58,7 @@ impl RedbKvEngine {
     }
 
     /// Creates the table at open, so no read ever meets a missing table.
-    fn with_database(db: redb::Database) -> KvResult<Self> {
+    pub(crate) fn with_database(db: redb::Database) -> KvResult<Self> {
         let txn = db.begin_write().map_err(kv_from_transaction)?;
         txn.open_table(TABLE).map_err(kv_from_table)?;
         txn.commit().map_err(kv_from_commit)?;
@@ -72,6 +72,41 @@ impl RedbKvEngine {
         let guard = self.db.read();
         let db = guard.as_ref().ok_or(KvError::ShutDown)?;
         f(db)
+    }
+}
+
+/// Runs `open`, which opens the redb file at `path`, and turns a panic inside
+/// it into a refusal logged as one ERROR line, so the node exits 1 like on any
+/// store that does not open (`TG-ENG-001`). redb 2 asserts on a file a crash
+/// left while it grew (a header whose layout is longer than the file); the
+/// records in such a file are intact, so the line asks to keep it. The panic
+/// hook still prints where redb asserted.
+///
+/// Only the open is caught, not the first commit that follows it: a redb
+/// panic once the database is open means its own invariants broke, and the
+/// process must not go on.
+pub(crate) fn open_redb<T, E: Into<anyhow::Error>>(
+    path: &Path,
+    open: impl FnOnce() -> Result<T, E>,
+) -> anyhow::Result<T> {
+    // Unwind safety: a panicking open leaves nothing the caller uses; the
+    // half-opened database is dropped while the panic unwinds.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(open)) {
+        Ok(result) => result.map_err(Into::into),
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            let line = format!(
+                "store open: {} does not open with this version: redb panicked while opening it ({}), as it does on a file left by a crash while the file grew; do not delete the file, its records are probably intact; to bring the node back now, restore the data directory and the WAL directory from the same backup and keep this file",
+                path.display(),
+                message.replace('\n', " ")
+            );
+            tracing::error!("{line}");
+            Err(anyhow::anyhow!(line))
+        }
     }
 }
 

@@ -2329,3 +2329,42 @@ fn m91_migration_of_one_gibibyte() {
         data_dir_size as f64 / legacy_size as f64
     );
 }
+
+/// A legacy file redb panics on at open (its header names a layout longer
+/// than the file) is refused before the migration creates anything, and is
+/// left as it was; the whole file put back then migrates as on a first start
+/// (`TG-ENG-001`). A panic caught when a resumed run reopens the legacy file
+/// (step 8) leaves the mark of step 7, from which `m05` resumes.
+#[test]
+fn a_legacy_file_redb_panics_on_is_refused_and_the_restored_file_then_migrates() {
+    let r = Root::new();
+    write_legacy(&r.l, &rich_fixture());
+    let whole = fs::read(&r.l).expect("read the legacy file");
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&r.l)
+        .expect("open the legacy file");
+    file.set_len(whole.len() as u64 - 4 * 4096)
+        .expect("cut the legacy file");
+    drop(file);
+    let cut = fs::read(&r.l).expect("read the cut file");
+
+    let err = RedbDataStore::open_location_with(&r.location(), &MigrationIo::default())
+        .err()
+        .expect("the cut file is refused");
+    assert!(
+        format!("{err:#}").contains("redb panicked while opening it"),
+        "{err:#}"
+    );
+    assert!(
+        !exists(&r.d) && !exists(&r.k),
+        "the refused migration created nothing"
+    );
+    assert_eq!(fs::read(&r.l).expect("read after"), cut);
+
+    fs::write(&r.l, &whole).expect("put the whole file back");
+    let store = RedbDataStore::open_location_with(&r.location(), &MigrationIo::default())
+        .expect("the migration");
+    drop(store);
+    assert!(exists(&r.engine_path()) && exists(&r.k));
+}
