@@ -146,6 +146,16 @@ fn apply_write(image: &mut Vec<u8>, offset: u64, bytes: &[u8]) {
     image[start..end].copy_from_slice(bytes);
 }
 
+/// A write a crash kept: only a kept `set_len` changes the image's length, so
+/// the bytes past the end are lost. redb never writes past the end of its
+/// file, and a journaling file system persists a length only as the metadata
+/// change that made it, never as the end of a write or sector that landed.
+fn persist_write(image: &mut [u8], offset: u64, bytes: &[u8]) {
+    let start = offset_to_index(offset).min(image.len());
+    let end = (start + bytes.len()).min(image.len());
+    image[start..end].copy_from_slice(&bytes[..end - start]);
+}
+
 impl CrashableBackend {
     /// An empty, live backend that is never killed until `set_die_at`.
     pub(crate) fn new() -> Self {
@@ -181,9 +191,9 @@ impl CrashableBackend {
     /// The backend a crash leaves, then releases this handle's state.
     ///
     /// The image is `durable` plus, by `mode`, a seeded part of the pending
-    /// ops. This handle's state is then emptied and dead, so every clone
-    /// answers EIO and no file image outlives the crash, whatever the dead
-    /// engine still holds.
+    /// ops; only a kept `set_len` changes its length. This handle's state is
+    /// then emptied and dead, so every clone answers EIO and no file image
+    /// outlives the crash, whatever the dead engine still holds.
     pub(crate) fn crash_image(&self, mode: CrashMode, seed: u64) -> CrashableBackend {
         let mut state = self.state.lock();
         let mut image = state.durable.clone();
@@ -201,13 +211,13 @@ impl CrashableBackend {
                             let room = offset_to_index(SECTOR - at % SECTOR);
                             let (sector, tail) = rest.split_at(room.min(rest.len()));
                             if rng.random_bool(0.5) {
-                                apply_write(&mut image, at, sector);
+                                persist_write(&mut image, at, sector);
                             }
                             at += sector.len() as u64;
                             rest = tail;
                         }
                     }
-                    PendingOp::Write { offset, bytes } => apply_write(&mut image, *offset, bytes),
+                    PendingOp::Write { offset, bytes } => persist_write(&mut image, *offset, bytes),
                     PendingOp::SetLen { len } => image.resize(offset_to_index(*len), 0),
                     PendingOp::Barrier => {}
                 }

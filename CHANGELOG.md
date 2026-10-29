@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server):** a store file left by a crash while the embedded store grew it (power loss
+  or `kill -9` during a commit) made the server exit with code 101 and only a Rust panic trace at
+  every start: the embedded redb store asserts inside its open on a header whose layout is longer
+  than the file. The server now refuses such a file like any store that does not open: it exits 1
+  with one `ERROR` line, `store open: {file} does not open with this version: redb panicked while
+  opening it (…)`, which names the file, says to keep it (its records are probably intact) and to
+  restore the data directory and the WAL directory from the same backup to bring the node back.
+  The same holds for the old store file a one-time migration reads. A redb panic after the open
+  is still not caught.
 - **Security (server):** OR-Map push-diff events were delivered to connections not subscribed to
   the map. They now reach only the connections with a query subscription on that map, other than
   the one that pushed, as events of ordinary writes already did. A client that subscribes to the

@@ -54,7 +54,7 @@ use super::engine_store::{
     FLAG_PRIMARY, KS_BACKUP, KS_MAP_BY_ID, KS_MAP_BY_NAME, KS_PRIMARY,
 };
 use super::kv_engine::{KeyRange, KvEngine, WriteOptions};
-use super::redb_engine::RedbKvEngine;
+use super::redb_engine::{open_redb, RedbKvEngine};
 
 use crate::storage::map_data_store::{check_map_name, StoreBrokenCause};
 use anyhow::{anyhow, bail, Context as _};
@@ -1046,8 +1046,10 @@ pub(crate) fn run_migration(
 fn close_legacy_cleanly(legacy: Option<LegacySource>, legacy_path: &Path) -> anyhow::Result<bool> {
     let handle = match legacy {
         Some(source) => source.db,
-        None if is_legacy_file(legacy_path)? => redb::Database::open(legacy_path)
-            .with_context(|| format!("store migration: cannot open {}", legacy_path.display()))?,
+        None if is_legacy_file(legacy_path)? => open_redb(legacy_path, || {
+            redb::Database::open(legacy_path)
+        })
+        .with_context(|| format!("store migration: cannot open {}", legacy_path.display()))?,
         None => return Ok(false),
     };
     drop(handle);
@@ -1381,8 +1383,8 @@ fn open_engine(path: &Path) -> anyhow::Result<RedbKvEngine> {
             inner: redb::backends::FileBackend::new(file)?,
             sentinel: sentinel.to_path_buf(),
         };
-        return RedbKvEngine::with_backend(backend)
-            .map_err(anyhow::Error::from)
+        return open_redb(path, || redb::Builder::new().create_with_backend(backend))
+            .and_then(|db| RedbKvEngine::with_database(db).map_err(anyhow::Error::from))
             .with_context(|| format!("store location: cannot open {}", path.display()));
     }
     #[cfg(feature = "fault-injection")]
@@ -1817,8 +1819,10 @@ impl EngineMapDataStore<RedbKvEngine> {
                 format!("store migration: {l} is not a table-per-map store file"),
             ));
         }
-        let db = redb::Database::open(&paths.legacy_path)
-            .with_context(|| format!("store migration: cannot open {l}"))?;
+        let db = open_redb(&paths.legacy_path, || {
+            redb::Database::open(&paths.legacy_path)
+        })
+        .with_context(|| format!("store migration: cannot open {l}"))?;
         step_done(io, MigrationStep::OpenLegacy);
 
         // Step 2.
