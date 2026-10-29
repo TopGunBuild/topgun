@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 const TABLE: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("t");
 const EXIT_WITHIN: Duration = Duration::from_secs(60);
-const PAGE: u64 = 4096;
+const PAGE: i64 = 4096;
 
 /// Writes a cleanly closed redb file at `path` and moves its end by `delta` bytes.
 fn engine_file_with_length_moved(path: &Path, delta: i64) {
@@ -117,7 +117,7 @@ fn a_store_file_shorter_than_its_layout_is_refused_with_exit_1_and_left_unchange
     let data_dir = dir.path().join("data");
     std::fs::create_dir(&data_dir).expect("data dir");
     let engine = data_dir.join("engine.redb");
-    engine_file_with_length_moved(&engine, -4 * PAGE as i64);
+    engine_file_with_length_moved(&engine, -4 * PAGE);
     let before = std::fs::read(&engine).expect("read before");
 
     let (code, output) = start(dir.path(), &data_dir);
@@ -139,7 +139,7 @@ fn a_store_file_of_a_length_redb_never_gives_is_refused_the_same_way_at_every_st
     let data_dir = dir.path().join("data");
     std::fs::create_dir(&data_dir).expect("data dir");
     let engine = data_dir.join("engine.redb");
-    engine_file_with_length_moved(&engine, (PAGE - 512) as i64);
+    engine_file_with_length_moved(&engine, PAGE - 512);
 
     let (code, output) = start(dir.path(), &data_dir);
     let first = refusal_line(&engine, code, &output);
