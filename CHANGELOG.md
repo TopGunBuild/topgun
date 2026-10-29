@@ -10,6 +10,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Added (server): encryption at rest.** With `TOPGUN_ENCRYPTION_AT_REST=on`,
+  `TOPGUN_MASTER_KEY_PROVIDER=file` and `TOPGUN_MASTER_KEY_FILE` (64 hex characters, mode `0600`
+  or `0400`), a stolen disk, a copied data directory or WAL directory, or a backup is unreadable
+  without the master key: record values and WAL frames are sealed with XChaCha20-Poly1305 under
+  data keys, which the data directory keeps only wrapped by the master key. Turning it on, or off,
+  is a restart; the start rewrites every stored value in a resumable pass before it accepts a
+  connection, and each value grows by 47 bytes. Record keys and map names stay plaintext, and so
+  does whatever was written before encryption was turned on, so disk encryption is still
+  required. Once a store has had encryption on, every start needs its master key — also after it
+  was turned off; without it the node logs `encryption: refusing to start: …` and exits 1 before
+  it opens the WAL, writing nothing. The master key is rotated by a start with
+  `TOPGUN_MASTER_KEY_PREVIOUS_FILE` set to the old key, which rewrites only the wrapped keys.
+  The boot summary line gains `encryption_at_rest` (`off` or `on:file`). The only key provider is
+  a local file; AWS KMS and Vault Transit are not available yet. See the "Encryption at rest"
+  guide.
+- **Changed (on-disk format): WAL format v2.** Every write-ahead-log segment this version creates
+  starts with a 61-byte header (`TGWS`, header version 2) that names, besides the partition, the
+  first sequence, a random salt and the data key id, three format fields: `layout` = 0 (the
+  partition function), `payload_schema` = 1 (the WAL entry schema) and `cipher` = 0 (plaintext)
+  or 1 (XChaCha20-Poly1305, sealed under the data key the header names). A reader that does not
+  know a value refuses the segment by name. The header is written and fsynced before the first
+  frame, and a process never appends to a segment it did not create, so every start begins a new
+  segment in each partition. Segments of the earlier format are still read, and leave by ordinary
+  collection; this reader stays for one version.
+  - **Older binaries refuse:** every binary built before this version — including the
+    `feacb7d4`…`727db547` binaries that read OR delta frames — reads a v2 segment as a frame with
+    the wrong magic at offset 0 and refuses to start before it accepts a connection. A store that
+    has had encryption on is refused by every older binary at its store open
+    (`store format: refusing to open: unknown metadata …`, naming `keyring`), also after
+    encryption was turned off. There is no tool that rewrites v2 segments as v1 or takes the
+    keyring out of a store, and none is planned.
+  - **Rollback:** a stop that logs `drained=true` now unlinks every WAL segment whose frames the
+    store holds, so with nothing left above the watermark the WAL directory holds no segment, and
+    the documented return to the pre-migration file keeps working. After a crash, a non-zero exit
+    or `drained=false`, v2 segments remain and an older binary refuses them: start the new binary
+    again and stop it until the line reads `drained=true`. A store that has had encryption on goes
+    back to an older binary only by that return to the pre-migration file.
 - **Fixed (server):** a store file left by a crash while the embedded store grew it (power loss
   or `kill -9` during a commit) made the server exit with code 101 and only a Rust panic trace at
   every start: the embedded redb store asserts inside its open on a header whose layout is longer
