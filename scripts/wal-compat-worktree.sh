@@ -9,31 +9,16 @@
 # modelled incarnation loss running ONE binary, so it can never execute a binary
 # built from another commit. That is what this script exists for.
 #
-# BOTH frame positions are exercised, because a decoder that does NOT know the
-# delta variant behaves differently between them, and asserting only one would
-# report a guarantee the product does not have:
+# Every WAL this tree writes is format v2: each segment starts with a "TGWS"
+# header. A binary built before that format reads the header as a frame whose
+# magic is wrong at offset 0 and refuses to start, so no older binary reads a
+# WAL from this tree, whatever the frames inside it hold. The delta frame is
+# still placed in BOTH positions -- mid-segment and trailing -- because a
+# trailing frame is where an older decoder tolerates a torn tail; the refusal
+# must hold there too, before the decoder reaches any frame.
 #
-#   * MID-SEGMENT delta frame  -> payload deserialization fails with bytes still
-#                                 ahead of it, which is corruption: refuse to
-#                                 start.
-#   * TRAILING delta frame     -> the same failure at the end of the byte stream
-#                                 is a torn tail, which recovery TOLERATES on the
-#                                 active segment: start cleanly, warn, silently
-#                                 drop that mutation, then durably truncate the
-#                                 segment to the intact prefix.
-#
-# MEASURED AGAINST THE PINNED BASE, AND IT IS NOT THAT. `feacb7d4` is the merge
-# point of the READER, so the binary this script builds already understands the
-# delta variant: it recovers a WAL from this tree CLEANLY IN BOTH POSITIONS, with
-# the delta frame replayed rather than dropped or refused. The split above is the
-# behaviour of a decoder OLDER than that reader — which is precisely what the
-# one-step contract declines to support, so it is described here and asserted
-# nowhere. Asserting the split against this base would be a test that passes only
-# by describing something else.
-#
-# The contract is ONE-STEP: a WAL written here needs a binary at or after the
-# reader's merge point. A two-step downgrade to a binary older than that is out
-# of contract and is not claimed to work.
+# Asserted in both positions: the old binary exits non-zero, logs wrong magic at
+# offset 0, and leaves the WAL directory byte for byte as it was.
 #
 # Usage:  bash scripts/wal-compat-worktree.sh
 # Env:    OLD_COMMIT   base commit to build the old binary from (default below)
@@ -105,6 +90,13 @@ probe_old_binary() {
   echo "started"
 }
 
+# Every file of the WAL directory with its content digest, in name order.
+wal_digest() {
+  (cd "$1" && find . -type f | LC_ALL=C sort | while read -r f; do
+    printf '%s %s\n' "$(shasum -a 256 <"$f" | cut -d' ' -f1)" "$f"
+  done)
+}
+
 fail=0
 for position in trailing mid; do
   echo
@@ -118,32 +110,27 @@ for position in trailing mid; do
     >"$SCRATCH/emit-$position.log" 2>&1 \
     || { echo "FAIL: could not emit the $position WAL"; cat "$SCRATCH/emit-$position.log"; exit 1; }
 
-  before_bytes=$(find "$wal_dir" -type f -exec stat -f%z {} \; 2>/dev/null | paste -sd+ - | bc \
-                 || find "$wal_dir" -type f -printf '%s\n' | paste -sd+ - | bc)
+  before="$(wal_digest "$wal_dir")"
 
   echo "== 4.${position}: run the OLD binary over it =="
   outcome="$(probe_old_binary "$wal_dir" "$SCRATCH/run-$position" "$SCRATCH/old-$position.log")"
   echo "   outcome: $outcome"
 
-  after_bytes=$(find "$wal_dir" -type f -exec stat -f%z {} \; 2>/dev/null | paste -sd+ - | bc \
-                || find "$wal_dir" -type f -printf '%s\n' | paste -sd+ - | bc)
+  after="$(wal_digest "$wal_dir")"
 
-  # The one-step contract, in both positions: start cleanly AND actually replay
-  # the window. "Started" alone would be satisfiable by a binary that skipped
-  # every frame, so the replay line is the non-vacuity half.
-  if [ "$outcome" != "started" ]; then
-    echo "   FAIL: the reader-era binary must recover this tree's WAL, got $outcome"
+  if [ "${outcome#refused:}" = "$outcome" ] || [ "$outcome" = "refused:0" ]; then
+    echo "   FAIL: an older binary must refuse a v2 WAL, got $outcome"
     tail -20 "$SCRATCH/old-$position.log"
     fail=1
+  elif ! grep -q 'has wrong magic at offset 0' "$SCRATCH/old-$position.log"; then
+    echo "   FAIL: refused, but not on the v2 header (no wrong magic at offset 0)"
+    tail -20 "$SCRATCH/old-$position.log"
+    fail=1
+  elif [ "$before" != "$after" ]; then
+    echo "   FAIL: the refusal changed the WAL directory"
+    fail=1
   else
-    replayed=$(grep -c 'WAL recovery: replaying unapplied entries' "$SCRATCH/old-$position.log" || true)
-    if [ "${replayed:-0}" -lt 1 ]; then
-      echo "   FAIL: started but replayed nothing -- the delta frame was skipped, not recovered"
-      tail -20 "$SCRATCH/old-$position.log"
-      fail=1
-    else
-      echo "   OK: started and replayed the window ($before_bytes -> $after_bytes bytes on disk)"
-    fi
+    echo "   OK: refused with wrong magic at offset 0; the WAL directory is unchanged"
   fi
 done
 
@@ -152,6 +139,4 @@ if [ "$fail" -ne 0 ]; then
   echo "WAL cross-binary compatibility: FAILED"
   exit 1
 fi
-echo "WAL cross-binary compatibility: both frame positions satisfy the ONE-STEP contract"
-echo "  (the pre-reader refuse-to-start / silent-tail-drop split is described in this"
-echo "   script's header and asserted NOWHERE -- see the base-commit caveat above)"
+echo "WAL cross-binary compatibility: an older binary refuses this tree's WAL in both frame positions"
