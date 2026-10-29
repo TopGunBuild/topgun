@@ -1,0 +1,127 @@
+---
+title: Encryption at rest
+description: Keep a stolen disk, a copied data directory or a leaked backup unreadable without your master key — turning it on, rotating the key, backups, turning it off and rolling back.
+order: 18
+---
+
+import { ChevronRight, Lock } from 'lucide-react';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Guides</span>
+  <ChevronRight className="w-4 h-4" />
+  <span>Encryption at rest</span>
+</div>
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Lock className="w-10 h-10 text-brand" />
+  <h1 className="text-4xl font-bold text-foreground">Encryption at rest</h1>
+</div>
+
+With encryption at rest on, a stolen disk, a copied data directory or write-ahead-log directory, or a leaked backup tells the reader nothing about your records' values without your master key. The server seals every record value and every write-ahead-log entry it stores, and keeps the keys that seal them only in a form your master key has to unlock. Your application does not change: clients read and write as before.
+
+It covers the server's files. To encrypt what a browser keeps in IndexedDB, see [client-side encryption](/docs/guides/security#encrypting-data-at-rest-on-the-client).
+
+## When to turn it on
+
+Turn it on for a **fresh data directory**, before the node stores anything. A value written before encryption was turned on can stay readable on that disk afterwards (see [what it does not protect](#what-it-protects-and-what-it-does-not)), so on an existing node treat earlier backups and the disk itself as unencrypted.
+
+Keep disk encryption on as well: record keys and map names are stored unencrypted.
+
+## Turn it on
+
+1. Create a master key: a file holding 64 hexadecimal characters (256 bits), readable by its owner only.
+
+   ```bash
+   umask 077
+   openssl rand -hex 32 > master.key
+   ```
+
+   The file may end with one newline (`\n`); a Windows line ending (`\r\n`) is refused. Store a copy of the key where you keep other secrets: **without it, the data cannot be read**, by you or by anyone.
+
+2. Start the server with three variables:
+
+   {/* doctest skip reason="starts a long-running server with a key file kept outside the docs" */}
+   ```bash
+   TOPGUN_ENCRYPTION_AT_REST=on \
+   TOPGUN_MASTER_KEY_PROVIDER=file \
+   TOPGUN_MASTER_KEY_FILE=/etc/topgun/master.key \
+   topgun-server
+   ```
+
+   `file` is the only provider today. The startup summary line reports `encryption_at_rest=on:file`.
+
+The key file must be readable by the user the server runs as, and by nobody else: a file whose mode gives the group or others any access is refused. The mode is checked on the file a symlink points to. In Kubernetes, mount the Secret with `defaultMode: 0400`. A Secret volume's files belong to root, and a pod-level `fsGroup` adds group read permission to them, which the server refuses; when the server runs as a non-root user with `fsGroup` set (as the TopGun Helm chart does), copy the key in an init container into an `emptyDir` volume, owned by the server's user with mode `0400`, and point `TOPGUN_MASTER_KEY_FILE` there.
+
+### The first start
+
+At the first start with encryption on, the server creates a data key, stores it wrapped by your master key, and rewrites every value already stored in sealed form. It does this before it accepts a connection, so the start takes as long as that pass. Give the startup or liveness probe room for it, as for the store migration. The pass is resumable: a start that is stopped or killed during it continues where it stopped. Its log lines:
+
+- `encryption: enabled; new values are sealed and a seal pass seals the stored ones` (with `key_id` and `provider`)
+- `encryption: seal pass started`
+- `encryption: seal pass progress` (with `rows`), at most every 10 seconds
+- `encryption: seal pass complete` (with `rows` and `elapsed_ms`)
+
+Each stored value grows by 47 bytes. From then on every write-ahead-log segment the server creates is sealed as well; segments written before stay unencrypted until the server collects them.
+
+## What it protects, and what it does not
+
+**Protected.** Someone who reads a copy of the data directory, the write-ahead-log directory or a backup, without the master key, learns no value written while encryption was on and kept sealed since, and no entry of a sealed write-ahead-log segment (map name, key and value). The server never returns a sealed value that was moved to another record or changed by one byte: it refuses it.
+
+**Not protected:**
+
+- **Values written before encryption was turned on.** They can remain in freed space inside the store file (the embedded store does not erase freed pages), in the `.pre-migration` file an upgrade kept, in write-ahead-log segments written before (until they are collected), and in older backups.
+- **Values that were unencrypted at any time after their write.** Turning encryption off writes every value unencrypted, and that copy can remain in freed space after encryption is turned on again.
+- **Record keys, map names, sizes, how often records are written, file names, and the store's metadata.**
+- **Anyone who can change the files.** Deleting, truncating, rolling back or planting rows, files or segments, including an unencrypted value, or putting back an older sealed value of the same record.
+- **The memory of a running server, and the client side.**
+
+Disk encryption is still required for everything in this list.
+
+## The master key is needed at every start
+
+Once a store has had encryption on, **every start needs its master key**, also after encryption was turned off again: the store keeps its data keys for good. Without the right key the server logs one line beginning `encryption: refusing to start:` and exits with code 1, before it accepts a connection and without writing anything. The line names the key file, or the fingerprint of the key the store expects (16 hexadecimal characters that identify a key without revealing it). Nothing retries inside the process; your supervisor's restart delay paces the restarts. [Troubleshooting](/docs/guides/troubleshooting#server-refuses-to-start-with-an-encryption-line) lists each line and what to do.
+
+A running server reads the key only at start. If the key file becomes unavailable while it runs, writes go on; the next start is refused.
+
+## Rotating the master key
+
+Start once with the new key as `TOPGUN_MASTER_KEY_FILE` and the old one as `TOPGUN_MASTER_KEY_PREVIOUS_FILE`:
+
+{/* doctest skip reason="starts a long-running server with key files kept outside the docs" */}
+```bash
+TOPGUN_ENCRYPTION_AT_REST=on \
+TOPGUN_MASTER_KEY_PROVIDER=file \
+TOPGUN_MASTER_KEY_FILE=/etc/topgun/master-2.key \
+TOPGUN_MASTER_KEY_PREVIOUS_FILE=/etc/topgun/master.key \
+topgun-server
+```
+
+The server unlocks its data keys with the old key and locks them again with the new one; no record and no log segment is rewritten, so the rotation takes no longer than an ordinary start. It logs `encryption: master key rotated; the keyring is re-wrapped under the new key`.
+
+Afterwards the previous key is ignored, but its file is still read at every start while the variable is set: unset `TOPGUN_MASTER_KEY_PREVIOUS_FILE` before you delete or move the old key file.
+
+## Backups
+
+Back up as before: stop the server, check that the stop logged `drained=true`, and copy the data directory and the write-ahead-log directory together. The data keys travel inside the data directory, locked by the master key; restoring needs nothing else **except the master key that was in use when the backup was taken**.
+
+So retire a master key only after every backup taken under it has expired. To restore a backup taken before a rotation, start with the current key as `TOPGUN_MASTER_KEY_FILE` and the key of the backup as `TOPGUN_MASTER_KEY_PREVIOUS_FILE`: the start moves the restored store to the current key. Without the old key the start is refused, naming the fingerprint the store expects.
+
+## Turning it off
+
+Start with `TOPGUN_ENCRYPTION_AT_REST=off`, keeping `TOPGUN_MASTER_KEY_PROVIDER` and `TOPGUN_MASTER_KEY_FILE`. The start rewrites every value unencrypted, with log lines like those above (`encryption: disabled; …`, then `encryption: unseal pass started`, `progress` and `complete`). Sealed log segments stay readable until they are collected.
+
+The store keeps its data keys, so **the master key is still required at every start**: removing the key file after turning encryption off stops the node from starting. Turning encryption on again later issues a new data key and seals every value again.
+
+## Rolling back
+
+A version of the server older than encryption at rest cannot read a store that has ever had it on, also after it was turned off: it refuses the store with `store format: refusing to open: unknown metadata "keyring"` and exits before it accepts a connection, changing nothing. It also refuses the new format of the write-ahead log, with `WAL file … has wrong magic at offset 0`. No tool takes the encryption out of a store, and none is planned.
+
+The only way back to an older version is the return to the file the store was migrated from, which goes to a version from before the data-directory layout and loses every write made since that migration. The steps, and what they cost, are in the [storage backends](/docs/deploy/storage-backends#upgrading-from-a-store-file) guide. Before you roll back, stop the newer version until its stop logs `drained=true`: that stop removes every log segment the store holds, and an older version refuses any segment that is left.
+
+## Not available yet
+
+- Key providers other than a local file, such as AWS KMS or Vault Transit.
+- Retiring an old data key once nothing uses it.
+- Separate keys per tenant, and erasing a tenant by deleting its key.

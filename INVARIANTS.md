@@ -8,7 +8,7 @@ an explicit `NAKED` marker; the gate is "the NAKED count never grows silently", 
 
 Conventions: IDs are `TG-<DOMAIN>-<NNN>` (domains: WAL, WB write-behind, OR, LWW, MRK merkle,
 EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch, ENG byte engine, AUTHZ
-authorization). Cite the ID verbatim in code comments and test names. Statuses:
+authorization, ENC encryption at rest). Cite the ID verbatim in code comments and test names. Statuses:
 `decided` (holds by design) · `open (SPEC/TODO-nnn)` (not yet true / not yet wired) ·
 `aspirational`. Precedent: omnigraph `docs/invariants.md` (structure) — improved here with the
 CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
@@ -69,12 +69,18 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     in the one engine batch of the records it covers, and never lower than the row it replaces;
     the WAL's in-memory copy advances only after that commit returned `Ok`. A collection tick
     (every 5 s) limits collection by a fresh engine read, `min(the WAL's copy, the engine
-    row)`, and collects nothing when that read fails or after `finish`. `wal-collected` (the
+    row)`, and collects nothing when that read fails or after `finish`. `finish(true)` — the
+    stop that writes the rollback hints — itself unlinks every segment, sealed, active or
+    header-only, whose frames are all at or below its partition's watermark, against the same
+    bound and nothing when the read fails or the store is already dropped; before it reads which
+    segments are covered it closes the WAL to appends under each partition's append lock.
+    `finish(false)` unlinks and closes nothing; `finish` seals nothing. `wal-collected` (the
     highest collected sequence of each partition) is durable before the first unlink it
     covers. A segment leaves the WAL's sealed set only once its file is unlinked; a segment that
     cannot be unlinked holds back only its own partition, and a later tick unlinks it. A segment
-    is sealed only by a tick, once it holds 8 MiB or its first frame is between 30 and 60 s
-    old, an age fixed per partition so that partitions do not all seal in one tick. The
+    is sealed by a tick, once it holds 8 MiB or its first frame is between 30 and 60 s old, or
+    by the first open of its partition in a process, which keeps the last segment as a sealed
+    one and creates a new active segment (`TG-ENC-005`); an age fixed per partition so that partitions do not all seal in one tick. The
     `.applied` files a stop that returns `Ok` writes are rollback hints for older
     binaries, each equal to the durable engine row (also after a drain that did not finish);
     this binary reads one only through the import at open, when the WAL directory holds no
@@ -93,6 +99,8 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `a21_a_tick_whose_watermark_read_fails_unlinks_nothing_and_the_next_tick_collects`,
   `a22_after_finish_no_tick_unlinks_and_the_tick_task_ends`,
   `a23_a_clean_stop_writes_one_rollback_hint_per_partition_equal_to_the_engine_row`,
+  `c09_a_drained_stop_unlinks_every_covered_segment_and_keeps_one_above_the_watermark`,
+  `c12_finish_unlinks_below_the_store_read_and_keeps_what_it_cannot_unlink`,
   `batched_replay_tests.rs::c09_a_segment_that_fails_to_unlink_holds_back_only_its_own_partition`,
   `batched_replay_tests.rs::c90_crash_loop` (`wal-collected` never above the engine row of a
   partition at any observation across real SIGKILLs, under both policies),
@@ -176,9 +184,12 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   workspace's `panic = "abort"` prohibition and tokio unwind containment.
 - **Maintaining code:** `wal/mod.rs` pre-check seam + `wal_fail_stop` (`#[cfg(test)]` seam panics
   for observability).
+  An append to a WAL that `finish(true)` has closed is a tier (A) case: refused before a byte is
+  written or a frame index is taken, never acknowledged.
 - **Enforcing test:** `prefix_watermark_proptest.rs::a_pre_frame_append_failure_removes_only_the_frameless_sequence_from_add`
   (+ `_from_remove` twin) and `::a_post_frame_append_failure_fail_stops_at_tier_b_without_rolling_back`
-  — the (c1)/(c2) inverted pair (frameless removed / frame-backed NOT removed, loss-class guard).
+  — the (c1)/(c2) inverted pair (frameless removed / frame-backed NOT removed, loss-class guard);
+  the closed WAL, `c10_an_append_after_finish_is_refused_and_touches_no_file`.
 - **Violation consequence:** continuing on a broken WAL (silent corruption) or rolling back
   frame-backed seqs (the AC2(c2) resurrection defect).
 - **Discovered by:** SPEC-350 Audits v10–v12.
@@ -396,7 +407,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     directory** is lost or overwritten. What the data directory does not hold is only what the
     WAL held above `W(p)` at the moment the data directory was copied; after a stop that exited
     0 **and logged `write-behind shutdown: rollback hints written` with `drained=true`** that set
-    is empty, so a backup of both directories taken after such a stop loses nothing acknowledged
+    is empty — except a frame recovery left unapplied because the store refused it at the start
+    (TODO-823): it stays above `W(p)`, and its segment stays in the WAL directory after such a
+    stop — so a backup of both directories taken after such a stop loses nothing acknowledged
     whichever of the two copies is older. An exit 0 alone is not enough: a drain that timed out
     exits 0 with frames above `W(p)` (`drained=false`). A copy of a running server is not a
     backup.
@@ -3148,4 +3161,189 @@ weaker than a test.
   rollback after a `kill -9` of the new binary. Any binary older than `07d009f0`. A tool that
   exports the new format back to tables — there is none.
 - **Discovered by:** SPEC-394d (the table-per-map store moved behind `KvEngine`).
+- **Status:** decided, **enforced**.
+
+### TG-ENC-001: Plaintext DEKs never leave process memory; the `keyring` row is their only persistent form, its key ids are never reused, and the row is never deleted
+
+- **Scope:** encryption at rest (`TOPGUN_ENCRYPTION_AT_REST`) — the data keys (DEKs) that seal record
+  values and WAL frames, and the `keyring` metadata row (`0x00 ‖ "keyring"`) of the data directory.
+- **Statement:** plaintext DEKs never leave process memory (they are zeroized on drop, never
+  written, logged or sent); the `keyring` row is the only persistent form of a DEK, wrapped
+  (XChaCha20-Poly1305) under the master key (KEK) named by the row's fingerprint; key ids start at
+  1, `next_key_id` only grows, so an id is never reused; and once a store has had encryption on,
+  the row is never deleted — a disable only moves every key to `decrypt_only`, so sealed WAL
+  segments and an interrupted unseal pass stay readable and an older binary keeps refusing the
+  store.
+- **Maintaining code:** `storage/sealing.rs` — `KeyringRow::decode` (strict checks), `Keyring`
+  (`with_new_active`, `disabled`, `rewrapped`), `FileKeyProvider::load` (the key file's buffer
+  zeroized); `engine_store.rs` `open_sealed` (the one batch that writes the row).
+- **Enforcing test:** `ac12_disable_with_sealed_frames_on_disk` (`wal/mod.rs`; a disable keeps the
+  row with every key `decrypt_only`, a re-enable issues id 2, never 1 again),
+  `the_keyring_row_round_trips_and_its_strict_checks_refuse`, `a_wrap_opens_only_under_its_own_id_and_kek`
+  (`sealing.rs`), `a_stolen_engine_file_holds_no_marker_and_opens_only_with_its_key` (`engine_store.rs`).
+- **Violation consequence:** a DEK on disk in plaintext would make every sealed value readable from
+  a stolen copy; a reused key id or a deleted row would leave sealed segments or values that no key
+  opens, or let an older binary open a store it cannot read.
+- **Not claimed:** retiring a `decrypt_only` key once nothing references it (TODO-883); per-tenant
+  keys and crypto-erase (TODO-885).
+- **Discovered by:** SPEC-399 (TODO-861), parts 399b and 399c.
+- **Status:** decided, **enforced**. Shown red on one-change mutants: the keyring row deleted by
+  the unseal pass (`ac12_…`).
+
+### TG-ENC-002: A sealed value opens only under its own engine key and envelope header
+
+- **Scope:** record values of the primary (`0x10`) and backup (`0x11`) spaces at the `KvEngine`
+  boundary, sealed while the keyring has an active key.
+- **Statement:** a sealed value (`0xC1 ‖ version ‖ cipher ‖ key id ‖ nonce ‖ ciphertext ‖ tag`, 47
+  bytes over the plaintext, a fresh random nonce per seal) is authenticated with the row's full
+  engine key and the envelope header as associated data. Any changed byte, or the same bytes under
+  another space, partition, map id or key, fails authentication and is refused — returned to the
+  caller as an error, never returned as a value and never skipped by a scan, `visit_records` or
+  `enumerate_leaves`. The error names the map id and partition, never the key.
+- **Maintaining code:** `storage/sealing.rs` `Keyring::seal_value`, `open_value`;
+  `engine_store.rs` `write_records` (the one place a value is sealed) and every read of a `0x10` /
+  `0x11` value through `open_record`.
+- **Enforcing test:** `flipping_any_byte_of_a_sealed_value_is_refused`,
+  `a_sealed_value_moved_to_another_row_fails_authentication`,
+  `a_thousand_seals_of_one_value_never_repeat_a_nonce` (`sealing.rs`);
+  `a_transplanted_sealed_value_fails_authentication_over_redb`,
+  `a_transplanted_sealed_value_fails_authentication_over_the_reference_engine`,
+  `a_stolen_engine_file_holds_no_marker_and_opens_only_with_its_key` (`engine_store.rs`).
+- **Violation consequence:** a value copied to another key or map by someone with write access to
+  the data directory would be served as genuine, or a damaged value would be returned or silently
+  skipped.
+- **Not claimed:** record keys and map names are plaintext; a plain (non-`0xC1`) value is accepted in
+  every state, so planting one, or replacing a sealed value by an older sealed value of the same
+  key, is outside the threat model.
+- **Discovered by:** SPEC-399 (TODO-861), part 399b.
+- **Status:** decided, **enforced**. Shown red on one-change mutants: a nonce reused across seals
+  (`a_thousand_seals_…`), associated data without the map id (both `a_transplanted_…` tests).
+
+### TG-ENC-003: A v2 segment's header is durable before its first frame; header and filename agree; a frame that fails authentication with an intact CRC is corruption, not a torn tail
+
+- **Scope:** every WAL segment this binary creates (format v2, a 61-byte `TGWS` header) and every
+  production reader of segment frames (`handle`, `decode_segment_max_seq`, `unapplied`, the
+  sequence seed, the `finish(true)` directory read).
+- **Statement:** a segment is created as `{name}.tmp` — header written, `sync_all`, renamed, the
+  WAL directory fsynced — before its first frame is appended. The header's partition and first
+  sequence equal the filename's; a mismatch, a bad header CRC or an unknown header version,
+  layout, payload schema or cipher is a refusal naming the file. A frame whose CRC is intact but
+  whose authentication fails — on any frame, the last frame of the last segment included — is
+  corruption and refuses the start naming file and offset; only a CRC or length failure at the end
+  of the last segment is a torn tail. A sealed segment whose key id is not in the keyring is a
+  refusal naming the segment.
+- **Maintaining code:** `storage/wal/segment.rs` `create_segment_file`, `SegmentHeader`;
+  `storage/wal/format.rs` `decode_segment_with`, `frame_v2`; `storage/wal/mod.rs`
+  `decode_segment_keyed`, `entries_or_refuse`, `create_active`.
+- **Enforcing test:** `c05_a_last_segment_without_an_intact_frame_is_replaced_under_its_name`,
+  `c06_a_crash_before_the_rename_of_a_created_segment_leaves_an_openable_directory`,
+  `c08_the_header_aware_decoder_and_the_refusals_behind_the_header`,
+  `c11_short_segment_files_by_position` (`wal/store_mode_tests.rs`);
+  `ac10_a_changed_sealed_frame_is_refused_and_a_torn_one_tolerated` (`wal/mod.rs`);
+  `ac2_a_sealed_frame_opens_only_at_its_index_under_its_segment_key` (`sealing.rs`).
+- **Violation consequence:** a frame appended before its header is durable could be read under a
+  header a crash replaced; a changed frame on the last segment would be dropped as a torn tail and
+  its write silently lost or replaced.
+- **Discovered by:** SPEC-399 (TODO-861), parts 399a and 399c.
+- **Status:** decided, **enforced**. Shown red on one-change mutants: the header written after the
+  first frame (`c05_…`), an authentication failure classified as a torn tail (`ac10_…`).
+
+### TG-ENC-004: The seal and unseal pass is resumable and convergent
+
+- **Scope:** the pass that rewrites every stored value after encryption is turned on (seal) or off
+  (unseal), driven by the `seal_pass` metadata row; it runs at start, before WAL recovery and before
+  the server accepts a connection.
+- **Statement:** rows up to the durable cursor are in the target form; the cursor is written only in
+  the batch of the rows it covers (`sync = true`); a crash at any point resumes from the durable
+  cursor, and the end state does not depend on where crashes happened. Every `keyring` / `seal_pass`
+  row this binary does not produce — an unknown keyring version, key id 0 or a repeated id, more than
+  one active key, `next_key_id` not above the largest id, a `seal_pass` without a keyring, with an
+  unknown direction, a seal pass with no active key, an unseal pass with one, or a cursor outside the
+  record spaces — is refused at open with nothing written.
+- **Maintaining code:** `engine_store.rs` `open_sealed` (the batch that starts a pass),
+  `seal_pass_with`, `check_sealing_rows`; `redb.rs` `open_location_sealed` (runs the pass after the
+  marker file is written).
+- **Enforcing test:** `the_seal_pass_resumes_to_the_same_end_after_a_crash_over_redb`,
+  `the_seal_pass_resumes_to_the_same_end_after_a_crash_over_the_reference_engine`,
+  `a_planted_keyring_or_seal_pass_row_is_refused_at_open` (`engine_store.rs`),
+  `the_seal_pass_row_round_trips_and_refuses_an_unknown_direction` (`sealing.rs`).
+- **Violation consequence:** a crash during a pass would leave values the cursor counts as sealed in
+  plaintext, or a resume would skip rows.
+- **Not claimed:** over redb the crash model of the tests is "drop every unsynced write"; a crash while
+  redb grows its file is TG-ENG-001's known-false case (TODO-888).
+- **Discovered by:** SPEC-399 (TODO-861), part 399b.
+- **Status:** decided, **enforced**. Shown red on one-change mutants: the cursor batch written before
+  the rows it covers (both `the_seal_pass_resumes_…` tests).
+
+### TG-ENC-005: No (segment key, nonce) pair is ever used for two different plaintexts
+
+- **Scope:** sealed WAL frames (cipher 1): the segment key is HKDF-SHA256 of the DEK, the header's
+  random salt and the header; the nonce of a frame is its index in the segment.
+- **Statement:** a process appends only to segment files it created in this process — at the first
+  open of a partition the last segment is kept as it is (truncated to its intact prefix) and a new
+  one is created, or, if it holds no intact frame, replaced under its name with a fresh salt; every
+  created segment has a fresh random salt; per-partition opens are serialized; the frame index is
+  taken under the append lock after the payload has encoded and passed the size check, so an
+  index is never handed out twice; and no frame is rewritten in place (collection unlinks whole
+  files).
+- **Maintaining code:** `storage/wal/mod.rs` `handle` (the open mutex and its re-check),
+  `frame_under_lock`, `append`; `storage/wal/segment.rs` `create_segment_file`, the segment's
+  next-index counter; `storage/sealing.rs` `SegmentKey::seal_frame`.
+- **Enforcing test:** `ac8_concurrent_sealed_appends_seal_each_index_once`,
+  `ac8_racing_first_opens_of_a_sealed_partition_create_one_segment`,
+  `ac8_a_cut_sealed_segment_is_never_appended_to`,
+  `ac8_a_sealed_rotation_with_a_failed_directory_fsync_then_the_next`,
+  `an_oversized_sealed_entry_is_refused_before_its_index_is_taken`,
+  `ac12b_finish_keeps_a_sealed_segment_above_the_watermark` (`wal/mod.rs`);
+  `c01_concurrent_appends_to_one_partition_take_each_frame_index_once_in_order`,
+  `c03_a_cut_segment_is_never_appended_to_and_no_frame_index_repeats` (`wal/store_mode_tests.rs`);
+  `ac3_two_headers_for_one_name_have_different_salts_and_keys` (`sealing.rs`).
+- **Violation consequence:** two plaintexts sealed under one key and nonce leak their XOR and let
+  the authentication key be recovered, so an attacker who reads the WAL directory could read and
+  forge frames.
+- **Discovered by:** SPEC-399 (TODO-861), parts 399a and 399c.
+- **Status:** decided, **enforced**. Shown red on one-change mutants: the reopen-for-append branch
+  restored, the frame sealed before the append lock, the open mutex removed (the `ac8_…` tests), and
+  the `finish` directory read made keyless (`ac12b_…`).
+
+### TG-ENC-006: A node whose store holds a keyring starts serving only after every DEK is unwrapped; otherwise it exits 1 before the WAL opens, with no record, metadata or WAL write by the refusal
+
+- **Scope:** the start of the server binary over a data directory; `EngineMapDataStore::open_sealed`
+  and the plain `open`.
+- **Statement:** when the store holds a `keyring` row, or `TOPGUN_ENCRYPTION_AT_REST=on`, the
+  configured master key must unwrap every DEK before the WAL opens. A key file that is missing,
+  unreadable, malformed or readable by group or others, a key with another fingerprint, or a wrap
+  that does not authenticate logs one `ERROR` line beginning `encryption: refusing to start:` and
+  the process exits 1 before the WAL opens and before it accepts a connection; the refusal writes no
+  record row, metadata row or WAL file. The plain `open` refuses a store with a keyring, so no other
+  path reads sealed values without keys.
+- **Maintaining code:** `bin/topgun_server.rs` `encryption_config`, `load_encryption`,
+  `select_datastore`; `engine_store.rs` `open_sealed`, `unwrap_keyring`, `key_refusal`, `open`.
+- **Enforcing test:** `a_stolen_engine_file_holds_no_marker_and_opens_only_with_its_key`,
+  `a_wrong_master_key_is_refused_over_the_reference_engine_too`,
+  `the_plain_open_refuses_a_sealed_store_and_writes_nothing` (`engine_store.rs`),
+  `the_file_provider_reads_64_hex_characters_and_refuses_everything_else` (`sealing.rs`),
+  `the_encryption_variables_refuse_every_value_they_do_not_name` (`bin/topgun_server.rs`); at the
+  process, `tests/integration-rust/encryption-at-rest.test.ts` (exit 1, the line, no WAL file, no
+  HTTP answer).
+- **Violation consequence:** a node without its key would serve errors for every sealed value, or
+  write into a store it cannot read back.
+- **Discovered by:** SPEC-399 (TODO-861), part 399b.
+- **Status:** decided, **enforced**.
+
+### TG-ENC-007: Master-key rotation rewrites only the `keyring` row
+
+- **Scope:** a start with `TOPGUN_MASTER_KEY_FILE` = the new KEK and `TOPGUN_MASTER_KEY_PREVIOUS_FILE`
+  = the KEK whose fingerprint the keyring names.
+- **Statement:** every DEK is unwrapped with the previous KEK, wrapped again with the new one (fresh
+  wrap nonces), and the `keyring` row is replaced in one durable batch before the WAL opens; no
+  value, no other row and no WAL segment is rewritten. When the fingerprint already matches the new
+  key, the previous key is ignored.
+- **Maintaining code:** `engine_store.rs` `unwrap_keyring`; `storage/sealing.rs` `Keyring::rewrapped`.
+- **Enforcing test:** `a_master_key_rotation_rewrites_only_the_keyring_row` (`engine_store.rs`),
+  `a_rewrapped_keyring_opens_under_the_new_kek_only` (`sealing.rs`); at the process,
+  `tests/integration-rust/encryption-at-rest.test.ts` (rotation, and a backup restored after it).
+- **Violation consequence:** a rotation that rewrote values or segments would take time proportional
+  to the data and could leave a store half under each key after a crash.
+- **Discovered by:** SPEC-399 (TODO-861), part 399b.
 - **Status:** decided, **enforced**.

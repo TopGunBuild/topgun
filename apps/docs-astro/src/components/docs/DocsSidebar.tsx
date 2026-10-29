@@ -91,7 +91,11 @@ const getInitialExpandedSection = (pathname: string): Record<SectionKey, boolean
 
   // Resource pages that live under /docs/guides/ but belong to the Resources section.
   // Must be checked BEFORE the /docs/guides/ startsWith so the Resources section opens.
-  const resourceGuidePaths = ['/docs/guides/troubleshooting', '/docs/guides/building-with-ai'];
+  const resourceGuidePaths = [
+    '/docs/guides/troubleshooting',
+    '/docs/guides/encryption-at-rest',
+    '/docs/guides/building-with-ai',
+  ];
 
   if (pathname.startsWith('/docs/tutorials/') || pathname === '/docs/tutorials') {
     sections.tutorials = true;
@@ -372,6 +376,9 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
             </SubItem>
             <SubItem to="/docs/guides/troubleshooting" currentPath={currentPath}>
               Troubleshooting
+            </SubItem>
+            <SubItem to="/docs/guides/encryption-at-rest" currentPath={currentPath}>
+              Encryption at rest
             </SubItem>
             <SubItem to="/docs/for-coding-agents" currentPath={currentPath}>
               For coding agents
