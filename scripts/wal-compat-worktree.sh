@@ -90,11 +90,10 @@ probe_old_binary() {
   echo "started"
 }
 
-# Every file of the WAL directory with its content digest, in name order.
+# Every file of the WAL directory with its content digest, in name order. A
+# file that cannot be hashed fails the pipeline, and with it the script.
 wal_digest() {
-  (cd "$1" && find . -type f | LC_ALL=C sort | while read -r f; do
-    printf '%s %s\n' "$(shasum -a 256 <"$f" | cut -d' ' -f1)" "$f"
-  done)
+  (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256)
 }
 
 fail=0
