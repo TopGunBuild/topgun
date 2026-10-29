@@ -213,6 +213,47 @@ This guide covers common issues you may encounter when using TopGun, organized b
 - `WAL directory check: refusing to start: {file} names no WAL partition 0..271; its applied watermark cannot be imported` — a file named like `partition-*.applied` that is not one of the 271 partitions lies in the WAL directory. Move it out of the WAL directory and start again.
 - `WAL recovery: refusing to start: partition {p} holds frame {sequence} at or below its applied watermark {W}; a frame below the watermark is never replayed` — the log hands recovery a write the data directory already counts as stored. This is not a state the server produces; keep the logs and both directories, and report it. Restoring both directories from the same backup lets the node start.
 
+### Server refuses to start with an encryption line
+
+**Symptom:** The server exits with code 1 at startup, before it accepts a connection, with an error that names one of the encryption variables, begins with `encryption: refusing to start:` (also logged as one `ERROR` line), or begins with `store format: refusing to open:` and names the keyring or the seal pass.
+
+**Cause:** With [encryption at rest](/docs/guides/encryption-at-rest), the data keys that seal your records are kept in the data directory only wrapped by your master key. A store that has ever had encryption on needs that master key at every start, also after encryption was turned off again. Without it the server refuses before it opens the write-ahead log, and the refusal writes nothing: no record, no metadata and no WAL file. The server never prints or logs the key. Below, `{fp}` is the fingerprint of a master key, 16 hexadecimal characters that identify it without revealing it.
+
+**Solutions, by the line the server logged:**
+
+- `{VAR} is set but empty` — one of `TOPGUN_ENCRYPTION_AT_REST`, `TOPGUN_MASTER_KEY_PROVIDER`, `TOPGUN_MASTER_KEY_FILE` or `TOPGUN_MASTER_KEY_PREVIOUS_FILE` is set to an empty value. Unset it, or give it a value.
+- ``TOPGUN_ENCRYPTION_AT_REST={value} is not `on` or `off` `` — use exactly `on` or `off`, in lower case.
+- `TOPGUN_ENCRYPTION_AT_REST=on with STORAGE_BACKEND=null: the null backend stores nothing to seal` — the null backend keeps nothing on disk. Remove `STORAGE_BACKEND=null` to use the embedded store, or turn encryption off.
+- `TOPGUN_ENCRYPTION_AT_REST=on needs TOPGUN_MASTER_KEY_PROVIDER=file` — set `TOPGUN_MASTER_KEY_PROVIDER=file` and `TOPGUN_MASTER_KEY_FILE`.
+- `TOPGUN_MASTER_KEY_PROVIDER=file needs TOPGUN_MASTER_KEY_FILE` — set `TOPGUN_MASTER_KEY_FILE` to the path of the key file.
+- `{VAR} is set, but TOPGUN_MASTER_KEY_PROVIDER is not` — a key file is named but no provider. Set `TOPGUN_MASTER_KEY_PROVIDER=file`, or unset the key file variable.
+- `TOPGUN_MASTER_KEY_PROVIDER={value} is not a provider (expected: file)` — `file` is the only provider. AWS KMS and Vault Transit are not available yet.
+- `encryption: refusing to start: provider file: the master key file {path} cannot be read: {error}` — the file is missing or the server's user cannot read it. Mount or restore the key file at that path. The line names the file, not a key id: no key is known until the file is read.
+- `encryption: refusing to start: provider file: the master key file {path} is accessible by group or others (mode {mode}); allow its owner only (chmod 600)` — run `chmod 600` (or `400`) on the file, owned by the user the server runs as. The mode is checked on the target of a symlink, so in Kubernetes mount the Secret with `defaultMode: 0400`.
+- `encryption: refusing to start: provider file: the master key file {path} does not hold exactly 64 hexadecimal characters` — the file must hold the 64 hexadecimal characters of a 256-bit key and at most one trailing newline. A file saved with Windows line endings (`\r\n`) is refused: convert it to a plain `\n` ending, or remove the ending.
+- `encryption: refusing to start: the store is sealed; set TOPGUN_MASTER_KEY_PROVIDER to the key that sealed it (fingerprint {fp})` — the store has had encryption on and no provider is configured. This also happens after encryption was turned off: the store keeps its keys. Set `TOPGUN_MASTER_KEY_PROVIDER=file` and `TOPGUN_MASTER_KEY_FILE` to the key with that fingerprint.
+- `encryption: refusing to start: provider {name}: key {id}: the keyring is wrapped by the master key with fingerprint {expected}, but the configured key has fingerprint {configured}; …` — the configured key is not the one the store expects, for example after a backup taken before a key rotation was restored. Point `TOPGUN_MASTER_KEY_FILE` at the key with fingerprint `{expected}`, or, to move the store to the configured key, set `TOPGUN_MASTER_KEY_PREVIOUS_FILE` to the key with fingerprint `{expected}`: the start then re-wraps the keys under the configured one.
+- `encryption: refusing to start: provider {name}: key {id}: the wrap does not authenticate under the configured master key (fingerprint {fp})` (or `the previous master key`) — the fingerprint matches, but the wrapped data key in the data directory was changed or damaged. Restore the data directory and the WAL directory from the same backup.
+- `store format: refusing to open: …` followed by one of `the keyring row cannot be decoded`, `the keyring is version …`, `the keyring holds key id 0, which is never issued`, `the keyring holds key id … twice`, `the keyring holds … active keys`, `the keyring's next key id … is not above its largest id …`, `a seal pass without a keyring`, `the seal pass direction … is unknown`, `a seal pass with no active key`, `an unseal pass with an active key` or `a seal pass cursor outside the record keyspaces` — the store holds a keyring or seal-pass row that this server does not write. The data directory was damaged or changed by something else. Restore the data directory and the WAL directory from the same backup; keep the refused directory and report it.
+- `value authentication failed for map {map_id} partition {p}` — a sealed value does not open: it was changed, or copied to another record, outside the server. A read of it fails instead of returning it; during the start (the seal or unseal pass) the start fails. Restore the data directory and the WAL directory from the same backup. The record key is not logged.
+
+### Server refuses to start with a WAL segment line
+
+**Symptom:** The server exits with code 1 at startup, before it accepts a connection, with a `FATAL:` line about the WAL followed by a line that begins with `WAL segment` or `WAL file`.
+
+**Cause:** Each write-ahead-log segment starts with a header that names its partition, its first sequence number, its format and, when [encryption at rest](/docs/guides/encryption-at-rest) is on, the data key that seals its frames. A segment whose header, name or frames do not agree is refused rather than replayed. Below, `{file}` is the segment.
+
+**Solutions, by the line the server logged:**
+
+- `WAL segment {file} has a header for partition {p} from sequence {s}, which its name does not carry; refusing to start` — the file was renamed or copied between partitions. Restore the WAL directory together with the data directory from the same backup.
+- `WAL segment {file} has a header that is refused: {reason}; refusing to start` — with `unknown header version`, `unknown partition layout`, `unknown payload schema` or `unknown cipher`, the segment was written by a newer version of the server: run that version. With `header CRC … does not match its content` or `key id … does not fit cipher …`, the header is damaged: restore the WAL directory together with the data directory from the same backup.
+- `WAL segment {file} has a truncated tail but is not the active segment; a torn non-last segment is corruption — refusing to start` — a segment that is not the last one in its partition is cut short. Restore both directories from the same backup.
+- `WAL segment {file} is sealed with data key {id}, which is not in the keyring; refusing to start` — the WAL directory does not belong to this data directory: no key the data directory holds opens it. Restore the data directory and the WAL directory from the same backup; they are one unit.
+- `WAL segment {file} has a frame at offset {offset} that fails authentication: its bytes were changed; refusing to start` — a sealed frame was changed on disk although its checksum is intact. It is not a torn write from a crash, which the server tolerates at the end of the last segment. Restore both directories from the same backup, and keep the refused files.
+- `WAL file {file} has wrong magic at offset 0; refusing to start to avoid replaying corrupt data` from a server **older** than WAL format v2 — the WAL directory was written by a newer version, which no older version reads. Start the newer version again and stop it until its stop logs `drained=true`: that stop removes every segment the store holds. An older version that refuses with `store format: refusing to open: unknown metadata "keyring"` cannot open a store that has had encryption on; see [rolling back](/docs/guides/encryption-at-rest#rolling-back).
+
+A store file that the embedded store cannot open at all is a different refusal, `store open: … redb panicked while opening it`; see the store location section above.
+
 ### Cluster nodes not discovering each other
 
 import { AlertBox } from '../../../components/docs/AlertBox';
