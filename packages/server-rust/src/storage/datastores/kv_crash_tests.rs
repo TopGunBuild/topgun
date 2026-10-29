@@ -80,6 +80,12 @@ fn k01_the_crashable_backend_keeps_synced_and_drops_unsynced_writes() {
             assert_dead(&backend);
             let bytes = image_bytes(&image);
             assert_eq!(&bytes[..MIB], synced.as_slice(), "{mode:?} seed {seed}");
+            // A write kept past a lost set_len does not lengthen the image.
+            assert!(
+                bytes.len() == MIB || bytes.len() == MIB + unsynced.len(),
+                "{mode:?} seed {seed}: length {} is not one a set_len gave",
+                bytes.len()
+            );
             let tail = bytes.get(MIB..).unwrap_or(&[]);
             let sectors: Vec<bool> = unsynced
                 .chunks(512)
