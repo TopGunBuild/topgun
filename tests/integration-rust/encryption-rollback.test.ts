@@ -1,6 +1,6 @@
 /**
  * Integration: an older binary refuses a data directory that has had
- * encryption at rest on (TG-ENC-009).
+ * encryption at rest on.
  *
  * The newer binary keeps the wrapped data keys in a `keyring` metadata row of
  * the data directory, and keeps that row after encryption is turned off again.
