@@ -11,6 +11,8 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'scripts/check-redb-vendor.sh'
+      - 'scripts/redb-vendor.patch'
       - '.github/workflows/rust.yml'
   pull_request:
     branches: [main, develop]
@@ -22,6 +24,8 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'scripts/check-redb-vendor.sh'
+      - 'scripts/redb-vendor.patch'
       - '.github/workflows/rust.yml'
   # Perf gates are informational and slow; run them nightly off the PR critical path
   # so PRs never time out waiting for multi-minute harness builds + benchmark scenarios.
@@ -59,7 +63,8 @@ jobs:
     # 30, not 15: with the soak-harness test corpus this job runs ~15 min on hosted
     # runners (clippy ~3 min + debug `cargo test --all-targets` ~10 min), so a 15-minute
     # budget cancels a job whose every step already passed and skips Simulation Tests.
-    timeout-minutes: 30
+    # 40, not 30: runs now reach ~27 min, leaving too little room for runner noise and a cold cache.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -85,6 +90,12 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+
+      # The server builds against the vendored redb; this fails when the
+      # [patch.crates-io] entry is gone or the vendored tree differs from the
+      # crates.io crate by anything but the committed patch.
+      - name: Check the vendored redb
+        run: ./scripts/check-redb-vendor.sh
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check

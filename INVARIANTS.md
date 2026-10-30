@@ -2862,24 +2862,34 @@ weaker than a test.
   written after the last sync may be lost, whole, per write or per 512-byte sector"; the file's
   length changes only by a kept `set_len`, never by a kept write past the end. redb runs with its
   default one-phase commit.
-- **Known false (redb 2.6.3, TODO-888):** a crash while a commit grows the file can keep the header
-  with the grown layout and lose the growth; redb 2.6.3 then panics inside its open
-  (`page_manager.rs:243`) on every start although the durable state is intact, so the recovery
-  this invariant claims does not happen. The server refuses such a file with exit 1 and one ERROR
-  line naming it (`open_redb` in `redb_engine.rs`, shown by
+- **A crash while the file grows:** covered by the statement for this build. Unmodified redb 2.6.3
+  can keep, after such a crash, the header with the grown layout and lose the growth, and then
+  panics inside its open (`page_manager.rs:243`) on every start although the durable state is
+  intact. The vendored redb (`packages/server-rust/vendor/redb-2.6.3`) carries the upstream fix
+  that syncs the file length right after every growth, before the grown layout can reach the
+  header, so this build no longer leaves such a file. A file left by an older binary is still
+  refused with exit 1 and one ERROR line naming it (`open_redb` in `redb_engine.rs`, shown by
   `a_store_file_shorter_than_its_layout_is_refused_with_exit_1_and_left_unchanged` in
-  `tests/redb_open_panic.rs`). A redb panic after the open (for example while a commit grows the
-  file) is deliberately not caught: redb's own invariants are broken and the process must not go
-  on, so it still exits 101. Of the 206 crash points of a growing 4-batch workload, 35 kept-write
-  and 18 torn-sector images hit this; `k03`/`k04` do not grow the file inside an unsynced window.
+  `tests/redb_open_panic.rs`). A redb panic after the open is deliberately not caught: redb's own
+  invariants are broken and the process must not go on, so it still exits 101. `k08` and `k09`
+  crash a workload of 4 durable batches of 10 000 rows of 60 random bytes that grows the file
+  after its first batch: `k09` at every 7th backend op (about 207 points × 3 modes), `k08` at every
+  161st (9 points × 3 modes). Without the fix, one counting run at every 7th op had 35 kept-write
+  and 16 torn-sector images panic in the open, and `k08` failed in 24 of 25 runs; with it, none.
+  Which images panic varies from run to run: redb iterates hash sets with a per-process random
+  order, so the op sequence of a run differs. `k03`/`k04` do not grow the file inside an unsynced
+  window.
 - **Maintaining code:** `kv_engine.rs` — `MemKvEngine::write` (one lock acquisition per batch) and
   `MemKvEngine::shutdown`; `redb_engine.rs` — `RedbKvEngine::write` (validation, then one write
   transaction), `sync`, `shutdown` (sync, then drop the database).
 - **Enforcing test:** `k01_the_crashable_backend_keeps_synced_and_drops_unsynced_writes` (the crash
   model, its length rule included), `k03_redb_every_crash_point_recovers_a_prefix_that_holds_every_durable_batch`,
   `k04_redb_random_crashes_recover_a_prefix_that_holds_every_durable_batch`,
-  `k05_mem_crashes_recover_a_prefix_that_holds_every_durable_batch` — in
-  `storage/datastores/kv_crash_tests.rs`; `c04_batch_ops_apply_in_order`,
+  `k05_mem_crashes_recover_a_prefix_that_holds_every_durable_batch`,
+  `k08_redb_crashes_while_the_file_grows_recover_a_prefix_that_holds_every_durable_batch`,
+  `k09_redb_every_seventh_op_of_a_growing_workload_recovers_a_prefix_that_holds_every_durable_batch`
+  (ignored; run with `--ignored`) — in `storage/datastores/kv_crash_tests.rs`;
+  `c04_batch_ops_apply_in_order`,
   `c05_a_batch_with_an_invalid_range_changes_nothing`,
   `c25_a_concurrent_reader_never_sees_part_of_a_batch`,
   `m03_a_reader_never_sees_a_batch_parked_between_its_ops`,
@@ -2895,7 +2905,8 @@ weaker than a test.
 - **Violation consequence:** a record layer built on the engine would expose half of a multi-key
   update to a reader, or lose acknowledged batches across a clean restart.
 - **Discovered by:** SPEC-394a (the boundary's contract).
-- **Status:** decided, **enforced** for both engines, except the known-false case above on redb 2.6.3. Shown red on one-change mutants: a batch
+- **Status:** decided, **enforced** for both engines. `k08` is red on unmodified redb 2.6.3 (a panic at
+  `page_manager.rs:243` in the open) in 24 of 25 runs. Shown red on one-change mutants: a batch
   applied op by op (mem), one commit per op (redb, `r01`, 10 of 10 runs, each ending `FAILED`), the
   database forgotten instead of dropped (redb, `c27`). A14 (Mem lock per op) is killed
   deterministically by `m03_a_reader_never_sees_a_batch_parked_between_its_ops`, 10 of 10;
@@ -3269,8 +3280,8 @@ weaker than a test.
   `the_seal_pass_row_round_trips_and_refuses_an_unknown_direction` (`sealing.rs`).
 - **Violation consequence:** a crash during a pass would leave values the cursor counts as sealed in
   plaintext, or a resume would skip rows.
-- **Not claimed:** over redb the crash model of the tests is "drop every unsynced write"; a crash while
-  redb grows its file is TG-ENG-001's known-false case (TODO-888).
+- **Not claimed:** over redb the crash model of the tests is "drop every unsynced write". A crash while
+  redb grows its file is covered by TG-ENG-001 for this build, not by these tests.
 - **Discovered by:** SPEC-399 (TODO-861), part 399b.
 - **Status:** decided, **enforced**. Shown red on one-change mutants: the cursor batch written before
   the rows it covers (both `the_seal_pass_resumes_…` tests).

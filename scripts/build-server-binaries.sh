@@ -71,6 +71,9 @@ rustup target add aarch64-apple-darwin x86_64-unknown-linux-gnu
 
 # ── Compile ────────────────────────────────────────────────────────────────────
 
+# The published binaries must carry the vendored redb, not the crates.io one.
+bash "${REPO_ROOT}/scripts/check-redb-vendor.sh" --resolve-only
+
 echo ""
 echo "[1/5] Building darwin-arm64 (aarch64-apple-darwin)..."
 cd "${REPO_ROOT}"

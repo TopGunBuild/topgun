@@ -19,3 +19,10 @@ limitations under the License.
 
 This product includes software developed by other open source projects.
 See the package dependencies for their respective licenses.
+
+redb 2.6.3 (https://github.com/cberner/redb), Copyright (c) 2021 Christopher Berner,
+licensed under the MIT License or the Apache License, Version 2.0, is included in
+source form in packages/server-rust/vendor/redb-2.6.3, with its license files.
+It is modified: the store file's grown length is synced right after the file
+grows, as upstream redb does from version 4.2.0. The change is described in
+packages/server-rust/vendor/redb-2.6.3/TOPGUN-VENDOR.md.

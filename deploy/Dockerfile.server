@@ -8,6 +8,10 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY packages/core-rust/ ./packages/core-rust/
 COPY packages/server-rust/ ./packages/server-rust/
+COPY scripts/check-redb-vendor.sh ./scripts/
+
+# The image must carry the vendored redb, not the crates.io one
+RUN ./scripts/check-redb-vendor.sh --resolve-only
 
 # Build the server binary in release mode
 RUN cargo build --release --bin topgun-server
