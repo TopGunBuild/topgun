@@ -11,6 +11,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'scripts/check-redb-vendor.sh'
       - '.github/workflows/docker.yml'
   pull_request:
     branches: [main]
@@ -21,6 +22,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'scripts/check-redb-vendor.sh'
       - '.github/workflows/docker.yml'
   workflow_dispatch:  # allow manual runs
 
