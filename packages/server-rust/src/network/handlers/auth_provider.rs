@@ -26,7 +26,7 @@ const OIDC_DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(86400);
 
 // ── Claim mapping ─────────────────────────────────────────────────────────────
 
-/// Which external claims map to `TopGun`'s `sub` and `roles`.
+/// Which external claims map to `TopGun`'s `sub`, `roles` and tenant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimMapping {
@@ -38,6 +38,10 @@ pub struct ClaimMapping {
     /// If absent, the issued `TopGun` JWT has empty roles.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub roles_claim: Option<String>,
+    /// JSON key to read the tenant from. Its string value is minted under the
+    /// server's `TOPGUN_TENANT_CLAIM` name, and only while tenancy is on.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tenant_claim: Option<String>,
 }
 
 impl Default for ClaimMapping {
@@ -45,6 +49,7 @@ impl Default for ClaimMapping {
         Self {
             sub_claim: "sub".to_string(),
             roles_claim: None,
+            tenant_claim: None,
         }
     }
 }
@@ -109,6 +114,9 @@ pub struct ExternalClaims {
     pub sub: String,
     /// Roles mapped from the configured `roles_claim`. Empty when not configured.
     pub roles: Vec<String>,
+    /// Tenant mapped from the configured `tenant_claim`, when its value is a
+    /// string. Its format is checked where the minted token is used, not here.
+    pub tenant: Option<String>,
 }
 
 // ── AuthProvider trait ────────────────────────────────────────────────────────
@@ -128,7 +136,7 @@ pub trait AuthProvider: Send + Sync {
 
 // ── Claim extraction helper ───────────────────────────────────────────────────
 
-/// Extract `sub` and `roles` from a decoded JWT payload according to `mapping`.
+/// Extract `sub`, `roles` and the tenant from a decoded JWT payload according to `mapping`.
 ///
 /// `sub_claim` falls back to "sub" when the configured field is empty, guarding
 /// against partial `claims` objects that omit the field entirely.
@@ -160,7 +168,14 @@ pub(crate) fn extract_claims(
         },
     };
 
-    Ok(ExternalClaims { sub, roles })
+    let tenant = mapping
+        .tenant_claim
+        .as_deref()
+        .and_then(|key| payload.get(key))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+
+    Ok(ExternalClaims { sub, roles, tenant })
 }
 
 // ── HMAC provider ─────────────────────────────────────────────────────────────
@@ -540,10 +555,30 @@ mod tests {
         let m = ClaimMapping {
             sub_claim: String::new(),
             roles_claim: None,
+            tenant_claim: None,
         };
         let payload = json!({ "sub": "user-1" });
         let claims = extract_claims(&payload, &m).unwrap();
         assert_eq!(claims.sub, "user-1");
+    }
+
+    /// A provider config written before `tenantClaim` existed still parses,
+    /// with no tenant mapping; one that names it maps it.
+    #[test]
+    fn claim_mapping_tenant_claim_is_optional_in_config() {
+        let parse = |claims: Value| match serde_json::from_value::<AuthProviderConfig>(json!({
+            "type": "hmac", "name": "idp", "secret": "s", "claims": claims,
+        }))
+        .unwrap()
+        {
+            AuthProviderConfig::Hmac { claims, .. } => claims,
+            other => panic!("expected Hmac, got {other:?}"),
+        };
+        let old = parse(json!({ "subClaim": "email", "rolesClaim": "roles" }));
+        assert_eq!(old.sub_claim, "email");
+        assert!(old.tenant_claim.is_none());
+        let new = parse(json!({ "subClaim": "sub", "tenantClaim": "org_id" }));
+        assert_eq!(new.tenant_claim.as_deref(), Some("org_id"));
     }
 
     // ── extract_claims ────────────────────────────────────────────────────────
@@ -553,6 +588,7 @@ mod tests {
         let m = ClaimMapping {
             sub_claim: "email".to_string(),
             roles_claim: None,
+            tenant_claim: None,
         };
         let payload = json!({ "email": "alice@example.com" });
         let claims = extract_claims(&payload, &m).unwrap();
@@ -565,6 +601,7 @@ mod tests {
         let m = ClaimMapping {
             sub_claim: "sub".to_string(),
             roles_claim: Some("roles".to_string()),
+            tenant_claim: None,
         };
         let payload = json!({ "sub": "u1", "roles": ["admin", "editor"] });
         let claims = extract_claims(&payload, &m).unwrap();
@@ -576,6 +613,7 @@ mod tests {
         let m = ClaimMapping {
             sub_claim: "sub".to_string(),
             roles_claim: Some("role".to_string()),
+            tenant_claim: None,
         };
         let payload = json!({ "sub": "u1", "role": "admin" });
         let claims = extract_claims(&payload, &m).unwrap();
@@ -587,6 +625,7 @@ mod tests {
         let m = ClaimMapping {
             sub_claim: "sub".to_string(),
             roles_claim: Some("roles".to_string()),
+            tenant_claim: None,
         };
         let payload = json!({ "sub": "u1" });
         let claims = extract_claims(&payload, &m).unwrap();
@@ -714,6 +753,7 @@ mod tests {
             ClaimMapping {
                 sub_claim: "sub".to_string(),
                 roles_claim: Some("roles".to_string()),
+                tenant_claim: None,
             },
         );
         let claims = provider.verify(&token).await.unwrap();

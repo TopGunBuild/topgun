@@ -59,7 +59,15 @@ struct ExchangeJwtClaims {
     roles: Vec<String>,
     exp: u64,
     iat: u64,
+    /// At most one entry: the tenant under the `TOPGUN_TENANT_CLAIM` name. Its
+    /// name is configured, so it cannot be a field of its own.
+    #[serde(flatten)]
+    tenant: serde_json::Map<String, serde_json::Value>,
 }
+
+/// Claims the mint writes itself; a tenant claim of one of these names would
+/// put a second key of that name into the token.
+const MINTED_CLAIMS: [&str; 4] = ["sub", "roles", "exp", "iat"];
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
@@ -74,6 +82,7 @@ struct ExchangeJwtClaims {
 /// Returns an error tuple of `(StatusCode, Json<ErrorResponse>)` when:
 /// - No auth providers are configured (404)
 /// - JWT secret is missing (500)
+/// - `TOPGUN_TENANT_CLAIM` names a claim the mint writes itself (500)
 /// - Named provider not found (400)
 /// - All providers fail verification (401)
 /// - Token signing fails (500)
@@ -104,6 +113,27 @@ pub async fn token_exchange_handler(
             }),
         )
     })?;
+
+    // JWT keys are case-sensitive, so only an exact match collides.
+    if let Some(name) = state
+        .config
+        .tenant_claim
+        .as_deref()
+        .filter(|name| MINTED_CLAIMS.contains(name))
+    {
+        let message = format!(
+            "configuration error: the tenant claim `{name}` is a claim token exchange mints itself"
+        );
+        tracing::error!("{message}; no token is minted");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                code: 500,
+                message,
+                field: None,
+            }),
+        ));
+    }
 
     // Resolve which providers to attempt.
     let providers: Vec<_> = if let Some(ref name) = req.provider {
@@ -169,11 +199,20 @@ pub async fn token_exchange_handler(
                     );
                 }
 
+                // Tenancy off: the external tenant is dropped, whatever it is.
+                let mut tenant = serde_json::Map::new();
+                if let (Some(name), Some(value)) =
+                    (state.config.tenant_claim.as_deref(), external_claims.tenant)
+                {
+                    tenant.insert(name.to_owned(), value.into());
+                }
+
                 let claims = ExchangeJwtClaims {
                     sub: external_claims.sub,
                     roles,
                     exp,
                     iat: now,
+                    tenant,
                 };
 
                 let token = jsonwebtoken::encode(
@@ -296,6 +335,7 @@ mod tests {
             Ok(ExternalClaims {
                 sub: self.sub.clone(),
                 roles: self.roles.clone(),
+                tenant: None,
             })
         }
     }
@@ -640,5 +680,176 @@ mod tests {
             body.get("refreshExpiresAt").is_none(),
             "refreshExpiresAt must be absent"
         );
+    }
+
+    // ── Tenant claim (AC7) ────────────────────────────────────────────────────
+
+    use crate::network::config::NetworkConfig;
+    use crate::network::handlers::auth::AuthHandler;
+    use crate::network::handlers::auth_provider::{ClaimMapping, HmacProvider};
+
+    const IDP_SECRET: &str = "idp-secret";
+    const MINT_SECRET: &str = "mint-secret";
+    /// Distinct from both the mapping's `org_id` and a bare `tenant`, so a mint
+    /// under either of those names is caught.
+    const TENANT_CLAIM: &str = "https://example.com/tenant";
+
+    /// Exchange an HS256 external token carrying `extra` through a real
+    /// `HmacProvider` that maps `tenantClaim: "org_id"`.
+    async fn exchange_with_tenant(tenant_claim: Option<&str>, extra: Value) -> (StatusCode, Value) {
+        let mut external = json!({
+            "sub": "user-1",
+            "exp": jsonwebtoken::get_current_timestamp() + 3600,
+        });
+        external
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let external = jsonwebtoken::encode(
+            &Header::default(),
+            &external,
+            &EncodingKey::from_secret(IDP_SECRET.as_bytes()),
+        )
+        .unwrap();
+        let provider: Arc<dyn AuthProvider> = Arc::new(HmacProvider::new(
+            "idp".to_string(),
+            IDP_SECRET.to_string(),
+            None,
+            ClaimMapping {
+                tenant_claim: Some("org_id".to_string()),
+                ..ClaimMapping::default()
+            },
+        ));
+        let state = AppState {
+            config: Arc::new(NetworkConfig {
+                tenant_claim: tenant_claim.map(str::to_owned),
+                ..NetworkConfig::default()
+            }),
+            ..make_state(vec![provider], Some(MINT_SECRET))
+        };
+        post_exchange(make_app(state), json!({ "token": external })).await
+    }
+
+    fn minted_claims(body: &Value) -> serde_json::Map<String, Value> {
+        let mut validation = jsonwebtoken::Validation::default();
+        validation.validate_aud = false;
+        jsonwebtoken::decode::<Value>(
+            body["token"].as_str().expect("minted token present"),
+            &jsonwebtoken::DecodingKey::from_secret(MINT_SECRET.as_bytes()),
+            &validation,
+        )
+        .unwrap()
+        .claims
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    fn keys(claims: &serde_json::Map<String, Value>) -> Vec<&str> {
+        let mut keys: Vec<&str> = claims.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[tokio::test]
+    async fn tenant_is_minted_under_the_configured_name() {
+        let (status, body) =
+            exchange_with_tenant(Some(TENANT_CLAIM), json!({ "org_id": "acme" })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let claims = minted_claims(&body);
+        assert_eq!(claims[TENANT_CLAIM], "acme");
+        assert_eq!(
+            keys(&claims),
+            ["exp", "https://example.com/tenant", "iat", "roles", "sub"]
+        );
+
+        let principal = AuthHandler::new(MINT_SECRET.to_string(), None)
+            .with_tenant_claim(Some(TENANT_CLAIM.to_string()))
+            .verify_token(body["token"].as_str().unwrap(), 0)
+            .await
+            .unwrap();
+        assert_eq!(principal.tenant.as_deref(), Some("acme"));
+    }
+
+    /// An empty string is still a string: it is minted, and refused at use.
+    #[tokio::test]
+    async fn empty_string_tenant_is_minted_as_is() {
+        let (status, body) =
+            exchange_with_tenant(Some(TENANT_CLAIM), json!({ "org_id": "" })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(minted_claims(&body)[TENANT_CLAIM], "");
+    }
+
+    #[tokio::test]
+    async fn missing_or_non_string_tenant_mints_no_tenant_key() {
+        for extra in [
+            json!({}),
+            json!({ "org_id": 5 }),
+            json!({ "org_id": null }),
+            json!({ "org_id": ["acme"] }),
+        ] {
+            let (status, body) = exchange_with_tenant(Some(TENANT_CLAIM), extra.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{extra}: {body}");
+            let claims = minted_claims(&body);
+            assert_eq!(keys(&claims), ["exp", "iat", "roles", "sub"], "{extra}");
+
+            let refused = AuthHandler::new(MINT_SECRET.to_string(), None)
+                .with_tenant_claim(Some(TENANT_CLAIM.to_string()))
+                .verify_token(body["token"].as_str().unwrap(), 0)
+                .await;
+            assert!(refused.is_err(), "{extra}: the token must fail at use");
+        }
+    }
+
+    #[tokio::test]
+    async fn tenant_claim_naming_a_minted_claim_mints_no_token() {
+        for name in MINTED_CLAIMS {
+            let (status, body) =
+                exchange_with_tenant(Some(name), json!({ "org_id": "acme" })).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{name}: {body}");
+            assert!(body.get("token").is_none(), "{name}: {body}");
+            let message = body["message"].as_str().unwrap();
+            assert!(
+                message.contains(&format!("`{name}`")) && message.contains("configuration"),
+                "{name}: {message}"
+            );
+        }
+        // JWT keys are case-sensitive: `Sub` is a claim of its own.
+        let (status, body) = exchange_with_tenant(Some("Sub"), json!({ "org_id": "acme" })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let claims = minted_claims(&body);
+        assert_eq!(
+            (&claims["Sub"], &claims["sub"]),
+            (&json!("acme"), &json!("user-1"))
+        );
+    }
+
+    /// [G] Tenancy off: no tenant key is minted, and a mapping that names a
+    /// minted claim is no configuration error.
+    #[tokio::test]
+    async fn tenancy_off_mints_no_tenant_key() {
+        let (status, body) = exchange_with_tenant(None, json!({ "org_id": "acme" })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(keys(&minted_claims(&body)), ["exp", "iat", "roles", "sub"]);
+
+        let provider: Arc<dyn AuthProvider> = Arc::new(HmacProvider::new(
+            "idp".to_string(),
+            IDP_SECRET.to_string(),
+            None,
+            ClaimMapping {
+                tenant_claim: Some("sub".to_string()),
+                ..ClaimMapping::default()
+            },
+        ));
+        let external = jsonwebtoken::encode(
+            &Header::default(),
+            &json!({ "sub": "user-1", "exp": jsonwebtoken::get_current_timestamp() + 3600 }),
+            &EncodingKey::from_secret(IDP_SECRET.as_bytes()),
+        )
+        .unwrap();
+        let app = make_app(make_state(vec![provider], Some(MINT_SECRET)));
+        let (status, body) = post_exchange(app, json!({ "token": external })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(keys(&minted_claims(&body)), ["exp", "iat", "roles", "sub"]);
     }
 }

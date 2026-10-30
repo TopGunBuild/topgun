@@ -24,6 +24,9 @@ pub enum AdminAuthError {
     InvalidToken(String),
     /// JWT is valid but lacks the `"admin"` role.
     Forbidden,
+    /// Tenancy is on and the JWT carries the tenant claim (named here): the
+    /// admin plane works across tenants, so a tenant's token never enters it.
+    TenantToken(String),
     /// JWT secret not configured on the server.
     NotConfigured,
 }
@@ -31,15 +34,28 @@ pub enum AdminAuthError {
 impl IntoResponse for AdminAuthError {
     fn into_response(self) -> Response {
         let (status, error_msg) = match self {
-            Self::MissingToken => (StatusCode::UNAUTHORIZED, "missing or invalid Bearer token"),
-            Self::InvalidToken(ref _e) => (StatusCode::UNAUTHORIZED, "invalid or expired token"),
-            Self::Forbidden => (StatusCode::FORBIDDEN, "admin role required"),
-            Self::NotConfigured => (StatusCode::UNAUTHORIZED, "authentication not configured"),
+            Self::MissingToken => (
+                StatusCode::UNAUTHORIZED,
+                "missing or invalid Bearer token".to_string(),
+            ),
+            Self::InvalidToken(ref _e) => (
+                StatusCode::UNAUTHORIZED,
+                "invalid or expired token".to_string(),
+            ),
+            Self::Forbidden => (StatusCode::FORBIDDEN, "admin role required".to_string()),
+            Self::TenantToken(claim) => (
+                StatusCode::FORBIDDEN,
+                format!("the admin API refuses a token carrying the tenant claim `{claim}`"),
+            ),
+            Self::NotConfigured => (
+                StatusCode::UNAUTHORIZED,
+                "authentication not configured".to_string(),
+            ),
         };
 
         let body = Json(ErrorResponse {
             code: status.as_u16().into(),
-            message: error_msg.to_string(),
+            message: error_msg,
             field: None,
         });
 
@@ -127,6 +143,18 @@ impl FromRequestParts<AppState> for AdminClaims {
             .as_str()
             .map(str::to_owned)
             .ok_or_else(|| AdminAuthError::InvalidToken("missing sub claim in JWT".to_string()))?;
+
+        // A tenant token is refused whatever the claim's value (an explicit
+        // `null` included) and whatever its roles, so the answer names the
+        // claim rather than a missing role. Keys match exactly, as in JWT.
+        if let Some(claim) = state.config.tenant_claim.as_deref() {
+            if raw_claims
+                .as_object()
+                .is_some_and(|claims| claims.contains_key(claim))
+            {
+                return Err(AdminAuthError::TenantToken(claim.to_owned()));
+            }
+        }
 
         let roles: Vec<String> = raw_claims["roles"]
             .as_array()
@@ -542,5 +570,136 @@ CQIDAQAB
             matches!(result.unwrap_err(), AdminAuthError::InvalidToken(_)),
             "should be InvalidToken"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC8: the admin plane refuses a token carrying the tenant claim
+    // -----------------------------------------------------------------------
+
+    /// `GET /api/admin/maps` with a token of `claims` (plus `sub` and `exp`),
+    /// tenancy on with claim `org_id` when `tenancy_on`.
+    async fn get_maps(
+        tenancy_on: bool,
+        validator: Option<Arc<dyn crate::network::handlers::auth_validator::AuthValidator>>,
+        claims: serde_json::Value,
+    ) -> (StatusCode, String) {
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        let mut token = serde_json::json!({
+            "sub": "operator",
+            "exp": jsonwebtoken::get_current_timestamp() + 3600,
+        });
+        token
+            .as_object_mut()
+            .unwrap()
+            .extend(claims.as_object().unwrap().clone());
+        let token = jsonwebtoken::encode(
+            &Header::default(),
+            &token,
+            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
+        )
+        .unwrap();
+        let state = AppState {
+            config: Arc::new(NetworkConfig {
+                tenant_claim: tenancy_on.then(|| "org_id".to_string()),
+                ..NetworkConfig::default()
+            }),
+            jwt_secret: Some(TEST_SECRET.to_owned()),
+            auth_validator: validator,
+            ..AppState::for_test()
+        };
+        let resp = axum::Router::new()
+            .route(
+                "/api/admin/maps",
+                get(crate::network::handlers::admin::list_maps),
+            )
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/admin/maps")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let message = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        (status, message)
+    }
+
+    fn assert_refused_as_tenant_token((status, message): (StatusCode, String), case: &str) {
+        assert_eq!(status, StatusCode::FORBIDDEN, "{case}: {message}");
+        assert!(
+            message.contains("`org_id`") && !message.contains("admin role required"),
+            "{case}: the answer must name the tenant claim, got {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tenancy_on_refuses_a_token_carrying_the_tenant_claim() {
+        use serde_json::json;
+        for value in [json!("acme"), json!(5), json!(null)] {
+            let (status, message) =
+                get_maps(true, None, json!({ "roles": ["admin"], "org_id": value })).await;
+            assert_refused_as_tenant_token((status, message), &format!("admin, org_id={value}"));
+        }
+        // Whatever its roles: not "admin role required".
+        assert_refused_as_tenant_token(
+            get_maps(true, None, json!({ "roles": ["viewer"], "org_id": "acme" })).await,
+            "no admin role",
+        );
+        // Before the custom validator.
+        let rejecting = Arc::new(
+            |_ctx: &crate::network::handlers::auth_validator::AuthValidationContext| {
+                Err("validator ran".to_string())
+            },
+        );
+        assert_refused_as_tenant_token(
+            get_maps(
+                true,
+                Some(rejecting),
+                json!({ "roles": ["admin"], "org_id": "acme" }),
+            )
+            .await,
+            "with a rejecting validator",
+        );
+    }
+
+    /// An admin token without the configured key passes the extractor; the
+    /// handler then answers 503, as `AppState::for_test()` has no store.
+    #[tokio::test]
+    async fn tenancy_on_admits_an_admin_token_without_the_tenant_claim() {
+        use serde_json::json;
+        for claims in [
+            json!({ "roles": ["admin"], "tenant": "acme" }),
+            json!({ "roles": ["admin"], "Org_id": "acme" }),
+        ] {
+            let (status, message) = get_maps(true, None, claims.clone()).await;
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{claims}: {message}"
+            );
+        }
+    }
+
+    /// [G] Tenancy off: the claim is never looked at.
+    #[tokio::test]
+    async fn tenancy_off_admits_an_admin_token_carrying_the_claim() {
+        let (status, message) = get_maps(
+            false,
+            None,
+            serde_json::json!({ "roles": ["admin"], "org_id": "acme" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{message}");
     }
 }
