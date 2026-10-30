@@ -626,6 +626,7 @@ mod tests {
         topgun_core::Principal {
             id: "admin1".to_string(),
             roles: vec!["admin".to_string()],
+            tenant: None,
         }
     }
 
@@ -633,6 +634,7 @@ mod tests {
         topgun_core::Principal {
             id: "user1".to_string(),
             roles: vec!["user".to_string()],
+            tenant: None,
         }
     }
 

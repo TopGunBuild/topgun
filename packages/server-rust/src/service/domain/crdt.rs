@@ -10261,6 +10261,7 @@ mod tests {
         topgun_core::Principal {
             id: "user-http".to_string(),
             roles: vec!["user".to_string()],
+            tenant: None,
         }
     }
 
