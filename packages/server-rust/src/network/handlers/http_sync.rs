@@ -14,7 +14,6 @@ use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use bytes::Bytes;
-use jsonwebtoken::Validation;
 use topgun_core::hash_to_partition;
 use topgun_core::messages::base::Query;
 use topgun_core::messages::{
@@ -23,7 +22,6 @@ use topgun_core::messages::{
 };
 use topgun_core::Timestamp;
 
-use super::auth_validator::AuthValidationContext;
 use super::websocket::{
     attribute_permanent_failure_per_op, numeric_max_op_id, register_client_op_refusal_series,
     OpBatchDispatchContext, TransportKind,
@@ -112,10 +110,9 @@ pub enum TokenPresence {
 /// distinguish "no token" from "bad token".
 #[derive(Debug, Clone)]
 pub struct ClientClaims {
-    /// The authenticated user's identifier (from JWT `sub` claim).
-    pub user_id: String,
-    /// Roles from the JWT.
-    pub roles: Vec<String>,
+    /// The principal the token path built: `sub`, roles and, with tenancy on,
+    /// the tenant. The handler uses it as is, so nothing rebuilds it.
+    pub principal: topgun_core::Principal,
 }
 
 impl OptionalFromRequestParts<AppState> for ClientClaims {
@@ -151,56 +148,18 @@ impl OptionalFromRequestParts<AppState> for ClientClaims {
             return Ok(None);
         };
 
-        // Validate JWT — supports both HS256 and RS256 via decode_jwt_key.
-        let Ok((algorithm, key)) = super::auth::decode_jwt_key(jwt_secret) else {
-            return Ok(None);
-        };
-        let mut validation = Validation::new(algorithm);
-        // Apply optional issuer/audience checks (off unless configured) so the
-        // HTTP request path enforces the same iss/aud as the WS handshake.
-        super::auth::apply_iss_aud_validation(
-            &mut validation,
-            state.config.jwt_issuer.as_deref(),
-            state.config.jwt_audience.as_deref(),
-        );
-        validation.leeway = state.config.jwt_clock_skew_secs;
-
-        // Decode into serde_json::Value to obtain raw_claims for AuthValidationContext.
-        let Ok(token_data) = jsonwebtoken::decode::<serde_json::Value>(token, &key, &validation)
-        else {
-            return Ok(None);
-        };
-
-        let raw_claims = token_data.claims.clone();
-
-        // Require sub claim — anonymous identity is not permitted.
-        let Some(user_id) = raw_claims["sub"].as_str().map(str::to_owned) else {
-            return Ok(None);
-        };
-
-        let roles: Vec<String> = raw_claims["roles"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // Call custom validator after signature verification if configured.
-        if let Some(ref validator) = state.auth_validator {
-            let ctx = AuthValidationContext {
-                user_id: user_id.clone(),
-                roles: roles.clone(),
-                raw_claims,
-            };
-            if let Err(reason) = validator.validate(&ctx).await {
-                tracing::warn!(user_id = %user_id, reason = %reason, "custom auth validator rejected token");
-                return Ok(None);
+        // The same token path as the WS handshake; a refused token is treated
+        // as no token.
+        match super::auth::AuthHandler::from_state(jwt_secret, state)
+            .verify_token(token, state.config.jwt_clock_skew_secs)
+            .await
+        {
+            Ok(principal) => Ok(Some(ClientClaims { principal })),
+            Err(reason) => {
+                tracing::debug!(reason = %reason, "HTTP client token refused");
+                Ok(None)
             }
         }
-
-        Ok(Some(ClientClaims { user_id, roles }))
     }
 }
 
@@ -300,7 +259,6 @@ async fn dispatch_operations(
     ops: Vec<topgun_core::messages::ClientOp>,
     classify_svc: &crate::service::classify::OperationService,
     dispatcher: &Arc<PartitionDispatcher>,
-    claims: Option<&ClientClaims>,
     caller_origin: CallerOrigin,
     principal: Option<&topgun_core::Principal>,
     response: &mut HttpSyncResponse,
@@ -332,7 +290,7 @@ async fn dispatch_operations(
         dispatcher,
         transport: TransportKind::Http,
         caller_origin,
-        client_id: claims.map(|c| c.user_id.clone()),
+        client_id: principal.map(|p| p.id.clone()),
         // Set for the RBAC authorization middleware, exactly as the WebSocket
         // path does.
         principal: principal.cloned(),
@@ -676,18 +634,12 @@ pub async fn http_sync_handler(
     }
 
     // Determine caller_origin and principal based on claims.
-    let (caller_origin, principal) = if let Some(ref c) = claims {
-        (
-            CallerOrigin::HttpClient,
-            Some(topgun_core::Principal {
-                id: c.user_id.clone(),
-                roles: c.roles.clone(),
-                tenant: None,
-            }),
-        )
+    let caller_origin = if claims.is_some() {
+        CallerOrigin::HttpClient
     } else {
-        (CallerOrigin::Anonymous, None)
+        CallerOrigin::Anonymous
     };
+    let principal = claims.map(|c| c.principal);
 
     // Obtain the server's current HLC timestamp.
     let server_hlc: Timestamp = state
@@ -733,7 +685,6 @@ pub async fn http_sync_handler(
             ops,
             classify_svc,
             dispatcher,
-            claims.as_ref(),
             caller_origin,
             principal.as_ref(),
             &mut http_response,
@@ -788,7 +739,7 @@ fn msgpack_response(response: &HttpSyncResponse) -> axum::response::Response {
 )]
 mod tests {
     use super::*;
-    use crate::network::handlers::auth::{decode_jwt_key, JwtClaims};
+    use crate::network::handlers::auth::AuthHandler;
     use crate::network::NetworkConfig;
     use crate::query::cursor::{decode_cursor, encode_cursor, CursorData, SortValue};
     use crate::storage::key_writer::KeyWriteToken;
@@ -958,17 +909,11 @@ mod tests {
         let state = test_state_with_auth(true);
         let token = make_token(Some("user-1"), 3600);
         // Build real ClientClaims by parsing the token with the test secret.
-        let claims = {
-            let (algo, key) = decode_jwt_key(TEST_SECRET).unwrap();
-            let mut v = jsonwebtoken::Validation::new(algo);
-            v.validate_aud = false;
-            v.leeway = 60;
-            let data = jsonwebtoken::decode::<JwtClaims>(&token, &key, &v).unwrap();
-            Some(ClientClaims {
-                user_id: data.claims.sub.unwrap(),
-                roles: data.claims.roles.unwrap_or_default(),
-            })
-        };
+        let principal = AuthHandler::new(TEST_SECRET.to_owned(), None)
+            .verify_token(&token, 60)
+            .await
+            .unwrap();
+        let claims = Some(ClientClaims { principal });
         let body = Bytes::from_static(b"");
         let response = http_sync_handler(
             State(state),
@@ -1101,17 +1046,11 @@ mod tests {
     async fn auth_valid_token_optional_auth_uses_http_client() {
         let state = test_state_with_auth(false);
         let token = make_token(Some("user-2"), 3600);
-        let claims = {
-            let (algo, key) = decode_jwt_key(TEST_SECRET).unwrap();
-            let mut v = jsonwebtoken::Validation::new(algo);
-            v.validate_aud = false;
-            v.leeway = 60;
-            let data = jsonwebtoken::decode::<JwtClaims>(&token, &key, &v).unwrap();
-            Some(ClientClaims {
-                user_id: data.claims.sub.unwrap(),
-                roles: data.claims.roles.unwrap_or_default(),
-            })
-        };
+        let principal = AuthHandler::new(TEST_SECRET.to_owned(), None)
+            .verify_token(&token, 60)
+            .await
+            .unwrap();
+        let claims = Some(ClientClaims { principal });
         let body = Bytes::from_static(b"");
         let response = http_sync_handler(
             State(state),
@@ -1671,7 +1610,7 @@ mod tests {
         assert!(result.is_ok(), "extractor should be infallible");
         let claims = result.unwrap();
         assert!(claims.is_some(), "no validator should accept valid token");
-        assert_eq!(claims.unwrap().user_id, "user-ok");
+        assert_eq!(claims.unwrap().principal.id, "user-ok");
     }
 
     // -----------------------------------------------------------------------
@@ -1888,7 +1827,6 @@ mod tests {
             ops,
             &classify_svc,
             &dispatcher,
-            None,
             CallerOrigin::HttpClient,
             Some(&principal),
             &mut response,
@@ -2053,7 +1991,6 @@ mod tests {
             ops,
             &classify_svc,
             &dispatcher,
-            None,
             CallerOrigin::HttpClient,
             Some(&principal),
             &mut response,
@@ -2121,5 +2058,197 @@ mod tests {
             !acked_ids(&ack).contains(&"q-1788000000000".to_string()),
             "a query id is never an acknowledged operation"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tenant claim on HTTP `/sync`
+    // -----------------------------------------------------------------------
+
+    /// Stands in for the CRDT service and records the principal of every
+    /// operation the handler dispatched, which is the principal the handler
+    /// itself built from the extractor's claims.
+    #[derive(Clone, Default)]
+    struct RecordPrincipal(Arc<std::sync::Mutex<Vec<Option<Principal>>>>);
+
+    impl tower::Service<Operation> for RecordPrincipal {
+        type Response = OperationResponse;
+        type Error = OperationError;
+        type Future = std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<OperationResponse, OperationError>> + Send>,
+        >;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, op: Operation) -> Self::Future {
+            self.0
+                .lock()
+                .expect("recorder lock")
+                .push(op.ctx().principal.clone());
+            Box::pin(async { Ok(OperationResponse::Empty) })
+        }
+    }
+
+    /// An `AppState` whose `/sync` pipeline ends in a `RecordPrincipal`.
+    fn tenant_state(
+        require_auth: bool,
+        tenant_claim: Option<&str>,
+        validator: Option<Arc<dyn crate::network::handlers::auth_validator::AuthValidator>>,
+    ) -> (AppState, RecordPrincipal) {
+        let recorder = RecordPrincipal::default();
+        let server_config = Arc::new(ServerConfig::default());
+        let hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
+            "http-tenant-node".to_string(),
+            Box::new(SystemClock),
+        )));
+        let dispatch_config = DispatchConfig {
+            worker_count: 1,
+            channel_buffer_size: 64,
+        };
+        let dispatcher = {
+            let recorder = recorder.clone();
+            let server_config = Arc::clone(&server_config);
+            Arc::new(PartitionDispatcher::new(&dispatch_config, move || {
+                let mut router = OperationRouter::new();
+                router.register(service_names::CRDT, recorder.clone());
+                build_operation_pipeline(router, &server_config, None)
+            }))
+        };
+        let mut config = crate::network::config::NetworkConfig::default();
+        config.jwt_clock_skew_secs = 60;
+        config.tenant_claim = tenant_claim.map(str::to_owned);
+        let security = ServerConfig {
+            security: SecurityConfig {
+                require_auth,
+                ..SecurityConfig::default()
+            },
+            ..ServerConfig::default()
+        };
+        let state = AppState {
+            config: Arc::new(config),
+            jwt_secret: Some(TEST_SECRET.to_owned()),
+            auth_validator: validator,
+            server_config: Some(Arc::new(ArcSwap::from_pointee(security))),
+            operation_service: Some(Arc::new(crate::service::classify::OperationService::new(
+                hlc,
+                server_config,
+            ))),
+            dispatcher: Some(dispatcher),
+            ..AppState::for_test()
+        };
+        (state, recorder)
+    }
+
+    /// One `/sync` request carrying `token` and one write, through the real
+    /// extractor and handler. Returns the status and the principals the
+    /// pipeline saw.
+    async fn sync_with_token(
+        state: &AppState,
+        recorder: &RecordPrincipal,
+        token: &str,
+    ) -> (axum::http::StatusCode, Vec<Option<Principal>>) {
+        use axum::http::{header, Request};
+
+        recorder.0.lock().expect("recorder lock").clear();
+        let req = Request::builder()
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(())
+            .expect("request construction should not fail");
+        let (mut parts, _) = req.into_parts();
+        let claims = <ClientClaims as axum::extract::OptionalFromRequestParts<AppState>>::from_request_parts(&mut parts, state)
+            .await
+            .expect("extractor is infallible");
+        let presence = *parts
+            .extensions
+            .get::<TokenPresence>()
+            .expect("the extractor records token presence");
+        let request = HttpSyncRequest {
+            client_id: "c1".to_string(),
+            operations: Some(vec![put_op("op-1", "k1", allowed_fields("x"))]),
+            ..Default::default()
+        };
+        let body = Bytes::from(rmp_serde::to_vec_named(&request).expect("encode request"));
+        let response = http_sync_handler(
+            State(state.clone()),
+            claims,
+            axum::Extension(presence),
+            body,
+        )
+        .await
+        .into_response();
+        let seen = recorder.0.lock().expect("recorder lock").clone();
+        (response.status(), seen)
+    }
+
+    #[tokio::test]
+    async fn http_tenancy_on_refuses_every_invalid_tenant_before_the_validator() {
+        use crate::network::handlers::auth::tenant_cases;
+        use std::sync::atomic::Ordering;
+        for (label, extra) in tenant_cases::refused() {
+            let token = tenant_cases::token(TEST_SECRET, &extra);
+
+            // Auth required: refused outright.
+            let (validator, calls) = tenant_cases::counting_validator();
+            let (state, recorder) = tenant_state(true, Some(tenant_cases::CLAIM), Some(validator));
+            let (status, seen) = sync_with_token(&state, &recorder, &token).await;
+            assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED, "{label}");
+            assert!(seen.is_empty(), "{label}: nothing dispatched");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "{label}: validator not called"
+            );
+
+            // Auth optional: continues as Anonymous, as a missing `sub` does.
+            let (validator, calls) = tenant_cases::counting_validator();
+            let (state, recorder) = tenant_state(false, Some(tenant_cases::CLAIM), Some(validator));
+            let (status, seen) = sync_with_token(&state, &recorder, &token).await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{label}");
+            assert!(
+                matches!(seen.as_slice(), [None]),
+                "{label}: dispatched once, without a principal"
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "{label}: validator not called"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn http_tenancy_on_hands_the_tenant_to_the_handler_principal() {
+        use crate::network::handlers::auth::tenant_cases;
+        use std::sync::atomic::Ordering;
+        for tenant in tenant_cases::admitted() {
+            let (validator, calls) = tenant_cases::counting_validator();
+            let (state, recorder) = tenant_state(true, Some(tenant_cases::CLAIM), Some(validator));
+            let extra = serde_json::json!({ tenant_cases::CLAIM: tenant });
+            let token = tenant_cases::token(TEST_SECRET, &extra);
+            let (status, seen) = sync_with_token(&state, &recorder, &token).await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{tenant}");
+            assert_eq!(seen.len(), 1, "{tenant}: one write dispatched");
+            let principal = seen[0].as_ref().expect("dispatched with a principal");
+            assert_eq!(principal.id, "u1");
+            assert_eq!(principal.tenant.as_deref(), Some(tenant.as_str()));
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "{tenant}: validator runs");
+        }
+    }
+
+    #[tokio::test]
+    async fn http_tenancy_off_never_reads_the_claim() {
+        use crate::network::handlers::auth::tenant_cases;
+        for extra in tenant_cases::ignored_when_off() {
+            let (state, recorder) = tenant_state(true, None, None);
+            let token = tenant_cases::token(TEST_SECRET, &extra);
+            let (status, seen) = sync_with_token(&state, &recorder, &token).await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{extra}");
+            let principal = seen[0].as_ref().expect("dispatched with a principal");
+            assert_eq!(principal.tenant, None, "{extra}");
+        }
     }
 }

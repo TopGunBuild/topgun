@@ -16,6 +16,7 @@ use topgun_core::Principal;
 use tracing::{debug, warn};
 
 use super::auth_validator::{AuthValidationContext, AuthValidator};
+use super::AppState;
 use crate::network::OutboundMessage;
 
 /// Normalize a PEM string received from environment variables.
@@ -132,6 +133,8 @@ pub struct AuthHandler {
     issuer: Option<String>,
     /// Expected JWT audience; `None` disables audience checking (default).
     audience: Option<String>,
+    /// Name of the JWT claim carrying the tenant; `None` keeps tenancy off.
+    tenant_claim: Option<String>,
 }
 
 impl AuthHandler {
@@ -145,7 +148,21 @@ impl AuthHandler {
             auth_validator,
             issuer: None,
             audience: None,
+            tenant_claim: None,
         }
+    }
+
+    /// Builds the handler from the server's configured token rules (secret,
+    /// validator, iss/aud, tenant claim), so the WebSocket handshake and HTTP
+    /// `/sync` are built from one place and cannot drift apart.
+    #[must_use]
+    pub(crate) fn from_state(jwt_secret: &str, state: &AppState) -> Self {
+        Self::new(jwt_secret.to_owned(), state.auth_validator.clone())
+            .with_issuer_audience(
+                state.config.jwt_issuer.clone(),
+                state.config.jwt_audience.clone(),
+            )
+            .with_tenant_claim(state.config.tenant_claim.clone())
     }
 
     /// Enables request-path issuer/audience validation (audit F7). Each is
@@ -158,6 +175,14 @@ impl AuthHandler {
     ) -> Self {
         self.issuer = issuer;
         self.audience = audience;
+        self
+    }
+
+    /// Turns tenancy on (`Some(claim)`): every token must then carry a valid
+    /// tenant in that top-level claim. `None` keeps it off.
+    #[must_use]
+    pub fn with_tenant_claim(mut self, tenant_claim: Option<String>) -> Self {
+        self.tenant_claim = tenant_claim;
         self
     }
 
@@ -186,8 +211,8 @@ impl AuthHandler {
     /// Returns `Ok(Principal)` on success so the caller can update
     /// `ConnectionMetadata` and send `AUTH_ACK` with the user's identity.
     ///
-    /// On failure, sends `AUTH_FAIL` via the outbound channel and returns
-    /// `Err(AuthError)`. The caller should close the connection.
+    /// On failure, sends exactly one `AUTH_FAIL` via the outbound channel and
+    /// returns `Err(AuthError)`. The caller should close the connection.
     ///
     /// The `leeway` parameter specifies the clock skew tolerance in seconds.
     /// Tokens expired within this window are still accepted to handle clock
@@ -200,7 +225,8 @@ impl AuthHandler {
     ///
     /// # Errors
     ///
-    /// Returns `AuthError::InvalidToken` if the JWT is invalid or expired.
+    /// Returns `AuthError::InvalidToken` if the token is refused (see
+    /// [`AuthHandler::verify_token`]).
     /// Returns `AuthError::SendFailed` if the outbound channel is closed.
     /// Returns `AuthError::Serialization` if message encoding fails.
     pub async fn handle_auth(
@@ -210,8 +236,42 @@ impl AuthHandler {
         leeway: u64,
         insecure_forward_auth_errors: bool,
     ) -> Result<Principal, AuthError> {
-        let (algorithm, key) = decode_jwt_key(&self.jwt_secret)
-            .map_err(|reason| AuthError::InvalidToken { reason })?;
+        let reason = match self.verify_token(&auth_msg.token, leeway).await {
+            Ok(principal) => return Ok(principal),
+            Err(reason) => reason,
+        };
+        warn!(reason = %reason, "client authentication failed");
+        let client_error = if insecure_forward_auth_errors {
+            reason.clone()
+        } else {
+            "Authentication failed".to_string()
+        };
+        let fail_msg = Message::AuthFail(AuthFailData {
+            error: Some(client_error),
+            ..Default::default()
+        });
+        let bytes = rmp_serde::to_vec_named(&fail_msg)?;
+        tx.send(OutboundMessage::Binary(bytes)).await?;
+
+        // No Close frame sent here: the caller (ws_handler) breaks out of the
+        // message loop on Err(AuthError::InvalidToken), dropping the sender half
+        // of the mpsc channel. This causes the writer task to shut down and close
+        // the socket, giving the client time to process AUTH_FAIL first.
+        Err(AuthError::InvalidToken { reason })
+    }
+
+    /// The whole client token path: signature and key, iss/aud, `exp` with
+    /// `leeway`, claims to `Principal`, the tenant check, then the custom
+    /// validator. The WebSocket handshake and HTTP `/sync` both admit through
+    /// this one function, so neither can admit a token the other refuses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason the token is refused: the key cannot be parsed, the
+    /// JWT does not verify, `sub` is missing, the tenant claim is missing or
+    /// invalid while tenancy is on, or the custom validator refuses it.
+    pub(crate) async fn verify_token(&self, token: &str, leeway: u64) -> Result<Principal, String> {
+        let (algorithm, key) = decode_jwt_key(&self.jwt_secret)?;
         let mut validation = Validation::new(algorithm);
         // Apply optional issuer/audience checks (off unless configured). Do NOT
         // clear required_spec_claims: the jsonwebtoken crate defaults to requiring
@@ -223,99 +283,76 @@ impl AuthHandler {
         );
         validation.leeway = leeway;
 
-        match jsonwebtoken::decode::<serde_json::Value>(&auth_msg.token, &key, &validation) {
-            Ok(token_data) => {
-                let raw_claims = token_data.claims.clone();
+        let raw_claims = jsonwebtoken::decode::<serde_json::Value>(token, &key, &validation)
+            .map_err(|e| format!("{e}"))?
+            .claims;
 
-                // Reject tokens without a subject claim — anonymous identity is
-                // not permitted; callers must always provide a `sub` field.
-                let Some(user_id) = raw_claims["sub"].as_str().map(str::to_owned) else {
-                    let detail = "missing sub claim in JWT";
-                    warn!("JWT accepted by signature but missing required `sub` claim");
-                    let client_error = if insecure_forward_auth_errors {
-                        detail.to_string()
-                    } else {
-                        "Authentication failed".to_string()
-                    };
-                    let fail_msg = Message::AuthFail(AuthFailData {
-                        error: Some(client_error),
-                        ..Default::default()
-                    });
-                    let bytes = rmp_serde::to_vec_named(&fail_msg)?;
-                    tx.send(OutboundMessage::Binary(bytes)).await?;
-                    return Err(AuthError::InvalidToken {
-                        reason: detail.to_string(),
-                    });
-                };
+        // Anonymous identity is not permitted; callers must always provide `sub`.
+        let user_id = raw_claims["sub"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "missing sub claim in JWT".to_string())?;
 
-                let roles: Vec<String> = raw_claims["roles"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+        let roles: Vec<String> = raw_claims["roles"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-                // Call custom validator after signature verification if configured.
-                if let Some(ref validator) = self.auth_validator {
-                    let ctx = AuthValidationContext {
-                        user_id: user_id.clone(),
-                        roles: roles.clone(),
-                        raw_claims,
-                    };
-                    if let Err(reason) = validator.validate(&ctx).await {
-                        warn!(user_id = %user_id, reason = %reason, "custom auth validator rejected token");
-                        let client_error = if insecure_forward_auth_errors {
-                            reason.clone()
-                        } else {
-                            "Authentication failed".to_string()
-                        };
-                        let fail_msg = Message::AuthFail(AuthFailData {
-                            error: Some(client_error),
-                            ..Default::default()
-                        });
-                        let bytes = rmp_serde::to_vec_named(&fail_msg)?;
-                        tx.send(OutboundMessage::Binary(bytes)).await?;
-                        return Err(AuthError::InvalidToken { reason });
-                    }
-                }
+        // With tenancy off the claim is never read, whatever the token carries.
+        // With it on, the check runs before the custom validator, so a validator
+        // never sees an invalid tenant.
+        let tenant = match self.tenant_claim.as_deref() {
+            None => None,
+            Some(claim) => Some(
+                raw_claims
+                    .get(claim)
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|t| is_valid_tenant(t))
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("missing or invalid tenant claim `{claim}` in JWT"))?,
+            ),
+        };
 
-                debug!(user_id = %user_id, ?roles, "JWT verified successfully");
-
-                Ok(Principal {
-                    id: user_id,
-                    roles,
-                    tenant: None,
-                })
-            }
-            Err(e) => {
-                let reason = format!("{e}");
-                warn!(error = %reason, "JWT verification failed");
-
-                let client_error = if insecure_forward_auth_errors {
-                    reason.clone()
-                } else {
-                    "Authentication failed".to_string()
-                };
-
-                // Send AUTH_FAIL via outbound channel. Detailed reason is logged
-                // above; only the client-facing message is controlled by the flag.
-                let fail_msg = Message::AuthFail(AuthFailData {
-                    error: Some(client_error),
-                    ..Default::default()
-                });
-                let bytes = rmp_serde::to_vec_named(&fail_msg)?;
-                tx.send(OutboundMessage::Binary(bytes)).await?;
-
-                // No Close frame sent here: the caller (ws_handler) breaks out of the
-                // message loop on Err(AuthError::InvalidToken), dropping the sender half
-                // of the mpsc channel. This causes the writer task to shut down and close
-                // the socket, giving the client time to process AUTH_FAIL first.
-                Err(AuthError::InvalidToken { reason })
-            }
+        if let Some(ref validator) = self.auth_validator {
+            let ctx = AuthValidationContext {
+                user_id: user_id.clone(),
+                roles: roles.clone(),
+                raw_claims,
+            };
+            validator.validate(&ctx).await?;
         }
+
+        debug!(user_id = %user_id, ?roles, "JWT verified successfully");
+
+        Ok(Principal {
+            id: user_id,
+            roles,
+            tenant,
+        })
     }
+}
+
+/// Whether `tenant` is an admissible tenant id: 1 to 128 bytes of
+/// `[A-Za-z0-9_-]` — so it holds no `.`, glob character, `/` or anything a URL
+/// path must encode — and not starting, ASCII case-insensitively, with
+/// `_topgun_` or `__topgun_`, so no map a tenant owns is a reserved map.
+fn is_valid_tenant(tenant: &str) -> bool {
+    let bytes = tenant.as_bytes();
+    let reserved = |prefix: &[u8]| {
+        bytes
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    };
+    (1..=128).contains(&bytes.len())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+        && !reserved(b"_topgun_")
+        && !reserved(b"__topgun_")
 }
 
 #[cfg(test)]
@@ -813,6 +850,102 @@ RQIDAQAB
         assert!(run_auth(&handler, token).await.is_ok());
     }
 
+    // ── Tenant claim (tenancy on / off) ──────────────────────────────────────
+
+    /// Runs one handshake and returns its result with every frame it sent.
+    async fn handshake(
+        handler: &AuthHandler,
+        token: String,
+    ) -> (Result<Principal, AuthError>, usize) {
+        let (tx, mut rx) = mpsc::channel(8);
+        let auth_msg = AuthMessage {
+            token,
+            protocol_version: None,
+            device_token: None,
+        };
+        let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
+        drop(tx);
+        let mut frames = 0;
+        while rx.recv().await.is_some() {
+            frames += 1;
+        }
+        (result, frames)
+    }
+
+    #[tokio::test]
+    async fn tenancy_on_refuses_every_invalid_tenant_before_the_validator() {
+        use std::sync::atomic::Ordering;
+        for (label, extra) in super::tenant_cases::refused() {
+            let (validator, calls) = super::tenant_cases::counting_validator();
+            let handler = AuthHandler::new(TEST_SECRET.to_owned(), Some(validator))
+                .with_tenant_claim(Some(super::tenant_cases::CLAIM.to_string()));
+            let token = super::tenant_cases::token(TEST_SECRET, &extra);
+            let (result, frames) = handshake(&handler, token).await;
+            assert!(
+                matches!(result, Err(AuthError::InvalidToken { .. })),
+                "{label}: expected InvalidToken, got {result:?}"
+            );
+            assert_eq!(frames, 1, "{label}: exactly one AUTH_FAIL");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "{label}: the validator never sees an invalid tenant"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tenancy_on_admits_valid_tenants_into_the_principal() {
+        use std::sync::atomic::Ordering;
+        for tenant in super::tenant_cases::admitted() {
+            let (validator, calls) = super::tenant_cases::counting_validator();
+            let handler = AuthHandler::new(TEST_SECRET.to_owned(), Some(validator))
+                .with_tenant_claim(Some(super::tenant_cases::CLAIM.to_string()));
+            let extra = serde_json::json!({ super::tenant_cases::CLAIM: tenant });
+            let token = super::tenant_cases::token(TEST_SECRET, &extra);
+            let (result, frames) = handshake(&handler, token).await;
+            let principal = result.unwrap_or_else(|e| panic!("{tenant}: refused: {e:?}"));
+            assert_eq!(principal.tenant.as_deref(), Some(tenant.as_str()));
+            assert_eq!(principal.id, "u1");
+            assert_eq!(frames, 0, "{tenant}: nothing sent on success");
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "{tenant}: validator runs");
+        }
+    }
+
+    // The claim name is a top-level key taken verbatim, never a dotted path.
+    #[tokio::test]
+    async fn tenancy_on_reads_a_namespaced_claim_verbatim() {
+        let claim = "https://example.com/tenant";
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), None)
+            .with_tenant_claim(Some(claim.to_string()));
+        let token = super::tenant_cases::token(TEST_SECRET, &serde_json::json!({ claim: "acme" }));
+        let principal = run_auth(&handler, token).await.expect("admitted");
+        assert_eq!(principal.tenant.as_deref(), Some("acme"));
+    }
+
+    #[tokio::test]
+    async fn tenancy_off_never_reads_the_claim() {
+        for extra in super::tenant_cases::ignored_when_off() {
+            let handler = AuthHandler::new(TEST_SECRET.to_owned(), None);
+            let token = super::tenant_cases::token(TEST_SECRET, &extra);
+            let principal = run_auth(&handler, token)
+                .await
+                .unwrap_or_else(|e| panic!("{extra}: refused: {e:?}"));
+            assert_eq!(principal.tenant, None, "{extra}");
+        }
+    }
+
+    // A key that is not PEM-parseable refuses with one AUTH_FAIL instead of
+    // closing the socket silently.
+    #[tokio::test]
+    async fn unparseable_key_sends_one_auth_fail() {
+        let handler = AuthHandler::new("-----BEGIN PUBLIC KEY-----\nnot a key".to_owned(), None);
+        let token = make_token(Some("user-1"), 3600);
+        let (result, frames) = handshake(&handler, token).await;
+        assert!(matches!(result, Err(AuthError::InvalidToken { .. })));
+        assert_eq!(frames, 1);
+    }
+
     // normalize_pem replaces escaped backslash-n with real newlines.
     #[test]
     fn normalize_pem_replaces_escaped_newlines() {
@@ -944,5 +1077,93 @@ RQIDAQAB
         } else {
             panic!("expected AuthFail message");
         }
+    }
+}
+
+/// Tenant-claim cases shared by the WebSocket and HTTP `/sync` tests, so both
+/// transports are held to one list. The claim name is [`tenant_cases::CLAIM`].
+#[cfg(test)]
+pub(crate) mod tenant_cases {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use jsonwebtoken::{EncodingKey, Header};
+    use serde_json::{json, Value};
+
+    use super::super::auth_validator::{AuthValidationContext, AuthValidator};
+
+    pub(crate) const CLAIM: &str = "tenant";
+
+    /// Claims tenancy must refuse, as `(label, claims merged into the token)`.
+    pub(crate) fn refused() -> Vec<(&'static str, Value)> {
+        vec![
+            ("missing", json!({})),
+            ("non-string", json!({ CLAIM: 5 })),
+            ("empty", json!({ CLAIM: "" })),
+            ("129 bytes", json!({ CLAIM: "a".repeat(129) })),
+            ("dot", json!({ CLAIM: "a.b" })),
+            ("glob star", json!({ CLAIM: "a*" })),
+            ("NUL", json!({ CLAIM: "a\u{0}b" })),
+            ("_TOPGUN_ prefix", json!({ CLAIM: "_TOPGUN_x" })),
+            ("__topgun_ prefix", json!({ CLAIM: "__topgun_x" })),
+            ("non-ASCII letter", json!({ CLAIM: "ténant" })),
+            ("CJK", json!({ CLAIM: "日本" })),
+            ("fullwidth letter", json!({ CLAIM: "Ａ" })),
+            ("claim name in another case", json!({ "Tenant": "acme" })),
+            (
+                "claim nested, not top-level",
+                json!({ "org": { CLAIM: "acme" } }),
+            ),
+        ]
+    }
+
+    /// Tenants tenancy must admit, each carried as is into `Principal.tenant`.
+    pub(crate) fn admitted() -> Vec<String> {
+        vec![
+            "acme".to_string(),
+            "A-z_09".to_string(),
+            "a".repeat(128),
+            "_topgun".to_string(),
+            "topgun_x".to_string(),
+        ]
+    }
+
+    /// Claims that must not matter while tenancy is off.
+    pub(crate) fn ignored_when_off() -> Vec<Value> {
+        vec![
+            json!({ CLAIM: "a" }),
+            json!({ CLAIM: 5 }),
+            json!({ CLAIM: "a.b" }),
+        ]
+    }
+
+    /// A valid HS256 token for `sub = "u1"` with `extra` merged into its claims.
+    pub(crate) fn token(secret: &str, extra: &Value) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_secs();
+        let mut claims = json!({ "sub": "u1", "exp": now + 3600 });
+        for (k, v) in extra.as_object().expect("extra claims are an object") {
+            claims[k] = v.clone();
+        }
+        jsonwebtoken::encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("test token encoding should not fail")
+    }
+
+    /// A validator that admits everything and counts its calls.
+    pub(crate) fn counting_validator() -> (Arc<dyn AuthValidator>, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let validator = move |_ctx: &AuthValidationContext| -> Result<(), String> {
+            seen.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        };
+        (Arc::new(validator), calls)
     }
 }

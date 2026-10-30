@@ -76,6 +76,11 @@ pub struct NetworkConfig {
     /// `aud` does not match and require the claim to be present. When `None`
     /// (default), audience is not checked. Set `TOPGUN_JWT_AUDIENCE` to enforce.
     pub jwt_audience: Option<String>,
+    /// Name of the top-level JWT claim that carries the caller's tenant, looked up
+    /// verbatim (no dot or pointer path). `Some` turns tenancy on: every client
+    /// token must then carry a valid tenant in that claim. `None` (default) turns
+    /// it off and the claim is never read. Set from `TOPGUN_TENANT_CLAIM`.
+    pub tenant_claim: Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -98,6 +103,7 @@ impl Default for NetworkConfig {
             insecure_forward_auth_errors: false,
             jwt_issuer: None,
             jwt_audience: None,
+            tenant_claim: None,
         }
     }
 }
