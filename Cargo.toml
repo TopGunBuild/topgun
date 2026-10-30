@@ -37,6 +37,12 @@ unsafe_code = "forbid"
 [workspace.dependencies]
 madsim = "0.2.34"
 
+# redb 2.6.3 with the upstream fix that syncs the file length right after the
+# store file grows, so a crash during growth cannot leave a header that names a
+# layout longer than the file. See packages/server-rust/vendor/redb-2.6.3/TOPGUN-VENDOR.md.
+[patch.crates-io]
+redb = { path = "packages/server-rust/vendor/redb-2.6.3" }
+
 [profile.release]
 lto = true
 codegen-units = 1
