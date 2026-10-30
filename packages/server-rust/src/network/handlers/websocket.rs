@@ -182,13 +182,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
                     if let TopGunMessage::Auth(ref auth_msg) = tg_msg {
                         if let Some(ref secret) = state.jwt_secret {
-                            let auth_handler =
-                                AuthHandler::new(secret.clone(), state.auth_validator.clone())
-                                    .with_issuer_audience(
-                                        state.config.jwt_issuer.clone(),
-                                        state.config.jwt_audience.clone(),
-                                    );
-                            match auth_handler
+                            match AuthHandler::from_state(secret, &state)
                                 .handle_auth(
                                     auth_msg,
                                     &handle.tx,

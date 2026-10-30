@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Added (server): `TOPGUN_TENANT_CLAIM` (opt-in).** Names the top-level JWT claim that carries
+  a caller's tenant, taken verbatim (so a namespaced claim such as `https://example.com/tenant`
+  works). When it is set, every client token on the WebSocket handshake and on HTTP `/sync` must
+  carry in that claim a tenant of 1 to 128 characters from `A-Z`, `a-z`, `0-9`, `_` and `-` that
+  does not start with `_topgun_` or `__topgun_` (in any letter case); any other token is refused as
+  a token without `sub` is, before a custom auth validator runs. A set but empty value, a value
+  that is not valid Unicode, and the variable together with `TOPGUN_NO_AUTH` are fatal at startup.
+  The boot summary line gains `tenant_claim` (the claim name, or `off`). Unset, nothing changes:
+  the claim is never read. Nothing enforces a boundary between tenants yet.
 - **Added (server): encryption at rest.** With `TOPGUN_ENCRYPTION_AT_REST=on`,
   `TOPGUN_MASTER_KEY_PROVIDER=file` and `TOPGUN_MASTER_KEY_FILE` (64 hex characters, mode `0600`
   or `0400`), a stolen disk, a copied data directory or WAL directory, or a backup is unreadable

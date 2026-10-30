@@ -385,6 +385,33 @@ fn admin_bind_posture(no_auth: bool, bind_addr: &str, allow_public_override: boo
     }
 }
 
+/// Parses `TOPGUN_TENANT_CLAIM`: the name of the top-level JWT claim carrying
+/// the tenant. Unset turns tenancy off (`Ok(None)`). Set but empty, set but not
+/// valid Unicode, or set while `TOPGUN_NO_AUTH` is on is fatal — a value the
+/// operator set is never read as unset, and a tenant boundary needs a token to
+/// draw it from.
+fn tenant_claim_from_env(
+    raw: Option<std::ffi::OsString>,
+    no_auth: bool,
+) -> Result<Option<String>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let claim = raw
+        .into_string()
+        .map_err(|_| "tenancy: TOPGUN_TENANT_CLAIM is not valid Unicode".to_string())?;
+    if claim.is_empty() {
+        return Err("tenancy: TOPGUN_TENANT_CLAIM is set but empty".to_string());
+    }
+    if no_auth {
+        return Err(
+            "tenancy: TOPGUN_TENANT_CLAIM requires authentication; TOPGUN_NO_AUTH is on"
+                .to_string(),
+        );
+    }
+    Ok(Some(claim))
+}
+
 /// Emits the single operator-facing boot summary.
 ///
 /// Reads against this line are how an operator confirms the effective memory
@@ -400,6 +427,7 @@ fn log_boot_summary(
     encryption_at_rest: &str,
     policies_loaded: usize,
     rbac_configured: bool,
+    tenant_claim: Option<&str>,
 ) {
     tracing::info!(
         max_ram_mb = eviction_config.max_ram_bytes / (1024 * 1024),
@@ -417,6 +445,9 @@ fn log_boot_summary(
         allocator = %ALLOCATOR_NAME,
         policies_loaded,
         rbac_configured,
+        // Quoted when on, so a claim that is itself named `off` cannot read as
+        // tenancy off.
+        tenant_claim = %tenant_claim.map_or_else(|| "off".to_string(), |c| format!("{c:?}")),
         "eviction + write-behind + WAL initialized"
     );
 }
@@ -706,6 +737,15 @@ async fn main() -> anyhow::Result<()> {
     let no_auth = std::env::var("TOPGUN_NO_AUTH")
         .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
         .unwrap_or(false);
+
+    let tenant_claim = match tenant_claim_from_env(std::env::var_os("TOPGUN_TENANT_CLAIM"), no_auth)
+    {
+        Ok(claim) => claim,
+        Err(fatal) => {
+            eprintln!("{fatal}");
+            std::process::exit(1);
+        }
+    };
 
     // Deliberate-exposure opt-out: when set to 1 or true, downgrade the
     // fail-closed refusal of a no-auth + non-loopback bind back to a loud warning
@@ -1250,6 +1290,7 @@ async fn main() -> anyhow::Result<()> {
         encryption_config.boot_field(),
         policies_loaded,
         rbac_configured,
+        tenant_claim.as_deref(),
     );
 
     // Make each policy's crash-durability caveat impossible to miss at boot on a
@@ -1339,6 +1380,7 @@ async fn main() -> anyhow::Result<()> {
             jwt_issuer,
             jwt_audience,
             trust_forwarded_for,
+            tenant_claim,
             ..NetworkConfig::default()
         }),
         start_time: Instant::now(),
@@ -2805,7 +2847,7 @@ mod tests {
         );
     }
 
-    use super::{admin_bind_posture, log_boot_summary, BindPosture};
+    use super::{admin_bind_posture, log_boot_summary, tenant_claim_from_env, BindPosture};
     use super::{EvictionConfig, WriteBehindConfig};
     use std::io;
     use std::sync::{Arc, Mutex};
@@ -2892,15 +2934,22 @@ mod tests {
             .with_writer(move || writer.clone())
             .with_ansi(false)
             .finish();
+        // The claim the line names is the parse result itself, the same value the
+        // binary builds `NetworkConfig.tenant_claim` from.
+        let tenant_on = tenant_claim_from_env(Some("org_id".into()), false).unwrap();
+        let tenant_off = tenant_claim_from_env(None, false).unwrap();
         tracing::subscriber::with_default(subscriber, || {
-            log_boot_summary(
-                &EvictionConfig::default(),
-                &write_behind_config,
-                true,
-                "on:file",
-                0,
-                false,
-            );
+            for tenant_claim in [&tenant_on, &tenant_off] {
+                log_boot_summary(
+                    &EvictionConfig::default(),
+                    &write_behind_config,
+                    true,
+                    "on:file",
+                    0,
+                    false,
+                    tenant_claim.as_deref(),
+                );
+            }
         });
 
         let rendered = String::from_utf8(
@@ -2932,6 +2981,11 @@ mod tests {
              captured: {rendered}"
         );
         assert!(
+            rendered.contains("tenant_claim=\"org_id\"") && rendered.contains("tenant_claim=off"),
+            "the operator-facing boot line must name the EFFECTIVE tenant claim, or off; \
+             captured: {rendered}"
+        );
+        assert!(
             rendered.contains("or_delta_wal=false"),
             "the operator-facing boot line must carry the EFFECTIVE OR delta-framing switch; \
              captured: {rendered}"
@@ -2949,6 +3003,53 @@ mod tests {
             rendered.contains("allocator=system"),
             "the operator-facing boot line must name the allocator the binary runs; \
              captured: {rendered}"
+        );
+    }
+
+    #[test]
+    fn tenant_claim_unset_is_tenancy_off() {
+        assert_eq!(tenant_claim_from_env(None, false), Ok(None));
+        assert_eq!(tenant_claim_from_env(None, true), Ok(None));
+    }
+
+    #[test]
+    fn tenant_claim_set_is_taken_verbatim() {
+        assert_eq!(
+            tenant_claim_from_env(Some("tenant".into()), false),
+            Ok(Some("tenant".to_string()))
+        );
+        assert_eq!(
+            tenant_claim_from_env(Some("https://example.com/tenant".into()), false),
+            Ok(Some("https://example.com/tenant".to_string()))
+        );
+    }
+
+    #[test]
+    fn tenant_claim_empty_is_fatal() {
+        assert_eq!(
+            tenant_claim_from_env(Some("".into()), false),
+            Err("tenancy: TOPGUN_TENANT_CLAIM is set but empty".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tenant_claim_not_unicode_is_fatal_not_unset() {
+        use std::os::unix::ffi::OsStringExt;
+        assert_eq!(
+            tenant_claim_from_env(Some(std::ffi::OsString::from_vec(vec![b't', 0xff])), false),
+            Err("tenancy: TOPGUN_TENANT_CLAIM is not valid Unicode".to_string())
+        );
+    }
+
+    #[test]
+    fn tenant_claim_with_no_auth_is_fatal() {
+        assert_eq!(
+            tenant_claim_from_env(Some("tenant".into()), true),
+            Err(
+                "tenancy: TOPGUN_TENANT_CLAIM requires authentication; TOPGUN_NO_AUTH is on"
+                    .to_string()
+            )
         );
     }
 
