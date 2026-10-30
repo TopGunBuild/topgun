@@ -20,6 +20,7 @@ use topgun_core::messages::{
     HttpQueryRequest, HttpQueryResult, HttpSyncAck, HttpSyncError, HttpSyncRequest,
     HttpSyncResponse,
 };
+use topgun_core::types::tenant_owns;
 use topgun_core::Timestamp;
 
 use super::websocket::{
@@ -32,6 +33,7 @@ use crate::query::cursor::{
 };
 use crate::service::dispatch::PartitionDispatcher;
 use crate::service::domain::predicate::{execute_query, value_to_rmpv};
+use crate::service::middleware::authorization::is_reserved_map_name;
 use crate::service::operation::{CallerOrigin, OpVerdict};
 use crate::service::policy::{
     GateDecision, PermissionAction, PolicyDecision, PolicyEvaluator, PolicyStore,
@@ -391,47 +393,65 @@ async fn dispatch_queries(
     principal: Option<&topgun_core::Principal>,
     policy_store: Option<&Arc<dyn PolicyStore>>,
     admin_subjects: &Arc<std::collections::HashSet<String>>,
+    tenancy: bool,
     response: &mut HttpSyncResponse,
 ) {
     for q in queries {
         let map_name = q.map_name.clone();
 
+        // The reserved maps are never served to a client, and with tenancy on a
+        // query is served only for a map its principal's tenant owns
+        // (TG-TEN-001). Both are decided before the policy gate, which runs only
+        // when a policy store is wired, so neither an unwired or never-configured
+        // store nor the admin-subject bypass can widen them.
+        let outside_boundary = is_reserved_map_name(&map_name)
+            || (tenancy
+                && !principal
+                    .and_then(|p| p.tenant.as_deref())
+                    .is_some_and(|tenant| tenant_owns(tenant, &map_name)));
+
         // RBAC map-level read access check. The admin bypass is anchored to the
         // server-trusted admin-subject allow-list (never to a roles claim), so the
         // evaluator is built with the same allow-list the middleware uses.
-        if let Some(store) = policy_store {
-            let evaluator =
-                PolicyEvaluator::with_admin_subjects(Arc::clone(store), Arc::clone(admin_subjects));
-            // Single fail-closed gate shared with the authorization middleware.
-            // AllowAll = never-configured store (allow the read for backward
-            // compat); Evaluate = configured store, enforce policy (default-deny
-            // even if rules were deleted); Deny = store read failure, reject the
-            // read rather than silently open access on a backend outage.
-            let deny_read = match evaluator.should_evaluate().await {
-                GateDecision::AllowAll => false,
-                GateDecision::Evaluate => {
-                    let decision = evaluator
-                        .evaluate(
-                            principal,
-                            PermissionAction::Read,
-                            &map_name,
-                            &rmpv::Value::Nil,
-                        )
-                        .await;
-                    decision == PolicyDecision::Deny
+        let deny_read = outside_boundary
+            || match policy_store {
+                None => false,
+                Some(store) => {
+                    let evaluator = PolicyEvaluator::with_admin_subjects(
+                        Arc::clone(store),
+                        Arc::clone(admin_subjects),
+                    );
+                    // Single fail-closed gate shared with the authorization middleware.
+                    // AllowAll = never-configured store (allow the read for backward
+                    // compat); Evaluate = configured store, enforce policy (default-deny
+                    // even if rules were deleted); Deny = store read failure, reject the
+                    // read rather than silently open access on a backend outage.
+                    match evaluator.should_evaluate().await {
+                        GateDecision::AllowAll => false,
+                        GateDecision::Evaluate => {
+                            let decision = evaluator
+                                .evaluate(
+                                    principal,
+                                    PermissionAction::Read,
+                                    &map_name,
+                                    &rmpv::Value::Nil,
+                                )
+                                .await;
+                            decision == PolicyDecision::Deny
+                        }
+                        GateDecision::Deny => true,
+                    }
                 }
-                GateDecision::Deny => true,
             };
-            if deny_read {
-                let errors = response.errors.get_or_insert_with(Vec::new);
-                errors.push(HttpSyncError {
-                    code: 403,
-                    message: "access denied".into(),
-                    context: Some(q.query_id.clone()),
-                });
-                // Skip adding any queryResults entry for this denied query.
-                continue;
-            }
+        if deny_read {
+            let errors = response.errors.get_or_insert_with(Vec::new);
+            errors.push(HttpSyncError {
+                code: 403,
+                message: "access denied".into(),
+                context: Some(q.query_id.clone()),
+            });
+            // Skip adding any queryResults entry for this denied query.
+            continue;
         }
 
         // Collect all entries for the requested map across all partitions.
@@ -700,6 +720,7 @@ pub async fn http_sync_handler(
                 principal.as_ref(),
                 state.policy_store.as_ref(),
                 &state.admin_subjects,
+                state.config.tenant_claim.is_some(),
                 &mut http_response,
             )
             .await;
@@ -1129,6 +1150,7 @@ mod tests {
                 None,
                 state.policy_store.as_ref(),
                 &state.admin_subjects,
+                false,
                 &mut response,
             )
             .await;
@@ -1698,8 +1720,9 @@ mod tests {
     /// `overloaded` swaps the CRDT service for one that always answers
     /// `Overloaded`, which is how the transient row of the mapping is exercised
     /// without a timing race.
-    async fn build_http_pipeline(
+    fn build_http_pipeline(
         overloaded: bool,
+        evaluator: PolicyEvaluator,
     ) -> (
         crate::service::classify::OperationService,
         Arc<PartitionDispatcher>,
@@ -1725,14 +1748,7 @@ mod tests {
             Arc::new(SchemaService::new()),
         ));
 
-        let policy_store = Arc::new(InMemoryPolicyStore::new());
-        for policy in deny_blocked_records() {
-            policy_store
-                .upsert_policy(policy)
-                .await
-                .expect("policy upsert");
-        }
-        let evaluator = Arc::new(PolicyEvaluator::new(policy_store));
+        let evaluator = Arc::new(evaluator);
 
         let dispatch_config = DispatchConfig {
             worker_count: 1,
@@ -1752,6 +1768,18 @@ mod tests {
             crate::service::classify::OperationService::new(hlc, server_config),
             dispatcher,
         )
+    }
+
+    /// The evaluator over [`deny_blocked_records`].
+    async fn deny_blocked_evaluator() -> PolicyEvaluator {
+        let policy_store = Arc::new(InMemoryPolicyStore::new());
+        for policy in deny_blocked_records() {
+            policy_store
+                .upsert_policy(policy)
+                .await
+                .expect("policy upsert");
+        }
+        PolicyEvaluator::new(policy_store)
     }
 
     /// `n` distinct keys that all hash to the SAME partition, so the batch forms
@@ -1809,7 +1837,8 @@ mod tests {
 
     /// Runs one batch through the HTTP dispatch path and returns the response.
     async fn http_dispatch(overloaded: bool, ops: Vec<ClientOp>) -> HttpSyncResponse {
-        let (classify_svc, dispatcher) = build_http_pipeline(overloaded).await;
+        let (classify_svc, dispatcher) =
+            build_http_pipeline(overloaded, deny_blocked_evaluator().await);
         let principal = Principal {
             id: "writer-1".to_string(),
             roles: vec!["user".to_string()],
@@ -1972,7 +2001,7 @@ mod tests {
             put_op("42", &keys[1], blocked_fields()),
         ];
 
-        let (classify_svc, dispatcher) = build_http_pipeline(false).await;
+        let (classify_svc, dispatcher) = build_http_pipeline(false, deny_blocked_evaluator().await);
         let principal = Principal {
             id: "writer-1".to_string(),
             roles: vec!["user".to_string()],
@@ -2025,6 +2054,7 @@ mod tests {
             Some(&principal),
             Some(&policy_store),
             &admin_subjects,
+            false,
             &mut response,
         )
         .await;
@@ -2250,5 +2280,182 @@ mod tests {
             let principal = seen[0].as_ref().expect("dispatched with a principal");
             assert_eq!(principal.tenant, None, "{extra}");
         }
+    }
+    // -----------------------------------------------------------------------
+    // Tenant boundary on HTTP /sync (TG-TEN-001)
+    // -----------------------------------------------------------------------
+
+    const ADMIN: &str = "admin-subject";
+
+    fn tenant_principal(id: &str, tenant: &str) -> Principal {
+        Principal {
+            id: id.to_string(),
+            roles: vec![],
+            tenant: Some(tenant.to_string()),
+        }
+    }
+
+    /// With tenancy on, an HTTP operation on another tenant's map is refused
+    /// on its own and one on the caller's own map is acknowledged: operations
+    /// go through the same authorization middleware as WebSocket ones.
+    #[tokio::test]
+    async fn http_tenant_operations_on_another_tenants_map_are_refused_per_op() {
+        let keys = keys_in_one_partition(2);
+        let ops = vec![
+            ClientOp {
+                map_name: "b.notes".to_string(),
+                ..put_op("51", &keys[1], allowed_fields("theirs"))
+            },
+            ClientOp {
+                map_name: "a.notes".to_string(),
+                ..put_op("52", &keys[0], allowed_fields("mine"))
+            },
+        ];
+        let never_configured = PolicyEvaluator::new(Arc::new(InMemoryPolicyStore::new()));
+        let (classify_svc, dispatcher) =
+            build_http_pipeline(false, never_configured.with_tenancy(true));
+        let mut response = HttpSyncResponse::default();
+        dispatch_operations(
+            ops,
+            &classify_svc,
+            &dispatcher,
+            CallerOrigin::HttpClient,
+            Some(&tenant_principal("user-a", "a")),
+            &mut response,
+        )
+        .await;
+
+        let errors = response.errors.expect("the refusal is reported");
+        assert_eq!(errors.len(), 1, "got {errors:?}");
+        assert_eq!(errors[0].code, 403);
+        assert_eq!(errors[0].context.as_deref(), Some("51"));
+        let ack = response.ack.expect("the own-map write is acknowledged");
+        assert_eq!(acked_ids(&ack), vec!["52"]);
+    }
+
+    /// Runs one query per map for `principal` and returns, per query id,
+    /// whether it was refused with a 403 entry and the rows it returned.
+    async fn query_outcomes(
+        factory: &RecordStoreFactory,
+        maps: &[&str],
+        principal: Option<&Principal>,
+        policy_store: Option<&Arc<dyn PolicyStore>>,
+        tenancy: bool,
+    ) -> Vec<(String, bool, usize)> {
+        let admin_subjects = Arc::new(std::iter::once(ADMIN.to_string()).collect());
+        let mut response = HttpSyncResponse::default();
+        dispatch_queries(
+            maps.iter()
+                .map(|map| HttpQueryRequest {
+                    query_id: (*map).to_string(),
+                    map_name: (*map).to_string(),
+                    filter: rmpv::Value::Nil,
+                    ..Default::default()
+                })
+                .collect(),
+            factory,
+            principal,
+            policy_store,
+            &admin_subjects,
+            tenancy,
+            &mut response,
+        )
+        .await;
+        let refused: Vec<String> = response
+            .errors
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.code == 403)
+            .filter_map(|e| e.context)
+            .collect();
+        let results = response.query_results.unwrap_or_default();
+        maps.iter()
+            .map(|map| {
+                let rows = results
+                    .iter()
+                    .find(|r| r.query_id == *map)
+                    .map_or(0, |r| r.results.len());
+                ((*map).to_string(), refused.iter().any(|id| id == map), rows)
+            })
+            .collect()
+    }
+
+    /// AC4: with tenancy on, a query on another tenant's map is refused with
+    /// a 403 entry and no rows — with no policy store wired, with a
+    /// never-configured one, with one that allows everything, and for an
+    /// admin subject; the caller's own map is served.
+    #[tokio::test]
+    async fn http_tenant_query_on_another_tenants_map_is_refused_whatever_the_policy() {
+        let state = state_with_map_data("b.orders", vec![("o1", "theirs")]).await;
+        let factory = state.store_factory.as_ref().unwrap();
+        let never_configured: Arc<dyn PolicyStore> = Arc::new(InMemoryPolicyStore::new());
+        let allow_all = Arc::new(InMemoryPolicyStore::new());
+        allow_all
+            .upsert_policy(PermissionPolicy {
+                id: "allow-all".to_string(),
+                map_pattern: "*".to_string(),
+                action: PermissionAction::All,
+                effect: PolicyEffect::Allow,
+                condition: None,
+            })
+            .await
+            .unwrap();
+        let allow_all: Arc<dyn PolicyStore> = allow_all;
+        for store in [None, Some(&never_configured), Some(&allow_all)] {
+            for id in ["user-a", ADMIN] {
+                let a = tenant_principal(id, "a");
+                let outcomes =
+                    query_outcomes(factory, &["b.orders", "a.orders"], Some(&a), store, true).await;
+                assert_eq!(
+                    outcomes,
+                    vec![
+                        ("b.orders".to_string(), true, 0),
+                        ("a.orders".to_string(), false, 0)
+                    ],
+                    "store={} subject={id}",
+                    store.is_some()
+                );
+            }
+        }
+        // The same tenant-`b` principal reads its own rows, so the refusal
+        // above withheld rows that exist.
+        let b = tenant_principal("user-b", "b");
+        assert_eq!(
+            query_outcomes(factory, &["b.orders"], Some(&b), None, true).await,
+            vec![("b.orders".to_string(), false, 1)]
+        );
+    }
+
+    /// AC4: with tenancy on an anonymous query is refused; with tenancy on or
+    /// off a query on a reserved map is refused, policy store wired or not.
+    #[tokio::test]
+    async fn http_query_without_a_tenant_or_on_a_reserved_map_is_refused() {
+        let state = state_with_map_data("_topgun_device_credentials", vec![("d1", "hash")]).await;
+        let factory = state.store_factory.as_ref().unwrap();
+        assert_eq!(
+            query_outcomes(factory, &["a.orders"], None, None, true).await,
+            vec![("a.orders".to_string(), true, 0)]
+        );
+        let user = Principal {
+            id: "user".to_string(),
+            roles: vec![],
+            tenant: None,
+        };
+        assert_eq!(
+            query_outcomes(factory, &["a.orders"], Some(&user), None, true).await,
+            vec![("a.orders".to_string(), true, 0)]
+        );
+        let never_configured: Arc<dyn PolicyStore> = Arc::new(InMemoryPolicyStore::new());
+        for store in [None, Some(&never_configured)] {
+            assert_eq!(
+                query_outcomes(factory, &["_topgun_device_credentials"], None, store, false).await,
+                vec![("_topgun_device_credentials".to_string(), true, 0)]
+            );
+        }
+        // Tenancy off leaves every other map as it was: served without a tenant.
+        assert_eq!(
+            query_outcomes(factory, &["b.orders"], Some(&user), None, false).await,
+            vec![("b.orders".to_string(), false, 0)]
+        );
     }
 }

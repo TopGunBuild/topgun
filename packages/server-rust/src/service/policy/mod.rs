@@ -200,6 +200,26 @@ fn glob_match_segments(pat: &[&str], inp: &[&str]) -> bool {
     }
 }
 
+/// Checks that every `.`-segment of a policy pattern that contains `*` is
+/// exactly `*` or `**`.
+///
+/// The matcher treats any other segment literally, so `users/*` or `a*` would
+/// silently match only the name spelled with a star rather than the names the
+/// author meant.
+///
+/// # Errors
+///
+/// Returns the first segment that contains `*` and is neither `*` nor `**`.
+pub fn validate_map_pattern(pattern: &str) -> Result<(), &str> {
+    match pattern
+        .split('.')
+        .find(|seg| seg.contains('*') && *seg != "*" && *seg != "**")
+    {
+        Some(seg) => Err(seg),
+        None => Ok(()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // InMemoryPolicyStore
 // ---------------------------------------------------------------------------
@@ -292,6 +312,9 @@ pub struct PolicyEvaluator {
     /// Subjects (`Principal.id`) granted the unconditional RBAC bypass. Sourced
     /// only from server-trusted config; empty by default (no data-plane admin).
     admin_subjects: Arc<HashSet<String>>,
+    /// Whether the tenant boundary (TG-TEN-001) is enforced by the
+    /// authorization middleware that holds this evaluator.
+    tenancy: bool,
 }
 
 impl PolicyEvaluator {
@@ -302,6 +325,7 @@ impl PolicyEvaluator {
         Self {
             store,
             admin_subjects: Arc::new(HashSet::new()),
+            tenancy: false,
         }
     }
 
@@ -317,7 +341,24 @@ impl PolicyEvaluator {
         Self {
             store,
             admin_subjects,
+            tenancy: false,
         }
+    }
+
+    /// Turns the tenant boundary (TG-TEN-001) on or off for the middleware
+    /// that holds this evaluator. Set from the same value as
+    /// `NetworkConfig.tenant_claim`, so the claim check and the boundary are
+    /// either both on or both off.
+    #[must_use]
+    pub fn with_tenancy(mut self, tenancy: bool) -> Self {
+        self.tenancy = tenancy;
+        self
+    }
+
+    /// Whether the tenant boundary (TG-TEN-001) is enforced.
+    #[must_use]
+    pub fn tenancy(&self) -> bool {
+        self.tenancy
     }
 
     /// Returns true if the store contains at least one policy.
@@ -471,6 +512,23 @@ impl PolicyEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- validate_map_pattern --
+
+    #[test]
+    fn a_pattern_segment_with_a_partial_star_is_refused_by_name() {
+        assert_eq!(validate_map_pattern("users/*"), Err("users/*"));
+        assert_eq!(validate_map_pattern("a*"), Err("a*"));
+        assert_eq!(validate_map_pattern("a.b*"), Err("b*"));
+        assert_eq!(validate_map_pattern("a*.b*"), Err("a*"));
+    }
+
+    #[test]
+    fn whole_segment_stars_and_literal_patterns_are_accepted() {
+        for pattern in ["*", "**", "a.**", "*.orders", "users/x"] {
+            assert_eq!(validate_map_pattern(pattern), Ok(()), "{pattern}");
+        }
+    }
 
     // -- glob_matches --
 

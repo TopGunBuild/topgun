@@ -18,12 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a token without `sub` is, before a custom auth validator runs. A set but empty value, a value
   that is not valid Unicode, and the variable together with `TOPGUN_NO_AUTH` are fatal at startup.
   The boot summary line gains `tenant_claim` (the claim name, or `off`). Unset, nothing changes:
-  the claim is never read. Nothing enforces a boundary between tenants yet.
+  the claim is never read.
 - **Added (server): `tenantClaim` in a token-exchange provider's `claims` mapping.** With
   `TOPGUN_TENANT_CLAIM` set, the exchange copies that external claim's string value into the minted
   token under the `TOPGUN_TENANT_CLAIM` name (a missing or non-string value mints no tenant), and
   refuses to mint when `TOPGUN_TENANT_CLAIM` is `sub`, `roles`, `exp` or `iat`. With it set, the
   admin API also refuses (403, naming the claim) any token that carries the tenant claim.
+- **Added (server): the tenant boundary.** With `TOPGUN_TENANT_CLAIM` set, a client of tenant `t`
+  reaches only maps, topics, counters and locks named `t.…`, before any policy and whatever the
+  policies, the admin-subject list or an empty policy store allow; `SqlQuery` is refused, and a
+  journal read or subscription without a map returns only the tenant's events. HTTP `/sync`
+  queries now also refuse a reserved map (`_topgun_*`, `__topgun_*`) with a 403 entry, with or
+  without tenancy, where they returned an empty result.
 - **Added (server): encryption at rest.** With `TOPGUN_ENCRYPTION_AT_REST=on`,
   `TOPGUN_MASTER_KEY_PROVIDER=file` and `TOPGUN_MASTER_KEY_FILE` (64 hex characters, mode `0600`
   or `0400`), a stolen disk, a copied data directory or WAL directory, or a backup is unreadable

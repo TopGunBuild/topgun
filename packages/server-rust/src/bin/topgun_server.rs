@@ -886,10 +886,15 @@ async fn main() -> anyhow::Result<()> {
             admin_subjects.len()
         );
     }
-    let policy_evaluator = Arc::new(PolicyEvaluator::with_admin_subjects(
-        Arc::clone(&policy_store),
-        Arc::clone(&admin_subjects),
-    ));
+    // The tenant boundary (TG-TEN-001) is on exactly when the tenant claim is
+    // required, from the one value `NetworkConfig.tenant_claim` is built from.
+    let policy_evaluator = Arc::new(
+        PolicyEvaluator::with_admin_subjects(
+            Arc::clone(&policy_store),
+            Arc::clone(&admin_subjects),
+        )
+        .with_tenancy(tenant_claim.is_some()),
+    );
 
     // Counts for the boot summary so operators can confirm RBAC survived restart.
     let policies_loaded: usize = policy_store
