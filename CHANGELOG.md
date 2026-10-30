@@ -56,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restore the data directory and the WAL directory from the same backup to bring the node back.
   The same holds for the old store file a one-time migration reads. A redb panic after the open
   is still not caught.
+- **Fixed (server):** a crash while the embedded store grows its file no longer leaves a store file
+  that refuses to open. The server now builds against redb 2.6.3 with the upstream fix that makes
+  the grown file length durable before the larger layout can reach the store's header (one extra
+  file sync per growth; the file doubles while it is small). The file format is unchanged. A file
+  left by an earlier version after such a crash is still refused with exit 1 and the
+  `store open: … redb panicked while opening it` line above.
 - **Security (server):** OR-Map push-diff events were delivered to connections not subscribed to
   the map. They now reach only the connections with a query subscription on that map, other than
   the one that pushed, as events of ordinary writes already did. A client that subscribes to the
