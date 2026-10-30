@@ -17,6 +17,7 @@ use tower::{Layer, Service};
 use crate::service::operation::{CallerOrigin, Operation, OperationError, OperationResponse};
 use crate::service::policy::{GateDecision, PermissionAction, PolicyDecision, PolicyEvaluator};
 use crate::storage::map_data_store::{check_map_name, MapNameViolation};
+use topgun_core::types::tenant_owns;
 
 // ---------------------------------------------------------------------------
 // AuthorizationLayer
@@ -110,6 +111,15 @@ where
             // line is the only place an operator sees it.
             MAP_NAME_REFUSAL_LOG.record(&refusal, Instant::now());
             return Box::pin(async move { Err(refusal) });
+        }
+        // Tenant boundary (TG-TEN-001). Before the `should_evaluate` gate and
+        // before the bypass-group early return below, so neither `AllowAll`,
+        // an operator's allow on `*`, the admin-subject bypass nor an operation
+        // the policy never sees (locks, `QuerySyncInit`) can cross it.
+        if evaluator.tenancy() {
+            if let Some(map_name) = tenant_violation(&op, principal.as_ref(), &map_name) {
+                return Box::pin(async move { Err(OperationError::Forbidden { map_name }) });
+            }
         }
         let Some(action) = action else {
             return Box::pin(self.inner.call(op));
@@ -283,6 +293,93 @@ fn reserved_target_map_name(op: &Operation, classified_map_name: &str) -> Option
             .map(|client_op| client_op.map_name.clone());
     }
     is_reserved_map_name(classified_map_name).then(|| classified_map_name.to_string())
+}
+
+/// The name to refuse `op` under when tenancy is on (TG-TEN-001), or `None`
+/// when it may pass.
+///
+/// A principal without a tenant is refused everything but the exempt
+/// operations, under the classified name (empty for an operation that names
+/// nothing). A principal with tenant `t` is refused the first name the
+/// operation carries that `t` does not own: every op of a batch, a lock name,
+/// or the classified name. `SqlQuery` classifies to the empty name, which no
+/// tenant owns, so it is refused; `QuerySyncInit` classifies the same way but
+/// names nothing, so it is admitted by variant.
+///
+/// Keyed by variant, with no `_` arm on purpose: a new `Operation` variant must
+/// fail to compile here until someone decides which names it carries.
+fn tenant_violation(
+    op: &Operation,
+    principal: Option<&topgun_core::Principal>,
+    classified_map_name: &str,
+) -> Option<String> {
+    enum Names<'a> {
+        Exempt,
+        None,
+        Classified,
+        Batch(&'a [topgun_core::messages::base::ClientOp]),
+        Lock(&'a str),
+    }
+    let names = match op {
+        Operation::Ping { .. }
+        | Operation::PartitionMapRequest { .. }
+        | Operation::GarbageCollect { .. }
+        | Operation::TopicUnsubscribe { .. }
+        | Operation::QueryUnsubscribe { .. }
+        | Operation::SearchUnsubscribe { .. }
+        | Operation::HybridSearchUnsubscribe { .. }
+        | Operation::JournalUnsubscribe { .. } => Names::Exempt,
+
+        Operation::QuerySyncInit { .. } => Names::None,
+        Operation::JournalRead { payload, .. } if payload.map_name.is_none() => Names::None,
+        Operation::JournalSubscribe { payload, .. } if payload.map_name.is_none() => Names::None,
+        Operation::ListResolvers { payload, .. } if payload.map_name.is_none() => Names::None,
+
+        Operation::OpBatch { payload, .. } => Names::Batch(&payload.payload.ops),
+        Operation::LockRequest { payload, .. } => Names::Lock(&payload.name),
+        Operation::LockRelease { payload, .. } => Names::Lock(&payload.name),
+
+        Operation::ClientOp { .. }
+        | Operation::ORMapPushDiff { .. }
+        | Operation::QuerySubscribe { .. }
+        | Operation::MerkleReqBucket { .. }
+        | Operation::ORMapMerkleReqBucket { .. }
+        | Operation::ORMapDiffRequest { .. }
+        | Operation::EntryProcess { .. }
+        | Operation::EntryProcessBatch { .. }
+        | Operation::Search { .. }
+        | Operation::SearchSubscribe { .. }
+        | Operation::HybridSearch { .. }
+        | Operation::HybridSearchSubscribe { .. }
+        | Operation::SyncInit { .. }
+        | Operation::ORMapSyncInit { .. }
+        | Operation::VectorSearch { .. }
+        | Operation::SqlQuery { .. }
+        | Operation::TopicPublish { .. }
+        | Operation::TopicSubscribe { .. }
+        | Operation::CounterSync { .. }
+        | Operation::CounterRequest { .. }
+        | Operation::JournalRead { .. }
+        | Operation::JournalSubscribe { .. }
+        | Operation::ListResolvers { .. }
+        | Operation::RegisterResolver { .. }
+        | Operation::UnregisterResolver { .. } => Names::Classified,
+    };
+    if matches!(names, Names::Exempt) {
+        return None;
+    }
+    let Some(tenant) = principal.and_then(|p| p.tenant.as_deref()) else {
+        return Some(classified_map_name.to_string());
+    };
+    let not_owned = |name: &str| (!tenant_owns(tenant, name)).then(|| name.to_string());
+    match names {
+        Names::Exempt | Names::None => None,
+        Names::Classified => not_owned(classified_map_name),
+        Names::Lock(name) => not_owned(name),
+        Names::Batch(ops) => ops
+            .iter()
+            .find_map(|client_op| not_owned(&client_op.map_name)),
+    }
 }
 
 /// The first map name `op` carries that the shared rule refuses, with the
@@ -2466,6 +2563,546 @@ mod tests {
                 journal.subscribers_for("secret", &JournalEventType::PUT),
                 vec![connection]
             );
+        }
+    }
+    /// TG-TEN-001: with tenancy on, a client operation reaches a domain
+    /// service only for a principal with a tenant and only for names that
+    /// tenant owns, whatever the policies say.
+    mod tenant {
+        use super::*;
+
+        const ADMIN: &str = "admin-subject";
+
+        /// The layer over a counting inner service with tenancy set as given,
+        /// under a never-configured policy store or a configured one whose
+        /// single policy allows everything, with `ADMIN` on the admin-subject
+        /// list — so a refusal can only come from the tenant boundary.
+        async fn service(
+            configured: bool,
+            tenancy: bool,
+        ) -> (AuthorizationService<CountingService>, Arc<AtomicUsize>) {
+            let store = Arc::new(InMemoryPolicyStore::new());
+            if configured {
+                store
+                    .upsert_policy(PermissionPolicy {
+                        id: "allow-all".to_string(),
+                        map_pattern: "*".to_string(),
+                        action: PermissionAction::All,
+                        effect: PolicyEffect::Allow,
+                        condition: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+            let admins = Arc::new(std::iter::once(ADMIN.to_string()).collect());
+            let evaluator =
+                PolicyEvaluator::with_admin_subjects(store, admins).with_tenancy(tenancy);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let svc = AuthorizationLayer::new(Arc::new(evaluator))
+                .layer(CountingService(Arc::clone(&calls)));
+            (svc, calls)
+        }
+
+        fn principal(id: &str, tenant: Option<&str>) -> Principal {
+            Principal {
+                id: id.to_string(),
+                roles: vec![],
+                tenant: tenant.map(str::to_string),
+            }
+        }
+
+        fn as_principal(
+            ops: Vec<(String, Operation)>,
+            principal: Option<&Principal>,
+        ) -> Vec<(String, Operation)> {
+            ops.into_iter()
+                .map(|(family, mut op)| {
+                    if let Some(p) = principal {
+                        op.set_principal(p.clone());
+                    }
+                    (family, op)
+                })
+                .collect()
+        }
+
+        fn ctx(service_name: &'static str) -> OperationContext {
+            client_ctx(service_name, CallerOrigin::Client)
+        }
+
+        fn client_op(map: &str, op_type: &str) -> Operation {
+            Operation::ClientOp {
+                ctx: ctx(service_names::CRDT),
+                payload: sync::ClientOpMessage {
+                    payload: base::ClientOp {
+                        map_name: map.to_string(),
+                        key: "k".to_string(),
+                        op_type: Some(op_type.to_string()),
+                        ..Default::default()
+                    },
+                },
+            }
+        }
+
+        fn op_batch(maps: &[&str]) -> Operation {
+            Operation::OpBatch {
+                ctx: ctx(service_names::CRDT),
+                payload: sync::OpBatchMessage {
+                    payload: sync::OpBatchPayload {
+                        ops: maps
+                            .iter()
+                            .map(|m| base::ClientOp {
+                                map_name: (*m).to_string(),
+                                key: "k".to_string(),
+                                ..Default::default()
+                            })
+                            .collect(),
+                        ..Default::default()
+                    },
+                },
+            }
+        }
+
+        fn sql_query() -> Operation {
+            Operation::SqlQuery {
+                ctx: ctx(service_names::QUERY),
+                payload: query::SqlQueryPayload {
+                    sql: "SELECT 1".to_string(),
+                    query_id: "q".to_string(),
+                },
+            }
+        }
+
+        fn lock_request(name: &str) -> Operation {
+            Operation::LockRequest {
+                ctx: ctx(service_names::COORDINATION),
+                payload: messaging::LockRequestPayload {
+                    request_id: "l".to_string(),
+                    name: name.to_string(),
+                    ttl: None,
+                },
+            }
+        }
+
+        fn lock_release(name: &str) -> Operation {
+            Operation::LockRelease {
+                ctx: ctx(service_names::COORDINATION),
+                payload: messaging::LockReleasePayload {
+                    request_id: None,
+                    name: name.to_string(),
+                    fencing_token: 1,
+                },
+            }
+        }
+
+        fn journal_read(map: Option<&str>) -> Operation {
+            Operation::JournalRead {
+                ctx: ctx(service_names::PERSISTENCE),
+                payload: messaging::JournalReadData {
+                    request_id: "j".to_string(),
+                    from_sequence: "0".to_string(),
+                    limit: None,
+                    map_name: map.map(str::to_string),
+                },
+            }
+        }
+
+        fn journal_subscribe(map: Option<&str>) -> Operation {
+            Operation::JournalSubscribe {
+                ctx: ctx(service_names::PERSISTENCE),
+                payload: messaging::JournalSubscribeData {
+                    request_id: "j".to_string(),
+                    map_name: map.map(str::to_string),
+                    ..Default::default()
+                },
+            }
+        }
+
+        fn list_resolvers(map: Option<&str>) -> Operation {
+            Operation::ListResolvers {
+                ctx: ctx(service_names::PERSISTENCE),
+                payload: messaging::ListResolversData {
+                    request_id: "r".to_string(),
+                    map_name: map.map(str::to_string),
+                },
+            }
+        }
+
+        /// Every operation that names a resource, each naming one of tenant
+        /// `t`'s: maps `t.orders` and `t.docs`, topic `t.chat`, counter
+        /// `t.hits`, lock `t.l`. Labelled with the name it must be refused
+        /// under.
+        // One literal per family, kept in one list so the count is checkable.
+        #[allow(clippy::too_many_lines)]
+        fn named_ops(t: &str) -> Vec<(String, Operation)> {
+            let orders = format!("{t}.orders");
+            let docs = format!("{t}.docs");
+            let chat = format!("{t}.chat");
+            let hits = format!("{t}.hits");
+            let lock = format!("{t}.l");
+            let mut ops: Vec<(String, Operation)> =
+                checked_family_ops(&orders, CallerOrigin::Client)
+                    .into_iter()
+                    .map(|(family, op)| (format!("{family} {orders}"), op))
+                    .collect();
+            ops.extend([
+                (format!("REMOVE {orders}"), client_op(&orders, "REMOVE")),
+                (format!("OR_ADD {docs}"), client_op(&docs, "OR_ADD")),
+                (format!("OR_REMOVE {docs}"), client_op(&docs, "OR_REMOVE")),
+                (
+                    format!("OpBatch non-first {orders}"),
+                    op_batch(&["a.orders", &orders]),
+                ),
+                (
+                    format!("TopicSubscribe {chat}"),
+                    Operation::TopicSubscribe {
+                        ctx: ctx(service_names::MESSAGING),
+                        payload: messaging::TopicSubPayload {
+                            topic: chat.clone(),
+                        },
+                    },
+                ),
+                (
+                    format!("TopicPublish {chat}"),
+                    Operation::TopicPublish {
+                        ctx: ctx(service_names::MESSAGING),
+                        payload: messaging::TopicPubPayload {
+                            topic: chat,
+                            data: rmpv::Value::Nil,
+                        },
+                    },
+                ),
+                (
+                    format!("CounterRequest {hits}"),
+                    Operation::CounterRequest {
+                        ctx: ctx(service_names::PERSISTENCE),
+                        payload: messaging::CounterRequestPayload { name: hits.clone() },
+                    },
+                ),
+                (
+                    format!("CounterSync {hits}"),
+                    Operation::CounterSync {
+                        ctx: ctx(service_names::PERSISTENCE),
+                        payload: messaging::CounterStatePayload {
+                            name: hits,
+                            state: messaging::PNCounterState {
+                                p: std::collections::HashMap::new(),
+                                n: std::collections::HashMap::new(),
+                            },
+                        },
+                    },
+                ),
+                (format!("LockRequest {lock}"), lock_request(&lock)),
+                (format!("LockRelease {lock}"), lock_release(&lock)),
+                (
+                    format!("RegisterResolver {orders}"),
+                    Operation::RegisterResolver {
+                        ctx: ctx(service_names::PERSISTENCE),
+                        payload: messaging::RegisterResolverData {
+                            request_id: "r".to_string(),
+                            map_name: orders.clone(),
+                            resolver: messaging::ConflictResolver {
+                                name: "noop".to_string(),
+                                code: String::new(),
+                                priority: None,
+                                key_pattern: None,
+                            },
+                        },
+                    },
+                ),
+                (
+                    format!("UnregisterResolver {orders}"),
+                    Operation::UnregisterResolver {
+                        ctx: ctx(service_names::PERSISTENCE),
+                        payload: messaging::UnregisterResolverData {
+                            request_id: "r".to_string(),
+                            map_name: orders.clone(),
+                            resolver_name: "noop".to_string(),
+                        },
+                    },
+                ),
+                (
+                    format!("ListResolvers {orders}"),
+                    list_resolvers(Some(&orders)),
+                ),
+                (format!("JournalRead {orders}"), journal_read(Some(&orders))),
+                (
+                    format!("JournalSubscribe {orders}"),
+                    journal_subscribe(Some(&orders)),
+                ),
+            ]);
+            ops
+        }
+
+        /// The operations exempt from the boundary: no principal or tenant
+        /// needed, nothing named.
+        fn exempt_ops() -> Vec<(String, Operation)> {
+            vec![
+                (
+                    "Ping".to_string(),
+                    Operation::Ping {
+                        ctx: ctx(service_names::COORDINATION),
+                        payload: messaging::PingData { timestamp: 0 },
+                    },
+                ),
+                (
+                    "PartitionMapRequest".to_string(),
+                    Operation::PartitionMapRequest {
+                        ctx: ctx(service_names::COORDINATION),
+                        payload: None,
+                    },
+                ),
+                (
+                    "GarbageCollect".to_string(),
+                    Operation::GarbageCollect {
+                        ctx: ctx(service_names::COORDINATION),
+                    },
+                ),
+                (
+                    "TopicUnsubscribe".to_string(),
+                    Operation::TopicUnsubscribe {
+                        ctx: ctx(service_names::MESSAGING),
+                        payload: messaging::TopicUnsubPayload {
+                            topic: "b.chat".to_string(),
+                        },
+                    },
+                ),
+                (
+                    "QueryUnsubscribe".to_string(),
+                    Operation::QueryUnsubscribe {
+                        ctx: ctx(service_names::QUERY),
+                        payload: query::QueryUnsubMessage {
+                            payload: query::QueryUnsubPayload {
+                                query_id: "q".to_string(),
+                            },
+                        },
+                    },
+                ),
+                (
+                    "SearchUnsubscribe".to_string(),
+                    Operation::SearchUnsubscribe {
+                        ctx: ctx(service_names::SEARCH),
+                        payload: search::SearchUnsubPayload {
+                            subscription_id: "s".to_string(),
+                        },
+                    },
+                ),
+                (
+                    "HybridSearchUnsubscribe".to_string(),
+                    Operation::HybridSearchUnsubscribe {
+                        ctx: ctx(service_names::SEARCH),
+                        payload: hybrid::HybridSearchUnsubPayload {
+                            subscription_id: "s".to_string(),
+                        },
+                    },
+                ),
+                (
+                    "JournalUnsubscribe".to_string(),
+                    Operation::JournalUnsubscribe {
+                        ctx: ctx(service_names::PERSISTENCE),
+                        payload: messaging::JournalUnsubscribeData {
+                            subscription_id: "j".to_string(),
+                        },
+                    },
+                ),
+            ]
+        }
+
+        /// Operations that need a principal with a tenant but are not
+        /// name-checked.
+        fn tenant_only_ops() -> Vec<(String, Operation)> {
+            vec![
+                (
+                    "QuerySyncInit".to_string(),
+                    Operation::QuerySyncInit {
+                        ctx: ctx(service_names::QUERY),
+                        payload: query::QuerySyncInitMessage {
+                            payload: query::QuerySyncInitPayload {
+                                query_id: "q".to_string(),
+                                root_hash: 0,
+                            },
+                        },
+                    },
+                ),
+                ("JournalRead without a map".to_string(), journal_read(None)),
+                (
+                    "JournalSubscribe without a map".to_string(),
+                    journal_subscribe(None),
+                ),
+                (
+                    "ListResolvers without a map".to_string(),
+                    list_resolvers(None),
+                ),
+            ]
+        }
+
+        async fn call(
+            svc: &mut AuthorizationService<CountingService>,
+            op: Operation,
+        ) -> Result<OperationResponse, OperationError> {
+            ServiceExt::ready(svc).await.unwrap().call(op).await
+        }
+
+        /// Asserts every op is refused as `Forbidden` and none reaches the inner
+        /// service; with `by_name`, under the name its label ends with when
+        /// that is a dotted name.
+        async fn assert_refused(
+            svc: &mut AuthorizationService<CountingService>,
+            calls: &AtomicUsize,
+            ops: Vec<(String, Operation)>,
+            by_name: bool,
+            case: &str,
+        ) {
+            let before = calls.load(Ordering::SeqCst);
+            for (family, op) in ops {
+                let named = family
+                    .rsplit(' ')
+                    .next()
+                    .filter(|n| by_name && n.contains('.'));
+                let result = call(svc, op).await;
+                match result {
+                    Err(OperationError::Forbidden { map_name }) => {
+                        if let Some(named) = named {
+                            assert_eq!(map_name, named, "{case}: {family}");
+                        }
+                    }
+                    other => panic!("{case}: {family}: expected Forbidden, got {other:?}"),
+                }
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    before,
+                    "{case}: {family}: inner was called"
+                );
+            }
+        }
+
+        async fn assert_admitted(
+            svc: &mut AuthorizationService<CountingService>,
+            calls: &AtomicUsize,
+            ops: Vec<(String, Operation)>,
+            case: &str,
+        ) {
+            for (family, op) in ops {
+                let before = calls.load(Ordering::SeqCst);
+                let result = call(svc, op).await;
+                assert!(result.is_ok(), "{case}: {family}: got {result:?}");
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    before + 1,
+                    "{case}: {family}: inner was not called"
+                );
+            }
+        }
+
+        /// AC1 / AC2: tenant `a` is refused every operation naming a resource
+        /// of tenant `b`, and admitted the same operations on its own — under
+        /// a policy that allows everything, a never-configured store, and as
+        /// an admin subject.
+        #[tokio::test]
+        async fn a_tenant_reaches_only_its_own_resources_whatever_the_policy() {
+            assert_eq!(named_ops("b").len(), 31, "every naming family is exercised");
+            for configured in [true, false] {
+                for id in ["user-a", ADMIN] {
+                    let case = format!("configured={configured} subject={id}");
+                    let a = principal(id, Some("a"));
+                    let (mut svc, calls) = service(configured, true).await;
+                    assert_refused(
+                        &mut svc,
+                        &calls,
+                        as_principal(named_ops("b"), Some(&a)),
+                        true,
+                        &case,
+                    )
+                    .await;
+                    assert_refused(
+                        &mut svc,
+                        &calls,
+                        as_principal(vec![("SqlQuery".to_string(), sql_query())], Some(&a)),
+                        true,
+                        &case,
+                    )
+                    .await;
+                    assert_admitted(
+                        &mut svc,
+                        &calls,
+                        as_principal(named_ops("a"), Some(&a)),
+                        &case,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        /// AC2: tenant `a` is admitted the exempt operations and the
+        /// tenant-only ones, whose classified name is empty.
+        #[tokio::test]
+        async fn a_tenant_is_admitted_the_operations_that_name_nothing() {
+            for configured in [true, false] {
+                let a = principal("user-a", Some("a"));
+                let (mut svc, calls) = service(configured, true).await;
+                let ops = exempt_ops().into_iter().chain(tenant_only_ops()).collect();
+                assert_admitted(
+                    &mut svc,
+                    &calls,
+                    as_principal(ops, Some(&a)),
+                    &format!("configured={configured}"),
+                )
+                .await;
+            }
+        }
+
+        /// AC2: a principal without a tenant, and an anonymous caller, are
+        /// refused everything outside the exempt list and admitted that list.
+        #[tokio::test]
+        async fn a_caller_without_a_tenant_is_refused_all_but_the_exempt_operations() {
+            for configured in [true, false] {
+                for id in ["user", ADMIN] {
+                    let no_tenant = principal(id, None);
+                    for who in [Some(&no_tenant), None] {
+                        let case = format!("configured={configured} {who:?}");
+                        let (mut svc, calls) = service(configured, true).await;
+                        let refused = named_ops("a")
+                            .into_iter()
+                            .chain(tenant_only_ops())
+                            .chain([("SqlQuery".to_string(), sql_query())])
+                            .collect();
+                        assert_refused(&mut svc, &calls, as_principal(refused, who), false, &case)
+                            .await;
+                        assert_admitted(&mut svc, &calls, as_principal(exempt_ops(), who), &case)
+                            .await;
+                    }
+                }
+            }
+        }
+
+        /// The prefix is byte-wise and ends at the separator: tenant `a` does
+        /// not own `ab.x`, `A.x`, `a` or `a.`.
+        #[tokio::test]
+        async fn ownership_is_a_case_sensitive_prefix_up_to_the_separator() {
+            let a = principal("user-a", Some("a"));
+            let (mut svc, calls) = service(true, true).await;
+            for name in ["ab.x", "A.x", "a", "a."] {
+                let ops = vec![
+                    (format!("ClientOp {name}"), client_op(name, "PUT")),
+                    (format!("LockRequest {name}"), lock_request(name)),
+                ];
+                assert_refused(&mut svc, &calls, as_principal(ops, Some(&a)), true, name).await;
+            }
+        }
+
+        /// With tenancy off the boundary does not exist: a tenant principal
+        /// reaches another tenant's names, and a principal without a tenant
+        /// reaches every operation, under a never-configured store.
+        #[tokio::test]
+        async fn with_tenancy_off_nothing_is_refused_by_tenant() {
+            let (mut svc, calls) = service(false, false).await;
+            for who in [principal("user-a", Some("a")), principal("user", None)] {
+                let ops = named_ops("b")
+                    .into_iter()
+                    .chain(tenant_only_ops())
+                    .chain([("SqlQuery".to_string(), sql_query())])
+                    .collect();
+                assert_admitted(&mut svc, &calls, as_principal(ops, Some(&who)), &who.id).await;
+            }
         }
     }
 }

@@ -6,7 +6,8 @@
 //! (map name, event types).
 //!
 //! An event reaches a principal only for a map it may read, and never for a
-//! reserved map (TG-AUTHZ-001).
+//! reserved map (TG-AUTHZ-001); a principal with a tenant sees only its own
+//! tenant's maps (TG-TEN-001).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,6 +17,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 
 use topgun_core::messages::{JournalEventData, JournalEventType};
+use topgun_core::types::tenant_owns;
 use topgun_core::Principal;
 
 use crate::network::connection::ConnectionId;
@@ -103,9 +105,14 @@ impl JournalStore {
         self
     }
 
-    /// Whether `principal` may see an event of `map_name`.
+    /// Whether `principal` may see an event of `map_name`: never a reserved
+    /// map, only its own tenant's maps for a principal with a tenant
+    /// (TG-TEN-001, with or without a policy), then the read policy.
     fn visible(&self, principal: Option<&Principal>, map_name: &str) -> bool {
         !is_reserved_map_name(map_name)
+            && principal
+                .and_then(|p| p.tenant.as_deref())
+                .is_none_or(|tenant| tenant_owns(tenant, map_name))
             && self
                 .policy
                 .as_ref()
@@ -650,5 +657,120 @@ mod tests {
             entry.types,
             Some(vec![JournalEventType::PUT, JournalEventType::DELETE])
         );
+    }
+    // --- tenant boundary (TG-TEN-001) ---
+
+    fn tenant_principal(tenant: &str) -> Principal {
+        Principal {
+            id: format!("user-{tenant}"),
+            roles: vec![],
+            tenant: Some(tenant.to_string()),
+        }
+    }
+
+    /// Journals holding events of tenant `a` and tenant `b`, interleaved:
+    /// one without a policy, one under a never-configured policy store and
+    /// one under a configured store whose single policy allows everything,
+    /// so the tenant filter can only come from the journal itself.
+    async fn tenant_journals() -> Vec<(&'static str, JournalStore)> {
+        use crate::service::policy::{
+            InMemoryPolicyStore, PermissionAction, PermissionPolicy, PolicyEffect, PolicyStore,
+        };
+        let configured = Arc::new(InMemoryPolicyStore::new());
+        configured
+            .upsert_policy(PermissionPolicy {
+                id: "allow-all".to_string(),
+                map_pattern: "*".to_string(),
+                action: PermissionAction::All,
+                effect: PolicyEffect::Allow,
+                condition: None,
+            })
+            .await
+            .unwrap();
+        let journals = vec![
+            ("no evaluator", JournalStore::new(100)),
+            (
+                "never-configured store",
+                JournalStore::new(100).with_policy(Arc::new(PolicyEvaluator::new(Arc::new(
+                    InMemoryPolicyStore::new(),
+                )))),
+            ),
+            (
+                "allow on *",
+                JournalStore::new(100).with_policy(Arc::new(PolicyEvaluator::new(configured))),
+            ),
+        ];
+        for (_, journal) in &journals {
+            for (map, key) in [
+                ("a.x", "a1"),
+                ("b.y", "b1"),
+                ("a.x", "a2"),
+                ("b.y", "b2"),
+                ("ab.x", "ab"),
+                ("a.x", "a3"),
+            ] {
+                journal.append(make_event(map, key, JournalEventType::PUT));
+            }
+        }
+        journals
+    }
+
+    #[tokio::test]
+    async fn a_read_without_a_map_returns_only_the_tenants_events_and_pages_over_them() {
+        let a = tenant_principal("a");
+        for (case, journal) in tenant_journals().await {
+            let keys = |(events, has_more): (Vec<JournalEventData>, bool)| {
+                (
+                    events.into_iter().map(|e| e.key).collect::<Vec<_>>(),
+                    has_more,
+                )
+            };
+            assert_eq!(
+                keys(journal.read(0, 2, None, Some(&a))),
+                (vec!["a1".to_string(), "a2".to_string()], true),
+                "{case}"
+            );
+            assert_eq!(
+                keys(journal.read(0, 3, None, Some(&a))),
+                (
+                    vec!["a1".to_string(), "a2".to_string(), "a3".to_string()],
+                    false
+                ),
+                "{case}: has_more counts visible events only"
+            );
+            assert_eq!(
+                keys(journal.read(0, 100, None, Some(&tenant_principal("b")))),
+                (vec!["b1".to_string(), "b2".to_string()], false),
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_subscription_without_a_map_is_delivered_only_the_tenants_events() {
+        for (case, journal) in tenant_journals().await {
+            journal.subscribe(
+                "s".to_string(),
+                JournalSubscription {
+                    connection_id: ConnectionId(1),
+                    map_name: None,
+                    types: None,
+                    principal: Some(tenant_principal("a")),
+                },
+            );
+            assert_eq!(
+                journal.subscribers_for("a.x", &JournalEventType::PUT),
+                vec![ConnectionId(1)],
+                "{case}"
+            );
+            for other in ["b.y", "ab.x", "A.x", "a"] {
+                assert!(
+                    journal
+                        .subscribers_for(other, &JournalEventType::PUT)
+                        .is_empty(),
+                    "{case}: {other}"
+                );
+            }
+        }
     }
 }

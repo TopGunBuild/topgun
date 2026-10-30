@@ -2484,9 +2484,11 @@ weaker than a test.
   - `LockRequest`, `LockRelease` — a lock name is not a map name and no policy names locks; a
     release is held to the lock's holder and fencing token (clause 5).
   - `QuerySyncInit` — a no-op stub; it reads nothing. `SqlQuery` is classified as a read of the
-    empty name, so an allow on `*` admits it across every map (tracked, TODO-444).
-- **Stated limits:** locks have no namespace in the policies, so `LockRequest` may name any lock;
-  a check by lock name would refuse clients whose policies name only maps. A connection that
+    empty name, so with tenancy off an allow on `*` admits it across every map (tracked, TODO-444);
+    with tenancy on it is refused (TG-TEN-001).
+- **Stated limits:** locks have no namespace in the policies, so with tenancy off `LockRequest` may
+  name any lock (with tenancy on, a lock name is held to the tenant prefix, TG-TEN-001); a check by
+  lock name would refuse clients whose policies name only maps. A connection that
   reconnects is a new holder: its old lock is freed by the disconnect cleanup or its TTL, not
   released by the new connection. A subscription that names a map (`QuerySubscribe`, `SearchSubscribe`,
   `HybridSearchSubscribe`, `JournalSubscribe`, `TopicSubscribe`) is authorized when it is made; a
@@ -2527,6 +2529,52 @@ weaker than a test.
   counter — or takes another client's lock away, or stops or takes over another client's live
   subscription, or receives the records written to a map it holds no subscription on.
 - **Discovered by:** the TODO-859/861 research; TODO-876; TODO-879; TODO-882.
+- **Status:** decided, **enforced**.
+
+### TG-TEN-001: With tenancy on, a client reaches only the names its tenant owns
+
+- **Scope:** the server binary's operation pipeline (which always installs the authorization layer,
+  as in TG-AUTHZ-001), its HTTP `/sync` query path and its event journal, with tenancy on
+  (`TOPGUN_TENANT_CLAIM` set), for operations of origin `Client`, `HttpClient` or `Anonymous`.
+  **Excluded:** trusted origins; a pipeline built without an evaluator (bench, an embedder's
+  `NetworkModule`), which has no boundary even with `tenant_claim` set; the admin API, which is the
+  cross-tenant operator plane and refuses tenant tokens.
+- **Statement:** a tenant `t` owns a name `n` when `t` is non-empty and `n` starts with the bytes of
+  `t` followed by `.` and at least one more byte (byte-wise, case-sensitive). With tenancy on, an
+  operation reaches a domain service, an HTTP `/sync` query reads a store, and a journal event
+  reaches a principal only if the principal carries a tenant and every name the operation, query
+  or event carries is owned by it: every op of an `OpBatch`, the map, topic or counter name the
+  operation is authorized on, and a lock name. `SqlQuery` names no map it can be held to and is
+  refused. The exemptions are exactly: `Ping`, `PartitionMapRequest`, `GarbageCollect`,
+  `TopicUnsubscribe` and the `*Unsubscribe` family need no tenant; `QuerySyncInit` and
+  `JournalRead` / `JournalSubscribe` / `ListResolvers` without a map need a tenant but are not
+  name-checked — the journal then keeps every event of a map the tenant does not own, at read
+  before the page limit and at live delivery, with or without a policy. Enforced before the
+  policy gate: no policy, `AllowAll` gate or admin subject widens it. Tenancy off, it does not
+  exist, except that an HTTP `/sync` query on a reserved map is refused either way.
+- **Stated limits:** a journal read or subscription without a map withholds other tenants' events
+  but not their sequence numbers, so the gaps show when and how much other tenants write. A refusal
+  on a single-message WebSocket path sends no frame (as in TG-NAME-002). A refreshed token would
+  carry no tenant and be refused (token refresh is not wired in production).
+- **Maintaining code:** `service/middleware/authorization.rs` `tenant_violation` and its call in
+  `call_with_principal`; `service/domain/journal.rs` `JournalStore::visible`;
+  `network/handlers/http_sync.rs` `dispatch_queries`; `service/policy/mod.rs`
+  `PolicyEvaluator::with_tenancy` / `tenancy`; `bin/topgun_server.rs` sets `with_tenancy` from
+  the value `NetworkConfig.tenant_claim` is built from; `topgun_core::types::tenant_owns`.
+- **Enforcing test:** `a_tenant_reaches_only_its_own_resources_whatever_the_policy`,
+  `a_tenant_is_admitted_the_operations_that_name_nothing`,
+  `a_caller_without_a_tenant_is_refused_all_but_the_exempt_operations`,
+  `ownership_is_a_case_sensitive_prefix_up_to_the_separator` and
+  `with_tenancy_off_nothing_is_refused_by_tenant` (`authorization.rs`);
+  `a_read_without_a_map_returns_only_the_tenants_events_and_pages_over_them` and
+  `a_subscription_without_a_map_is_delivered_only_the_tenants_events` (`journal.rs`);
+  `http_tenant_operations_on_another_tenants_map_are_refused_per_op`,
+  `http_tenant_query_on_another_tenants_map_is_refused_whatever_the_policy` and
+  `http_query_without_a_tenant_or_on_a_reserved_map_is_refused` (`http_sync.rs`); at the wire,
+  `tests/integration-rust/tenants.test.ts`.
+- **Violation consequence:** a client of one tenant reads, writes or subscribes to another tenant's
+  maps, topics, counters or locks, or reads their mutations through the journal.
+- **Discovered by:** SPEC-398 (TODO-859), part SPEC-398a2.
 - **Status:** decided, **enforced**.
 
 ### TG-KEY-001: Every write of a record holds that record's per-key writer
