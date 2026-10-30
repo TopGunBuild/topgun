@@ -1423,6 +1423,14 @@ A policy is a single rule binding a map pattern + action to an allow/deny effect
 | `effect` | `allow` \| `deny` | Whether a match grants or denies access. |
 | `condition` | predicate (optional) | Rule only applies when the condition evaluates true against the record data and auth context. |
 
+### Map patterns
+
+Patterns split map names on `.`. A segment that is exactly `*` matches one segment, so `users.*` matches `users.profiles` but not `users` or `users.a.b`; a segment that is exactly `**` matches zero or more, so `users.**` covers the whole `users` namespace. A lone `*` matches every map. Any other segment is compared literally, including one that contains a `*`: `users/*` or `user*` matches only the map spelled that way, not the maps you probably meant. Name maps with `.` between their parts and put wildcards in whole segments.
+
+### Tenants
+
+When the server runs with `TOPGUN_TENANT_CLAIM`, every client token carries a tenant, and a client of tenant `acme` reaches only maps, topics, counters and locks whose names start with `acme.`. That boundary is checked before any policy and does not depend on one: no policy, admin subject or empty policy store lets a client reach another tenant's names. Policies then decide what a client may do inside its own tenant. To write one rule for every tenant, put the wildcard in the tenant segment: `*.orders` matches `acme.orders` and `globex.orders`.
+
 ## Defining policies (admin API)
 
 Policies are managed over the admin HTTP API. The endpoints require an **admin bearer token** (mint one by logging in with the operator credentials — see [self-hosting](/docs/deploy/self-host)).
