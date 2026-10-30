@@ -63,7 +63,8 @@ jobs:
     # 30, not 15: with the soak-harness test corpus this job runs ~15 min on hosted
     # runners (clippy ~3 min + debug `cargo test --all-targets` ~10 min), so a 15-minute
     # budget cancels a job whose every step already passed and skips Simulation Tests.
-    timeout-minutes: 30
+    # 40, not 30: runs now reach ~27 min, leaving too little room for runner noise and a cold cache.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
