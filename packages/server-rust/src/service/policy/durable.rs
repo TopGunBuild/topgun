@@ -350,6 +350,7 @@ mod tests {
         let user = topgun_core::Principal {
             id: "u1".to_string(),
             roles: vec!["user".to_string()],
+            tenant: None,
         };
         let decision = eval
             .evaluate(

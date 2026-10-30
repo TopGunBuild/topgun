@@ -283,7 +283,11 @@ impl AuthHandler {
 
                 debug!(user_id = %user_id, ?roles, "JWT verified successfully");
 
-                Ok(Principal { id: user_id, roles })
+                Ok(Principal {
+                    id: user_id,
+                    roles,
+                    tenant: None,
+                })
             }
             Err(e) => {
                 let reason = format!("{e}");

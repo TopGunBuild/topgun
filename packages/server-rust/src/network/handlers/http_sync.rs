@@ -682,6 +682,7 @@ pub async fn http_sync_handler(
             Some(topgun_core::Principal {
                 id: c.user_id.clone(),
                 roles: c.roles.clone(),
+                tenant: None,
             }),
         )
     } else {
@@ -1873,6 +1874,7 @@ mod tests {
         let principal = Principal {
             id: "writer-1".to_string(),
             roles: vec!["user".to_string()],
+            tenant: None,
         };
         let mut response = HttpSyncResponse {
             server_hlc: Timestamp {
@@ -2036,6 +2038,7 @@ mod tests {
         let principal = Principal {
             id: "writer-1".to_string(),
             roles: vec!["user".to_string()],
+            tenant: None,
         };
         let mut response = HttpSyncResponse {
             server_hlc: Timestamp {

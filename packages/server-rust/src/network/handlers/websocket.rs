@@ -2139,6 +2139,7 @@ mod tests {
         Principal {
             id: "writer-1".to_string(),
             roles: vec!["user".to_string()],
+            tenant: None,
         }
     }
 
@@ -3581,6 +3582,7 @@ mod tests {
         let second = Principal {
             id: "writer-2".to_string(),
             roles: vec!["user".to_string()],
+            tenant: None,
         };
         // One partition, so the frames do not depend on the order two
         // sub-batches happened to finish in.

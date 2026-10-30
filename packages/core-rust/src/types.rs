@@ -183,6 +183,25 @@ pub struct Principal {
     pub id: String,
     /// Roles assigned to this principal for authorization checks.
     pub roles: Vec<String>,
+    /// Tenant the principal acts for. `None` means no tenant claim was
+    /// presented, so no tenant boundary applies to this principal.
+    pub tenant: Option<String>,
+}
+
+/// Whether the map `name` belongs to `tenant`.
+///
+/// A tenant owns the names that start with its id followed by `.` and at
+/// least one more byte. The comparison is on bytes, so it is case-sensitive
+/// and never normalises Unicode: two ids that differ in any byte are distinct
+/// tenants. An empty tenant owns nothing, so a missing id can never match
+/// every name that begins with the separator.
+#[must_use]
+pub fn tenant_owns(tenant: &str, name: &str) -> bool {
+    let (tenant, name) = (tenant.as_bytes(), name.as_bytes());
+    !tenant.is_empty()
+        && name.len() > tenant.len() + 1
+        && name.starts_with(tenant)
+        && name[tenant.len()] == b'.'
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +211,74 @@ pub struct Principal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- tenant_owns --
+
+    #[test]
+    fn tenant_owns_name_after_separator() {
+        assert!(tenant_owns("a", "a.x"));
+    }
+
+    #[test]
+    fn tenant_owns_name_with_further_separators() {
+        assert!(tenant_owns("a", "a.x.y"));
+    }
+
+    #[test]
+    fn tenant_owns_any_byte_after_separator() {
+        assert!(tenant_owns("a", "a.."));
+    }
+
+    #[test]
+    fn tenant_does_not_own_its_bare_id() {
+        assert!(!tenant_owns("a", "a"));
+    }
+
+    #[test]
+    fn tenant_does_not_own_separator_without_further_byte() {
+        assert!(!tenant_owns("a", "a."));
+    }
+
+    #[test]
+    fn tenant_does_not_own_longer_id() {
+        assert!(!tenant_owns("a", "ab.x"));
+    }
+
+    #[test]
+    fn tenant_owns_is_case_sensitive() {
+        assert!(!tenant_owns("a", "A.x"));
+    }
+
+    #[test]
+    fn tenant_does_not_own_empty_name() {
+        assert!(!tenant_owns("a", ""));
+    }
+
+    #[test]
+    fn tenant_does_not_own_id_past_the_start() {
+        assert!(!tenant_owns("a", "b.a.x"));
+    }
+
+    #[test]
+    fn empty_tenant_owns_nothing() {
+        assert!(!tenant_owns("", ".x"));
+    }
+
+    // A multi-byte id catches a separator indexed by chars instead of bytes.
+    #[test]
+    fn multibyte_tenant_owns_name_after_separator() {
+        assert!(tenant_owns("é", "é.x"));
+    }
+
+    #[test]
+    fn multibyte_tenant_does_not_own_its_bare_id() {
+        assert!(!tenant_owns("é", "é"));
+    }
+
+    #[test]
+    fn multibyte_tenant_does_not_own_separator_without_further_byte() {
+        assert!(!tenant_owns("é", "é."));
+    }
 
     // -- From<rmpv::Value> for Value --
 

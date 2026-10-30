@@ -712,6 +712,7 @@ mod tests {
         ctx.principal = Some(Principal {
             id: "user1".to_string(),
             roles: vec![],
+            tenant: None,
         });
         let op = Operation::Ping {
             ctx,
@@ -931,6 +932,7 @@ mod tests {
         let principal = Principal {
             id: "user1".to_string(),
             roles: vec!["user".to_string()],
+            tenant: None,
         };
 
         let layer = AuthorizationLayer::new(evaluator);
@@ -955,6 +957,7 @@ mod tests {
         let principal = Principal {
             id: "user1".to_string(),
             roles: vec!["user".to_string()],
+            tenant: None,
         };
 
         let layer = AuthorizationLayer::new(evaluator);
@@ -979,6 +982,7 @@ mod tests {
         let principal = Principal {
             id: "user1".to_string(),
             roles: vec!["user".to_string()],
+            tenant: None,
         };
 
         let layer = AuthorizationLayer::new(evaluator);
@@ -1003,6 +1007,7 @@ mod tests {
         let principal = Principal {
             id: "user1".to_string(),
             roles: vec!["user".to_string()],
+            tenant: None,
         };
 
         let layer = AuthorizationLayer::new(evaluator);
@@ -1138,6 +1143,7 @@ mod tests {
         let principal = Principal {
             id: "user1".to_string(),
             roles: vec!["user".to_string()],
+            tenant: None,
         };
 
         let layer = AuthorizationLayer::new(evaluator);
@@ -2093,6 +2099,7 @@ mod tests {
             ctx.principal = Some(Principal {
                 id: "user".to_string(),
                 roles: vec![],
+                tenant: None,
             });
             ctx
         }
