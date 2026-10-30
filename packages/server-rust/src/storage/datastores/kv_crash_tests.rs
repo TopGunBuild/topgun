@@ -2,14 +2,20 @@
 //! it, recovers from a crash to a prefix of its batches, each whole, holding
 //! every durable one (`TG-ENG-001`, `TG-ENG-005`, `TG-ENG-006`).
 
+use std::sync::Arc;
 use std::time::Instant;
 
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use redb::StorageBackend;
 
+use super::engine_store::KS_PRIMARY;
 use super::kv_crash::{
     crash_case, every_crash_point, random_crashes, CrashMode, CrashTarget, CrashableBackend,
-    KvWorkload, MemTarget, RedbTarget, RegistryWorkload, Scenario, CRASH_MODES,
+    KvWorkload, MemTarget, RedbTarget, RegistryWorkload, Scenario, Step, CRASH_MODES,
 };
+use super::kv_engine::BatchOp;
+use super::redb_engine::RedbKvEngine;
 
 const MIB: usize = 1024 * 1024;
 
@@ -250,4 +256,100 @@ fn k06_redb_registry_after_any_crash_has_no_orphan_and_lists_exactly_the_recover
 #[test]
 fn k07_mem_registry_after_any_crash_has_no_orphan_and_lists_exactly_the_recovered_maps() {
     assert!(registry_suite::<MemTarget>() > 0);
+}
+
+/// Batches, rows per batch and value bytes of the growing workload. It is the
+/// only shape shown to cross a growth of the redb file while unsynced writes
+/// are pending; smaller workloads stay inside the file redb creates.
+const GROWING_BATCHES: u32 = 4;
+const GROWING_ROWS: u32 = 10_000;
+const GROWING_VALUE_BYTES: usize = 60;
+
+/// `k08`'s stride over the crash points: the smallest multiple of 7 that keeps
+/// the test within 60 s in a debug build and still fails it without the redb
+/// fix that syncs the file length after a growth. Not in every run: redb
+/// iterates hash sets in a per-process random order, so which crash images
+/// panic varies (24 of 25 runs failed).
+const K08_STRIDE: u64 = 161;
+
+/// `GROWING_BATCHES` durable batches of `GROWING_ROWS` primary keys with
+/// seeded random values.
+fn growing_workload() -> KvWorkload {
+    let mut rng = StdRng::seed_from_u64(887);
+    let steps = (0..GROWING_BATCHES)
+        .map(|batch| {
+            let ops = (0..GROWING_ROWS)
+                .map(|row| {
+                    let mut key = vec![KS_PRIMARY];
+                    key.extend_from_slice(&(batch * GROWING_ROWS + row).to_be_bytes());
+                    let mut value = vec![0u8; GROWING_VALUE_BYTES];
+                    rng.fill(value.as_mut_slice());
+                    BatchOp::Put { key, value }
+                })
+                .collect();
+            Step::Batch { ops, sync: true }
+        })
+        .collect();
+    KvWorkload { steps }
+}
+
+/// Crashes the growing workload at every `stride`-th op of its dry run, in
+/// every mode with seed 0, and returns the number of cases. Each case panics
+/// unless the image opens and holds a prefix of whole batches that contains
+/// every durable one.
+fn growing_crash_sweep(stride: u64) -> usize {
+    let workload = growing_workload();
+
+    // The dry run, one batch at a time over a kept handle, so the file length
+    // after each batch is visible: the workload must grow the file after its
+    // first durable batch, or it crosses no growth a crash could interrupt.
+    let backend = CrashableBackend::new();
+    let engine = Arc::new(
+        RedbKvEngine::with_backend(backend.clone()).expect("redb over a fresh crashable backend"),
+    );
+    let mut lengths = Vec::new();
+    for step in &workload.steps {
+        let run = KvWorkload {
+            steps: vec![step.clone()],
+        }
+        .run(&engine);
+        assert!(run.ok.iter().all(|&ok| ok), "a dry-run batch failed");
+        lengths.push(backend.len().expect("len of the live backend"));
+    }
+    assert!(
+        lengths.windows(2).any(|pair| pair[1] > pair[0]),
+        "the file never grows after the first durable batch: lengths {lengths:?}"
+    );
+    let ops = backend.ops_so_far();
+    drop(engine);
+
+    let mut cases = 0;
+    for point in (0..ops).step_by(usize::try_from(stride).expect("stride fits")) {
+        for mode in CRASH_MODES {
+            crash_case::<RedbTarget, _>(&workload, Some(point), mode, 0);
+            cases += 1;
+        }
+    }
+    let points = usize::try_from(ops.div_ceil(stride)).expect("points fit");
+    assert_eq!(cases, points * CRASH_MODES.len());
+    cases
+}
+
+#[test]
+fn k08_redb_crashes_while_the_file_grows_recover_a_prefix_that_holds_every_durable_batch() {
+    let started = Instant::now();
+    let cases = growing_crash_sweep(K08_STRIDE);
+    eprintln!(
+        "k08: stride {K08_STRIDE}, {cases} cases, {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+#[ignore = "every 7th op of the growing workload; run in release with --ignored"]
+fn k09_redb_every_seventh_op_of_a_growing_workload_recovers_a_prefix_that_holds_every_durable_batch(
+) {
+    let started = Instant::now();
+    let cases = growing_crash_sweep(7);
+    eprintln!("k09: stride 7, {cases} cases, {:?}", started.elapsed());
 }
