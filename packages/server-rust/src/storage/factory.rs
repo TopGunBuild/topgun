@@ -196,8 +196,13 @@ impl RecordStoreFactory {
         map_name: &str,
         consumer: &mut (dyn FnMut(&str, &RecordValue) + Send),
     ) -> anyhow::Result<()> {
-        let _ = (map_name, consumer);
-        todo!()
+        self.scan_merged_batches(map_name, |batch| {
+            for (key, value) in &batch {
+                consumer(key, value);
+            }
+            std::future::ready(Ok(()))
+        })
+        .await
     }
 
     /// The batch-level form of [`scan_merged`](Self::scan_merged)
@@ -242,9 +247,67 @@ impl RecordStoreFactory {
         F: FnMut(Vec<(String, RecordValue)>) -> Fut + Send,
         Fut: Future<Output = anyhow::Result<()>> + Send,
     {
-        let _ = (map_name, &mut on_batch);
-        let _: Option<HashMap<String, (RecordValue, Option<Timestamp>)>> = None;
-        todo!()
+        // The resident snapshot is taken before the data store is called, so a
+        // write that lands between the two is either in the snapshot or newer
+        // than the stored row it races, and the merge below keeps the newer one.
+        let mut resident: HashMap<String, (RecordValue, Option<Timestamp>)> = HashMap::new();
+        for store in self.get_all_for_map(map_name) {
+            store.for_each_boxed(
+                &mut |key, record| {
+                    let timestamp = match &record.value {
+                        RecordValue::Lww { timestamp, .. } => Some(timestamp.clone()),
+                        _ => None,
+                    };
+                    resident.insert(key.to_string(), (record.value.clone(), timestamp));
+                },
+                false,
+            );
+        }
+
+        if !self.data_store.is_null() {
+            let data_store = self.data_store();
+            // 0 = the backend's default batch budget.
+            let mut batch = data_store.scan_values(map_name, false, 0).await?;
+            loop {
+                let mut emitted = Vec::with_capacity(batch.records.len());
+                for (key, scanned) in batch.records {
+                    let resident_wins = match resident.get(&key) {
+                        None => false,
+                        Some((_, Some(resident_ts))) => match &scanned {
+                            RecordValue::Lww { timestamp, .. } => timestamp <= resident_ts,
+                            // A resident LWW copy against a stored non-LWW slot:
+                            // the resident copy is the live one.
+                            _ => true,
+                        },
+                        // A resident OR slot is authoritative.
+                        Some((_, None)) => true,
+                    };
+                    if resident_wins {
+                        continue;
+                    }
+                    resident.remove(&key);
+                    emitted.push((key, scanned));
+                }
+                if !emitted.is_empty() {
+                    on_batch(emitted).await?;
+                }
+                let Some(cursor) = batch.next_cursor else {
+                    break;
+                };
+                batch = data_store
+                    .scan_values_batched(map_name, false, cursor, 0)
+                    .await?;
+            }
+        }
+
+        let survivors: Vec<(String, RecordValue)> = resident
+            .into_iter()
+            .map(|(key, (value, _))| (key, value))
+            .collect();
+        if !survivors.is_empty() {
+            on_batch(survivors).await?;
+        }
+        Ok(())
     }
 
     /// Returns a reference to the shared persistence backend.
@@ -269,6 +332,291 @@ impl RecordStoreFactory {
             .iter()
             .map(|entry| Arc::clone(entry.value()))
             .collect()
+    }
+}
+
+/// A configurable in-memory `MapDataStore` for the whole-map read tests of this
+/// crate: real batched scans, plus failures, panics, a gate that parks
+/// `scan_values` and call counters.
+#[cfg(test)]
+pub(crate) mod test_store {
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    use async_trait::async_trait;
+    use parking_lot::Mutex;
+
+    use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch, ScanCursor};
+    use crate::storage::record::RecordValue;
+
+    pub(crate) struct TestStore {
+        rows: Mutex<BTreeMap<String, BTreeMap<String, RecordValue>>>,
+        batch_rows: usize,
+        null: bool,
+        calls: AtomicU64,
+        scans: Mutex<HashMap<String, u64>>,
+        fail_first: Mutex<HashSet<String>>,
+        fail_resumed: Mutex<HashSet<String>>,
+        panic_scan: AtomicBool,
+        /// `true` while closed: a `scan_values` call fixes its rows, counts
+        /// itself as parked and waits until the gate opens.
+        gate: tokio::sync::watch::Sender<bool>,
+        parked: AtomicU64,
+    }
+
+    impl TestStore {
+        /// A store whose scans return `batch_rows` rows per batch.
+        pub(crate) fn new(batch_rows: usize) -> Self {
+            Self {
+                rows: Mutex::new(BTreeMap::new()),
+                batch_rows: batch_rows.max(1),
+                null: false,
+                calls: AtomicU64::new(0),
+                scans: Mutex::new(HashMap::new()),
+                fail_first: Mutex::new(HashSet::new()),
+                fail_resumed: Mutex::new(HashSet::new()),
+                panic_scan: AtomicBool::new(false),
+                gate: tokio::sync::watch::channel(false).0,
+                parked: AtomicU64::new(0),
+            }
+        }
+
+        /// An empty store that reports itself as a null store.
+        pub(crate) fn null() -> Self {
+            Self {
+                null: true,
+                ..Self::new(1000)
+            }
+        }
+
+        /// Writes a row directly, out of band of any record store.
+        pub(crate) fn put_row(&self, map: &str, key: &str, value: RecordValue) {
+            self.rows
+                .lock()
+                .entry(map.to_string())
+                .or_default()
+                .insert(key.to_string(), value);
+        }
+
+        pub(crate) fn delete_row(&self, map: &str, key: &str) {
+            if let Some(rows) = self.rows.lock().get_mut(map) {
+                rows.remove(key);
+            }
+        }
+
+        pub(crate) fn row(&self, map: &str, key: &str) -> Option<RecordValue> {
+            self.rows.lock().get(map).and_then(|r| r.get(key)).cloned()
+        }
+
+        /// Every `MapDataStore` method call so far.
+        pub(crate) fn calls(&self) -> u64 {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        /// `scan_values` calls for `map` so far.
+        pub(crate) fn scans(&self, map: &str) -> u64 {
+            self.scans.lock().get(map).copied().unwrap_or(0)
+        }
+
+        pub(crate) fn fail_scans(&self, map: &str, fail: bool) {
+            let mut set = self.fail_first.lock();
+            if fail {
+                set.insert(map.to_string());
+            } else {
+                set.remove(map);
+            }
+        }
+
+        pub(crate) fn fail_resumed_scans(&self, map: &str) {
+            self.fail_resumed.lock().insert(map.to_string());
+        }
+
+        pub(crate) fn panic_scans(&self, panic: bool) {
+            self.panic_scan.store(panic, Ordering::SeqCst);
+        }
+
+        pub(crate) fn close_gate(&self) {
+            self.gate.send_replace(true);
+        }
+
+        pub(crate) fn open_gate(&self) {
+            self.gate.send_replace(false);
+        }
+
+        /// `scan_values` calls that have parked on the gate so far.
+        pub(crate) fn parked(&self) -> u64 {
+            self.parked.load(Ordering::SeqCst)
+        }
+
+        fn count(&self) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn batch_after(&self, map: &str, after: Option<&str>) -> ScanBatch {
+            let rows = self.rows.lock();
+            let Some(map_rows) = rows.get(map) else {
+                return ScanBatch::default();
+            };
+            let mut records = Vec::new();
+            let mut next_cursor = None;
+            for (key, value) in map_rows {
+                if after.is_some_and(|a| key.as_str() <= a) {
+                    continue;
+                }
+                if records.len() == self.batch_rows {
+                    let last: String = records
+                        .last()
+                        .map(|(k, _): &(String, RecordValue)| k.clone())
+                        .unwrap_or_default();
+                    next_cursor = Some(ScanCursor(last.into_bytes()));
+                    break;
+                }
+                records.push((key.clone(), value.clone()));
+            }
+            ScanBatch {
+                records,
+                next_cursor,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for TestStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            self.count();
+            if !self.null {
+                self.put_row(map, key, value.clone());
+            }
+            Ok(())
+        }
+
+        async fn add_backup(
+            &self,
+            _map: &str,
+            _key: &str,
+            _value: &RecordValue,
+            _expiration_time: i64,
+            _now: i64,
+        ) -> anyhow::Result<()> {
+            self.count();
+            Ok(())
+        }
+
+        async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
+            self.count();
+            self.delete_row(map, key);
+            Ok(())
+        }
+
+        async fn remove_backup(&self, _map: &str, _key: &str, _now: i64) -> anyhow::Result<()> {
+            self.count();
+            Ok(())
+        }
+
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            self.count();
+            Ok(self.row(map, key))
+        }
+
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            self.count();
+            Ok(keys
+                .iter()
+                .filter_map(|k| self.row(map, k).map(|v| (k.clone(), v)))
+                .collect())
+        }
+
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            self.count();
+            for key in keys {
+                self.delete_row(map, key);
+            }
+            Ok(())
+        }
+
+        async fn enumerate_leaves(
+            &self,
+            _map: &str,
+            _is_backup: bool,
+            _sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            self.count();
+            Ok(())
+        }
+
+        async fn scan_values(
+            &self,
+            map: &str,
+            _is_backup: bool,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.count();
+            *self.scans.lock().entry(map.to_string()).or_default() += 1;
+            assert!(
+                !self.panic_scan.load(Ordering::SeqCst),
+                "injected scan_values panic"
+            );
+            if self.fail_first.lock().contains(map) {
+                anyhow::bail!("injected scan_values failure");
+            }
+            // The rows of a parked call are fixed before it parks: a key written
+            // while it is parked is not in this scan.
+            let batch = self.batch_after(map, None);
+            let mut gate = self.gate.subscribe();
+            if *gate.borrow_and_update() {
+                self.parked.fetch_add(1, Ordering::SeqCst);
+                let _ = gate.wait_for(|closed| !*closed).await;
+            }
+            Ok(batch)
+        }
+
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            _is_backup: bool,
+            cursor: ScanCursor,
+            _max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            self.count();
+            if self.fail_resumed.lock().contains(map) || self.fail_first.lock().contains(map) {
+                anyhow::bail!("injected scan_values_batched failure");
+            }
+            let after = String::from_utf8(cursor.0).expect("test cursor is a key");
+            Ok(self.batch_after(map, Some(&after)))
+        }
+
+        fn is_loadable(&self, _key: &str) -> bool {
+            true
+        }
+
+        fn pending_operation_count(&self) -> u64 {
+            0
+        }
+
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            self.count();
+            Ok(0)
+        }
+
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            self.count();
+            Ok(())
+        }
+
+        fn is_null(&self) -> bool {
+            self.null
+        }
     }
 }
 
@@ -604,5 +952,247 @@ mod tests {
             (crate::storage::datastores::engine_store::PARTITION_THEN_KEY.key_position)(key)
         });
         assert_eq!(originals, expected, "no original key missed or duplicated");
+    }
+
+    // ── TG-READ-001: scan_merged ─────────────────────────────────────────
+
+    mod scan_merged_tests {
+        use std::collections::HashMap;
+
+        use topgun_core::hash_to_partition;
+        use topgun_core::hlc::Timestamp;
+        use topgun_core::types::Value;
+
+        use super::super::test_store::TestStore;
+        use super::super::*;
+        use crate::storage::datastores::{WriteBehindConfig, WriteBehindDataStore};
+        use crate::storage::key_writer::KeyWriteToken;
+        use crate::storage::record::{OrMapEntry, RecordValue};
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+
+        const MAP: &str = "m";
+
+        fn ts(millis: i64) -> Timestamp {
+            Timestamp {
+                millis: u64::try_from(millis).unwrap(),
+                counter: 0,
+                node_id: "n".to_string(),
+            }
+        }
+
+        fn lww(value: &str, millis: i64) -> RecordValue {
+            RecordValue::Lww {
+                value: Value::String(value.to_string()),
+                timestamp: ts(millis),
+            }
+        }
+
+        fn or_slot(value: &str) -> RecordValue {
+            RecordValue::OrMap {
+                records: vec![OrMapEntry {
+                    value: Value::String(value.to_string()),
+                    tag: format!("tag-{value}"),
+                    timestamp: ts(1_000),
+                }],
+                tombstones: Vec::new(),
+            }
+        }
+
+        fn factory_over(store: Arc<dyn MapDataStore>) -> RecordStoreFactory {
+            RecordStoreFactory::new(StorageConfig::default(), store, Vec::new())
+        }
+
+        /// Puts `value` into the engine only: replication provenance writes
+        /// nothing through to the data store.
+        async fn put_resident(factory: &RecordStoreFactory, key: &str, value: RecordValue) {
+            let store = factory.get_or_create(MAP, hash_to_partition(key));
+            store
+                .put(
+                    &KeyWriteToken::for_test(MAP, key),
+                    key,
+                    value,
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Replication,
+                )
+                .await
+                .unwrap();
+        }
+
+        async fn collect(factory: &RecordStoreFactory) -> Vec<(String, RecordValue)> {
+            let mut out = Vec::new();
+            factory
+                .scan_merged(MAP, &mut |key, value| {
+                    out.push((key.to_string(), value.clone()))
+                })
+                .await
+                .unwrap();
+            out
+        }
+
+        fn only(rows: &[(String, RecordValue)], key: &str) -> RecordValue {
+            let hits: Vec<&RecordValue> = rows
+                .iter()
+                .filter(|(k, _)| k == key)
+                .map(|(_, v)| v)
+                .collect();
+            assert_eq!(hits.len(), 1, "key {key} emitted {} times", hits.len());
+            hits[0].clone()
+        }
+
+        /// AC8(a): a resident LWW value newer than the stored row is emitted.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_a_newer_resident_lww_value_wins() {
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(MAP, "k", lww("stored", 1_000));
+            let factory = factory_over(store.clone());
+            put_resident(&factory, "k", lww("resident", 2_000)).await;
+
+            let rows = collect(&factory).await;
+            assert_eq!(only(&rows, "k"), lww("resident", 2_000));
+            assert_eq!(rows.len(), 1);
+        }
+
+        /// AC8(b): a stored row strictly newer than the resident copy is emitted.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_a_strictly_newer_stored_row_wins() {
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(MAP, "k", lww("stored", 2_000));
+            let factory = factory_over(store.clone());
+            put_resident(&factory, "k", lww("resident", 1_000)).await;
+
+            let rows = collect(&factory).await;
+            assert_eq!(only(&rows, "k"), lww("stored", 2_000));
+            assert_eq!(rows.len(), 1);
+        }
+
+        /// AC8(c): equal timestamps keep the resident copy.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_equal_timestamps_keep_the_resident_copy() {
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(MAP, "k", lww("stored", 1_500));
+            let factory = factory_over(store.clone());
+            put_resident(&factory, "k", lww("resident", 1_500)).await;
+
+            let rows = collect(&factory).await;
+            assert_eq!(only(&rows, "k"), lww("resident", 1_500));
+        }
+
+        /// AC8(d): a resident-only and a stored-only key are each emitted once,
+        /// also when the stored rows span several batches.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_emits_resident_only_and_stored_only_keys_once() {
+            let store = Arc::new(TestStore::new(2));
+            for i in 0..5 {
+                store.put_row(MAP, &format!("s{i}"), lww("stored", 1_000));
+            }
+            let factory = factory_over(store.clone());
+            put_resident(&factory, "r", lww("resident", 1_000)).await;
+
+            let rows = collect(&factory).await;
+            assert_eq!(only(&rows, "r"), lww("resident", 1_000));
+            for i in 0..5 {
+                assert_eq!(only(&rows, &format!("s{i}")), lww("stored", 1_000));
+            }
+            assert_eq!(rows.len(), 6);
+        }
+
+        /// AC8(e): a delete staged in the write-behind store over a stored row
+        /// is not emitted.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_skips_a_staged_delete_over_a_stored_row() {
+            let inner = Arc::new(TestStore::new(100));
+            inner.put_row(MAP, "gone", lww("stored", 1_000));
+            inner.put_row(MAP, "kept", lww("stored", 1_000));
+            let write_behind = WriteBehindDataStore::new(
+                inner.clone() as Arc<dyn MapDataStore>,
+                WriteBehindConfig {
+                    // Long enough that the delete stays staged for the test.
+                    write_delay_ms: 600_000,
+                    flush_interval_ms: 10,
+                    ..WriteBehindConfig::default()
+                },
+            );
+            write_behind.remove(MAP, "gone", 2_000).await.unwrap();
+            assert!(
+                inner.row(MAP, "gone").is_some(),
+                "the delete is staged, not yet in the inner store"
+            );
+            let factory = factory_over(write_behind);
+
+            let rows = collect(&factory).await;
+            assert!(
+                rows.iter().all(|(k, _)| k != "gone"),
+                "staged delete emitted: {rows:?}"
+            );
+            assert_eq!(only(&rows, "kept"), lww("stored", 1_000));
+        }
+
+        /// AC8(f): a scan over non-resident rows loads nothing into the engine.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_leaves_engine_residency_unchanged() {
+            let store = Arc::new(TestStore::new(3));
+            for i in 0..10 {
+                store.put_row(MAP, &format!("s{i}"), lww("stored", 1_000));
+            }
+            let factory = factory_over(store.clone());
+            put_resident(&factory, "r", lww("resident", 1_000)).await;
+
+            let sizes = |f: &RecordStoreFactory| -> HashMap<u32, usize> {
+                f.all_stores()
+                    .iter()
+                    .map(|s| (s.partition_id(), s.size()))
+                    .collect()
+            };
+            let before = sizes(&factory);
+            let rows = collect(&factory).await;
+            assert_eq!(rows.len(), 11);
+            assert_eq!(
+                sizes(&factory),
+                before,
+                "store set or sizes changed by the scan"
+            );
+        }
+
+        /// AC8(g): over a null store only the residents are emitted and the data
+        /// store is not called.
+        #[tokio::test]
+        async fn scan_merged_over_a_null_store_emits_residents_and_calls_nothing() {
+            let store = Arc::new(TestStore::null());
+            let factory = factory_over(store.clone());
+            put_resident(&factory, "r1", lww("a", 1_000)).await;
+            put_resident(&factory, "r2", lww("b", 1_000)).await;
+            let calls = store.calls();
+
+            let rows = collect(&factory).await;
+            assert_eq!(only(&rows, "r1"), lww("a", 1_000));
+            assert_eq!(only(&rows, "r2"), lww("b", 1_000));
+            assert_eq!(rows.len(), 2);
+            assert_eq!(store.calls(), calls, "the null store was called");
+        }
+
+        /// AC8(h): a failing resumed batch fails the read.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_fails_on_a_failing_resumed_batch() {
+            let store = Arc::new(TestStore::new(1));
+            store.put_row(MAP, "a", lww("x", 1_000));
+            store.put_row(MAP, "b", lww("y", 1_000));
+            store.fail_resumed_scans(MAP);
+            let factory = factory_over(store.clone());
+
+            let result = factory.scan_merged(MAP, &mut |_, _| {}).await;
+            assert!(result.is_err(), "a failed resumed batch must fail the scan");
+        }
+
+        /// AC8(i): a resident OR slot wins over the stored one.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_a_resident_or_slot_wins_over_the_stored_one() {
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(MAP, "o", or_slot("stored"));
+            let factory = factory_over(store.clone());
+            put_resident(&factory, "o", or_slot("resident")).await;
+
+            let rows = collect(&factory).await;
+            assert_eq!(only(&rows, "o"), or_slot("resident"));
+        }
     }
 }
