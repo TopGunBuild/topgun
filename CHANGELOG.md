@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server): HTTP `/sync`, full-text search and hybrid search see stored records after a
+  restart or eviction.** They answered only over the records loaded in memory, so after a restart
+  `/sync` returned nothing, `SEARCH` and hybrid `fullText` found nothing, hybrid `exact` dropped
+  matches (also where a scalar index existed on the predicate attribute) and `includeValue` left
+  values out; after eviction they left out the evicted records. Each now reads the stored map,
+  merged with the records in memory, without loading the map into memory. A read the store
+  refuses is answered with an error (a 500 entry for that `/sync` query, `error` on the search
+  response, and no subscription registered), never with a partial result. A key deleted while it
+  was not in memory no longer stays in the full-text index. The cost: the first full-text search
+  of a map in a process, and the first after writes made while the map had no search
+  subscription, reads the whole stored map to build its index, and every `/sync` query and hybrid
+  `exact` request reads the whole stored map.
 - **Added (server): `TOPGUN_TENANT_CLAIM` (opt-in).** Names the top-level JWT claim that carries
   a caller's tenant, taken verbatim (so a namespaced claim such as `https://example.com/tenant`
   works). When it is set, every client token on the WebSocket handshake and on HTTP `/sync` must

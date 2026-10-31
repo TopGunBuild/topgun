@@ -32,7 +32,7 @@ use crate::query::cursor::{
     build_next_cursor, decode_cursor, is_after_cursor, validate_cursor_expiry,
 };
 use crate::service::dispatch::PartitionDispatcher;
-use crate::service::domain::predicate::{execute_query, value_to_rmpv};
+use crate::service::domain::predicate::{evaluate_where, execute_query, value_to_rmpv};
 use crate::service::middleware::authorization::is_reserved_map_name;
 use crate::service::operation::{CallerOrigin, OpVerdict};
 use crate::service::policy::{
@@ -379,13 +379,12 @@ async fn dispatch_operations(
     });
 }
 
-/// Executes one-shot queries directly from the in-memory record store, bypassing the
+/// Executes one-shot queries directly against the record stores and the data store, bypassing the
 /// partition dispatcher pipeline to avoid unnecessary operation overhead for reads.
 ///
-/// This function is `async` solely because the RBAC policy evaluation calls
-/// (`has_policies()` and `evaluate()`) on `PolicyEvaluator` are async. The store
-/// scanning and `execute_query` call are synchronous. The CPU-bound portion is short
-/// enough that `spawn_blocking` is not needed.
+/// Each query reads the map through `RecordStoreFactory::scan_merged`, so records
+/// that are stored but not resident (after a restart or eviction) are served too
+/// (TG-READ-001). A failed scan answers that query with a 500 error entry.
 #[allow(clippy::too_many_lines)]
 async fn dispatch_queries(
     queries: Vec<HttpQueryRequest>,
@@ -454,21 +453,6 @@ async fn dispatch_queries(
             continue;
         }
 
-        // Collect all entries for the requested map across all partitions.
-        let partition_stores = store_factory.get_all_for_map(&map_name);
-        let mut entries: Vec<(String, rmpv::Value)> = Vec::new();
-        for store in &partition_stores {
-            store.for_each_boxed(
-                &mut |key: &str, record: &crate::storage::record::Record| {
-                    if let RecordValue::Lww { ref value, .. } = record.value {
-                        entries.push((key.to_string(), value_to_rmpv(value)));
-                    }
-                    // Skip OrMap and OrTombstones entries.
-                },
-                false, // is_backup = false
-            );
-        }
-
         // Build a Query struct from the filter field.
         // filter is a MsgPack Map -> use it as a where-clause (field equality).
         // filter is Nil/anything else -> match all (no filter).
@@ -482,6 +466,36 @@ async fn dispatch_queries(
             } else {
                 None
             };
+
+        // Every stored record of the map, resident or not (TG-READ-001). Only
+        // the LWW rows that match are kept, so the retained set is the result,
+        // not the map.
+        let mut entries: Vec<(String, rmpv::Value)> = Vec::new();
+        let scanned = store_factory
+            .scan_merged(&map_name, &mut |key, value| {
+                if let RecordValue::Lww { value, .. } = value {
+                    let row = value_to_rmpv(value);
+                    if where_clause
+                        .as_ref()
+                        .is_none_or(|wh| evaluate_where(wh, &row))
+                    {
+                        entries.push((key.to_string(), row));
+                    }
+                }
+            })
+            .await;
+        if let Err(error) = scanned {
+            // A partial or resident-only answer would look complete to the
+            // client, so the query fails as a whole.
+            tracing::warn!(map = %map_name, error = %error, "http sync: store scan for a query failed");
+            let errors = response.errors.get_or_insert_with(Vec::new);
+            errors.push(HttpSyncError {
+                code: 500,
+                message: "store scan failed".into(),
+                context: Some(q.query_id.clone()),
+            });
+            continue;
+        }
 
         let query = Query {
             r#where: where_clause,
@@ -1156,6 +1170,68 @@ mod tests {
             .await;
         }
         response
+    }
+
+    /// AC7 (TG-READ-001): a query whose store scan fails gets a 500 error entry
+    /// and no result entry, and another query of the same request is served
+    /// from the store.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_store_scan_fails_only_its_own_query() {
+        use crate::storage::factory::test_store::TestStore;
+        use crate::storage::impls::StorageConfig;
+
+        let store = Arc::new(TestStore::new(100));
+        store.fail_scans("bad", true);
+        store.put_row(
+            "good",
+            "g1",
+            RecordValue::Lww {
+                value: topgun_core::types::Value::Map(std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    topgun_core::types::Value::String("Good".to_string()),
+                )])),
+                timestamp: Timestamp {
+                    millis: 1_000,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+            },
+        );
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            store,
+            Vec::new(),
+        ));
+        let state = AppState {
+            store_factory: Some(factory),
+            ..AppState::for_test()
+        };
+        let query = |id: &str, map: &str| QueryReq {
+            query_id: id.to_string(),
+            map_name: map.to_string(),
+            filter: rmpv::Value::Nil,
+            limit: None,
+            offset: None,
+            cursor: None,
+        };
+
+        let response =
+            run_dispatch_queries(vec![query("qbad", "bad"), query("qgood", "good")], &state).await;
+
+        let errors = response.errors.expect("the bad query must answer an error");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].code, 500);
+        assert_eq!(errors[0].context.as_deref(), Some("qbad"));
+        let results = response.query_results.expect("the good query answers");
+        assert!(
+            results.iter().all(|r| r.query_id != "qbad"),
+            "the bad query must have no result entry"
+        );
+        let good = results
+            .iter()
+            .find(|r| r.query_id == "qgood")
+            .expect("the good query has a result entry");
+        assert_eq!(good.results.len(), 1, "{:?}", good.results);
     }
 
     /// Query with a matching where-filter returns only the matching records.

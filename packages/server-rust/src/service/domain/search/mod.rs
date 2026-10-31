@@ -10,12 +10,14 @@ pub mod registry;
 pub mod rrf;
 
 pub use hybrid::{HybridSearchEngine, HybridSearchError, HybridSearchResult, SearchMethod};
+
+use hybrid::FullTextMode;
 pub use registry::{RegistryEntry, SubscriptionRegistry};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -585,6 +587,86 @@ struct MutationEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Population state, write generations and the hybrid dirty set
+// ---------------------------------------------------------------------------
+
+/// State shared by the `SearchService` and every `SearchMutationObserver`
+/// attached to it.
+///
+/// - `generations`: one write generation per map. An attached observer bumps it
+///   at callback time for every non-backup event, whether the event is then
+///   enqueued or skipped, never in the batch processor. A population reads it
+///   before its resident snapshot and records the map as populated only when it
+///   is unchanged after the swap (`TG-READ-001`).
+/// - `dirty`: the map names whose hybrid subscriptions need a re-evaluation.
+///   The batch processor inserts a name instead of sending it on a channel; an
+///   insert is idempotent, never blocks and wakes the one notifier task, which
+///   takes the whole set at the start of a pass. The set holds at most one entry
+///   per map, whatever the write rate.
+#[derive(Default)]
+struct SearchShared {
+    generations: DashMap<String, Arc<AtomicU64>>,
+    dirty: Mutex<HashSet<String>>,
+    dirty_wake: tokio::sync::Notify,
+}
+
+impl SearchShared {
+    /// The write generation of `map_name`, created at 0 on first use.
+    fn generation(&self, map_name: &str) -> Arc<AtomicU64> {
+        if let Some(cell) = self.generations.get(map_name) {
+            return Arc::clone(cell.value());
+        }
+        Arc::clone(
+            self.generations
+                .entry(map_name.to_owned())
+                .or_default()
+                .value(),
+        )
+    }
+
+    /// Marks `map_name` for a hybrid re-evaluation and wakes the notifier. A
+    /// name already in the set is not added twice; a wake while a pass runs is
+    /// kept as one permit, so the next pass serves it.
+    fn mark_dirty(&self, map_name: &str) {
+        {
+            let mut dirty = self.dirty.lock();
+            if !dirty.contains(map_name) {
+                dirty.insert(map_name.to_owned());
+            }
+        }
+        self.dirty_wake.notify_one();
+    }
+
+    fn take_dirty(&self) -> HashSet<String> {
+        std::mem::take(&mut *self.dirty.lock())
+    }
+}
+
+/// The link from one `SearchMutationObserver` (and its batch processor) to the
+/// service it is attached to, returned by `SearchMutationObserver::new` and
+/// consumed by `SearchService::spawn_hybrid_notifier`.
+///
+/// Until it is attached, the observer sets the map's `needs_population` flag on
+/// every non-backup event instead of bumping a generation (searches stay
+/// correct at the cost of a population per search) and its batch processor
+/// marks nothing dirty (no hybrid deltas).
+pub struct HybridLink {
+    cell: Arc<OnceLock<Arc<SearchShared>>>,
+}
+
+/// The population state of one map's full-text index. An absent entry means
+/// "needs population"; so does a set `needs_population` flag over `Populated`.
+enum PopState {
+    /// The last population's scan was overlapped by no write.
+    Populated,
+    /// A population task runs; a search that needs population joins it.
+    InFlight {
+        id: u64,
+        outcome: tokio::sync::watch::Receiver<Option<bool>>,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // SearchMutationObserver
 // ---------------------------------------------------------------------------
 
@@ -611,16 +693,21 @@ pub struct SearchMutationObserver {
     /// Shared flag map: set to true when a write is skipped due to no active
     /// subscriptions, so `SearchService` knows to populate the index on first query.
     needs_population: Arc<DashMap<String, AtomicBool>>,
+    /// Set once the link returned by `new` is attached to a service.
+    link: Arc<OnceLock<Arc<SearchShared>>>,
+    /// This map's write generation, looked up once after the link is attached.
+    generation: OnceLock<Arc<AtomicU64>>,
 }
 
 impl SearchMutationObserver {
     /// Creates a new observer and spawns the background batch processor task.
     ///
-    /// Returns a tuple of `(Self, UnboundedReceiver<String>)`. The receiver
-    /// delivers mutated map names to the hybrid delta notifier task, which
-    /// must be spawned by the caller (i.e., `SearchService::spawn_hybrid_notifier`).
-    /// This design avoids giving the observer a reference to `SearchService`
-    /// which would create a circular `Arc` dependency.
+    /// Returns `(Self, HybridLink)`. The caller hands the link to
+    /// `SearchService::spawn_hybrid_notifier`, which attaches this observer and
+    /// its batch processor to the service's write generations and hybrid dirty
+    /// set, before the store serves a write. The link avoids giving the
+    /// observer a reference to `SearchService`, which would create a circular
+    /// `Arc` dependency.
     pub fn new(
         map_name: String,
         registry: Arc<SearchRegistry>,
@@ -629,7 +716,7 @@ impl SearchMutationObserver {
         connection_registry: Arc<ConnectionRegistry>,
         config: SearchConfig,
         needs_population: Arc<DashMap<String, AtomicBool>>,
-    ) -> (Self, mpsc::UnboundedReceiver<String>) {
+    ) -> (Self, HybridLink) {
         // Bounded so a stalled batch processor applies backpressure instead of
         // growing memory without limit. Capacity 10_000 is large enough that
         // healthy sustained write throughput never reaches it; if it does,
@@ -639,10 +726,7 @@ impl SearchMutationObserver {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let shutdown_tx = Arc::new(shutdown_tx);
 
-        // Channel for hybrid delta notifications: the batch processor sends mutated
-        // map names, and the caller (SearchService) receives them to call
-        // notify_hybrid_subscriptions_for_map asynchronously.
-        let (hybrid_notify_tx_for_task, hybrid_notify_rx) = mpsc::unbounded_channel::<String>();
+        let link: Arc<OnceLock<Arc<SearchShared>>> = Arc::new(OnceLock::new());
 
         // Clone the registry Arc so the struct retains a reference for the
         // subscription check in enqueue_index/enqueue_remove, while the batch
@@ -659,7 +743,7 @@ impl SearchMutationObserver {
             connection_registry,
             Duration::from_millis(config.batch_interval_ms),
             config.batch_flush_threshold,
-            hybrid_notify_tx_for_task,
+            Arc::clone(&link),
         ));
 
         let observer = Self {
@@ -669,8 +753,10 @@ impl SearchMutationObserver {
             registry,
             hybrid_registry,
             needs_population,
+            link: Arc::clone(&link),
+            generation: OnceLock::new(),
         };
-        (observer, hybrid_notify_rx)
+        (observer, HybridLink { cell: link })
     }
 
     /// Returns a clone of the shutdown signal sender, so that `SearchService`
@@ -685,6 +771,28 @@ impl SearchMutationObserver {
         let _ = self.shutdown_tx.send(true);
         // Brief yield to allow background task to drain pending events.
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    /// Records a non-backup event at callback time, before it is enqueued or
+    /// skipped (`TG-READ-001`): a population that this write overlapped must
+    /// not record the map as populated, also when the write is skipped and
+    /// never reaches the batch processor. Unattached, the observer marks the
+    /// map as needing population instead.
+    fn note_write(&self) {
+        if let Some(shared) = self.link.get() {
+            self.generation
+                .get_or_init(|| shared.generation(&self.map_name))
+                .fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.mark_needs_population();
+        }
+    }
+
+    fn mark_needs_population(&self) {
+        self.needs_population
+            .entry(self.map_name.clone())
+            .or_insert_with(|| AtomicBool::new(false))
+            .store(true, Ordering::Release);
     }
 
     /// Enqueues an index operation for the batch processor (no synchronous indexing).
@@ -702,10 +810,7 @@ impl SearchMutationObserver {
             .has_subscriptions_for_map(&self.map_name);
         if !has_text && !has_hybrid {
             // Mark this map as needing population when a subscription arrives.
-            self.needs_population
-                .entry(self.map_name.clone())
-                .or_insert_with(|| AtomicBool::new(false))
-                .store(true, Ordering::Release);
+            self.mark_needs_population();
             return;
         }
         if let Err(err) = self.event_tx.try_send(MutationEvent {
@@ -738,10 +843,7 @@ impl SearchMutationObserver {
         if !has_text && !has_hybrid {
             // Mark map as needing population so the first query triggers a full
             // rebuild that correctly excludes the removed key.
-            self.needs_population
-                .entry(self.map_name.clone())
-                .or_insert_with(|| AtomicBool::new(false))
-                .store(true, Ordering::Release);
+            self.mark_needs_population();
             return;
         }
         if let Err(err) = self.event_tx.try_send(MutationEvent {
@@ -770,6 +872,7 @@ impl MutationObserver for SearchMutationObserver {
         if is_backup {
             return;
         }
+        self.note_write();
         let rmpv_val = record_to_rmpv(&record.value);
         self.enqueue_index(key, rmpv_val, ChangeEventType::ENTER);
     }
@@ -785,6 +888,7 @@ impl MutationObserver for SearchMutationObserver {
         if is_backup {
             return;
         }
+        self.note_write();
         let rmpv_val = record_to_rmpv(&record.value);
         self.enqueue_index(key, rmpv_val, ChangeEventType::UPDATE);
     }
@@ -793,10 +897,23 @@ impl MutationObserver for SearchMutationObserver {
         if is_backup {
             return;
         }
+        self.note_write();
+        self.enqueue_remove(key);
+    }
+
+    /// A delete of a key that was not resident. The index holds stored keys
+    /// whatever their residency, so without this the deleted key would stay in
+    /// it and search would return it.
+    fn on_remove_key(&self, key: &str, is_backup: bool) {
+        if is_backup {
+            return;
+        }
+        self.note_write();
         self.enqueue_remove(key);
     }
 
     fn on_clear(&self) {
+        self.note_write();
         if let Err(err) = self.event_tx.try_send(MutationEvent {
             map_name: self.map_name.clone(),
             op: IndexOp::Clear,
@@ -850,7 +967,7 @@ async fn run_batch_processor(
     connection_registry: Arc<ConnectionRegistry>,
     batch_interval: Duration,
     batch_flush_threshold: usize,
-    hybrid_notify_tx: mpsc::UnboundedSender<String>,
+    link: Arc<OnceLock<Arc<SearchShared>>>,
 ) {
     let mut batch: Vec<MutationEvent> = Vec::new();
 
@@ -868,7 +985,7 @@ async fn run_batch_processor(
                             batch.push(evt);
                         }
                         if !batch.is_empty() {
-                            process_batch(batch, &registry, &indexes, &connection_registry, &hybrid_notify_tx);
+                            process_batch(batch, &registry, &indexes, &connection_registry, &link);
                         }
                         return;
                     }
@@ -905,7 +1022,7 @@ async fn run_batch_processor(
                                 batch.push(evt);
                             }
                             if !batch.is_empty() {
-                                process_batch(batch, &registry, &indexes, &connection_registry, &hybrid_notify_tx);
+                                process_batch(batch, &registry, &indexes, &connection_registry, &link);
                             }
                             return;
                         }
@@ -926,7 +1043,7 @@ async fn run_batch_processor(
                 &registry,
                 &indexes,
                 &connection_registry,
-                &hybrid_notify_tx,
+                &link,
             );
         }
     }
@@ -1047,7 +1164,7 @@ fn process_batch(
     registry: &Arc<SearchRegistry>,
     indexes: &Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
     connection_registry: &Arc<ConnectionRegistry>,
-    hybrid_notify_tx: &mpsc::UnboundedSender<String>,
+    link: &OnceLock<Arc<SearchShared>>,
 ) {
     // --- Phase 1: Deduplicate ---
     let mut per_key_ops: HashMap<(String, String), IndexOp> = HashMap::new();
@@ -1139,19 +1256,232 @@ fn process_batch(
     }
 
     // --- Phase 4: Notify hybrid subscribers ---
-    // Send each mutated map name through the channel so the hybrid notifier task
-    // can call SearchService::notify_hybrid_subscriptions_for_map asynchronously.
-    // Deduplicate: only send each map name once per batch.
-    let mut notified_hybrid: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for map_name in ops_by_map.keys() {
-        if notified_hybrid.insert(map_name.as_str()) {
-            let _ = hybrid_notify_tx.send(map_name.clone());
+    // Mark each mutated map dirty (cleared maps are in `ops_by_map` too); the
+    // one notifier task re-evaluates each dirty map once per pass.
+    if let Some(shared) = link.get() {
+        for map_name in ops_by_map.keys() {
+            shared.mark_dirty(map_name);
         }
     }
-    for map_name in cleared_maps.keys() {
-        if notified_hybrid.insert(map_name.as_str()) {
-            let _ = hybrid_notify_tx.send(map_name.clone());
+}
+
+// ---------------------------------------------------------------------------
+// Full-text index population
+// ---------------------------------------------------------------------------
+
+/// The message a search answers when the population it waited for failed.
+const STORE_SCAN_FAILED: &str = "store scan failed";
+
+/// Populates per-map full-text indexes from every stored record
+/// (`TG-READ-001`).
+///
+/// A population runs in its own spawned task, at most one per map; a search
+/// that needs population while one runs joins it. It reads through
+/// `RecordStoreFactory::scan_merged_batches`, builds a new index on a blocking
+/// thread, and takes the indexes' write lock only to swap it in. It records
+/// the map as populated only when the map's write generation did not move
+/// between the read before its resident snapshot and the swap.
+struct Populations {
+    factory: Arc<RecordStoreFactory>,
+    indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
+    needs_population: Arc<DashMap<String, AtomicBool>>,
+    shared: Arc<SearchShared>,
+    states: Mutex<HashMap<String, PopState>>,
+    next_id: AtomicU64,
+    /// Populations started so far.
+    #[cfg(test)]
+    started: AtomicU64,
+    /// When set, the blocking indexer panics in its commit.
+    #[cfg(test)]
+    commit_panic: AtomicBool,
+}
+
+impl Populations {
+    /// Returns once `map_name`'s index answers from a completed population:
+    /// at once when the map is populated, else after the population this call
+    /// starts or joins.
+    ///
+    /// # Errors
+    ///
+    /// The population failed or panicked: its store scan or its indexer.
+    async fn ensure(self: &Arc<Self>, map_name: &str) -> anyhow::Result<()> {
+        let mut outcome = {
+            let mut states = self.states.lock();
+            let flagged = self
+                .needs_population
+                .get(map_name)
+                .is_some_and(|flag| flag.load(Ordering::Acquire));
+            match states.get(map_name) {
+                Some(PopState::Populated) if !flagged => return Ok(()),
+                Some(PopState::InFlight { outcome, .. }) => outcome.clone(),
+                _ => {
+                    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                    let (tx, rx) = tokio::sync::watch::channel(None);
+                    states.insert(
+                        map_name.to_owned(),
+                        PopState::InFlight {
+                            id,
+                            outcome: rx.clone(),
+                        },
+                    );
+                    // Spawned, not awaited in the request future: a request
+                    // timeout that drops the search cannot cut the population.
+                    tokio::spawn(Arc::clone(self).run(map_name.to_owned(), id, tx));
+                    rx
+                }
+            }
+        };
+        let succeeded = outcome
+            .wait_for(Option::is_some)
+            .await
+            .is_ok_and(|done| *done == Some(true));
+        if succeeded {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(STORE_SCAN_FAILED))
         }
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        map_name: String,
+        id: u64,
+        outcome: tokio::sync::watch::Sender<Option<bool>>,
+    ) {
+        // Publishes "failed" and releases the in-flight marker on every exit
+        // that does not finish, a panic included.
+        let guard = PopGuard {
+            pops: Arc::clone(&self),
+            map_name: map_name.clone(),
+            id,
+            outcome,
+            finished: false,
+        };
+        #[cfg(test)]
+        self.started.fetch_add(1, Ordering::SeqCst);
+
+        // Both before the resident snapshot: a write the snapshot misses bumps
+        // the generation after this read (the observer runs after the engine
+        // reflects the write), so this population cannot record "populated".
+        if let Some(flag) = self.needs_population.get(&map_name) {
+            flag.store(false, Ordering::Release);
+        }
+        let generation = self.shared.generation(&map_name);
+        let start_generation = generation.load(Ordering::SeqCst);
+
+        // Capacity 1: back-pressure from the indexer to the scan, at most one
+        // batch queued.
+        let (batch_tx, mut batch_rx) = mpsc::channel::<Vec<(String, RecordValue)>>(1);
+        #[cfg(test)]
+        let commit_panic = self.commit_panic.load(Ordering::SeqCst);
+        let indexer = tokio::task::spawn_blocking(move || {
+            let index = TantivyMapIndex::new();
+            while let Some(batch) = batch_rx.blocking_recv() {
+                for (key, value) in &batch {
+                    index.index_document(key, &record_to_rmpv(value));
+                }
+            }
+            #[cfg(test)]
+            assert!(!commit_panic, "injected indexer commit panic");
+            index.commit();
+            index
+        });
+
+        let scanned = {
+            let batch_tx = &batch_tx;
+            self.factory
+                .scan_merged_batches(&map_name, move |batch| async move {
+                    batch_tx
+                        .send(batch)
+                        .await
+                        .map_err(|_| anyhow::anyhow!("the full-text indexer ended during the scan"))
+                })
+                .await
+        };
+        // The indexer cannot tell a finished scan from a failed one by the
+        // channel closing, so it only builds; the swap is decided here.
+        drop(batch_tx);
+        let built = indexer.await;
+        let index = match (scanned, built) {
+            (Ok(()), Ok(index)) => index,
+            (Err(error), _) => {
+                tracing::warn!(map = %map_name, error = %error, "full-text index population failed: store scan failed");
+                return;
+            }
+            (Ok(()), Err(error)) => {
+                tracing::warn!(map = %map_name, error = %error, "full-text index population failed: the indexer did not finish");
+                return;
+            }
+        };
+
+        let replaced = self.indexes.write().insert(map_name, index);
+        // Dropped after the write lock is released: dropping an index writer
+        // joins its threads.
+        drop(replaced);
+        let overlapped = generation.load(Ordering::SeqCst) != start_generation;
+        guard.finish(!overlapped);
+    }
+
+    #[cfg(test)]
+    fn is_populated(&self, map_name: &str) -> bool {
+        matches!(self.states.lock().get(map_name), Some(PopState::Populated))
+    }
+
+    #[cfg(test)]
+    fn in_flight(&self, map_name: &str) -> bool {
+        matches!(
+            self.states.lock().get(map_name),
+            Some(PopState::InFlight { .. })
+        )
+    }
+}
+
+/// Ends one population: publishes its outcome and replaces its in-flight
+/// marker, unless a later population or a reset already replaced it.
+struct PopGuard {
+    pops: Arc<Populations>,
+    map_name: String,
+    id: u64,
+    outcome: tokio::sync::watch::Sender<Option<bool>>,
+    finished: bool,
+}
+
+impl PopGuard {
+    fn settle(&self, next: Option<PopState>) {
+        let mut states = self.pops.states.lock();
+        if matches!(states.get(&self.map_name), Some(PopState::InFlight { id, .. }) if *id == self.id)
+        {
+            match next {
+                Some(state) => {
+                    states.insert(self.map_name.clone(), state);
+                }
+                None => {
+                    states.remove(&self.map_name);
+                }
+            }
+        }
+    }
+
+    /// The swap happened. `populated`: no write overlapped the scan, so the map
+    /// is recorded as populated; otherwise it stays "needs population" and the
+    /// swapped-in index serves only the searches that waited.
+    fn finish(mut self, populated: bool) {
+        self.settle(populated.then_some(PopState::Populated));
+        self.finished = true;
+        self.outcome.send_replace(Some(true));
+    }
+}
+
+impl Drop for PopGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Some(flag) = self.pops.needs_population.get(&self.map_name) {
+            flag.store(true, Ordering::Release);
+        }
+        self.settle(None);
+        self.outcome.send_replace(Some(false));
     }
 }
 
@@ -1169,9 +1499,6 @@ pub struct SearchService {
     registry: Arc<SearchRegistry>,
     hybrid_registry: Arc<HybridSearchRegistry>,
     indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
-    /// Used to populate the tantivy index lazily when the first search query
-    /// arrives for a map that had writes skipped due to no active subscriptions.
-    record_store_factory: Arc<RecordStoreFactory>,
     /// Used by hybrid search handler to resolve `IndexRegistry` per map.
     index_observer_factory: Arc<IndexObserverFactory>,
     /// Connection registry used to push hybrid search update deltas.
@@ -1182,11 +1509,30 @@ pub struct SearchService {
     observer_shutdown_signals: RwLock<Vec<Arc<tokio::sync::watch::Sender<bool>>>>,
     /// Shared with `SearchMutationObserver`: set to true when `enqueue_index`/
     /// `enqueue_remove` skips a write due to no active subscriptions. Cleared
-    /// after `populate_index_from_store` completes.
+    /// by a population before its resident snapshot.
     needs_population: Arc<DashMap<String, AtomicBool>>,
     /// `HybridSearchEngine` wired after construction (two-phase `OnceLock` to break
     /// the circular Arc: `SearchService` -> `HybridSearchEngine` -> `SearchService`).
     hybrid_engine: OnceLock<Arc<HybridSearchEngine>>,
+    /// Write generations and the hybrid dirty set, shared with every attached
+    /// observer.
+    shared: Arc<SearchShared>,
+    populations: Arc<Populations>,
+    /// Set when the one hybrid notifier task has been spawned.
+    notifier_started: AtomicBool,
+    /// Maps handled by notifier passes so far.
+    #[cfg(test)]
+    notifier_passes: AtomicU64,
+}
+
+/// The answer to a `SEARCH` / `SEARCH_SUB` whose population failed.
+fn search_failed(request_id: String) -> SearchRespPayload {
+    SearchRespPayload {
+        request_id,
+        results: Vec::new(),
+        total_count: 0,
+        error: Some(STORE_SCAN_FAILED.to_string()),
+    }
 }
 
 /// Convert an `Instant` elapsed duration to milliseconds, saturating at `u64::MAX`.
@@ -1209,16 +1555,33 @@ impl SearchService {
         needs_population: Arc<DashMap<String, AtomicBool>>,
         index_observer_factory: Arc<IndexObserverFactory>,
     ) -> Self {
+        let shared = Arc::new(SearchShared::default());
+        let populations = Arc::new(Populations {
+            factory: record_store_factory,
+            indexes: Arc::clone(&indexes),
+            needs_population: Arc::clone(&needs_population),
+            shared: Arc::clone(&shared),
+            states: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(0),
+            #[cfg(test)]
+            started: AtomicU64::new(0),
+            #[cfg(test)]
+            commit_panic: AtomicBool::new(false),
+        });
         Self {
             registry,
             hybrid_registry,
             indexes,
-            record_store_factory,
             index_observer_factory,
             connection_registry,
             observer_shutdown_signals: RwLock::new(Vec::new()),
             needs_population,
             hybrid_engine: OnceLock::new(),
+            shared,
+            populations,
+            notifier_started: AtomicBool::new(false),
+            #[cfg(test)]
+            notifier_passes: AtomicU64::new(0),
         }
     }
 
@@ -1241,101 +1604,42 @@ impl SearchService {
         self.observer_shutdown_signals.write().push(signal);
     }
 
-    /// Spawns the hybrid delta notifier task that consumes the map-name channel
-    /// produced by `SearchMutationObserver::new()`.
+    /// Attaches the observer behind `link` to this service (its write
+    /// generations and hybrid dirty set) and, on the first call, spawns the one
+    /// hybrid notifier task.
     ///
-    /// Each map name received from the channel triggers a call to
-    /// `notify_hybrid_subscriptions_for_map`, which re-evaluates all hybrid
-    /// subscriptions for that map and sends ENTER/UPDATE/LEAVE deltas.
-    ///
-    /// The spawned task holds an `Arc<SearchService>` (cloned from `self`).
-    /// Because `topgun_server` lifetimes are process-bounded the task is dropped
-    /// when the process exits, so this is not a reference-cycle concern in practice.
-    pub fn spawn_hybrid_notifier(self: &Arc<Self>, mut hybrid_rx: mpsc::UnboundedReceiver<String>) {
+    /// A pass of the notifier takes the whole dirty set and re-evaluates each
+    /// map in it once; passes are sequential, and wakes that arrive while a pass
+    /// runs are served by the next one. The task holds an `Arc<SearchService>`;
+    /// it lives as long as the process.
+    pub fn spawn_hybrid_notifier(self: &Arc<Self>, link: HybridLink) {
+        let HybridLink { cell } = link;
+        let _ = cell.set(Arc::clone(&self.shared));
+        if self.notifier_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let svc = Arc::clone(self);
         tokio::spawn(async move {
-            while let Some(map_name) = hybrid_rx.recv().await {
-                svc.notify_hybrid_subscriptions_for_map(&map_name).await;
+            loop {
+                svc.shared.dirty_wake.notified().await;
+                for map_name in svc.shared.take_dirty() {
+                    svc.notify_hybrid_subscriptions_for_map(&map_name).await;
+                }
             }
         });
     }
 
-    /// Creates or retrieves the tantivy index for a map (lazy creation).
-    fn ensure_index(&self, map_name: &str) {
-        let mut indexes = self.indexes.write();
-        indexes.entry(map_name.to_owned()).or_default();
-    }
-
-    /// Ensures the tantivy index for `map_name` is populated from `RecordStore`.
-    ///
-    /// Called before search queries. When conditional indexing skips writes
-    /// (no active subscriptions), the `needs_population` flag is set to true.
-    /// This method reads the flag and triggers a full index rebuild before
-    /// the search query executes, ensuring correct results.
-    fn ensure_index_populated(&self, map_name: &str) {
-        // Check explicit flag set when conditional indexing skipped writes for this map.
-        let needs_pop = self
-            .needs_population
-            .get(map_name)
-            .is_some_and(|flag| flag.load(Ordering::Acquire));
-        if !needs_pop {
-            return; // index is up to date
-        }
-        // Populate from RecordStore (iterates all partitions that hold data),
-        // then clear the flag so subsequent queries skip this rebuild.
-        self.populate_index_from_store(map_name);
-        if let Some(flag) = self.needs_population.get(map_name) {
-            flag.store(false, Ordering::Release);
-        }
-    }
-
-    /// Populates the tantivy index for `map_name` by iterating all records
-    /// across every partition that holds data for this map.
-    ///
-    /// Indexes all records in a single batch and commits once, making this a
-    /// bounded one-time cost when the first search query arrives after writes
-    /// were skipped due to no active subscriptions.
-    fn populate_index_from_store(&self, map_name: &str) {
-        let stores = self.record_store_factory.get_all_for_map(map_name);
-        let mut indexes = self.indexes.write();
-        let index = indexes.entry(map_name.to_owned()).or_default();
-
-        // Clear the existing index before repopulating to remove stale state
-        // from records that may have been deleted while no subscription existed.
-        index.clear();
-
-        for store in &stores {
-            store.for_each_boxed(
-                &mut |key, record| {
-                    let rmpv_val = record_to_rmpv(&record.value);
-                    index.index_document(key, &rmpv_val);
-                },
-                false,
-            );
-        }
-        index.commit();
-    }
-
     /// Executes a search against the index for a map and builds `SearchResultEntry` list.
-    fn execute_search(
+    async fn execute_search(
         &self,
         map_name: &str,
         query_str: &str,
         options: &SearchOptions,
-    ) -> Vec<SearchResultEntry> {
-        self.ensure_index(map_name);
-        // Rebuild the index from RecordStore if conditional indexing skipped
-        // writes while no search subscriptions were active for this map.
-        self.ensure_index_populated(map_name);
-        let indexes = self.indexes.read();
-        let Some(index) = indexes.get(map_name) else {
-            return Vec::new();
-        };
-        let scored_docs = index.search(query_str, options);
-
-        // For each hit, retrieve the full record value from RecordStoreFactory.
-        // RecordStoreFactory::create() returns an empty store (lazy data entry via observers).
-        scored_docs
+    ) -> anyhow::Result<Vec<SearchResultEntry>> {
+        let scored_docs = self
+            .search_map(map_name, query_str, options, FullTextMode::Populate)
+            .await?;
+        Ok(scored_docs
             .into_iter()
             .map(|doc| {
                 SearchResultEntry {
@@ -1345,40 +1649,52 @@ impl SearchService {
                     matched_terms: doc.matched_terms,
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// Executes a BM25 full-text search against the tantivy index for `map_name`.
     ///
-    /// Ensures the index exists and is populated before searching. Returns an
-    /// empty vec if no index exists for the map. Returns raw `ScoredDoc` results
-    /// so callers (e.g. `HybridSearchEngine`) can handle value enrichment separately.
-    pub(crate) fn search_map(
+    /// With `FullTextMode::Populate` a map that needs population is populated
+    /// first and the call waits for it (`TG-READ-001`); with
+    /// `FullTextMode::CurrentIndex` the current index is read as it is. Returns
+    /// raw `ScoredDoc` results so callers (e.g. `HybridSearchEngine`) can handle
+    /// value enrichment separately.
+    ///
+    /// # Errors
+    ///
+    /// The population this search waited for failed.
+    pub(crate) async fn search_map(
         &self,
         map_name: &str,
         query_str: &str,
         options: &SearchOptions,
-    ) -> Vec<ScoredDoc> {
-        self.ensure_index(map_name);
-        self.ensure_index_populated(map_name);
+        mode: FullTextMode,
+    ) -> anyhow::Result<Vec<ScoredDoc>> {
+        if mode == FullTextMode::Populate {
+            self.populations.ensure(map_name).await?;
+        }
         let indexes = self.indexes.read();
-        let Some(index) = indexes.get(map_name) else {
-            return Vec::new();
-        };
-        index.search(query_str, options)
+        Ok(indexes
+            .get(map_name)
+            .map(|index| index.search(query_str, options))
+            .unwrap_or_default())
     }
 
-    fn handle(&self, op: Operation) -> Result<OperationResponse, OperationError> {
+    async fn handle(&self, op: Operation) -> Result<OperationResponse, OperationError> {
         match op {
             Operation::Search { ctx: _, payload } => {
                 let options = payload.options.unwrap_or_default();
-                let results = self.execute_search(&payload.map_name, &payload.query, &options);
-                let total_count = u32::try_from(results.len()).unwrap_or(u32::MAX);
-                let resp_payload = SearchRespPayload {
-                    request_id: payload.request_id,
-                    results,
-                    total_count,
-                    error: None,
+                let resp_payload = match self
+                    .execute_search(&payload.map_name, &payload.query, &options)
+                    .await
+                {
+                    Ok(results) => SearchRespPayload {
+                        request_id: payload.request_id,
+                        total_count: u32::try_from(results.len()).unwrap_or(u32::MAX),
+                        results,
+                        error: None,
+                    },
+                    Err(_) => search_failed(payload.request_id),
                 };
                 Ok(OperationResponse::Message(Box::new(Message::SearchResp {
                     payload: resp_payload,
@@ -1392,8 +1708,17 @@ impl SearchService {
                     ))
                 })?;
                 let options = payload.options.unwrap_or_default();
-                // Execute initial search.
-                let results = self.execute_search(&payload.map_name, &payload.query, &options);
+                // Execute initial search. A failed population is answered as an
+                // error and registers nothing: a subscription seeded from an
+                // incomplete index would look complete to the client.
+                let Ok(results) = self
+                    .execute_search(&payload.map_name, &payload.query, &options)
+                    .await
+                else {
+                    return Ok(OperationResponse::Message(Box::new(Message::SearchResp {
+                        payload: search_failed(payload.subscription_id),
+                    })));
+                };
                 let total_count = u32::try_from(results.len()).unwrap_or(u32::MAX);
 
                 // Build subscription with initial result cache populated.
@@ -1635,7 +1960,20 @@ impl SearchService {
                         }
                         results
                     }
-                    Err(_) => vec![],
+                    // A failed initial evaluation registers nothing: a
+                    // subscription seeded empty would look complete.
+                    Err(error) => {
+                        return Ok(OperationResponse::Message(Box::new(
+                            Message::HybridSearchResp {
+                                payload: HybridSearchRespPayload {
+                                    request_id: payload.subscription_id.clone(),
+                                    results: vec![],
+                                    search_time_ms: elapsed_ms(start),
+                                    error: Some(error.to_string()),
+                                },
+                            },
+                        )));
+                    }
                 }
             } else {
                 vec![]
@@ -1723,8 +2061,15 @@ impl SearchService {
     /// Compares new results against cached results and emits ENTER/UPDATE/LEAVE
     /// deltas to each subscriber's connection. Called by the hybrid notifier task
     /// spawned in `spawn_hybrid_notifier`.
+    ///
+    /// The `exact` legs of all the map's subscriptions share one store scan;
+    /// when it fails, those subscriptions get no delta in this pass (the next
+    /// write marks the map dirty again). The `fullText` legs read the current
+    /// index and never start or join a population.
     #[allow(clippy::too_many_lines)]
     pub async fn notify_hybrid_subscriptions_for_map(&self, map_name: &str) {
+        #[cfg(test)]
+        self.notifier_passes.fetch_add(1, Ordering::SeqCst);
         let subs = self.hybrid_registry.get_subscriptions_for_map(map_name);
         if subs.is_empty() {
             return;
@@ -1738,24 +2083,64 @@ impl SearchService {
         let factory = Arc::clone(&self.index_observer_factory);
         let conn_reg = Arc::clone(&self.connection_registry);
 
-        for sub in subs {
+        // One scan of the map for every `exact` subscription on it. Without a
+        // registry such subscriptions are skipped below, so they add nothing.
+        // Looked up once, so the scan below and the per-subscription choice
+        // agree on which subscriptions take an exact list.
+        let map_registry = factory.get_registry(map_name);
+        let empty_registry =
+            Arc::new(crate::service::domain::index::registry::IndexRegistry::new());
+        let predicates: Vec<&topgun_core::messages::base::PredicateNode> = if map_registry.is_some()
+        {
+            subs.iter()
+                .filter(|sub| sub.methods.contains(&SearchMethod::Exact))
+                .filter_map(|sub| sub.predicate.as_ref())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut exact_lists = if predicates.is_empty() {
+            Some(Vec::new().into_iter())
+        } else {
+            match engine.exact_matches(map_name, &predicates).await {
+                Ok(lists) => Some(lists.into_iter()),
+                Err(error) => {
+                    tracing::warn!(map = %map_name, error = %error, "hybrid live re-evaluation: store scan failed; no exact deltas in this pass");
+                    None
+                }
+            }
+        };
+
+        for sub in &subs {
             // Use the registered IndexRegistry if available. For subscriptions that
             // only use FullText or Semantic methods, an empty registry suffices since
             // no Exact-match predicate evaluation is performed against the index.
-            let owned_registry;
+            // Subscriptions that only use FullText or Semantic methods can use an
+            // empty registry, since no Exact predicate is evaluated against it.
             let registry: &crate::service::domain::index::registry::IndexRegistry =
-                if let Some(reg) = factory.get_registry(&sub.map_name) {
-                    owned_registry = reg;
-                    &owned_registry
+                if let Some(reg) = map_registry.as_ref() {
+                    reg
                 } else if sub.methods.contains(&SearchMethod::Exact) {
-                    // Exact search without a registered index would return no results,
-                    // but we skip rather than silently return empty deltas.
+                    // Exact search without a registered index is skipped rather
+                    // than answered with empty deltas.
                     continue;
                 } else {
-                    owned_registry =
-                        Arc::new(crate::service::domain::index::registry::IndexRegistry::new());
-                    &owned_registry
+                    &empty_registry
                 };
+
+            let exact = if sub.methods.contains(&SearchMethod::Exact) {
+                let Some(lists) = exact_lists.as_mut() else {
+                    continue;
+                };
+                // Lists come in the order the predicates were collected above.
+                Some(if sub.predicate.is_some() {
+                    lists.next().unwrap_or_default()
+                } else {
+                    Vec::new()
+                })
+            } else {
+                None
+            };
 
             let params = crate::service::domain::search::hybrid::HybridSearchParams {
                 map_name: &sub.map_name,
@@ -1768,7 +2153,10 @@ impl SearchService {
                 include_value: sub.include_value,
             };
 
-            let Ok(mut new_results) = engine.hybrid_search(params).await else {
+            let Ok(mut new_results) = engine
+                .hybrid_search_with_exact(params, exact, FullTextMode::CurrentIndex)
+                .await
+            else {
                 continue;
             };
 
@@ -1893,6 +2281,7 @@ impl ManagedService for SearchService {
         self.registry.subscriptions.clear();
         self.hybrid_registry.subscriptions.clear();
         self.needs_population.clear();
+        self.populations.states.lock().clear();
         Ok(())
     }
 
@@ -1951,7 +2340,7 @@ impl Service<Operation> for Arc<SearchService> {
                         ref ctx,
                         ref payload,
                     } => Ok(svc.handle_hybrid_search_unsubscribe(ctx, payload)),
-                    _ => svc.handle(op),
+                    _ => svc.handle(op).await,
                 }
             }
             .instrument(span),
@@ -2968,5 +3357,516 @@ mod tests {
             ChangeEventType::UPDATE,
             "expected UPDATE change_type"
         );
+    }
+
+    // --- TG-READ-001: population, notifier passes and failures ---
+
+    mod stored_read_tests {
+        use std::collections::BTreeMap;
+        use std::sync::OnceLock;
+        use std::time::Duration;
+
+        use topgun_core::hash_to_partition;
+        use topgun_core::messages::base::{PredicateNode, PredicateOp};
+        use topgun_core::types::Value;
+        use tower::Service as _;
+
+        use super::*;
+        use crate::network::config::ConnectionConfig;
+        use crate::network::connection::ConnectionKind;
+        use crate::service::domain::index::IndexObserverFactory;
+        use crate::storage::factory::test_store::TestStore;
+        use crate::storage::factory::ObserverFactory;
+        use crate::storage::key_writer::KeyWriteToken;
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+
+        const M: &str = "m";
+        const TERM: &str = "alpha";
+
+        /// Mirrors the binary's `SearchObserverFactory::create_observer`: the
+        /// observer's link is attached to the service before the store serves
+        /// a write.
+        struct TestSearchObservers {
+            registry: Arc<SearchRegistry>,
+            hybrid_registry: Arc<HybridSearchRegistry>,
+            indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
+            connection_registry: Arc<ConnectionRegistry>,
+            needs_population: Arc<DashMap<String, AtomicBool>>,
+            svc: OnceLock<Arc<SearchService>>,
+        }
+
+        impl ObserverFactory for TestSearchObservers {
+            fn create_observer(
+                &self,
+                map_name: &str,
+                _partition_id: u32,
+            ) -> Option<Arc<dyn MutationObserver>> {
+                let (observer, link) = SearchMutationObserver::new(
+                    map_name.to_string(),
+                    Arc::clone(&self.registry),
+                    Arc::clone(&self.hybrid_registry),
+                    Arc::clone(&self.indexes),
+                    Arc::clone(&self.connection_registry),
+                    SearchConfig {
+                        batch_interval_ms: 16,
+                        batch_flush_threshold: 100,
+                    },
+                    Arc::clone(&self.needs_population),
+                );
+                if let Some(svc) = self.svc.get() {
+                    svc.spawn_hybrid_notifier(link);
+                }
+                Some(Arc::new(observer))
+            }
+        }
+
+        struct Harness {
+            svc: Arc<SearchService>,
+            factory: Arc<RecordStoreFactory>,
+            store: Arc<TestStore>,
+            index_factory: Arc<IndexObserverFactory>,
+            rx: tokio::sync::mpsc::Receiver<OutboundMessage>,
+            conn: ConnectionId,
+        }
+
+        fn harness() -> Harness {
+            let store = Arc::new(TestStore::new(1000));
+            let registry = Arc::new(SearchRegistry::new());
+            let hybrid_registry = Arc::new(HybridSearchRegistry::new());
+            let indexes = Arc::new(RwLock::new(HashMap::new()));
+            let connection_registry = Arc::new(ConnectionRegistry::new());
+            let needs_population = Arc::new(DashMap::new());
+            let observers = Arc::new(TestSearchObservers {
+                registry: Arc::clone(&registry),
+                hybrid_registry: Arc::clone(&hybrid_registry),
+                indexes: Arc::clone(&indexes),
+                connection_registry: Arc::clone(&connection_registry),
+                needs_population: Arc::clone(&needs_population),
+                svc: OnceLock::new(),
+            });
+            let factory = Arc::new(
+                RecordStoreFactory::new(
+                    StorageConfig::default(),
+                    Arc::clone(&store) as Arc<dyn crate::storage::MapDataStore>,
+                    Vec::new(),
+                )
+                .with_observer_factories(vec![Arc::clone(&observers) as Arc<dyn ObserverFactory>]),
+            );
+            let index_factory = Arc::new(IndexObserverFactory::new());
+            let svc = Arc::new(SearchService::new(
+                registry,
+                hybrid_registry,
+                indexes,
+                Arc::clone(&factory),
+                Arc::clone(&connection_registry),
+                needs_population,
+                Arc::clone(&index_factory),
+            ));
+            let _ = observers.svc.set(Arc::clone(&svc));
+            svc.set_hybrid_engine(Arc::new(HybridSearchEngine::new(
+                Arc::clone(&svc),
+                Arc::clone(&factory),
+                None,
+            )));
+            let (handle, rx) =
+                connection_registry.register(ConnectionKind::Client, &ConnectionConfig::default());
+            Harness {
+                svc,
+                factory,
+                store,
+                index_factory,
+                rx,
+                conn: handle.id,
+            }
+        }
+
+        fn doc(text: &str) -> RecordValue {
+            RecordValue::Lww {
+                value: Value::Map(BTreeMap::from([
+                    ("text".to_string(), Value::String(text.to_string())),
+                    ("status".to_string(), Value::String("open".to_string())),
+                ])),
+                timestamp: Timestamp {
+                    millis: 1_000,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+            }
+        }
+
+        /// Stores `n` rows holding `TERM` out of band: none is resident.
+        fn store_rows(h: &Harness, n: usize) {
+            for i in 0..n {
+                h.store
+                    .put_row(M, &format!("s{i}"), doc(&format!("{TERM} stored {i}")));
+            }
+        }
+
+        /// A write through the record store: engine put, observer callback,
+        /// data-store add.
+        async fn write(h: &Harness, key: &str, text: &str) {
+            let store = h.factory.get_or_create(M, hash_to_partition(key));
+            store
+                .put(
+                    &KeyWriteToken::for_test(M, key),
+                    key,
+                    doc(text),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .unwrap();
+        }
+
+        async fn call(svc: &Arc<SearchService>, op: Operation) -> Message {
+            let mut svc = Arc::clone(svc);
+            match svc.call(op).await.expect("the search service answers") {
+                OperationResponse::Message(msg) => *msg,
+                other => panic!("unexpected response: {other:?}"),
+            }
+        }
+
+        async fn search(svc: &Arc<SearchService>) -> SearchRespPayload {
+            match call(svc, make_search_op(M, TERM)).await {
+                Message::SearchResp { payload } => payload,
+                other => panic!("unexpected message: {other:?}"),
+            }
+        }
+
+        fn keys(payload: &SearchRespPayload) -> Vec<String> {
+            let mut keys: Vec<String> = payload.results.iter().map(|r| r.key.clone()).collect();
+            keys.sort();
+            keys
+        }
+
+        fn hybrid_resp(msg: Message) -> HybridSearchRespPayload {
+            match msg {
+                Message::HybridSearchResp { payload } => payload,
+                other => panic!("unexpected message: {other:?}"),
+            }
+        }
+
+        fn status_open() -> PredicateNode {
+            PredicateNode {
+                op: PredicateOp::Eq,
+                attribute: Some("status".to_string()),
+                value: Some(rmpv::Value::String("open".into())),
+                ..PredicateNode::default()
+            }
+        }
+
+        fn exact_sub_op(sub_id: &str) -> Operation {
+            let mut op = make_hybrid_sub_op(M, "", sub_id);
+            if let Operation::HybridSearchSubscribe { payload, .. } = &mut op {
+                payload.methods = vec![WireSearchMethod::Exact];
+                payload.predicate = Some(status_open());
+            }
+            op
+        }
+
+        async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !cond() {
+                assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        fn old_index_has(h: &Harness, key: &str) -> bool {
+            h.svc
+                .indexes
+                .read()
+                .get(M)
+                .is_some_and(|index| index.score_single_document(key, TERM).is_some())
+        }
+
+        /// AC18(a): a population survives the search that started it being
+        /// dropped, records the map as populated, and serves the next search
+        /// without a further scan.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn tg_read_001_population_survives_a_dropped_search() {
+            let h = harness();
+            store_rows(&h, 3);
+            h.store.close_gate();
+            let svc = Arc::clone(&h.svc);
+            let dropped = tokio::spawn(async move { search(&svc).await });
+            eventually("the population's scan parks", || h.store.parked() == 1).await;
+            dropped.abort();
+            let _ = dropped.await;
+            h.store.open_gate();
+
+            eventually("the population ends", || !h.svc.populations.in_flight(M)).await;
+            assert!(
+                h.svc.populations.is_populated(M),
+                "the population must finish in its own task and record the map"
+            );
+            assert_eq!(h.store.scans(M), 1);
+
+            let resp = search(&h.svc).await;
+            assert_eq!(keys(&resp), vec!["s0", "s1", "s2"]);
+            assert_eq!(
+                h.store.scans(M),
+                1,
+                "a populated map is searched without a scan"
+            );
+        }
+
+        /// AC18(b): a write skipped for lack of subscriptions while the scan is
+        /// parked leaves the map "needs population"; the next search returns it.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn tg_read_001_a_skipped_write_during_population_blocks_populated() {
+            let h = harness();
+            store_rows(&h, 2);
+            h.store.close_gate();
+            let svc = Arc::clone(&h.svc);
+            let first = tokio::spawn(async move { search(&svc).await });
+            eventually("the population's scan parks", || h.store.parked() == 1).await;
+            write(&h, "x", &format!("{TERM} written while parked")).await;
+            h.store.open_gate();
+            let _ = first.await.unwrap();
+
+            eventually("the population ends", || !h.svc.populations.in_flight(M)).await;
+            assert!(
+                !h.svc.populations.is_populated(M),
+                "a population a write overlapped must not record the map as populated"
+            );
+            let resp = search(&h.svc).await;
+            assert!(keys(&resp).contains(&"x".to_string()), "{resp:?}");
+        }
+
+        /// AC18(c): with a text subscription the overlapping write is enqueued
+        /// and applied to the old index before the swap; the swap must not
+        /// leave the map recorded as populated without it.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn tg_read_001_an_enqueued_write_during_population_blocks_populated() {
+            let h = harness();
+            store_rows(&h, 2);
+            match call(&h.svc, make_subscribe_op(M, TERM)).await {
+                Message::SearchResp { payload } => assert!(payload.error.is_none()),
+                other => panic!("unexpected message: {other:?}"),
+            }
+            assert!(h.svc.registry.has_subscriptions_for_map(M));
+            h.svc
+                .needs_population
+                .entry(M.to_string())
+                .or_insert_with(|| AtomicBool::new(false))
+                .store(true, Ordering::Release);
+
+            h.store.close_gate();
+            let svc = Arc::clone(&h.svc);
+            let first = tokio::spawn(async move { search(&svc).await });
+            eventually("the population's scan parks", || h.store.parked() == 1).await;
+            write(&h, "x", &format!("{TERM} written while parked")).await;
+            eventually("the batch processor applies x to the old index", || {
+                old_index_has(&h, "x")
+            })
+            .await;
+            h.store.open_gate();
+            let _ = first.await.unwrap();
+
+            eventually("the population ends", || !h.svc.populations.in_flight(M)).await;
+            assert!(!h.svc.populations.is_populated(M));
+            let resp = search(&h.svc).await;
+            assert!(keys(&resp).contains(&"x".to_string()), "{resp:?}");
+        }
+
+        /// AC19: while the notifier's scan is parked, five further dirty
+        /// inserts for the map cause exactly one further scan, shared by both
+        /// exact subscriptions.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn tg_read_001_notifier_scans_each_dirty_map_once_per_pass() {
+            let h = harness();
+            store_rows(&h, 2);
+            h.index_factory.register_map(M);
+            for id in ["e1", "e2"] {
+                h.svc
+                    .hybrid_registry
+                    .register(HybridSearchSubscription::new(
+                        id.to_string(),
+                        h.conn,
+                        M.to_string(),
+                        String::new(),
+                        vec![SearchMethod::Exact],
+                        10,
+                        None,
+                        Some(status_open()),
+                        false,
+                        None,
+                    ));
+            }
+
+            h.store.close_gate();
+            write(&h, "w", "trigger").await;
+            eventually("the notifier's scan parks", || h.store.parked() == 1).await;
+            for _ in 0..5 {
+                h.svc.shared.mark_dirty(M);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            h.store.open_gate();
+
+            eventually("the further scan runs", || h.store.scans(M) >= 2).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(
+                h.store.scans(M),
+                2,
+                "one parked scan and exactly one further"
+            );
+        }
+
+        /// AC21(a): a failed population is answered as an error by every
+        /// request path, registers no subscription, leaves the map "needs
+        /// population", and the healed store serves the next search.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn tg_read_001_a_failed_population_answers_errors_and_registers_nothing() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            h.index_factory.register_map(M);
+            h.store.fail_scans(M, true);
+
+            let resp = search(&h.svc).await;
+            assert!(resp.error.is_some() && resp.results.is_empty(), "{resp:?}");
+            assert!(!h.svc.populations.is_populated(M) && !h.svc.populations.in_flight(M));
+
+            let hybrid = hybrid_resp(call(&h.svc, make_hybrid_search_op(M, TERM)).await);
+            assert!(
+                hybrid.error.is_some() && hybrid.results.is_empty(),
+                "{hybrid:?}"
+            );
+
+            let sub = hybrid_resp(call(&h.svc, make_hybrid_sub_op(M, TERM, "hft")).await);
+            assert!(sub.error.is_some() && sub.results.is_empty(), "{sub:?}");
+            let sub = hybrid_resp(call(&h.svc, exact_sub_op("hex")).await);
+            assert!(sub.error.is_some() && sub.results.is_empty(), "{sub:?}");
+            assert!(
+                !h.svc.hybrid_registry.has_subscriptions_for_map(M),
+                "a failed initial evaluation must not register the subscription"
+            );
+
+            match call(&h.svc, make_subscribe_op(M, TERM)).await {
+                Message::SearchResp { payload } => {
+                    assert!(payload.error.is_some() && payload.results.is_empty());
+                }
+                other => panic!("unexpected message: {other:?}"),
+            }
+            assert!(
+                !h.svc.registry.has_subscriptions_for_map(M),
+                "a failed population must not register the text subscription"
+            );
+            assert!(
+                h.rx.try_recv().is_err(),
+                "nothing is pushed for a refused subscription"
+            );
+
+            h.store.fail_scans(M, false);
+            let resp = search(&h.svc).await;
+            assert!(resp.error.is_none());
+            assert_eq!(keys(&resp), vec!["s0", "s1"]);
+        }
+
+        /// AC21(b): a panicking scan answers the waiting search with an error
+        /// and releases the in-flight marker; the healed store is searched.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn tg_read_001_a_panicked_population_releases_the_map() {
+            let h = harness();
+            store_rows(&h, 2);
+            h.store.panic_scans(true);
+
+            let resp = tokio::time::timeout(Duration::from_secs(10), search(&h.svc))
+                .await
+                .expect("the waiting search must not hang");
+            assert!(resp.error.is_some() && resp.results.is_empty(), "{resp:?}");
+            assert!(!h.svc.populations.in_flight(M));
+
+            h.store.panic_scans(false);
+            let resp = tokio::time::timeout(Duration::from_secs(10), search(&h.svc))
+                .await
+                .expect("a new population must start");
+            assert_eq!(keys(&resp), vec!["s0", "s1"]);
+        }
+
+        /// AC21(c): an indexer that panics in its commit after the last batch
+        /// fails the population: no swap, nothing recorded, marker released.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn tg_read_001_an_indexer_panic_after_the_last_batch_swaps_nothing() {
+            let h = harness();
+            store_rows(&h, 2);
+            {
+                let old = TantivyMapIndex::new();
+                old.index_document("sentinel", &make_rmpv_map(&[("text", TERM)]));
+                old.commit();
+                h.svc.indexes.write().insert(M.to_string(), old);
+            }
+            h.svc.populations.commit_panic.store(true, Ordering::SeqCst);
+
+            let resp = search(&h.svc).await;
+            assert!(resp.error.is_some() && resp.results.is_empty(), "{resp:?}");
+            assert!(old_index_has(&h, "sentinel"), "the old index must stay");
+            assert!(!old_index_has(&h, "s0"));
+            assert!(!h.svc.populations.is_populated(M) && !h.svc.populations.in_flight(M));
+
+            h.svc
+                .populations
+                .commit_panic
+                .store(false, Ordering::SeqCst);
+            let resp = search(&h.svc).await;
+            assert_eq!(keys(&resp), vec!["s0", "s1"]);
+        }
+
+        /// AC24: notifier passes read the current index; they start no
+        /// population and no store scan, and still deliver fullText deltas.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn tg_read_001_notifier_passes_run_no_population() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            h.index_factory.register_map(M);
+
+            h.store.close_gate();
+            let svc = Arc::clone(&h.svc);
+            let registration =
+                tokio::spawn(async move { call(&svc, make_hybrid_sub_op(M, TERM, "hsub")).await });
+            eventually("the registration's scan parks", || h.store.parked() == 1).await;
+            write(&h, "w0", &format!("{TERM} overlapping")).await;
+            h.store.open_gate();
+            let resp = hybrid_resp(registration.await.unwrap());
+            assert!(resp.error.is_none(), "{resp:?}");
+            assert!(
+                !h.svc.populations.is_populated(M),
+                "the population was overlapped"
+            );
+
+            let passes_before = h.svc.notifier_passes.load(Ordering::SeqCst);
+            for i in 1..=5 {
+                write(&h, &format!("w{i}"), &format!("{TERM} steady {i}")).await;
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+            let mut delivered = Vec::new();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline && delivered.is_empty() {
+                while let Ok(msg) = h.rx.try_recv() {
+                    if let Some(update) = decode_hybrid_update(msg) {
+                        if (1..=5).any(|i| update.key == format!("w{i}")) {
+                            delivered.push(update.key);
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            assert!(
+                h.svc.notifier_passes.load(Ordering::SeqCst) > passes_before,
+                "a pass over the map ran after registration"
+            );
+            assert!(
+                !delivered.is_empty(),
+                "the passes delivered a fullText delta"
+            );
+            assert_eq!(
+                h.svc.populations.started.load(Ordering::SeqCst),
+                1,
+                "only registration populated"
+            );
+            assert_eq!(h.store.scans(M), 1, "only registration scanned");
+        }
     }
 }

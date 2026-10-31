@@ -14,10 +14,10 @@
  * re-onboarding path — and the server restarts: a client of `b` gets no record
  * of `b.x` from query, search, hybrid, vector and HTTP query, and the index
  * descriptors of `b.x` and `b.never` are gone (the latter was never in a drop's
- * `dropped`), while `c.keep` keeps its record and its indexes. Of the five read
- * paths only the query serves a record stored before a restart on this binary
- * (the control on `c.keep` shows it), so it is the one that tells a dropped map
- * from a kept one.
+ * `dropped`), while `c.keep` keeps its record and its indexes. The control on
+ * `c.keep` shows that query, search, hybrid and HTTP query serve a record
+ * stored before a restart (TG-READ-001), so each of them tells a dropped map
+ * from a kept one; vector search answers nothing on this binary.
  */
 
 import { serialize, deserialize } from '@topgunbuild/core';
@@ -360,15 +360,21 @@ describe('Integration: tenant deletion (DELETE /api/admin/tenants/{tenant})', ()
     const b = await connect('user-b3', 'b');
     expect(await keysFromEveryReadPath(port, b, 'b', 'b.x')).toEqual(NO_KEYS);
 
-    // The control: the restart serves the other tenant's record through a
-    // query, and its indexes. Search, hybrid, HTTP query and vector search
-    // serve no record stored before a restart for any map on this binary, so
-    // for them the empty answers above hold with or without the delete; only
-    // the query discriminates.
+    // The control: the restart serves the other tenant's record through every
+    // read path that reads stored records (TG-READ-001), and its indexes, so
+    // the empty answers above come from the delete. Vector search answers
+    // nothing on this binary.
     const c = await connect('user-c2', 'c');
     const control = await keysFromEveryReadPath(port, c, 'c', 'c.keep');
     process.stderr.write(`[tenant-delete] c.keep after the restart: ${JSON.stringify(control)}\n`);
-    expect(control.query).toEqual(['k1']);
+    // HTTP query rows carry values only, so that path is checked by its count.
+    expect({ ...control, http: (control.http as unknown[]).length }).toEqual({
+      query: ['k1'],
+      search: ['k1'],
+      hybrid: ['k1'],
+      vector: [],
+      http: 1,
+    });
     expect(await indexes(port, dir)).toEqual({
       scalarFile: ['c.keep'],
       vectorFile: ['c.keep'],
