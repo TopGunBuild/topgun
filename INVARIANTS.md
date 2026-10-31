@@ -2605,7 +2605,12 @@ weaker than a test.
   vector indexes) stay until restart. The data stays in old WAL segments and in backups until they
   are collected or expire. A frame left un-applied at boot, or a write the store keeps refusing in
   any map, holds every drop to its deadline (the snapshot is the whole WAL, not only owned frames).
-  Index descriptor files are removed by the admin endpoint, not here.
+  Index descriptor files are not touched here: `DELETE /api/admin/tenants/{tenant}`
+  (`network/handlers/admin.rs`, `delete_tenant`) removes the scalar and vector descriptors of every
+  owned map after this drop returns `Done`, except the maps in its `failed`
+  (`ac12_delete_drops_the_owned_maps_and_a_rerun_finishes`,
+  `ac12_a_drop_error_is_503_keeps_the_policy_and_the_descriptors`,
+  `a_map_left_by_the_drop_keeps_its_descriptors`; over the wire `tenant-delete.test.ts`).
 - **Maintaining code:** `storage/datastores/write_behind.rs` — `TenantCloses` (`enter`, `close`,
   `lift`, `wait_in_flight`, `try_start_drop`), `InFlightWrite`, `OwnClose`, `DropRunning`,
   `drop_tenant`, `wal_frontier_snapshot`, `owned_writes_durable` and the `enter` call in each write

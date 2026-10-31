@@ -71,7 +71,7 @@ Patterns split map names on `.`. A segment that is exactly `*` matches one segme
 
 ### Tenants
 
-When the server runs with `TOPGUN_TENANT_CLAIM`, every client token carries a tenant, and a client of tenant `acme` reaches only maps, topics, counters and locks whose names start with `acme.`. That boundary is checked before any policy and does not depend on one: no policy, admin subject or empty policy store lets a client reach another tenant's names. Policies then decide what a client may do inside its own tenant. To write one rule for every tenant, put the wildcard in the tenant segment: `*.orders` matches `acme.orders` and `globex.orders`.
+When the server runs with `TOPGUN_TENANT_CLAIM`, every client token carries a tenant, and a client of tenant `acme` reaches only maps, topics, counters and locks whose names start with `acme.`. That boundary is checked before any policy and does not depend on one: no policy, admin subject or empty policy store lets a client reach another tenant's names. Policies then decide what a client may do inside its own tenant. To write one rule for every tenant, put the wildcard in the tenant segment: `*.orders` matches `acme.orders` and `globex.orders`. [Tenants and tenant deletion](#tenants-and-tenant-deletion) below has the whole model.
 
 ## Defining policies (admin API)
 
@@ -109,6 +109,56 @@ curl -X POST https://api.example.com/api/admin/policies \
   }'
 ```
 
+## Tenants and tenant deletion
+
+A tenant is a prefix of map names bound to a claim of the client's token. Turn tenancy on by setting `TOPGUN_TENANT_CLAIM` to the name of the top-level JWT claim that carries the tenant, taken verbatim (a namespaced claim such as `https://example.com/tenant` works). Unset, tenancy is off and the claim is never read.
+
+**Choose a claim users cannot edit.** The server checks only the form of the tenant, never where it came from. `TOPGUN_TENANT_CLAIM`, and `tenantClaim` in a token-exchange provider's `claims` mapping, must name a claim your identity provider sets and users cannot change — an organization id, not a profile field. A claim a user can edit lets that user pick any tenant.
+
+**Claim rules.** With tenancy on, every client token on the WebSocket handshake and on HTTP `/sync` must carry a tenant of 1 to 128 characters from `A-Z`, `a-z`, `0-9`, `_` and `-` that does not start with `_topgun_` or `__topgun_` in any letter case. A token without one is refused like a token without `sub`. There is no exemption by subject, role or origin.
+
+**Naming.** A tenant `acme` owns every name `acme.<anything>`: maps such as `acme.orders` and `acme.users.profiles`, and topics, counters and locks named the same way. `acme` does not own `acmecorp.orders` (the `.` is part of the prefix).
+
+**What is refused.** A client of tenant `acme` is refused every operation on a name it does not own: writes and reads, queries and subscriptions, search, hybrid and vector search, sync, journal reads of another tenant's map, topics, counters and locks. A journal read or subscription without a map returns only the tenant's events. `SqlQuery` is refused with tenancy on.
+
+**The admin plane is the only cross-tenant client.** The admin API (`/api/admin/*`) works across tenants and refuses any token that carries the tenant claim (403), so an admin token is minted without one.
+
+**Token refresh.** A token minted by `/api/auth/refresh` carries no tenant and would be refused with tenancy on. The server binary does not wire refresh tokens, and it does not serve token exchange (`/api/auth/token`) either.
+
+**Isolation is logical.** All tenants share one store and one WAL; a tenant is a name prefix, not a separate store. A store per tenant is deferred until a hosted product needs it.
+
+### Deleting a tenant
+
+```http
+DELETE /api/admin/tenants/{tenant}   # admin bearer token
+```
+
+Deleting tenant `acme` removes every map it owns from the store, including maps whose first write is still buffered, and the scalar and vector index descriptors of those maps. Before anything is written the server refuses — and changes nothing — when tenancy is off (409), when RBAC is not configured (409: the delete writes a deny policy, which would turn a deployment without policies default-deny for everyone), and for an invalid tenant (400). Otherwise it:
+
+1. writes the policy `tenant-deleted:acme` — `mapPattern` `acme.**`, `action` `all`, `effect` `deny` — so the tenant's clients are refused from then on and cannot push their copies back;
+2. drops the maps once every write of them is durable;
+3. removes the index descriptors of every owned map the drop removed.
+
+It answers `200` with `{ "dropped": [...], "failed": [], "message": "..." }`. Running it again is safe and finishes what an earlier run left. Every answer other than one of the refusals above leaves the tenant denied:
+
+- `409` — another tenant delete is running on the node, or the store cannot delete a tenant (`STORAGE_BACKEND=null`); this request deleted nothing. Run it again.
+- `503` with `failed: [{ "map", "error" }]` — the maps listed are still stored; the descriptors of those maps are kept. Run it again.
+- `503` with no `failed` maps — the store refused the drop (for example, a write it keeps refusing holds the drop past `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`), or the index descriptor file could not be written. Data may be partly deleted. Run it again.
+- `503` naming the deny policy — the policy could not be written; nothing was closed or deleted.
+
+An accepted delete runs to the end even if the client disconnects; its outcome is logged as `tenant delete finished` (`tenant`, `dropped`, `failed`, `error`), at `INFO` on success and `WARN` otherwise.
+
+What a delete does not do:
+
+- **Deletion is logical.** The values stay in sealed WAL segments until they are collected, in backups, in the in-memory event journal until evicted, and in a kept `.pre-migration` store file — a rollback to that file brings deleted tenants back.
+- **In-memory copies stay until restart.** Until the server restarts, the admin data plane may still show the deleted maps, and background work (rehydration, tombstone pruning, expiry) that touches a resident copy is refused and logs it. Subscriptions made before the delete stay registered but receive nothing, since every write is refused.
+- **Admin subjects bypass the deny policy.** A subject on `TOPGUN_ADMIN_SUBJECTS` is not refused by the policy; until the server restarts its writes to the tenant's maps are refused by the delete itself. Remove the tenant's subjects from that list before you re-enable the tenant or restart.
+- **Locks stay usable.** A deleted tenant's clients can still take and release locks on its own names, also after a restart: locks skip the policy check and hold no data. Its topics and counters are refused by the deny policy.
+- **A typo is still a delete.** Deleting a tenant name that never existed writes its deny policy and closes the name until the server restarts.
+- **One stuck write blocks every delete.** A WAL frame left unreplayed at boot (the `BootUnreplayed` alarm), or a write the store keeps refusing in any map, makes every tenant delete on the node answer `503` until it is resolved or the server restarts and replays it. A delete can also start the stalled-watermark `ERROR` line for WAL partitions that were idle.
+
+**Re-onboarding a deleted tenant:** delete the `tenant-deleted:acme` policy (`DELETE /api/admin/policies/tenant-deleted:acme`) **and restart the server** — the store keeps refusing the tenant's writes for the rest of the process.
+
 ## Conditions
 
 A policy can carry a condition that is evaluated against the record `data` and the caller's auth context. Conditions reference `data.<field>` and `auth.id` / `auth.roles`. The simplest way to express one is the `conditionExpr` string, a CEL-like expression parsed server-side:
@@ -140,13 +190,9 @@ Supported operators: `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `contains`, `contai
 
 Roles come from the authenticated principal (the JWT validated on the WebSocket handshake — see [Authentication](/docs/guides/authentication)). The `admin` role short-circuits evaluation and is always allowed. Other roles are matched inside conditions via `auth.roles` (e.g. `data.role in auth.roles`).
 
-## Persistence caveat
+## Persistence
 
-<AlertBox
-  variant="warning"
-  title="Policies are in-memory and do not survive a restart"
-  text="The current policy store keeps policies in memory only. They are enforced at runtime, but a server restart clears them — re-apply your policies after every restart (e.g. from a startup script that POSTs them). Durable, restart-surviving policy storage is on the roadmap."
-/>
+On the embedded store (the default, `STORAGE_BACKEND=redb`) policies are stored durably and survive a restart, including the marker that RBAC is configured: once any policy has been written, a store emptied of policies denies by default. With `STORAGE_BACKEND=null` policies are kept in memory only and a restart clears them.
 
 See the [roadmap](/docs/roadmap) for the status of durable policy storage and cluster-wide policy replication.
 
