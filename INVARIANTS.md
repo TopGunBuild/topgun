@@ -3517,8 +3517,28 @@ weaker than a test.
 - **Maintaining code:** `storage/factory.rs` — `scan_merged`, `scan_merged_batches`;
   `storage/datastores/write_behind.rs` — the scan overlay; `service/domain/search/mod.rs` —
   `SearchShared`, `PopState`, the population task and the observer's generation bump.
-- **Enforcing test:** (filled in by the implementation commits)
-- **Integration tests:** (filled in by the implementation commits)
+- **Enforcing test:** `scan_merged_a_newer_resident_lww_value_wins`, `scan_merged_a_strictly_newer_stored_row_wins`,
+  `scan_merged_equal_timestamps_keep_the_resident_copy`, `scan_merged_emits_resident_only_and_stored_only_keys_once`,
+  `scan_merged_skips_a_staged_delete_over_a_stored_row`, `scan_merged_leaves_engine_residency_unchanged`,
+  `scan_merged_over_a_null_store_emits_residents_and_calls_nothing`, `scan_merged_fails_on_a_failing_resumed_batch`,
+  `scan_merged_a_resident_or_slot_wins_over_the_stored_one` (`storage/factory.rs`, AC8);
+  `tg_read_001_population_survives_a_dropped_search`,
+  `tg_read_001_a_skipped_write_during_population_blocks_populated`,
+  `tg_read_001_an_enqueued_write_during_population_blocks_populated` (`search/mod.rs`, AC18); also
+  `a_failed_store_scan_fails_only_its_own_query` (`http_sync.rs`),
+  `tg_read_001_exact_returns_a_stored_key_the_index_misses` (`search/hybrid.rs`) and, in
+  `search/mod.rs`, `tg_read_001_notifier_scans_each_dirty_map_once_per_pass`,
+  `tg_read_001_a_failed_population_answers_errors_and_registers_nothing`,
+  `tg_read_001_a_panicked_population_releases_the_map`,
+  `tg_read_001_an_indexer_panic_after_the_last_batch_swaps_nothing`,
+  `tg_read_001_notifier_passes_run_no_population`.
+- **Integration tests:** `tests/integration-rust/stored-read-paths.test.ts` —
+  `AC1: /sync returns every stored record, and the filtered ones`,
+  `AC2: SEARCH finds stored records`,
+  `AC3: hybrid exact, fullText and includeValue see stored records despite the index`,
+  `AC4(a): a key removed before the restart appears in no read path`,
+  `AC4(b): deleting a non-resident key after the restart removes it from search and /sync`,
+  `AC5: after eviction /sync, SEARCH and hybrid exact still return every record`.
 - **Violation consequence:** after a restart or eviction, `/sync`, full-text search or hybrid
   `exact` silently omit stored records, or a search answers from an index that a concurrent write
   left incomplete.
