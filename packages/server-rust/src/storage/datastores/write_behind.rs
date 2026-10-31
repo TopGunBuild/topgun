@@ -6,20 +6,21 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
 use tokio::sync::{watch, Notify};
+use topgun_core::types::tenant_owns;
 use topgun_core::{fnv1a_hash, PARTITION_COUNT};
 use tracing::{error, info, warn};
 
 use crate::storage::engine::SlotCell;
 use crate::storage::map_data_store::{
-    merkle_leaf_hash, FlushCommit, LeafSink, Loaded, MapDataStore, MerkleLeaf, PutValue,
-    RecordRefused, ScanBatch, ScanCursor, ScanOrder, StoreBrokenCause, StoreErrorClass, StoreWrite,
-    WriteSource,
+    check_tenant, merkle_leaf_hash, DropOutcome, FlushCommit, LeafSink, Loaded, MapDataStore,
+    MerkleLeaf, PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder, StoreBrokenCause,
+    StoreErrorClass, StoreWrite, WriteSource,
 };
 use crate::storage::record::RecordValue;
 use crate::storage::wal::{
@@ -850,6 +851,9 @@ struct TestParks {
     /// Parks the next write of the key between the staging of its key and its
     /// queue insert.
     between_stage_and_queue_insert: Mutex<Option<(String, String, ParkGate)>>,
+    /// Parks the next backup write of the key once it passed the tenant
+    /// close, before its inner-store call.
+    before_backup_write: Mutex<Option<(String, String, ParkGate)>>,
     /// Parks `hard_flush` once the shutdown flag is set, before the flush
     /// loop is joined.
     after_shutdown_flag: Mutex<Option<ParkGate>>,
@@ -1742,6 +1746,200 @@ where
     }
 }
 
+/// How often a tenant drop re-checks what it waits for.
+const TENANT_DROP_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// The tenants whose maps this store refuses to write, and the count of
+/// writes a tenant drop waits for (`TG-TEN-002`).
+///
+/// A write registers in the counter of the current epoch before it reads the
+/// close set, and leaves it through [`InFlightWrite`]. A drop closes the
+/// tenant first, then switches the epoch and waits until the counter of the
+/// previous epoch is zero. All of it is `SeqCst`, so a write either registered
+/// before the switch — and the drop waits for it — or reads the close set
+/// after the tenant was added to it. The drop waits only for writes that
+/// began before its switch, so writes of other maps that keep arriving
+/// cannot hold it.
+///
+/// While no tenant is closed a write pays the counter and two atomic loads,
+/// and takes no lock.
+struct TenantCloses {
+    /// Raised while `closed` holds a tenant, lowered only under its write
+    /// lock; a write reads `closed` only when it is raised.
+    any: AtomicBool,
+    /// The closed tenants. Few: one per drop of this process.
+    closed: parking_lot::RwLock<Vec<String>>,
+    /// Its low bit selects the counter a write registers in.
+    epoch: AtomicUsize,
+    /// Writes in flight, by the epoch they registered in.
+    in_flight: [AtomicUsize; 2],
+    /// Held by the one drop that may run at a time.
+    drop_running: AtomicBool,
+    /// Runs once between a write's registration and its re-read of the
+    /// epoch, so a test can switch the epoch exactly there.
+    #[cfg(test)]
+    after_register: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs once at the start of a lift, so a test can look at the drop slot
+    /// at that moment.
+    #[cfg(test)]
+    on_lift: Mutex<Option<Box<dyn FnOnce(&TenantCloses) + Send>>>,
+}
+
+/// A write's registration in [`TenantCloses`]; dropping it deregisters the
+/// write, from the counter it registered in, also when the write's future is
+/// cancelled.
+struct InFlightWrite<'a> {
+    count: &'a AtomicUsize,
+}
+
+impl Drop for InFlightWrite<'_> {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The one running tenant drop; dropping it lets the next one run.
+struct DropRunning<'a>(&'a AtomicBool);
+
+impl Drop for DropRunning<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The close a running drop added. Dropping it lifts that close — on a
+/// deadline, an error or the cancellation of the drop — unless the drop kept
+/// it; a close an earlier drop added is never lifted here.
+struct OwnClose<'a> {
+    closes: &'a TenantCloses,
+    tenant: &'a str,
+    added: bool,
+}
+
+impl OwnClose<'_> {
+    /// Keeps the close for the rest of the process; whether this call added it.
+    fn keep(&mut self) -> bool {
+        std::mem::take(&mut self.added)
+    }
+}
+
+impl Drop for OwnClose<'_> {
+    fn drop(&mut self) {
+        if self.added {
+            self.closes.lift(self.tenant);
+        }
+    }
+}
+
+impl TenantCloses {
+    fn new() -> Self {
+        Self {
+            any: AtomicBool::new(false),
+            closed: parking_lot::RwLock::new(Vec::new()),
+            epoch: AtomicUsize::new(0),
+            in_flight: [AtomicUsize::new(0), AtomicUsize::new(0)],
+            drop_running: AtomicBool::new(false),
+            #[cfg(test)]
+            after_register: Mutex::new(None),
+            #[cfg(test)]
+            on_lift: Mutex::new(None),
+        }
+    }
+
+    /// Registers a write of `map`, then refuses it, as a temporary error,
+    /// when a closed tenant owns `map`.
+    fn enter(&self, map: &str) -> anyhow::Result<InFlightWrite<'_>> {
+        let write = loop {
+            let epoch = self.epoch.load(Ordering::SeqCst) & 1;
+            let count = &self.in_flight[epoch];
+            count.fetch_add(1, Ordering::SeqCst);
+            #[cfg(test)]
+            if let Some(hook) = self
+                .after_register
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                hook();
+            }
+            // A drop switched the epoch since the load: register again in
+            // the new one, so the drop's counter holds only writes that
+            // began before its switch. Undone before any guard exists, so the
+            // count is taken back once.
+            if self.epoch.load(Ordering::SeqCst) & 1 == epoch {
+                break InFlightWrite { count };
+            }
+            count.fetch_sub(1, Ordering::SeqCst);
+        };
+        if self.any.load(Ordering::SeqCst)
+            && self
+                .closed
+                .read()
+                .iter()
+                .any(|tenant| tenant_owns(tenant, map))
+        {
+            anyhow::bail!(
+                "write-behind store: the tenant of map={map} is being dropped or was dropped; \
+                 write rejected"
+            );
+        }
+        Ok(write)
+    }
+
+    /// The drop slot, or `None` while another drop holds it.
+    fn try_start_drop(&self) -> Option<DropRunning<'_>> {
+        self.drop_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| DropRunning(&self.drop_running))
+    }
+
+    /// Closes `tenant`; the guard lifts the close only if this call added it.
+    fn close<'a>(&'a self, tenant: &'a str) -> OwnClose<'a> {
+        let mut closed = self.closed.write();
+        let added = !closed.iter().any(|t| t == tenant);
+        if added {
+            closed.push(tenant.to_string());
+            self.any.store(true, Ordering::SeqCst);
+        }
+        OwnClose {
+            closes: self,
+            tenant,
+            added,
+        }
+    }
+
+    fn lift(&self, tenant: &str) {
+        #[cfg(test)]
+        if let Some(hook) = self
+            .on_lift
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            hook(self);
+        }
+        let mut closed = self.closed.write();
+        closed.retain(|t| t != tenant);
+        if closed.is_empty() {
+            self.any.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Switches the epoch and waits until every write registered before the
+    /// switch has left; `false` at `deadline`.
+    async fn wait_in_flight(&self, deadline: tokio::time::Instant) -> bool {
+        let previous = &self.in_flight[self.epoch.fetch_add(1, Ordering::SeqCst) & 1];
+        while previous.load(Ordering::SeqCst) != 0 {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(TENANT_DROP_POLL).await;
+        }
+        true
+    }
+}
+
 /// Write-behind buffering layer that wraps any [`MapDataStore`].
 ///
 /// Buffers `add`/`remove` calls in per-partition coalesced queues and flushes
@@ -1869,6 +2067,8 @@ pub struct WriteBehindDataStore {
     /// Set by a refusal and cleared by the walk that finds no refused entry,
     /// so a pass on a store that refuses nothing pays one load and no walk.
     retrying: AtomicBool,
+    /// Closed tenants and the in-flight writes a tenant drop waits for.
+    tenant_closes: TenantCloses,
 }
 
 /// WAL plus the live sequence counter's starting value, threaded into
@@ -1991,6 +2191,7 @@ impl WriteBehindDataStore {
             store_hold: AtomicBool::new(false),
             failed_probes: AtomicU32::new(0),
             retrying: AtomicBool::new(false),
+            tenant_closes: TenantCloses::new(),
         });
 
         // Spawn background flush loop with a clone of the Arc
@@ -2461,6 +2662,21 @@ impl WriteBehindDataStore {
         handle
     }
 
+    /// Parks the next backup write (`add_backup` or `remove_backup`) of
+    /// `(map, key)` once it passed the tenant close, before its inner-store
+    /// call. One-shot and held by this store instance.
+    #[cfg(test)]
+    pub(crate) fn test_park_before_backup_write(&self, map: &str, key: &str) -> TestParkHandle {
+        let (gate, handle) = TestParkHandle::arm();
+        *self
+            .test_parks
+            .before_backup_write
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((map.to_string(), key.to_string(), gate));
+        handle
+    }
+
     /// Parks the next write of `(map, key)` between the staging of its key and
     /// its queue insert, so a flush pass or a shutdown drain can run while the
     /// write has done one of the two and not the other. One-shot and held by
@@ -2525,6 +2741,15 @@ impl WriteBehindDataStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert((map.to_string(), key.to_string()));
+    }
+
+    /// Undoes [`Self::test_refuse_encoding`] for `(map, key)`.
+    #[cfg(test)]
+    pub(crate) fn test_accept_encoding(&self, map: &str, key: &str) {
+        self.encode_refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(map.to_string(), key.to_string()));
     }
 
     /// The injected encoding failure of `entry`'s put, if one is set: what
@@ -4794,6 +5019,63 @@ async fn watchdog_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch:
 }
 
 // ---------------------------------------------------------------------------
+// Tenant drop (`TG-TEN-002`)
+// ---------------------------------------------------------------------------
+
+impl WriteBehindDataStore {
+    /// Refuses, as a temporary error, unless the store is running.
+    fn refuse_drop_unless_running(&self, tenant: &str) -> anyhow::Result<()> {
+        match self.lifecycle.load(Ordering::Acquire) {
+            Lifecycle::Running => Ok(()),
+            Lifecycle::Failed => anyhow::bail!(
+                "write-behind store has failed ({}); drop of tenant {tenant} refused",
+                self.failed_reason()
+            ),
+            Lifecycle::ShuttingDown => anyhow::bail!(
+                "write-behind store is shutting down; drop of tenant {tenant} refused"
+            ),
+        }
+    }
+
+    /// Seeds every WAL partition, then returns, per partition, the highest
+    /// sequence its WAL still holds above the applied watermark — frames an
+    /// earlier process left un-applied included — or 0. Empty with no WAL.
+    async fn wal_frontier_snapshot(&self) -> anyhow::Result<Vec<u64>> {
+        let Some(tracking) = &self.wal else {
+            return Ok(Vec::new());
+        };
+        let mut highest = Vec::with_capacity(PARTITION_COUNT as usize);
+        for partition in 0..PARTITION_COUNT {
+            self.ensure_wal_seeded(partition).await;
+            let frames = tracking.wal.unapplied(partition).await.map_err(|err| {
+                anyhow::anyhow!(
+                    "the un-applied frames of WAL partition {partition} could not be read: {err:#}"
+                )
+            })?;
+            highest.push(frames.iter().map(|frame| frame.sequence).max().unwrap_or(0));
+        }
+        Ok(highest)
+    }
+
+    /// Whether no entry of a map `tenant` owns is buffered and every WAL
+    /// partition's durable applied watermark covers `highest`.
+    fn owned_writes_durable(&self, tenant: &str, highest: &[u64]) -> bool {
+        let covered = self.wal.as_ref().is_none_or(|tracking| {
+            (0..PARTITION_COUNT)
+                .zip(highest)
+                .all(|(partition, &sequence)| {
+                    tracking.wal.durable_applied(partition).unwrap_or(0) >= sequence
+                })
+        });
+        covered
+            && !self
+                .staging
+                .iter()
+                .any(|slot| tenant_owns(tenant, &slot.key().0))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MapDataStore trait implementation -- Segment S1 (delegating methods)
 // ---------------------------------------------------------------------------
 
@@ -4881,6 +5163,9 @@ impl MapDataStore for WriteBehindDataStore {
                 "write-behind store is shutting down; write rejected for map={map} key={key}"
             ),
         }
+        // Before the WAL sequence is assigned, and held until the queue
+        // insert is done, so a tenant drop waits for this write (`TG-TEN-002`).
+        let _in_flight = self.tenant_closes.enter(map)?;
 
         // Check capacity before insertion to avoid partial state on rejection
         if self.config.capacity != 0 {
@@ -5063,7 +5348,11 @@ impl MapDataStore for WriteBehindDataStore {
         now: i64,
     ) -> anyhow::Result<()> {
         // Backups pass through directly -- backup replication has its own
-        // consistency guarantees
+        // consistency guarantees -- but not past a tenant close, and a tenant
+        // drop waits for the inner call (`TG-TEN-002`).
+        let _in_flight = self.tenant_closes.enter(map)?;
+        #[cfg(test)]
+        TestParks::pass_keyed(&self.test_parks.before_backup_write, map, key).await;
         self.inner
             .add_backup(map, key, value, expiration_time, now)
             .await
@@ -5082,6 +5371,8 @@ impl MapDataStore for WriteBehindDataStore {
                 "write-behind store is shutting down; remove rejected for map={map} key={key}"
             ),
         }
+        // As in `add_with_witness`.
+        let _in_flight = self.tenant_closes.enter(map)?;
 
         // The same soft bound as in `add_with_witness`, where it is described.
         if self.config.capacity != 0 {
@@ -5178,7 +5469,10 @@ impl MapDataStore for WriteBehindDataStore {
     }
 
     async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
-        // Backups pass through directly
+        // Backups pass through directly, as in `add_backup`.
+        let _in_flight = self.tenant_closes.enter(map)?;
+        #[cfg(test)]
+        TestParks::pass_keyed(&self.test_parks.before_backup_write, map, key).await;
         self.inner.remove_backup(map, key, now).await
     }
 
@@ -5275,6 +5569,8 @@ impl MapDataStore for WriteBehindDataStore {
                 "write-behind store is shutting down; remove_all rejected for map={map}"
             ),
         }
+        // As in `add_with_witness`, once for every key of the call.
+        let _in_flight = self.tenant_closes.enter(map)?;
 
         let now = now_millis();
 
@@ -5582,6 +5878,53 @@ impl MapDataStore for WriteBehindDataStore {
             upper: upper.as_deref(),
         };
         Ok(overlay_scan_batch(batch, &pending, &range))
+    }
+
+    /// Drops every map `tenant` owns, ordered after every write of them
+    /// (`TG-TEN-002`): close the tenant, wait for the writes that passed the
+    /// close check, snapshot each WAL partition's highest frame, wait until
+    /// nothing owned is buffered and every durable applied watermark covers
+    /// the snapshot, then drop in the inner store. The close stays for the
+    /// rest of the process once the inner drop has started. A deadline
+    /// (`shutdown_timeout_ms`) or an error before then lifts the close only
+    /// if this call added it, and deletes nothing.
+    async fn drop_tenant(&self, tenant: &str) -> anyhow::Result<DropOutcome> {
+        check_tenant(tenant)?;
+        let Some(_running) = self.tenant_closes.try_start_drop() else {
+            return Ok(DropOutcome::Busy);
+        };
+        self.refuse_drop_unless_running(tenant)?;
+        // Declared after `_running`, so it is dropped first: an own close is
+        // lifted before the next drop can take the slot. The other order lets
+        // that drop find the close, take it for an earlier one, and run on
+        // after the lift with no close at all.
+        let mut close = self.tenant_closes.close(tenant);
+        let timeout_ms = self.config.shutdown_timeout_ms;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let not_durable = || {
+            anyhow::anyhow!(
+                "drop of tenant {tenant}: its writes are not yet durable after {timeout_ms} ms; \
+                 nothing was deleted, retry later"
+            )
+        };
+        if !self.tenant_closes.wait_in_flight(deadline).await {
+            return Err(not_durable());
+        }
+        let highest = self.wal_frontier_snapshot().await?;
+        while !self.owned_writes_durable(tenant, &highest) {
+            self.refuse_drop_unless_running(tenant)?;
+            if tokio::time::Instant::now() >= deadline {
+                return Err(not_durable());
+            }
+            tokio::time::sleep(TENANT_DROP_POLL).await;
+        }
+        let added = close.keep();
+        let outcome = self.inner.drop_tenant(tenant).await;
+        if added && matches!(outcome, Ok(DropOutcome::Unsupported)) {
+            // Nothing was deleted, so nothing has to stay closed.
+            self.tenant_closes.lift(tenant);
+        }
+        outcome
     }
 
     fn is_loadable(&self, _key: &str) -> bool {
@@ -16638,5 +16981,984 @@ mod store_broken_tests {
             );
             assert_eq!(inner.calls(), calls, "the read makes no inner call");
         });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tenant drop (`TG-TEN-002`): close, write barrier, watermark wait
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tenant_drop_tests {
+    use super::*;
+    use crate::storage::datastores::engine_store::EngineMapDataStore;
+    use crate::storage::datastores::kv_engine::{KeyRange, KvEngine, MemKvEngine};
+    use crate::storage::map_data_store::StoreBrokenCause;
+    use crate::storage::record::OrMapEntry;
+    use crate::storage::wal::{WalRecovery, WalWriter};
+    use std::time::Duration;
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    const TENANT: &str = "b";
+    const OWNED: &str = "b.m";
+    const OTHER: &str = "a.m";
+
+    fn ts(millis: u64) -> Timestamp {
+        Timestamp {
+            millis,
+            counter: 0,
+            node_id: "n".to_string(),
+        }
+    }
+
+    fn lww(value: &str) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String(value.to_string()),
+            timestamp: ts(1),
+        }
+    }
+
+    fn or_entry(tag: &str) -> OrMapEntry {
+        OrMapEntry {
+            value: Value::String(tag.to_string()),
+            tag: tag.to_string(),
+            timestamp: ts(1),
+        }
+    }
+
+    fn config(shutdown_timeout_ms: u64) -> WriteBehindConfig {
+        WriteBehindConfig {
+            write_delay_ms: 0,
+            flush_interval_ms: 10,
+            shutdown_timeout_ms,
+            ..WriteBehindConfig::default()
+        }
+    }
+
+    fn done(maps: &[&str]) -> DropOutcome {
+        DropOutcome::Done {
+            dropped: maps.iter().map(ToString::to_string).collect(),
+            failed: Vec::new(),
+        }
+    }
+
+    /// A key of `map` that lands in WAL partition `partition`.
+    fn key_in(map: &str, partition: u32) -> String {
+        (0..100_000)
+            .map(|i| format!("r{i}"))
+            .find(|key| partition_for(map, key) == partition)
+            .expect("a key in the partition")
+    }
+
+    async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !cond() {
+            assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// The WAL of a node, with a one-shot park inside `append` for a map and
+    /// an on-demand failure of `unapplied`.
+    struct TestWal {
+        writer: Arc<WalWriter>,
+        park: Mutex<Option<(String, ParkGate)>>,
+        fail_unapplied: AtomicBool,
+    }
+
+    impl TestWal {
+        /// Parks the next append of a frame of `map` before it is written.
+        fn park_append(&self, map: &str) -> TestParkHandle {
+            let (gate, handle) = TestParkHandle::arm();
+            *self.park.lock().unwrap() = Some((map.to_string(), gate));
+            handle
+        }
+    }
+
+    #[async_trait]
+    impl Wal for TestWal {
+        async fn append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()> {
+            let gate = {
+                let mut slot = self.park.lock().unwrap();
+                if slot.as_ref().is_some_and(|(map, _)| *map == entry.map) {
+                    slot.take().map(|(_, gate)| gate)
+                } else {
+                    None
+                }
+            };
+            if let Some(gate) = gate {
+                gate.pass().await;
+            }
+            self.writer.append(partition, entry).await
+        }
+
+        async fn mark_applied(&self, partition: u32, sequence: u64) -> anyhow::Result<()> {
+            self.writer.mark_applied(partition, sequence).await
+        }
+
+        async fn unapplied(&self, partition: u32) -> anyhow::Result<Vec<WalEntry>> {
+            if self.fail_unapplied.load(Ordering::SeqCst) {
+                anyhow::bail!("the test WAL cannot read partition {partition}");
+            }
+            self.writer.unapplied(partition).await
+        }
+
+        async fn sync(&self) -> anyhow::Result<()> {
+            self.writer.sync().await
+        }
+
+        fn durable_applied(&self, partition: u32) -> Option<u64> {
+            self.writer.durable_applied(partition)
+        }
+
+        async fn finish(&self, write_hints: bool) -> anyhow::Result<usize> {
+            self.writer.finish(write_hints).await
+        }
+    }
+
+    /// One process: an engine store over a memory engine (kept across
+    /// restarts), a WAL in a temporary directory, a write-behind store.
+    struct Node {
+        engine: Arc<MemKvEngine>,
+        wal_dir: tempfile::TempDir,
+        inner: Arc<EngineMapDataStore<MemKvEngine>>,
+        wal: Arc<TestWal>,
+        store: Arc<WriteBehindDataStore>,
+    }
+
+    impl Node {
+        async fn fresh(config: WriteBehindConfig) -> Self {
+            Self::start(
+                Arc::new(MemKvEngine::new()),
+                tempfile::tempdir().unwrap(),
+                config,
+            )
+            .await
+        }
+
+        /// A start as the server makes it: open the store, recover the WAL,
+        /// then the write-behind store above the highest sequence seen.
+        async fn start(
+            engine: Arc<MemKvEngine>,
+            wal_dir: tempfile::TempDir,
+            config: WriteBehindConfig,
+        ) -> Self {
+            let inner = Arc::new(EngineMapDataStore::open(Arc::clone(&engine)).unwrap());
+            let dyn_inner: Arc<dyn MapDataStore> = inner.clone();
+            let writer = WalWriter::open_over_store(
+                wal_dir.path().to_path_buf(),
+                WalFsyncPolicy::PerOp,
+                Arc::clone(&dyn_inner),
+            )
+            .unwrap();
+            WalRecovery::new(Arc::clone(&writer), Vec::new())
+                .run(Arc::clone(&dyn_inner))
+                .await
+                .unwrap();
+            let sequence_start = writer.max_observed_sequence().await.unwrap() + 1;
+            let wal = Arc::new(TestWal {
+                writer,
+                park: Mutex::new(None),
+                fail_unapplied: AtomicBool::new(false),
+            });
+            let store = WriteBehindDataStore::new_with_wal(
+                dyn_inner,
+                config,
+                Some(WalBootstrap {
+                    wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                    sequence_start,
+                }),
+            );
+            Self {
+                engine,
+                wal_dir,
+                inner,
+                wal,
+                store,
+            }
+        }
+
+        /// A `kill -9`: the background tasks stop without a drain and the WAL
+        /// is not finished; the same data and WAL directories are reopened.
+        async fn kill_and_restart(self, config: WriteBehindConfig) -> Self {
+            let Self {
+                engine,
+                wal_dir,
+                inner,
+                wal,
+                store,
+            } = self;
+            let _ = store.shutdown.send(true);
+            drop(store);
+            drop(inner);
+            let writer = Arc::clone(&wal.writer);
+            drop(wal);
+            super::release_wal(writer).await;
+            Self::start(engine, wal_dir, config).await
+        }
+
+        /// A clean stop (drain, WAL finished) and a start.
+        async fn stop_and_restart(self, config: WriteBehindConfig) -> Self {
+            self.store.hard_flush().await.unwrap();
+            self.wal.writer.finish(true).await.unwrap();
+            self.kill_and_restart(config).await
+        }
+
+        async fn assert_owned_map_gone(&self, keys: &[&str]) {
+            for key in keys {
+                assert_eq!(self.store.load(OWNED, key).await.unwrap(), None, "{key}");
+                assert_eq!(self.inner.load(OWNED, key).await.unwrap(), None, "{key}");
+            }
+            assert!(
+                !self
+                    .inner
+                    .list_maps()
+                    .await
+                    .unwrap()
+                    .contains(&OWNED.to_string()),
+                "{OWNED} must not be listed"
+            );
+            assert_eq!(
+                self.registry_rows_of(OWNED),
+                0,
+                "no registry row of {OWNED}"
+            );
+        }
+
+        fn registry_rows_of(&self, name: &str) -> usize {
+            let key = crate::storage::datastores::engine_store::map_by_name_key(name);
+            usize::from(self.engine.get(&key).unwrap().is_some())
+        }
+
+        fn rows_in(&self, space: u8) -> usize {
+            self.engine
+                .snapshot()
+                .unwrap()
+                .iter(KeyRange {
+                    start: Some(vec![space]),
+                    end: Some(vec![space + 1]),
+                })
+                .unwrap()
+                .count()
+        }
+
+        fn spawn_drop(&self, tenant: &str) -> tokio::task::JoinHandle<anyhow::Result<DropOutcome>> {
+            let store = Arc::clone(&self.store);
+            let tenant = tenant.to_string();
+            tokio::spawn(async move { store.drop_tenant(&tenant).await })
+        }
+
+        fn spawn_add(&self, map: &str, key: &str) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+            let store = Arc::clone(&self.store);
+            let (map, key) = (map.to_string(), key.to_string());
+            tokio::spawn(async move { store.add(&map, &key, &lww("v"), 0, 2).await })
+        }
+
+        fn spawn_add_backup(
+            &self,
+            map: &str,
+            key: &str,
+        ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+            let store = Arc::clone(&self.store);
+            let (map, key) = (map.to_string(), key.to_string());
+            tokio::spawn(async move { store.add_backup(&map, &key, &lww("v"), 0, 2).await })
+        }
+
+        /// Waits until the write of `(map, key)` left the buffer: stored.
+        async fn wait_stored(&self, map: &str, key: &str) {
+            let slot = (map.to_string(), key.to_string());
+            eventually("the write is stored", || {
+                !self.store.staging.contains_key(&slot)
+            })
+            .await;
+            assert!(self.inner.load(map, key).await.unwrap().is_some());
+        }
+
+        fn closed(&self) -> Vec<String> {
+            self.store.tenant_closes.closed.read().clone()
+        }
+
+        async fn assert_refused(&self, map: &str) {
+            let err = self.store.add(map, "x", &lww("x"), 0, 3).await.unwrap_err();
+            assert!(err.to_string().contains("dropped"), "{err:#}");
+        }
+    }
+
+    /// Long enough that a drop which does not wait has returned.
+    const SETTLE: Duration = Duration::from_millis(300);
+
+    /// AC10a: a write of `b.m` parked inside its WAL append — past the close
+    /// check, with no frame on disk yet — holds the drop, which then drops
+    /// that write too; `b.m` stays absent after a `kill -9` and a restart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac10a_a_drop_waits_for_a_write_parked_in_its_wal_append() {
+        let node = Node::fresh(config(10_000)).await;
+        node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+        let mut park = node.wal.park_append(OWNED);
+        let write = node.spawn_add(OWNED, "k1");
+        park.wait_parked().await;
+
+        let drop_call = node.spawn_drop(TENANT);
+        tokio::time::sleep(SETTLE).await;
+        assert!(
+            !drop_call.is_finished(),
+            "the drop must wait for the write that passed the close check"
+        );
+        park.release();
+        write.await.unwrap().unwrap();
+        assert_eq!(drop_call.await.unwrap().unwrap(), done(&[OWNED]));
+        node.assert_owned_map_gone(&["k0", "k1"]).await;
+
+        let node = node.kill_and_restart(config(10_000)).await;
+        node.assert_owned_map_gone(&["k0", "k1"]).await;
+    }
+
+    /// AC10a with the park the store offers between the close check and the
+    /// queue insert (`test_park_before_queue_insert`). Its frame is already
+    /// on disk there, so the watermark wait holds the drop as well.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac10a_a_drop_waits_for_a_write_parked_before_its_queue_insert() {
+        let node = Node::fresh(config(10_000)).await;
+        node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+        let mut park = node.store.test_park_before_queue_insert(OWNED, "k1");
+        let write = node.spawn_add(OWNED, "k1");
+        park.wait_parked().await;
+
+        let drop_call = node.spawn_drop(TENANT);
+        tokio::time::sleep(SETTLE).await;
+        assert!(!drop_call.is_finished(), "the drop must wait for the write");
+        park.release();
+        write.await.unwrap().unwrap();
+        assert_eq!(drop_call.await.unwrap().unwrap(), done(&[OWNED]));
+        node.assert_owned_map_gone(&["k0", "k1"]).await;
+
+        let node = node.kill_and_restart(config(10_000)).await;
+        node.assert_owned_map_gone(&["k0", "k1"]).await;
+    }
+
+    /// AC10b: after the close every write of an owned name is refused, from
+    /// every entry point; other tenants' maps and `b.` are not closed; nothing
+    /// of `b.m` reappears, also after a restart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac10b_a_write_after_the_close_is_refused_and_nothing_reappears() {
+        let node = Node::fresh(config(10_000)).await;
+        node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+        assert_eq!(
+            node.store.drop_tenant(TENANT).await.unwrap(),
+            done(&[OWNED])
+        );
+
+        node.assert_refused(OWNED).await;
+        node.assert_refused("b.other").await;
+        assert!(node.store.remove(OWNED, "k0", 3).await.is_err());
+        assert!(node
+            .store
+            .remove_all(OWNED, &["k0".to_string()])
+            .await
+            .is_err());
+        assert!(node
+            .store
+            .add_backup(OWNED, "k0", &lww("x"), 0, 3)
+            .await
+            .is_err());
+        assert!(node.store.remove_backup(OWNED, "k0", 3).await.is_err());
+        for map in ["bb.z", "b.", "b", OTHER] {
+            node.store.add(map, "k", &lww("v"), 0, 3).await.unwrap();
+        }
+        eventually("the other maps are stored", || node.store.test_is_idle()).await;
+        node.assert_owned_map_gone(&["k0", "x"]).await;
+
+        let node = node.stop_and_restart(config(10_000)).await;
+        node.assert_owned_map_gone(&["k0", "x"]).await;
+        for map in ["bb.z", "b.", "b", OTHER] {
+            assert!(node.inner.load(map, "k").await.unwrap().is_some(), "{map}");
+        }
+    }
+
+    /// AC10c: a frame of `b.m` held above the durable watermark by a refused
+    /// write of another map in the same partition holds the drop until the
+    /// refusal clears; afterwards no replay brings `b.m` back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac10c_a_drop_waits_while_a_refused_write_holds_the_watermark() {
+        let node = Node::fresh(config(20_000)).await;
+        let partition = partition_for(OWNED, "k1");
+        let refused = key_in(OTHER, partition);
+        node.store.test_refuse_encoding(OTHER, &refused);
+        node.store
+            .add(OTHER, &refused, &lww("r"), 0, 1)
+            .await
+            .unwrap();
+        node.store.add(OWNED, "k1", &lww("v1"), 0, 1).await.unwrap();
+        node.wait_stored(OWNED, "k1").await;
+
+        let drop_call = node.spawn_drop(TENANT);
+        tokio::time::sleep(SETTLE).await;
+        assert!(
+            !drop_call.is_finished(),
+            "the drop must wait until the watermark covers the b.m frame"
+        );
+        node.store.test_accept_encoding(OTHER, &refused);
+        assert_eq!(drop_call.await.unwrap().unwrap(), done(&[OWNED]));
+        node.assert_owned_map_gone(&["k1"]).await;
+
+        let node = node.kill_and_restart(config(20_000)).await;
+        node.assert_owned_map_gone(&["k1"]).await;
+        assert!(node.inner.load(OTHER, &refused).await.unwrap().is_some());
+    }
+
+    /// AC10c, deadline: while the refusal lasts the drop ends on its deadline,
+    /// deletes nothing, and `b.m` is writable again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac10c_on_the_deadline_nothing_is_deleted_and_the_map_stays_writable() {
+        let node = Node::fresh(config(300)).await;
+        let partition = partition_for(OWNED, "k1");
+        let refused = key_in(OTHER, partition);
+        node.store.test_refuse_encoding(OTHER, &refused);
+        node.store
+            .add(OTHER, &refused, &lww("r"), 0, 1)
+            .await
+            .unwrap();
+        node.store.add(OWNED, "k1", &lww("v1"), 0, 1).await.unwrap();
+        node.wait_stored(OWNED, "k1").await;
+
+        let err = node.store.drop_tenant(TENANT).await.unwrap_err();
+        assert!(err.to_string().contains("not yet durable"), "{err:#}");
+        assert!(node.inner.load(OWNED, "k1").await.unwrap().is_some());
+        assert!(node
+            .inner
+            .list_maps()
+            .await
+            .unwrap()
+            .contains(&OWNED.to_string()));
+        assert!(node.closed().is_empty());
+        node.store.add(OWNED, "k2", &lww("v2"), 0, 2).await.unwrap();
+    }
+
+    /// AC10d: no entry of an OR slot written before the drop reappears, in
+    /// the process or after a restart, though the slot was still buffered
+    /// when the drop began.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac10d_no_entry_of_a_pre_drop_or_slot_reappears() {
+        const SLOT_MAP: &str = "b.o";
+        let buffered = WriteBehindConfig {
+            write_delay_ms: 200,
+            ..config(10_000)
+        };
+        let node = Node::fresh(buffered.clone()).await;
+        let two = RecordValue::OrMap {
+            records: vec![or_entry("t1"), or_entry("t2")],
+            tombstones: Vec::new(),
+        };
+        node.store.add(SLOT_MAP, "s", &two, 0, 1).await.unwrap();
+        let three = RecordValue::OrMap {
+            records: vec![or_entry("t1"), or_entry("t2"), or_entry("t3")],
+            tombstones: Vec::new(),
+        };
+        node.store
+            .add_with_witness(
+                SLOT_MAP,
+                "s",
+                WriteSource::Value(&three),
+                0,
+                2,
+                Some(&OrDelta::Add {
+                    entry: or_entry("t3"),
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            node.store.drop_tenant(TENANT).await.unwrap(),
+            done(&[SLOT_MAP])
+        );
+        // Past the write delay, so a buffered entry would have been stored.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(node.store.load(SLOT_MAP, "s").await.unwrap(), None);
+        assert_eq!(node.inner.load(SLOT_MAP, "s").await.unwrap(), None);
+        assert_eq!(node.registry_rows_of(SLOT_MAP), 0);
+
+        let node = node.kill_and_restart(buffered).await;
+        assert_eq!(node.inner.load(SLOT_MAP, "s").await.unwrap(), None);
+        assert_eq!(node.registry_rows_of(SLOT_MAP), 0);
+    }
+
+    /// AC10e: a backup write of `b.m` parked before its inner-store call holds
+    /// the drop; afterwards no `0x11` row of `b.m` exists.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac10e_a_drop_waits_for_a_backup_write_parked_before_its_inner_call() {
+        let node = Node::fresh(config(10_000)).await;
+        node.store
+            .add_backup(OWNED, "k0", &lww("v0"), 0, 1)
+            .await
+            .unwrap();
+        let mut park = node.store.test_park_before_backup_write(OWNED, "k1");
+        let write = node.spawn_add_backup(OWNED, "k1");
+        park.wait_parked().await;
+
+        let drop_call = node.spawn_drop(TENANT);
+        tokio::time::sleep(SETTLE).await;
+        assert!(
+            !drop_call.is_finished(),
+            "the drop must wait for the backup write"
+        );
+        park.release();
+        write.await.unwrap().unwrap();
+        assert_eq!(drop_call.await.unwrap().unwrap(), done(&[OWNED]));
+        assert_eq!(node.rows_in(0x11), 0, "no backup row of b.m");
+        assert_eq!(node.registry_rows_of(OWNED), 0);
+    }
+
+    /// AC10f: a write the close refuses is refused at ingress: no retry
+    /// entry, no refusal age, no refused commit. The store has no notion of
+    /// origin, so a `System` write meets the same entry points.
+    #[test]
+    fn ac10f_a_write_refused_by_the_close_leaves_no_retry_and_no_refusal_age() {
+        fn value_of(rendered: &str, name: &str) -> Option<f64> {
+            rendered
+                .lines()
+                .find(|line| line.starts_with(&format!("{name} ")))
+                .and_then(|line| line[name.len() + 1..].parse().ok())
+        }
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let rendered = metrics::with_local_recorder(&recorder, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let node = Node::fresh(config(10_000)).await;
+                    node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+                    assert_eq!(
+                        node.store.drop_tenant(TENANT).await.unwrap(),
+                        done(&[OWNED])
+                    );
+                    for key in ["k0", "k1", "k2"] {
+                        assert!(node.store.add(OWNED, key, &lww("v"), 0, 2).await.is_err());
+                        assert!(node.store.remove(OWNED, key, 2).await.is_err());
+                    }
+                    // Several flush passes.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    assert_eq!(node.store.pending_operation_count(), 0);
+                    handle.render()
+                })
+        });
+        assert_eq!(
+            value_of(&rendered, "topgun_write_behind_oldest_refusal_age_seconds"),
+            Some(0.0),
+            "{rendered}"
+        );
+        assert_eq!(
+            value_of(&rendered, "topgun_write_behind_retrying_entries"),
+            Some(0.0)
+        );
+        assert_eq!(
+            value_of(&rendered, "topgun_write_behind_flush_refusals_total"),
+            Some(0.0)
+        );
+    }
+
+    /// AC10g: a `b.m` frame an earlier process left un-applied above a frame
+    /// that failed at replay, in a partition this process never writes, holds
+    /// the drop to its deadline; `b.m` stays intact and writable.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac10g_a_frame_left_unapplied_at_boot_holds_the_drop() {
+        let partition = partition_for(OWNED, "k1");
+        let node = Node::fresh(config(10_000)).await;
+        node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+        let node = node.stop_and_restart(config(10_000)).await;
+        let Node {
+            engine,
+            wal_dir,
+            inner,
+            wal,
+            store,
+        } = node;
+        let _ = store.shutdown.send(true);
+        drop(store);
+        drop(inner);
+        let writer = Arc::clone(&wal.writer);
+        drop(wal);
+        // The earlier process: a frame the store refuses at replay (a map
+        // name it never takes), then a frame of b.m above it.
+        let next = writer.max_observed_sequence().await.unwrap() + 1;
+        for (sequence, map, key) in [(next, "", "bad"), (next + 1, OWNED, "k1")] {
+            let entry = WalEntry {
+                map: map.to_string(),
+                key: key.to_string(),
+                op: WalOp::Store {
+                    value: WalStorePayload::Record(lww("v1")),
+                    expiration_time: None,
+                },
+                timestamp: Some(ts(1)),
+                sequence,
+            };
+            writer.append(partition, &entry).await.unwrap();
+        }
+        super::release_wal(writer).await;
+
+        let node = Node::start(engine, wal_dir, config(300)).await;
+        assert!(
+            !node
+                .wal
+                .writer
+                .unapplied(partition)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the precondition: recovery left the b.m frame un-applied"
+        );
+        let err = node.store.drop_tenant(TENANT).await.unwrap_err();
+        assert!(err.to_string().contains("not yet durable"), "{err:#}");
+        assert!(node.inner.load(OWNED, "k0").await.unwrap().is_some());
+        assert_eq!(node.registry_rows_of(OWNED), 1);
+        assert!(node.closed().is_empty());
+        node.store.add(OWNED, "k2", &lww("v2"), 0, 2).await.unwrap();
+    }
+
+    /// AC10h: an invalid tenant is refused before anything is closed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac10h_an_invalid_tenant_is_refused_before_anything_is_closed() {
+        let node = Node::fresh(config(10_000)).await;
+        for tenant in ["", "_topgun_x", "__TOPGUN_x", "a.b", "a/b"] {
+            assert!(node.store.drop_tenant(tenant).await.is_err(), "{tenant:?}");
+            assert!(node.closed().is_empty(), "{tenant:?}");
+        }
+        node.store.add(".x", "k", &lww("v"), 0, 1).await.unwrap();
+        node.store
+            .add("_topgun_x.m", "k", &lww("v"), 0, 1)
+            .await
+            .unwrap();
+    }
+
+    /// AC10h: a second drop while one runs answers `Busy`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac10h_a_second_drop_while_one_runs_is_busy() {
+        let node = Node::fresh(config(10_000)).await;
+        let mut park = node.store.test_park_before_backup_write(OTHER, "k");
+        let write = node.spawn_add_backup(OTHER, "k");
+        park.wait_parked().await;
+        let first = node.spawn_drop(TENANT);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            node.store.drop_tenant("c").await.unwrap(),
+            DropOutcome::Busy
+        );
+        park.release();
+        write.await.unwrap().unwrap();
+        assert_eq!(first.await.unwrap().unwrap(), done(&[]));
+        assert_eq!(node.store.drop_tenant("c").await.unwrap(), done(&[]));
+    }
+
+    /// AC10h: a failed (`TG-WB-006`), broken (`TG-WB-010`) or stopping store
+    /// refuses the drop and closes nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac10h_a_failed_broken_or_stopping_store_refuses_the_drop() {
+        let failed = Node::fresh(config(10_000)).await;
+        failed
+            .store
+            .record_background_failure(BackgroundTask::Flush, "test panic".to_string());
+        assert!(failed.store.drop_tenant(TENANT).await.is_err());
+        assert!(failed.closed().is_empty());
+
+        let broken = Node::fresh(config(10_000)).await;
+        broken.store.record_store_broken(
+            StoreBrokenCause::PreviousIo,
+            &anyhow::anyhow!("test"),
+            OTHER,
+            "k",
+            "test",
+        );
+        assert!(broken.store.drop_tenant(TENANT).await.is_err());
+        assert!(broken.closed().is_empty());
+
+        let stopping = Node::fresh(config(10_000)).await;
+        stopping.store.hard_flush().await.unwrap();
+        assert!(stopping.store.drop_tenant(TENANT).await.is_err());
+        assert!(stopping.closed().is_empty());
+    }
+
+    /// AC10h: a re-run that meets an `unapplied` error or a deadline does not
+    /// lift the close an earlier, completed drop added.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac10h_a_failed_rerun_keeps_the_close_of_an_earlier_drop() {
+        let node = Node::fresh(config(300)).await;
+        node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+        assert_eq!(
+            node.store.drop_tenant(TENANT).await.unwrap(),
+            done(&[OWNED])
+        );
+
+        node.wal.fail_unapplied.store(true, Ordering::SeqCst);
+        let err = node.store.drop_tenant(TENANT).await.unwrap_err();
+        node.wal.fail_unapplied.store(false, Ordering::SeqCst);
+        assert!(err.to_string().contains("un-applied"), "{err:#}");
+        node.assert_refused(OWNED).await;
+
+        let mut park = node.store.test_park_before_backup_write(OTHER, "k");
+        let write = node.spawn_add_backup(OTHER, "k");
+        park.wait_parked().await;
+        let err = node.store.drop_tenant(TENANT).await.unwrap_err();
+        assert!(err.to_string().contains("not yet durable"), "{err:#}");
+        node.assert_refused(OWNED).await;
+        park.release();
+        write.await.unwrap().unwrap();
+        assert_eq!(node.closed(), vec![TENANT.to_string()]);
+    }
+
+    /// AC10h: a drop cancelled before the inner drop lifts its own close and
+    /// frees the drop slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac10h_a_cancelled_drop_lifts_its_close_and_frees_the_slot() {
+        let node = Node::fresh(config(10_000)).await;
+        node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+        let mut park = node.store.test_park_before_backup_write(OTHER, "k");
+        let write = node.spawn_add_backup(OTHER, "k");
+        park.wait_parked().await;
+        let drop_call = node.spawn_drop(TENANT);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        node.assert_refused(OWNED).await;
+        drop_call.abort();
+        assert!(drop_call.await.unwrap_err().is_cancelled());
+
+        assert!(node.closed().is_empty());
+        node.store.add(OWNED, "k1", &lww("v1"), 0, 2).await.unwrap();
+        park.release();
+        write.await.unwrap().unwrap();
+        assert_eq!(
+            node.store.drop_tenant(TENANT).await.unwrap(),
+            done(&[OWNED])
+        );
+    }
+
+    /// AC10h: a write cancelled while registered leaves no in-flight count, so
+    /// the next drop does not wait for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac10h_a_cancelled_write_leaves_no_in_flight_count() {
+        let node = Node::fresh(config(1_000)).await;
+        let mut park = node.store.test_park_before_backup_write(OWNED, "k1");
+        let write = node.spawn_add_backup(OWNED, "k1");
+        park.wait_parked().await;
+        write.abort();
+        assert!(write.await.unwrap_err().is_cancelled());
+        assert_eq!(node.store.drop_tenant(TENANT).await.unwrap(), done(&[]));
+    }
+
+    /// The drop waits only for writes that began before its epoch switch:
+    /// a write of another map that registers after the switch and stays in
+    /// flight does not hold it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_write_that_begins_after_the_switch_does_not_hold_the_drop() {
+        let node = Node::fresh(config(1_000)).await;
+        let mut early = node.store.test_park_before_backup_write(OWNED, "k1");
+        let early_write = node.spawn_add_backup(OWNED, "k1");
+        early.wait_parked().await;
+        let drop_call = node.spawn_drop(TENANT);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut late = node.wal.park_append(OTHER);
+        let late_write = node.spawn_add(OTHER, "k");
+        late.wait_parked().await;
+        early.release();
+        early_write.await.unwrap().unwrap();
+        assert_eq!(drop_call.await.unwrap().unwrap(), done(&[OWNED]));
+        late.release();
+        late_write.await.unwrap().unwrap();
+    }
+
+    /// Writes of another map that keep arriving do not hold the drop past its
+    /// deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn continuous_writes_of_another_map_do_not_hold_the_drop() {
+        let node = Node::fresh(config(3_000)).await;
+        node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let writers: Vec<_> = (0..4)
+            .map(|w| {
+                let store = Arc::clone(&node.store);
+                let stop = Arc::clone(&stop);
+                tokio::spawn(async move {
+                    let mut i = 0u64;
+                    while !stop.load(Ordering::SeqCst) {
+                        let key = format!("w{w}-{}", i % 64);
+                        store.add(OTHER, &key, &lww("v"), 0, 1).await.unwrap();
+                        i += 1;
+                    }
+                    i
+                })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let outcome = node.store.drop_tenant(TENANT).await;
+        stop.store(true, Ordering::SeqCst);
+        for writer in writers {
+            assert!(writer.await.unwrap() > 0);
+        }
+        assert_eq!(outcome.unwrap(), done(&[OWNED]));
+    }
+
+    /// A write that registered just before an epoch switch registers again in
+    /// the new epoch and gives the old count back once: two later drops both
+    /// find their counter at zero.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_registration_raced_by_a_switch_is_taken_back_once() {
+        let node = Node::fresh(config(1_000)).await;
+        let store = Arc::clone(&node.store);
+        *node.store.tenant_closes.after_register.lock().unwrap() = Some(Box::new(move || {
+            store.tenant_closes.epoch.fetch_add(1, Ordering::SeqCst);
+        }));
+        node.store.add(OTHER, "k", &lww("v"), 0, 1).await.unwrap();
+        assert_eq!(node.store.drop_tenant(TENANT).await.unwrap(), done(&[]));
+        assert_eq!(node.store.drop_tenant(TENANT).await.unwrap(), done(&[]));
+        assert_eq!(node.store.drop_tenant("c").await.unwrap(), done(&[]));
+    }
+
+    /// An own close is lifted while the drop still holds its slot, so no
+    /// second drop can find that close and take it for an earlier one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_close_is_lifted_before_the_drop_slot_is_freed() {
+        let node = Node::fresh(config(200)).await;
+        let slot_free_at_lift = Arc::new(AtomicU8::new(0));
+        let seen = Arc::clone(&slot_free_at_lift);
+        *node.store.tenant_closes.on_lift.lock().unwrap() = Some(Box::new(move |closes| {
+            let free = closes.try_start_drop().is_some();
+            seen.store(if free { 2 } else { 1 }, Ordering::SeqCst);
+        }));
+        let mut park = node.store.test_park_before_backup_write(OTHER, "k");
+        let write = node.spawn_add_backup(OTHER, "k");
+        park.wait_parked().await;
+        assert!(node.store.drop_tenant(TENANT).await.is_err());
+        assert_eq!(
+            slot_free_at_lift.load(Ordering::SeqCst),
+            1,
+            "the lift must run while the drop slot is still held"
+        );
+        park.release();
+        write.await.unwrap().unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// In-process write-path measurement (ignored; run by hand)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod write_path_measure {
+    use super::*;
+    use crate::storage::datastores::engine_store::EngineMapDataStore;
+    use crate::storage::datastores::kv_engine::MemKvEngine;
+    use crate::storage::wal::{WalRecovery, WalWriter};
+    use std::time::{Duration, Instant};
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    /// Throughput and p99 latency of `add` (and `remove` with
+    /// `WB_MEASURE_MIX=1`, one `remove` per three `add`s) of new keys into
+    /// maps `a.*`, from `WB_MEASURE_WRITERS` tasks (default 8) for
+    /// `WB_MEASURE_SECS` seconds (default 10), over a memory engine with a
+    /// WAL in a temporary directory. `WB_MEASURE_CLOSE=1` drops tenant `z`
+    /// first, so a closed tenant is present that owns none of the maps.
+    /// Prints one `WB_MEASURE` line. The numbers are relative only.
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn write_path_throughput_and_p99() {
+        let env_u64 = |name: &str, default: u64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let writers = env_u64("WB_MEASURE_WRITERS", 8);
+        let secs = env_u64("WB_MEASURE_SECS", 10);
+        let mix = env_u64("WB_MEASURE_MIX", 0) == 1;
+        let close = env_u64("WB_MEASURE_CLOSE", 0) == 1;
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let wal_dir = tempfile::tempdir().unwrap();
+                let inner: Arc<dyn MapDataStore> =
+                    Arc::new(EngineMapDataStore::open(Arc::new(MemKvEngine::new())).unwrap());
+                let wal = WalWriter::open_over_store(
+                    wal_dir.path().to_path_buf(),
+                    WalFsyncPolicy::Batched,
+                    Arc::clone(&inner),
+                )
+                .unwrap();
+                WalRecovery::new(Arc::clone(&wal), Vec::new())
+                    .run(Arc::clone(&inner))
+                    .await
+                    .unwrap();
+                let store = WriteBehindDataStore::new_with_wal(
+                    inner,
+                    WriteBehindConfig {
+                        capacity: 0,
+                        ..WriteBehindConfig::default()
+                    },
+                    Some(WalBootstrap {
+                        wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                        sequence_start: 1,
+                    }),
+                );
+                if close {
+                    assert!(matches!(
+                        store.drop_tenant("z").await.unwrap(),
+                        DropOutcome::Done { .. }
+                    ));
+                }
+                let value = RecordValue::Lww {
+                    value: Value::String("v".repeat(64)),
+                    timestamp: Timestamp {
+                        millis: 1,
+                        counter: 0,
+                        node_id: "n".to_string(),
+                    },
+                };
+                let end = Instant::now() + Duration::from_secs(secs);
+                let tasks: Vec<_> = (0..writers)
+                    .map(|w| {
+                        let store = Arc::clone(&store);
+                        let value = value.clone();
+                        tokio::spawn(async move {
+                            let mut latencies = Vec::new();
+                            let mut i = 0u64;
+                            while Instant::now() < end {
+                                let map = format!("a.{}", i % 16);
+                                let started = Instant::now();
+                                if mix && i % 4 == 3 {
+                                    let key = format!("w{w}-{}", i - 1);
+                                    store.remove(&map, &key, 1).await.unwrap();
+                                } else {
+                                    let key = format!("w{w}-{i}");
+                                    store.add(&map, &key, &value, 0, 1).await.unwrap();
+                                }
+                                latencies.push(started.elapsed().as_nanos() as u64);
+                                i += 1;
+                            }
+                            latencies
+                        })
+                    })
+                    .collect();
+                let mut all = Vec::new();
+                for task in tasks {
+                    all.extend(task.await.unwrap());
+                }
+                all.sort_unstable();
+                let ops = all.len() as f64;
+                let p99 = all[(all.len() * 99 / 100).min(all.len() - 1)];
+                let p50 = all[all.len() / 2];
+                println!(
+                    "WB_MEASURE mix={mix} close={close} writers={writers} secs={secs} ops={} \
+                     ops_per_s={:.0} p50_us={:.1} p99_us={:.1}",
+                    all.len(),
+                    ops / secs as f64,
+                    p50 as f64 / 1000.0,
+                    p99 as f64 / 1000.0
+                );
+            });
     }
 }
