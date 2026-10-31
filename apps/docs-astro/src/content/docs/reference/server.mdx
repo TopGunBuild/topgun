@@ -162,7 +162,7 @@ At startup the server emits a single `tracing::info!` line containing the effect
 | `/api/status` | GET | none | Server status (version, uptime, node info). |
 | `/api/auth/login` | POST | none | Admin login. Returns JWT for admin API access. |
 | `/api/admin/cluster/status` | GET | admin JWT | Cluster membership and partition status. |
-| `/api/admin/maps` | GET | admin JWT | List maps with record counts and partition info. |
+| `/api/admin/maps` | GET | admin JWT | List the store's maps, reserved maps left out; `entryCount` is the in-memory record count (0 for a map not loaded). Empty on `STORAGE_BACKEND=null`. |
 | `/api/admin/settings` | GET, PUT | admin JWT | Read or update server configuration at runtime. |
 | `/api/openapi.json` | GET | none | OpenAPI spec of the admin API, as JSON. |
 | `/admin/*` | GET | none | SPA admin dashboard. Serves static files from `TOPGUN_ADMIN_DIR`. |

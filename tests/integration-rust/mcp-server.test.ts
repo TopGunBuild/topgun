@@ -22,6 +22,10 @@
  * turns it green.
  */
 
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
 import { TopGunClient, SyncState } from '@topgunbuild/client';
 import type { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
 import { TopGunMCPServer } from '@topgunbuild/mcp-server';
@@ -561,9 +565,19 @@ describe('Integration: MCP tools against a real Rust server (cold cache)', () =>
   // endpoint) must return exactly those names with their entry counts — and never
   // the retired boilerplate ('users'/'tasks'/'posts'/'products' as examples). The
   // MCP client carries both the data-plane 'ADMIN' role (to connect) and the
-  // admin-plane 'admin' role (the HTTP control plane requires it).
+  // admin-plane 'admin' role (the HTTP control plane requires it). The server
+  // runs on the embedded store: the admin listing reads the store's map registry,
+  // which the null backend does not keep, so a null-backend catalog is empty.
   test('list_maps reflects the real server catalog, not fabricated names (F4)', async () => {
-    const server = await spawnRustServer();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-mcp-catalog-'));
+    const server = await spawnRustServer({
+      env: {
+        STORAGE_BACKEND: 'redb',
+        TOPGUN_DATA_DIR: path.join(dir, 'topgun-data'),
+        TOPGUN_REDB_PATH: path.join(dir, 'topgun.redb'),
+        TOPGUN_WAL_DIR: path.join(dir, 'wal'),
+      },
+    });
     const seeder = await createRustTestClient(server.port, {
       userId: 'mcp-seeder',
       roles: ['ADMIN'],
@@ -616,6 +630,7 @@ describe('Integration: MCP tools against a real Rust server (cold cache)', () =>
       await mcpClient.close().catch(() => {});
       seeder.close();
       await server.cleanup().catch(() => {});
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000);
 
