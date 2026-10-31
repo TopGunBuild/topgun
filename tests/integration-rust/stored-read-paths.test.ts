@@ -123,7 +123,11 @@ async function remove(client: TestClient, key: string): Promise<void> {
   expect(reply.type).toBe('OP_ACK');
 }
 
-/** Every row `/sync` returns for `MAP` with `filter`, following `nextCursor`. */
+/**
+ * Every value `/sync` returns for `MAP` with `filter`, following `nextCursor`.
+ * `/sync` returns values without their keys, so each written value carries its
+ * key as `id`.
+ */
 async function syncRows(port: number, filter: unknown = null): Promise<any[]> {
   const rows: any[] = [];
   let cursor: string | undefined;
@@ -151,7 +155,7 @@ async function syncRows(port: number, filter: unknown = null): Promise<any[]> {
 }
 
 async function syncKeys(port: number, filter: unknown = null): Promise<string[]> {
-  return (await syncRows(port, filter)).map((r: any) => r.key).sort();
+  return (await syncRows(port, filter)).map((r: any) => r.id).sort();
 }
 
 async function search(client: TestClient, query: string, limit = 100): Promise<string[]> {
@@ -262,10 +266,10 @@ function storedServer(extraEnv: Record<string, string> = {}) {
 describe('Integration: whole-map reads see stored records after a restart (TG-READ-001)', () => {
   const s = storedServer();
   const WRITTEN: Record<string, Record<string, string>> = {
-    a: { status: 'open', text: 'alpha zebra common' },
-    b: { status: 'open', text: 'beta common' },
-    c: { status: 'done', text: 'gamma common' },
-    d: { status: 'later', text: 'epsilon common' },
+    a: { id: 'a', status: 'open', text: 'alpha zebra common' },
+    b: { id: 'b', status: 'open', text: 'beta common' },
+    c: { id: 'c', status: 'done', text: 'gamma common' },
+    d: { id: 'd', status: 'later', text: 'epsilon common' },
   };
 
   beforeAll(async () => {
@@ -278,7 +282,7 @@ describe('Integration: whole-map reads see stored records after a restart (TG-RE
       writer,
       Object.entries(WRITTEN).map(([key, value]) => ({ key, value })),
     );
-    await writeMany(writer, [{ key: 'gone', value: { status: 'open', text: 'delta common' } }]);
+    await writeMany(writer, [{ key: 'gone', value: { id: 'gone', status: 'open', text: 'delta common' } }]);
     await remove(writer, 'gone');
   });
 
@@ -290,8 +294,8 @@ describe('Integration: whole-map reads see stored records after a restart (TG-RE
   test('AC1: /sync returns every stored record, and the filtered ones', async () => {
     const port = await s.restart();
     const rows = await syncRows(port);
-    expect(rows.map((r: any) => r.key).sort()).toEqual(['a', 'b', 'c', 'd']);
-    for (const row of rows) expect(row.value).toEqual(WRITTEN[row.key]);
+    expect(rows.map((r: any) => r.id).sort()).toEqual(['a', 'b', 'c', 'd']);
+    for (const row of rows) expect(row).toEqual(WRITTEN[row.id]);
     expect(await syncKeys(port, { status: 'open' })).toEqual(['a', 'b']);
   });
 
@@ -353,10 +357,8 @@ describe('Integration: whole-map reads see evicted records (TG-READ-001)', () =>
     for (let from = 0; from < N; from += 50) {
       const batch = [];
       for (let i = from; i < Math.min(N, from + 50); i++) {
-        batch.push({
-          key: `k${String(i).padStart(4, '0')}`,
-          value: { status: 'open', text: 'sharedterm', pad: PAD },
-        });
+        const key = `k${String(i).padStart(4, '0')}`;
+        batch.push({ key, value: { id: key, status: 'open', text: 'sharedterm', pad: PAD } });
       }
       await writeMany(writer, batch);
     }
@@ -376,7 +378,7 @@ describe('Integration: whole-map reads see evicted records (TG-READ-001)', () =>
     }, 30_000);
     process.stderr.write(`[stored-read-paths] eviction witness: entry_count ${resident} < ${N}\n`);
 
-    expect(await syncKeys(port)).toHaveLength(N);
+    expect(new Set(await syncKeys(port)).size).toBe(N);
     const client = await s.connect('ac5');
     expect(await search(client, 'sharedterm', N + 10)).toHaveLength(N);
     expect(await exactKeys(client, N + 10)).toHaveLength(N);

@@ -1613,7 +1613,8 @@ impl SearchService {
     /// runs are served by the next one. The task holds an `Arc<SearchService>`;
     /// it lives as long as the process.
     pub fn spawn_hybrid_notifier(self: &Arc<Self>, link: HybridLink) {
-        let _ = link.cell.set(Arc::clone(&self.shared));
+        let HybridLink { cell } = link;
+        let _ = cell.set(Arc::clone(&self.shared));
         if self.notifier_started.swap(true, Ordering::SeqCst) {
             return;
         }

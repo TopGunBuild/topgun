@@ -1022,7 +1022,7 @@ mod tests {
             let mut out = Vec::new();
             factory
                 .scan_merged(MAP, &mut |key, value| {
-                    out.push((key.to_string(), value.clone()))
+                    out.push((key.to_string(), value.clone()));
                 })
                 .await
                 .unwrap();
