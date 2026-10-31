@@ -2630,7 +2630,7 @@ mod tenant_drop_tests {
                 && be_u32(&key[5..9]) == id)
     }
 
-    /// AC10h on one engine: maps `b.x` (primary and backup rows, keys in
+    /// `AC10h` on one engine: maps `b.x` (primary and backup rows, keys in
     /// many partitions), `b.y` (backup rows only), `bb.z`, `b.` and `b`.
     fn drop_removes_exactly_the_owned_maps<E: KvEngine>(engine: &Arc<E>) {
         let store = EngineMapDataStore::open(Arc::clone(engine)).expect("open");

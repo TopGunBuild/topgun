@@ -1782,8 +1782,12 @@ struct TenantCloses {
     /// Runs once at the start of a lift, so a test can look at the drop slot
     /// at that moment.
     #[cfg(test)]
-    on_lift: Mutex<Option<Box<dyn FnOnce(&TenantCloses) + Send>>>,
+    on_lift: Mutex<Option<LiftHook>>,
 }
+
+/// A test hook run at the start of a lift.
+#[cfg(test)]
+type LiftHook = Box<dyn FnOnce(&TenantCloses) + Send>;
 
 /// A write's registration in [`TenantCloses`]; dropping it deregisters the
 /// write, from the counter it registered in, also when the write's future is
@@ -17288,7 +17292,7 @@ mod tenant_drop_tests {
     /// Long enough that a drop which does not wait has returned.
     const SETTLE: Duration = Duration::from_millis(300);
 
-    /// AC10a: a write of `b.m` parked inside its WAL append — past the close
+    /// `AC10a`: a write of `b.m` parked inside its WAL append — past the close
     /// check, with no frame on disk yet — holds the drop, which then drops
     /// that write too; `b.m` stays absent after a `kill -9` and a restart.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -17314,7 +17318,7 @@ mod tenant_drop_tests {
         node.assert_owned_map_gone(&["k0", "k1"]).await;
     }
 
-    /// AC10a with the park the store offers between the close check and the
+    /// `AC10a` with the park the store offers between the close check and the
     /// queue insert (`test_park_before_queue_insert`). Its frame is already
     /// on disk there, so the watermark wait holds the drop as well.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -17337,7 +17341,7 @@ mod tenant_drop_tests {
         node.assert_owned_map_gone(&["k0", "k1"]).await;
     }
 
-    /// AC10b: after the close every write of an owned name is refused, from
+    /// `AC10b`: after the close every write of an owned name is refused, from
     /// every entry point; other tenants' maps and `b.` are not closed; nothing
     /// of `b.m` reappears, also after a restart.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -17376,7 +17380,7 @@ mod tenant_drop_tests {
         }
     }
 
-    /// AC10c: a frame of `b.m` held above the durable watermark by a refused
+    /// `AC10c`: a frame of `b.m` held above the durable watermark by a refused
     /// write of another map in the same partition holds the drop until the
     /// refusal clears; afterwards no replay brings `b.m` back.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -17407,7 +17411,7 @@ mod tenant_drop_tests {
         assert!(node.inner.load(OTHER, &refused).await.unwrap().is_some());
     }
 
-    /// AC10c, deadline: while the refusal lasts the drop ends on its deadline,
+    /// `AC10c`, deadline: while the refusal lasts the drop ends on its deadline,
     /// deletes nothing, and `b.m` is writable again.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac10c_on_the_deadline_nothing_is_deleted_and_the_map_stays_writable() {
@@ -17435,7 +17439,7 @@ mod tenant_drop_tests {
         node.store.add(OWNED, "k2", &lww("v2"), 0, 2).await.unwrap();
     }
 
-    /// AC10d: no entry of an OR slot written before the drop reappears, in
+    /// `AC10d`: no entry of an OR slot written before the drop reappears, in
     /// the process or after a restart, though the slot was still buffered
     /// when the drop began.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -17484,7 +17488,7 @@ mod tenant_drop_tests {
         assert_eq!(node.registry_rows_of(SLOT_MAP), 0);
     }
 
-    /// AC10e: a backup write of `b.m` parked before its inner-store call holds
+    /// `AC10e`: a backup write of `b.m` parked before its inner-store call holds
     /// the drop; afterwards no `0x11` row of `b.m` exists.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac10e_a_drop_waits_for_a_backup_write_parked_before_its_inner_call() {
@@ -17510,7 +17514,7 @@ mod tenant_drop_tests {
         assert_eq!(node.registry_rows_of(OWNED), 0);
     }
 
-    /// AC10f: a write the close refuses is refused at ingress: no retry
+    /// `AC10f`: a write the close refuses is refused at ingress: no retry
     /// entry, no refusal age, no refused commit. The store has no notion of
     /// origin, so a `System` write meets the same entry points.
     #[test]
@@ -17560,7 +17564,7 @@ mod tenant_drop_tests {
         );
     }
 
-    /// AC10g: a `b.m` frame an earlier process left un-applied above a frame
+    /// `AC10g`: a `b.m` frame an earlier process left un-applied above a frame
     /// that failed at replay, in a partition this process never writes, holds
     /// the drop to its deadline; `b.m` stays intact and writable.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -17618,7 +17622,7 @@ mod tenant_drop_tests {
         node.store.add(OWNED, "k2", &lww("v2"), 0, 2).await.unwrap();
     }
 
-    /// AC10h: an invalid tenant is refused before anything is closed.
+    /// `AC10h`: an invalid tenant is refused before anything is closed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac10h_an_invalid_tenant_is_refused_before_anything_is_closed() {
         let node = Node::fresh(config(10_000)).await;
@@ -17633,7 +17637,7 @@ mod tenant_drop_tests {
             .unwrap();
     }
 
-    /// AC10h: a second drop while one runs answers `Busy`.
+    /// `AC10h`: a second drop while one runs answers `Busy`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac10h_a_second_drop_while_one_runs_is_busy() {
         let node = Node::fresh(config(10_000)).await;
@@ -17652,7 +17656,7 @@ mod tenant_drop_tests {
         assert_eq!(node.store.drop_tenant("c").await.unwrap(), done(&[]));
     }
 
-    /// AC10h: a failed (`TG-WB-006`), broken (`TG-WB-010`) or stopping store
+    /// `AC10h`: a failed (`TG-WB-006`), broken (`TG-WB-010`) or stopping store
     /// refuses the drop and closes nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac10h_a_failed_broken_or_stopping_store_refuses_the_drop() {
@@ -17680,7 +17684,7 @@ mod tenant_drop_tests {
         assert!(stopping.closed().is_empty());
     }
 
-    /// AC10h: a re-run that meets an `unapplied` error or a deadline does not
+    /// `AC10h`: a re-run that meets an `unapplied` error or a deadline does not
     /// lift the close an earlier, completed drop added.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac10h_a_failed_rerun_keeps_the_close_of_an_earlier_drop() {
@@ -17708,7 +17712,7 @@ mod tenant_drop_tests {
         assert_eq!(node.closed(), vec![TENANT.to_string()]);
     }
 
-    /// AC10h: a drop cancelled before the inner drop lifts its own close and
+    /// `AC10h`: a drop cancelled before the inner drop lifts its own close and
     /// frees the drop slot.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac10h_a_cancelled_drop_lifts_its_close_and_frees_the_slot() {
@@ -17733,7 +17737,7 @@ mod tenant_drop_tests {
         );
     }
 
-    /// AC10h: a write cancelled while registered leaves no in-flight count, so
+    /// `AC10h`: a write cancelled while registered leaves no in-flight count, so
     /// the next drop does not wait for it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac10h_a_cancelled_write_leaves_no_in_flight_count() {
@@ -17863,6 +17867,7 @@ mod write_path_measure {
     /// Prints one `WB_MEASURE` line. The numbers are relative only.
     #[test]
     #[ignore = "measurement, run by hand"]
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     fn write_path_throughput_and_p99() {
         let env_u64 = |name: &str, default: u64| {
             std::env::var(name)
