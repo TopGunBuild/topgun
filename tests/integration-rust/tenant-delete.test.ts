@@ -367,7 +367,14 @@ describe('Integration: tenant deletion (DELETE /api/admin/tenants/{tenant})', ()
     const c = await connect('user-c2', 'c');
     const control = await keysFromEveryReadPath(port, c, 'c', 'c.keep');
     process.stderr.write(`[tenant-delete] c.keep after the restart: ${JSON.stringify(control)}\n`);
-    expect(control).toEqual({ query: ['k1'], search: ['k1'], hybrid: ['k1'], vector: [], http: ['k1'] });
+    // HTTP query rows carry values only, so that path is checked by its count.
+    expect({ ...control, http: (control.http as unknown[]).length }).toEqual({
+      query: ['k1'],
+      search: ['k1'],
+      hybrid: ['k1'],
+      vector: [],
+      http: 1,
+    });
     expect(await indexes(port, dir)).toEqual({
       scalarFile: ['c.keep'],
       vectorFile: ['c.keep'],

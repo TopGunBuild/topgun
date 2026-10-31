@@ -186,8 +186,17 @@ async function hybrid(client: TestClient, payload: Record<string, unknown>): Pro
 
 const STATUS_OPEN = { op: 'eq', attribute: 'status', value: 'open' };
 
+/**
+ * Keys only: values are checked once, in AC3. With values, an answer above the
+ * server's 512 KiB WebSocket write buffer closes the connection.
+ */
 async function exactKeys(client: TestClient, k = 100): Promise<string[]> {
-  const results = await hybrid(client, { methods: ['exact'], predicate: STATUS_OPEN, k });
+  const results = await hybrid(client, {
+    methods: ['exact'],
+    predicate: STATUS_OPEN,
+    k,
+    includeValue: false,
+  });
   return results.map((r: any) => r.key).sort();
 }
 
@@ -282,7 +291,9 @@ describe('Integration: whole-map reads see stored records after a restart (TG-RE
       writer,
       Object.entries(WRITTEN).map(([key, value]) => ({ key, value })),
     );
-    await writeMany(writer, [{ key: 'gone', value: { id: 'gone', status: 'open', text: 'delta common' } }]);
+    await writeMany(writer, [
+      { key: 'gone', value: { id: 'gone', status: 'open', text: 'delta common' } },
+    ]);
     await remove(writer, 'gone');
   });
 
