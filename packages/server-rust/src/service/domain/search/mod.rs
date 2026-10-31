@@ -12,10 +12,10 @@ pub mod rrf;
 pub use hybrid::{HybridSearchEngine, HybridSearchError, HybridSearchResult, SearchMethod};
 pub use registry::{RegistryEntry, SubscriptionRegistry};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -582,6 +582,54 @@ enum IndexOp {
 struct MutationEvent {
     map_name: String,
     op: IndexOp,
+}
+
+// ---------------------------------------------------------------------------
+// Population state, write generations and the hybrid dirty set
+// ---------------------------------------------------------------------------
+
+/// State shared by the `SearchService` and every `SearchMutationObserver`
+/// attached to it.
+///
+/// - `generations`: one write generation per map. An attached observer bumps it
+///   at callback time for every non-backup event, whether the event is then
+///   enqueued or skipped, never in the batch processor. A population reads it
+///   before its resident snapshot and records the map as populated only when it
+///   is unchanged after the swap (`TG-READ-001`).
+/// - `dirty`: the map names whose hybrid subscriptions need a re-evaluation.
+///   The batch processor inserts a name instead of sending it on a channel; an
+///   insert is idempotent, never blocks and wakes the one notifier task, which
+///   takes the whole set at the start of a pass. The set holds at most one entry
+///   per map, whatever the write rate.
+#[derive(Default)]
+struct SearchShared {
+    generations: DashMap<String, Arc<AtomicU64>>,
+    dirty: Mutex<HashSet<String>>,
+    dirty_wake: tokio::sync::Notify,
+}
+
+/// The link from one `SearchMutationObserver` (and its batch processor) to the
+/// service it is attached to, returned by `SearchMutationObserver::new` and
+/// consumed by `SearchService::spawn_hybrid_notifier`.
+///
+/// Until it is attached, the observer sets the map's `needs_population` flag on
+/// every non-backup event instead of bumping a generation (searches stay
+/// correct at the cost of a population per search) and its batch processor
+/// marks nothing dirty (no hybrid deltas).
+pub struct HybridLink {
+    cell: Arc<OnceLock<Arc<SearchShared>>>,
+}
+
+/// The population state of one map's full-text index. An absent entry means
+/// "needs population"; so does a set `needs_population` flag over `Populated`.
+enum PopState {
+    /// The last population's scan was overlapped by no write.
+    Populated,
+    /// A population task runs; a search that needs population joins it.
+    InFlight {
+        id: u64,
+        outcome: tokio::sync::watch::Receiver<Option<bool>>,
+    },
 }
 
 // ---------------------------------------------------------------------------

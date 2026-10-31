@@ -8,14 +8,18 @@
 //! Stores are cached by `(map_name, partition_id)` in a [`DashMap`] so that
 //! repeated lookups for the same pair return the same [`Arc<dyn RecordStore>`].
 
+use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use topgun_core::hlc::Timestamp;
 
 use crate::storage::engines::HashMapStorage;
 use crate::storage::impls::{DefaultRecordStore, StorageConfig};
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
+use crate::storage::record::RecordValue;
 use crate::storage::record_store::RecordStore;
 
 /// Factory that creates per-map mutation observers at store-creation time.
@@ -173,6 +177,74 @@ impl RecordStoreFactory {
             .filter(|entry| entry.key().0 == map_name)
             .map(|entry| Arc::clone(entry.value()))
             .collect()
+    }
+
+    /// Visits every live record of `map_name` once, from the resident record or
+    /// the data store, without loading anything into the in-memory engine
+    /// (`TG-READ-001`).
+    ///
+    /// The same merge as [`scan_merged_batches`](Self::scan_merged_batches),
+    /// with `consumer` called once per emitted row.
+    ///
+    /// # Errors
+    ///
+    /// A data-store error on the first or a resumed batch. Rows already given
+    /// to `consumer` stay given; the caller must treat the whole read as
+    /// failed: there is no "resident rows only" fallback.
+    pub async fn scan_merged(
+        &self,
+        map_name: &str,
+        consumer: &mut (dyn FnMut(&str, &RecordValue) + Send),
+    ) -> anyhow::Result<()> {
+        let _ = (map_name, consumer);
+        todo!()
+    }
+
+    /// The batch-level form of [`scan_merged`](Self::scan_merged)
+    /// (`TG-READ-001`): the rows emitted for each data-store batch, and last
+    /// the surviving residents, are handed to `on_batch` as one `Vec`, and the
+    /// step is awaited before the next data-store batch is requested, so a
+    /// step that hands rows to another task applies back-pressure.
+    ///
+    /// The contract:
+    /// - **Resident snapshot first.** Every store of the map is read with
+    ///   `for_each_boxed(.., false)` into a keyed snapshot before the data
+    ///   store is called.
+    /// - **Merge.** For a scanned row whose key is resident, the resident copy
+    ///   wins when both are `Lww` and the scanned timestamp is `<=` the
+    ///   resident one, or when either side is not `Lww` (a resident OR slot is
+    ///   authoritative). Otherwise the scanned row is emitted and the key leaves
+    ///   the snapshot. The keys left in the snapshot are emitted after the scan.
+    ///   The `<=` rule assumes a key's timestamps rise in write order, which
+    ///   holds for writes the server stamps.
+    /// - **Each key at most once**, and exactly once if it is resident or
+    ///   emitted by the data-store scan. A key whose last write is a delete is
+    ///   neither resident nor emitted by the write-behind scan (`TG-WB-008`).
+    /// - **No engine writes**: no store is created, hydrated or read through
+    ///   `get`; every store's `size()` is unchanged.
+    /// - **Null store**: with `data_store().is_null()` only the resident
+    ///   snapshot is emitted and the data store is not called.
+    /// - **Memory**: the resident snapshot, one data-store batch and the batch
+    ///   being handed to the step, plus what the step keeps. Each call holds its
+    ///   own snapshot.
+    /// - No lock guard is held across an `.await`.
+    ///
+    /// # Errors
+    ///
+    /// A data-store error on the first or a resumed batch, or the first `Err`
+    /// of `on_batch`, which ends the scan.
+    pub async fn scan_merged_batches<F, Fut>(
+        &self,
+        map_name: &str,
+        mut on_batch: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(Vec<(String, RecordValue)>) -> Fut + Send,
+        Fut: Future<Output = anyhow::Result<()>> + Send,
+    {
+        let _ = (map_name, &mut on_batch);
+        let _: Option<HashMap<String, (RecordValue, Option<Timestamp>)>> = None;
+        todo!()
     }
 
     /// Returns a reference to the shared persistence backend.

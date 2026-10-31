@@ -70,6 +70,23 @@ pub enum HybridSearchError {
     NoEmbeddingProvider,
     #[error("map not found: {0}")]
     MapNotFound(String),
+    /// A read of the stored map failed: the store scan of `exact`, or the
+    /// population the `fullText` leg waited for. Never answered as an empty
+    /// result list (`TG-READ-001`).
+    #[error("store scan failed: {0}")]
+    Store(String),
+}
+
+/// Whether the `fullText` leg may start or join a population of the map's
+/// full-text index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FullTextMode {
+    /// A request path: a map that needs population is populated first, and the
+    /// leg waits for it.
+    Populate,
+    /// A hybrid notifier pass: the map's current index is read as it is, and no
+    /// population is started or joined.
+    CurrentIndex,
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +236,40 @@ impl HybridSearchEngine {
             .collect();
 
         Ok(results)
+    }
+
+    /// Like [`hybrid_search`](Self::hybrid_search), but the `exact` leg takes
+    /// `exact` when it is `Some` instead of scanning the map, and the
+    /// `fullText` leg runs in `mode`.
+    ///
+    /// # Errors
+    ///
+    /// As [`hybrid_search`](Self::hybrid_search).
+    pub(crate) async fn hybrid_search_with_exact(
+        &self,
+        params: HybridSearchParams<'_>,
+        exact: Option<Vec<String>>,
+        mode: FullTextMode,
+    ) -> Result<Vec<HybridSearchResult>, HybridSearchError> {
+        let _ = (params, exact, mode);
+        todo!()
+    }
+
+    /// The keys of `map_name` whose stored or resident `Lww` value matches each
+    /// of `predicates`, one list per predicate, from one `scan_merged` of the
+    /// map (`TG-READ-001`). No scalar index is consulted, so an index that
+    /// misses a key cannot drop a match.
+    ///
+    /// # Errors
+    ///
+    /// `HybridSearchError::Store` when the scan fails; never a partial list.
+    pub(crate) async fn exact_matches(
+        &self,
+        map_name: &str,
+        predicates: &[&PredicateNode],
+    ) -> Result<Vec<Vec<String>>, HybridSearchError> {
+        let _ = (map_name, predicates);
+        todo!()
     }
 
     // -----------------------------------------------------------------------

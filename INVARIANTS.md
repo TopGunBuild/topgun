@@ -8,7 +8,7 @@ an explicit `NAKED` marker; the gate is "the NAKED count never grows silently", 
 
 Conventions: IDs are `TG-<DOMAIN>-<NNN>` (domains: WAL, WB write-behind, OR, LWW, MRK merkle,
 EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch, ENG byte engine, AUTHZ
-authorization, ENC encryption at rest). Cite the ID verbatim in code comments and test names. Statuses:
+authorization, ENC encryption at rest, READ whole-map reads). Cite the ID verbatim in code comments and test names. Statuses:
 `decided` (holds by design) · `open (SPEC/TODO-nnn)` (not yet true / not yet wired) ·
 `aspirational`. Precedent: omnigraph `docs/invariants.md` (structure) — improved here with the
 CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
@@ -3483,4 +3483,44 @@ weaker than a test.
 - **Violation consequence:** a rotation that rewrote values or segments would take time proportional
   to the data and could leave a store half under each key after a crash.
 - **Discovered by:** SPEC-399 (TODO-861), part 399b.
+- **Status:** decided, **enforced**.
+
+---
+
+### TG-READ-001: A whole-map read sees every stored record, not only the resident ones
+
+- **Scope:** `RecordStoreFactory::scan_merged` / `scan_merged_batches` and their callers: the HTTP
+  `/sync` query, the full-text index population, and hybrid `exact` (request and live
+  re-evaluation).
+- **Statement:** the read takes a snapshot of the resident records, then streams the data store's
+  `scan_values` / `scan_values_batched` to the end. A scanned row of a resident key is skipped when
+  both copies are `Lww` and the scanned timestamp is `<=` the resident one, or when either copy is
+  not `Lww` (a resident OR slot is authoritative); otherwise the scanned row is emitted and the
+  resident copy dropped; the residents left are emitted after the scan. Each key is emitted at
+  most once, and exactly once if it is resident or emitted by the scan. The read writes nothing
+  into any record store or engine (no hydration, no `get`; every store's `size()` is unchanged). A
+  key whose last write is a delete is not emitted: the engine remove takes it out of the resident
+  set and the write-behind scan overlay emits no staged delete (`TG-WB-008`, clause 4). A scan
+  error fails the whole read (a 500 entry for the `/sync` query, an error for search and hybrid),
+  never a partial or resident-only answer. A full-text population records the map "populated"
+  only after a swap whose scan no write overlapped: it clears the map's `needs_population` flag
+  and reads the map's write generation before the resident snapshot, every non-backup observer
+  callback bumps that generation, and an unchanged generation after the swap is the condition.
+- **Precondition:** a key's HLC timestamps rise in write order (server-stamped writes).
+- **Stated limits:** an unsanitized write of a trusted origin with a lower timestamp than the stored
+  row loses to that row between its engine put and its staging. Each data-store batch is its own
+  snapshot, so there is no point-in-time read. A search that joins a population may miss a write
+  acknowledged before it; that population then does not record "populated". Notifier passes never
+  populate, so live `fullText` deltas after an overlapped population read an index that may miss
+  writes applied to the old index (TODO-901). `Clear` / `reset` issued before a population reads
+  its generation are not covered (no production caller). TTL / max-idle are not addressed.
+- **Maintaining code:** `storage/factory.rs` — `scan_merged`, `scan_merged_batches`;
+  `storage/datastores/write_behind.rs` — the scan overlay; `service/domain/search/mod.rs` —
+  `SearchShared`, `PopState`, the population task and the observer's generation bump.
+- **Enforcing test:** (filled in by the implementation commits)
+- **Integration tests:** (filled in by the implementation commits)
+- **Violation consequence:** after a restart or eviction, `/sync`, full-text search or hybrid
+  `exact` silently omit stored records, or a search answers from an index that a concurrent write
+  left incomplete.
+- **Discovered by:** SPEC-398b2 (TODO-897); fixed by SPEC-401a.
 - **Status:** decided, **enforced**.
