@@ -6,9 +6,15 @@
 // default run that included them would be red on every clean checkout.
 const optInSuites = [
   {
-    files: ['map-name-upgrade', 'map-name-rollback', 'watermark-rollback', 'encryption-rollback'],
+    files: [
+      'map-name-upgrade',
+      'map-name-rollback',
+      'watermark-rollback',
+      'encryption-rollback',
+      'tenant-delete-rollback',
+    ],
     reason:
-      'each drives two server binaries and needs the older one by path: map-name-upgrade a 07d009f0 build (OLD_SERVER_BINARY, OLD_SERVER_COMMIT), map-name-rollback a b346e277 build (FORMAT_OLD_SERVER_BINARY, FORMAT_OLD_SERVER_COMMIT), watermark-rollback a 6a030bb6 build (WATERMARK_OLD_SERVER_BINARY, WATERMARK_OLD_SERVER_COMMIT), encryption-rollback a 727db547 build (ENC_OLD_SERVER_BINARY, ENC_OLD_SERVER_COMMIT); all also NEW_SERVER_COMMIT for the newer binary',
+      'each drives two server binaries and needs the older one by path: map-name-upgrade a 07d009f0 build (OLD_SERVER_BINARY, OLD_SERVER_COMMIT), map-name-rollback a b346e277 build (FORMAT_OLD_SERVER_BINARY, FORMAT_OLD_SERVER_COMMIT), watermark-rollback a 6a030bb6 build (WATERMARK_OLD_SERVER_BINARY, WATERMARK_OLD_SERVER_COMMIT), encryption-rollback a 727db547 build (ENC_OLD_SERVER_BINARY, ENC_OLD_SERVER_COMMIT), tenant-delete-rollback a 727db547 build (TENANT_OLD_SERVER_BINARY, TENANT_OLD_SERVER_COMMIT); all also NEW_SERVER_COMMIT for the newer binary',
     script: 'pnpm test:integration-rust:two-binary',
   },
   {
