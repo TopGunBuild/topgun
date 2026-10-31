@@ -12,7 +12,7 @@ use axum::Json;
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
-use super::handlers::admin;
+use super::handlers::admin::{self, TenantDeleteFailedMap, TenantDeleteResponse};
 use super::handlers::admin_types::{
     ClusterStatusResponse, CreatePolicyRequest, ErrorResponse, LoginRequest, LoginResponse,
     MapInfo, MapsListResponse, NodeInfo, NodeStatus, PartitionInfo, PolicyListResponse,
@@ -57,6 +57,7 @@ impl Modify for BearerAuthAddon {
         admin::list_policies,
         admin::create_policy,
         admin::delete_policy,
+        admin::delete_tenant,
     ),
     components(schemas(
         ServerStatusResponse,
@@ -78,6 +79,8 @@ impl Modify for BearerAuthAddon {
         CreatePolicyRequest,
         PolicyListResponse,
         PolicyResponse,
+        TenantDeleteResponse,
+        TenantDeleteFailedMap,
     )),
     modifiers(&BearerAuthAddon)
 )]

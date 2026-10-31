@@ -30,6 +30,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   journal read or subscription without a map returns only the tenant's events. HTTP `/sync`
   queries now also refuse a reserved map (`_topgun_*`, `__topgun_*`) with a 403 entry, with or
   without tenancy, where they returned an empty result.
+- **Added (server): tenant deletion, `DELETE /api/admin/tenants/{tenant}`.** With
+  `TOPGUN_TENANT_CLAIM` set and RBAC configured, the admin API deletes every map a tenant owns:
+  it writes the deny policy `tenant-deleted:{tenant}` (`{tenant}.**`, all actions), drops the maps
+  once every write of them is durable, including maps whose first write is still buffered, and
+  removes their scalar and vector index descriptors. It refuses, changing nothing, with tenancy off
+  (409), without a configured policy store (409) and for an invalid tenant (400); every other
+  answer leaves the tenant denied, and re-running finishes what an earlier run left. An accepted
+  delete runs to the end even if the client disconnects, and logs `tenant delete finished`.
+  Deletion is logical: values stay in sealed WAL segments until collected, in backups and in a
+  kept `.pre-migration` file. Re-onboarding a deleted tenant takes deleting its policy and a
+  restart. See the "Tenants and tenant deletion" section of the RBAC guide.
+- **Changed (server): `GET /api/admin/maps` lists the store's maps.** The listing now comes from
+  the store, so a map not touched since the last start is listed too (its `entryCount` is the
+  resident count, 0 for a map not loaded), and reserved maps are left out in any letter case. On
+  `STORAGE_BACKEND=null` the listing is empty.
+- **Changed (server): policy patterns are checked.** `POST /api/admin/policies` refuses (400,
+  naming the segment) a `mapPattern` segment that contains `*` and is neither `*` nor `**`, such as
+  `users/*` or `a*`, which would match only a name spelled with that star. Stored policies are not
+  rewritten.
+- **Removed (core-rust): `RequestContext.tenant_id`.** The field was never filled; a caller's
+  tenant is carried by `Principal`.
 - **Added (server): encryption at rest.** With `TOPGUN_ENCRYPTION_AT_REST=on`,
   `TOPGUN_MASTER_KEY_PROVIDER=file` and `TOPGUN_MASTER_KEY_FILE` (64 hex characters, mode `0600`
   or `0400`), a stolen disk, a copied data directory or WAL directory, or a backup is unreadable

@@ -12,6 +12,7 @@
 //! - `GET /api/admin/indexes` -- list all indexes across all maps (admin only)
 //! - `DELETE /api/admin/indexes/:map/:attr` -- remove an index (admin only)
 //! - `GET /api/admin/indexes/:map/:attr/status` -- backfill progress (admin only)
+//! - `DELETE /api/admin/tenants/:tenant` -- delete a tenant's maps (admin only)
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use std::time::SystemTime;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use jsonwebtoken::{EncodingKey, Header};
 use serde::Serialize;
@@ -43,8 +44,14 @@ use super::AppState;
 use crate::cluster::types::NodeState;
 use crate::service::domain::index::vector_index::format_iso8601;
 use crate::service::domain::index::IndexType;
+use crate::service::middleware::authorization::is_reserved_map_name;
 use crate::service::middleware::metrics::total_operations;
-use crate::service::policy::{expr_parser::parse_permission_expr, PermissionPolicy};
+use crate::service::policy::{
+    expr_parser::parse_permission_expr, validate_map_pattern, PermissionAction, PermissionPolicy,
+    PolicyEffect, PolicyStore,
+};
+use crate::storage::{check_tenant, DropOutcome, MapDataStore};
+use topgun_core::types::tenant_owns;
 
 /// JWT claims for token generation (encoding).
 ///
@@ -312,18 +319,22 @@ pub async fn cluster_status(
 
 /// Lists all non-system maps with entry counts.
 ///
-/// Excludes maps with names starting with `$sys/`.
-/// Entry count is summed across all partitions for each map.
+/// Lists the maps the store's registry holds, so a map not touched since the
+/// last start is listed too. Excludes `$sys/` maps and reserved internal maps
+/// (`_topgun_*`, `__topgun_*`, ASCII case-insensitively). The entry count is
+/// the resident count, summed across partitions: `0` for a map not loaded
+/// into memory, whatever the store holds.
 ///
 /// # Errors
 ///
-/// Returns 503 if the storage layer is not configured.
+/// Returns 503 if the storage layer is not configured or the registry cannot
+/// be read.
 #[utoipa::path(
     get,
     path = "/api/admin/maps",
     responses(
         (status = 200, description = "List of maps", body = MapsListResponse),
-        (status = 503, description = "Storage not configured", body = ErrorResponse),
+        (status = 503, description = "Storage not configured or unreadable", body = ErrorResponse),
     ),
     security(("bearer_auth" = [])),
     tag = "Maps"
@@ -343,10 +354,19 @@ pub async fn list_maps(
         )
     })?;
 
-    let map_names = store_factory.map_names();
+    let map_names = store_factory.data_store().list_maps().await.map_err(|e| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                code: 503,
+                message: format!("failed to list maps: {e:#}"),
+                field: None,
+            }),
+        )
+    })?;
     let maps: Vec<MapInfo> = map_names
         .into_iter()
-        .filter(|name| !name.starts_with("$sys/"))
+        .filter(|name| !name.starts_with("$sys/") && !is_reserved_map_name(name))
         .map(|name| {
             let stores = store_factory.get_all_for_map(&name);
             let entry_count: u64 = stores.iter().map(|s| s.size() as u64).sum();
@@ -657,6 +677,20 @@ pub async fn create_policy(
         )
     })?;
 
+    if let Err(segment) = validate_map_pattern(&req.map_pattern) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                code: 400,
+                message: format!(
+                    "mapPattern segment {segment:?} contains `*` but is neither `*` nor `**`; \
+                     it would match only a name spelled with that star"
+                ),
+                field: Some("mapPattern".to_string()),
+            }),
+        ));
+    }
+
     let id = req.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // Resolve condition: JSON `condition` takes precedence over `condition_expr` string.
@@ -756,6 +790,313 @@ pub async fn delete_policy(
     })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Tenant deletion ───────────────────────────────────────────────────
+
+/// One map a tenant delete did not drop, with the error it met.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TenantDeleteFailedMap {
+    /// The map that is still stored.
+    pub map: String,
+    /// Why the store did not drop it.
+    pub error: String,
+}
+
+/// Response body for `DELETE /api/admin/tenants/{tenant}` once the store ran
+/// the drop: 200 when every owned map is gone and its index descriptors are
+/// removed, else 503 with what is left. Either way the tenant stays denied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TenantDeleteResponse {
+    /// The maps this request removed, in name order.
+    pub dropped: Vec<String>,
+    /// The maps still stored; a re-run drops them.
+    pub failed: Vec<TenantDeleteFailedMap>,
+    /// What happened and what to do next.
+    pub message: String,
+}
+
+/// How a tenant delete that passed the checks ended. Built by the task that
+/// runs it, which logs it whether or not the caller is still waiting.
+enum TenantDeleteEnd {
+    /// The deny policy could not be written; nothing was closed or deleted.
+    UpsertFailed(String),
+    /// The store answered `Busy` or `Unsupported`; this request deleted nothing.
+    NotRun(DropOutcome),
+    /// The store refused the drop or failed it.
+    DropFailed(String),
+    /// The drop ran; `descriptors` is the scalar descriptor removal's error.
+    Done {
+        dropped: Vec<String>,
+        failed: Vec<(String, String)>,
+        descriptors: Option<String>,
+    },
+}
+
+fn tenant_error(status: StatusCode, message: String) -> Response {
+    (
+        status,
+        Json(ErrorResponse {
+            code: u32::from(status.as_u16()),
+            message,
+            field: None,
+        }),
+    )
+        .into_response()
+}
+
+/// The id of the deny policy a delete of `tenant` writes.
+fn tenant_deny_policy_id(tenant: &str) -> String {
+    format!("tenant-deleted:{tenant}")
+}
+
+/// Deletes every map a tenant owns (`TG-TEN-002`), on the operator plane only.
+///
+/// Before anything is written it refuses: 409 with tenancy off, 409 without a
+/// configured policy store (a deny policy written into an unconfigured store
+/// would turn the whole deployment default-deny), 400 for a tenant the
+/// tenant-id rule refuses. Then, in one task the request does not own: (a)
+/// upsert the deny policy `tenant-deleted:{tenant}` on `{tenant}.**`, (b) drop
+/// the tenant's maps in the store, (c) when the drop ran, remove the scalar and
+/// vector index descriptors of every owned map except those the store failed
+/// to drop. Every answer after (a) leaves the deny policy in place. A client
+/// that disconnects does not stop the task: an accepted delete runs to the
+/// end, and its outcome is logged (`tenant delete finished`).
+///
+/// # Errors
+///
+/// 409 or 400 before (a), as above; after (a), 409 when another delete is
+/// running or the store cannot drop a tenant, 503 when the upsert, the drop or
+/// the descriptor removal failed or a map is left.
+#[utoipa::path(
+    delete,
+    path = "/api/admin/tenants/{tenant}",
+    params(
+        ("tenant" = String, Path, description = "Tenant whose maps (`{tenant}.*`) are deleted")
+    ),
+    responses(
+        (status = 200, description = "Every owned map dropped; the tenant stays denied", body = TenantDeleteResponse),
+        (status = 400, description = "Invalid tenant; nothing was changed", body = ErrorResponse),
+        (status = 409, description = "Tenancy off or policy store not configured (nothing was changed), or a delete already running / unsupported store (the tenant is denied)", body = ErrorResponse),
+        (status = 503, description = "Some maps are left, or the drop failed; the tenant is denied unless the policy upsert itself failed", body = TenantDeleteResponse),
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Tenants"
+)]
+pub async fn delete_tenant(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+    Path(tenant): Path<String>,
+) -> Response {
+    delete_tenant_at(state, tenant, scalar_descriptor_path()).await
+}
+
+/// [`delete_tenant`] with the scalar descriptor file named by the caller, so
+/// tests need not set `TOPGUN_INDEX_PATH` in the process environment.
+async fn delete_tenant_at(
+    state: AppState,
+    tenant: String,
+    scalar_path: std::path::PathBuf,
+) -> Response {
+    if state.config.tenant_claim.is_none() {
+        return tenant_error(
+            StatusCode::CONFLICT,
+            "tenancy is off (TOPGUN_TENANT_CLAIM is not set); nothing was changed".to_string(),
+        );
+    }
+    let policy_store = match &state.policy_store {
+        Some(store) if matches!(store.is_configured().await, Ok(true)) => Arc::clone(store),
+        _ => {
+            return tenant_error(
+                StatusCode::CONFLICT,
+                "the policy store is not configured: deleting a tenant writes a deny policy, \
+                 which would turn every client default-deny; configure RBAC first. \
+                 Nothing was changed"
+                    .to_string(),
+            )
+        }
+    };
+    if let Err(e) = check_tenant(&tenant) {
+        return tenant_error(
+            StatusCode::BAD_REQUEST,
+            format!("{e:#}; nothing was changed"),
+        );
+    }
+    let Some(store_factory) = state.store_factory.as_ref() else {
+        return tenant_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage not configured; nothing was changed".to_string(),
+        );
+    };
+    let data_store = store_factory.data_store();
+    let vector_path = descriptor_path(&state);
+
+    // Once the deny policy is written, the drop must run to the end: the store
+    // keeps the tenant closed after its inner drop starts, so a drop cut short
+    // by a dropped request future would leave some maps deleted and the rest
+    // closed until a re-run. The task is detached from the request for that.
+    let task = {
+        use tracing::instrument::WithSubscriber;
+        let tenant = tenant.clone();
+        tokio::spawn(
+            async move {
+                let end = run_tenant_delete(
+                    &*policy_store,
+                    &*data_store,
+                    &tenant,
+                    &scalar_path,
+                    &vector_path,
+                )
+                .await;
+                log_tenant_delete(&tenant, &end);
+                end
+            }
+            .with_current_subscriber(),
+        )
+    };
+    match task.await {
+        Ok(end) => tenant_delete_response(&tenant, end),
+        Err(e) => tenant_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "the delete of tenant {tenant} failed ({e}); the deny policy {} may have been \
+                 written and data may be partly deleted; re-run to finish",
+                tenant_deny_policy_id(&tenant)
+            ),
+        ),
+    }
+}
+
+/// Steps (a)–(c) of a tenant delete.
+async fn run_tenant_delete(
+    policy_store: &dyn PolicyStore,
+    data_store: &dyn MapDataStore,
+    tenant: &str,
+    scalar_path: &std::path::Path,
+    vector_path: &std::path::Path,
+) -> TenantDeleteEnd {
+    let deny = PermissionPolicy {
+        id: tenant_deny_policy_id(tenant),
+        map_pattern: format!("{tenant}.**"),
+        action: PermissionAction::All,
+        effect: PolicyEffect::Deny,
+        condition: None,
+    };
+    if let Err(e) = policy_store.upsert_policy(deny).await {
+        return TenantDeleteEnd::UpsertFailed(e.to_string());
+    }
+    let (dropped, failed) = match data_store.drop_tenant(tenant).await {
+        Ok(DropOutcome::Done { dropped, failed }) => (dropped, failed),
+        Ok(outcome) => return TenantDeleteEnd::NotRun(outcome),
+        Err(e) => return TenantDeleteEnd::DropFailed(format!("{e:#}")),
+    };
+    // Every owned descriptor, not only those of `dropped`: a re-run after a
+    // crash between a map's drop and its descriptor removal finds the map gone
+    // and must still remove the leftover. Read after the drop, each file in
+    // one read-filter-write.
+    let left = |map: &str| failed.iter().any(|(name, _)| name == map);
+    let removable = |map: &str| tenant_owns(tenant, map) && !left(map);
+    let descriptors = remove_scalar_descriptors(scalar_path, |d| removable(&d.map_name))
+        .err()
+        .map(|e| e.to_string());
+    remove_vector_descriptors(vector_path, |d| removable(&d.map_name));
+    TenantDeleteEnd::Done {
+        dropped,
+        failed,
+        descriptors,
+    }
+}
+
+fn log_tenant_delete(tenant: &str, end: &TenantDeleteEnd) {
+    let (dropped, failed, error): (&[String], &[(String, String)], Option<String>) = match end {
+        TenantDeleteEnd::Done {
+            dropped,
+            failed,
+            descriptors,
+        } => (
+            dropped,
+            failed,
+            descriptors
+                .clone()
+                .or_else(|| (!failed.is_empty()).then(|| "some maps were not dropped".to_string())),
+        ),
+        TenantDeleteEnd::UpsertFailed(e) => (&[], &[], Some(format!("deny policy upsert: {e}"))),
+        TenantDeleteEnd::DropFailed(e) => (&[], &[], Some(e.clone())),
+        TenantDeleteEnd::NotRun(outcome) => (&[], &[], Some(format!("{outcome:?}"))),
+    };
+    match error {
+        None => info!(tenant, ?dropped, ?failed, "tenant delete finished"),
+        Some(error) => tracing::warn!(tenant, ?dropped, ?failed, %error, "tenant delete finished"),
+    }
+}
+
+fn tenant_delete_response(tenant: &str, end: TenantDeleteEnd) -> Response {
+    let policy = tenant_deny_policy_id(tenant);
+    match end {
+        TenantDeleteEnd::UpsertFailed(e) => tenant_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("failed to write the deny policy {policy}: {e}; nothing was closed or deleted"),
+        ),
+        TenantDeleteEnd::NotRun(outcome) => {
+            let why = if outcome == DropOutcome::Busy {
+                "another tenant delete is running on this node"
+            } else {
+                "this storage backend cannot delete a tenant"
+            };
+            tenant_error(
+                StatusCode::CONFLICT,
+                format!(
+                    "{why}; this request deleted nothing, but tenant {tenant} is denied \
+                     (policy {policy}); re-run to finish"
+                ),
+            )
+        }
+        TenantDeleteEnd::DropFailed(e) => tenant_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "the store did not drop tenant {tenant}: {e}; tenant {tenant} is denied \
+                 (policy {policy}); data may be partly deleted; re-run to finish"
+            ),
+        ),
+        TenantDeleteEnd::Done {
+            dropped,
+            failed,
+            descriptors,
+        } => {
+            let ok = failed.is_empty() && descriptors.is_none();
+            let message = if ok {
+                format!(
+                    "tenant {tenant} deleted; it stays denied by policy {policy} — delete that \
+                     policy and restart the server to onboard it again"
+                )
+            } else {
+                let what = descriptors.map_or_else(
+                    || "some maps were not dropped".to_string(),
+                    |e| format!("failed to remove its scalar index descriptors: {e}"),
+                );
+                format!(
+                    "{what}; tenant {tenant} is denied (policy {policy}); data may be partly \
+                     deleted; re-run to finish"
+                )
+            };
+            let body = TenantDeleteResponse {
+                dropped,
+                failed: failed
+                    .into_iter()
+                    .map(|(map, error)| TenantDeleteFailedMap { map, error })
+                    .collect(),
+                message,
+            };
+            let status = if ok {
+                StatusCode::OK
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+            (status, Json(body)).into_response()
+        }
+    }
 }
 
 // ── Index admin endpoints ─────────────────────────────────────────────
@@ -1012,20 +1353,16 @@ pub async fn remove_index_handler(
     // re-register a removed index. Disk write failures are logged but do not
     // fail the request — the in-memory removal succeeded and that is the
     // user-observable contract for DELETE.
-    let path = scalar_descriptor_path();
-    let mut descriptors = load_scalar_descriptors(&path);
-    let before = descriptors.len();
-    descriptors.retain(|d| !(d.map_name == map_name && d.attribute == attribute));
-    if descriptors.len() != before {
-        if let Err(e) = save_scalar_descriptors(&path, &descriptors) {
-            tracing::warn!(
-                target: "topgun_server::index_persistence",
-                map = %map_name,
-                attribute = %attribute,
-                error = %e,
-                "failed to persist scalar index descriptor removal; in-memory state already removed"
-            );
-        }
+    if let Err(e) = remove_scalar_descriptors(&scalar_descriptor_path(), |d| {
+        d.map_name == map_name && d.attribute == attribute
+    }) {
+        tracing::warn!(
+            target: "topgun_server::index_persistence",
+            map = %map_name,
+            attribute = %attribute,
+            error = %e,
+            "failed to persist scalar index descriptor removal; in-memory state already removed"
+        );
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -1161,6 +1498,26 @@ pub fn save_scalar_descriptors(
     std::fs::write(path, json)
 }
 
+/// Removes every scalar index descriptor `remove` matches from the sidecar
+/// file at `path`, in one read-filter-write with no await in between; the file
+/// is written only when a descriptor matched.
+///
+/// # Errors
+///
+/// The error of [`save_scalar_descriptors`].
+fn remove_scalar_descriptors(
+    path: &std::path::Path,
+    remove: impl Fn(&ScalarIndexDescriptor) -> bool,
+) -> std::io::Result<()> {
+    let mut descriptors = load_scalar_descriptors(path);
+    let before = descriptors.len();
+    descriptors.retain(|d| !remove(d));
+    if descriptors.len() == before {
+        return Ok(());
+    }
+    save_scalar_descriptors(path, &descriptors)
+}
+
 // ── Vector index descriptor persistence ──────────────────────────────────────
 
 /// Default vector-index descriptor sidecar path used when none is configured.
@@ -1239,6 +1596,22 @@ pub fn save_vector_descriptors(path: &std::path::Path, descriptors: &[VectorInde
         Err(e) => {
             tracing::warn!(error = %e, "failed to serialize vector index descriptors");
         }
+    }
+}
+
+/// Removes every vector index descriptor `remove` matches from the sidecar
+/// file at `path`, in one read-filter-write with no await in between; the file
+/// is written only when a descriptor matched. Infallible like
+/// [`save_vector_descriptors`], which logs a write error.
+fn remove_vector_descriptors(
+    path: &std::path::Path,
+    remove: impl Fn(&VectorIndexDescriptor) -> bool,
+) {
+    let mut descriptors = load_vector_descriptors(path);
+    let before = descriptors.len();
+    descriptors.retain(|d| !remove(d));
+    if descriptors.len() != before {
+        save_vector_descriptors(path, &descriptors);
     }
 }
 
@@ -1462,10 +1835,9 @@ pub async fn remove_vector_index_handler(
     let _ = registry.remove_index(&attribute);
 
     // Remove from persistent descriptor file.
-    let path = descriptor_path(&state);
-    let mut descriptors = load_vector_descriptors(&path);
-    descriptors.retain(|d| !(d.map_name == map_name && d.index_name == index_name));
-    save_vector_descriptors(&path, &descriptors);
+    remove_vector_descriptors(&descriptor_path(&state), |d| {
+        d.map_name == map_name && d.index_name == index_name
+    });
 
     // Clean up backfill progress entry if present.
     state
@@ -2271,5 +2643,679 @@ mod vector_admin_tests {
             result2.is_ok(),
             "second cancel (idempotent) should return 200"
         );
+    }
+}
+
+#[cfg(test)]
+mod tenant_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use parking_lot::Mutex;
+    use serial_test::serial;
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+    use topgun_core::vector::DistanceMetric;
+
+    use super::*;
+    use crate::network::config::NetworkConfig;
+    use crate::service::policy::{InMemoryPolicyStore, PolicyError};
+    use crate::storage::datastores::kv_engine::{
+        KeyRange, KvCapabilities, KvEngine, KvError, KvResult, KvSnapshot, MemKvEngine, WriteBatch,
+        WriteOptions,
+    };
+    use crate::storage::impls::StorageConfig;
+    use crate::storage::{
+        EngineMapDataStore, NullDataStore, RecordStoreFactory, RecordValue, WriteBehindConfig,
+        WriteBehindDataStore,
+    };
+
+    const TENANT: &str = "b";
+
+    // Every test that runs a delete is `serial(tenant_delete)`: the
+    // `tenant delete finished` event is one callsite, and while another test
+    // hits it concurrently the subscriber of
+    // `an_accepted_delete_runs_to_the_end_after_the_caller_left` does not see
+    // it (the test passes alone and serially).
+
+    fn claims() -> AdminClaims {
+        AdminClaims {
+            user_id: "op".to_string(),
+            roles: vec!["admin".to_string()],
+        }
+    }
+
+    fn lww(value: &str) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String(value.to_string()),
+            timestamp: Timestamp {
+                millis: 1,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
+        }
+    }
+
+    /// A policy store that has been configured, as the deployment it guards.
+    async fn configured_policies() -> Arc<InMemoryPolicyStore> {
+        let store = Arc::new(InMemoryPolicyStore::new());
+        store
+            .upsert_policy(PermissionPolicy {
+                id: "allow-all".to_string(),
+                map_pattern: "*".to_string(),
+                action: PermissionAction::All,
+                effect: PolicyEffect::Allow,
+                condition: None,
+            })
+            .await
+            .unwrap();
+        store
+    }
+
+    /// Descriptor files in a temporary directory, kept alive with it.
+    struct Files {
+        _dir: tempfile::TempDir,
+        scalar: std::path::PathBuf,
+        vector: std::path::PathBuf,
+    }
+
+    impl Files {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            Self {
+                scalar: dir.path().join("scalar_indexes.json"),
+                vector: dir.path().join("vector_indexes.json"),
+                _dir: dir,
+            }
+        }
+
+        /// One scalar and one vector index descriptor on each of `maps`.
+        fn index(&self, maps: &[&str]) {
+            let mut scalar = load_scalar_descriptors(&self.scalar);
+            let mut vector = load_vector_descriptors(&self.vector);
+            for map in maps {
+                scalar.push(ScalarIndexDescriptor {
+                    map_name: (*map).to_string(),
+                    attribute: "a".to_string(),
+                    index_type: IndexTypeParam::Hash,
+                    created_at: "t".to_string(),
+                });
+                vector.push(VectorIndexDescriptor {
+                    map_name: (*map).to_string(),
+                    attribute: "_embedding".to_string(),
+                    index_name: "emb".to_string(),
+                    dimension: 4,
+                    distance_metric: DistanceMetric::Cosine,
+                    hnsw_m: 16,
+                    hnsw_ef_construction: 200,
+                    dedup_enabled: false,
+                    created_at: "t".to_string(),
+                });
+            }
+            save_scalar_descriptors(&self.scalar, &scalar).unwrap();
+            save_vector_descriptors(&self.vector, &vector);
+        }
+
+        /// The maps with a scalar and with a vector descriptor, sorted.
+        fn indexed(&self) -> (Vec<String>, Vec<String>) {
+            let mut scalar: Vec<String> = load_scalar_descriptors(&self.scalar)
+                .into_iter()
+                .map(|d| d.map_name)
+                .collect();
+            let mut vector: Vec<String> = load_vector_descriptors(&self.vector)
+                .into_iter()
+                .map(|d| d.map_name)
+                .collect();
+            scalar.sort();
+            vector.sort();
+            (scalar, vector)
+        }
+    }
+
+    fn names(maps: &[&str]) -> Vec<String> {
+        maps.iter().map(ToString::to_string).collect()
+    }
+
+    fn state(
+        data_store: Arc<dyn MapDataStore>,
+        policies: Option<Arc<dyn PolicyStore>>,
+        tenancy: bool,
+        files: &Files,
+    ) -> AppState {
+        AppState {
+            config: Arc::new(NetworkConfig {
+                tenant_claim: tenancy.then(|| "org".to_string()),
+                ..NetworkConfig::default()
+            }),
+            store_factory: Some(Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                data_store,
+                Vec::new(),
+            ))),
+            policy_store: policies,
+            vector_index_path: Some(files.vector.clone()),
+            ..AppState::for_test()
+        }
+    }
+
+    async fn delete(state: &AppState, tenant: &str, files: &Files) -> (StatusCode, String) {
+        let response =
+            delete_tenant_at(state.clone(), tenant.to_string(), files.scalar.clone()).await;
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    async fn deny_policy(policies: &dyn PolicyStore, tenant: &str) -> Option<PermissionPolicy> {
+        policies
+            .list_policies()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == format!("tenant-deleted:{tenant}"))
+    }
+
+    /// The deny policy is present with exactly the content R8.1a names.
+    async fn assert_denied(policies: &dyn PolicyStore, tenant: &str) {
+        let policy = deny_policy(policies, tenant)
+            .await
+            .unwrap_or_else(|| panic!("the deny policy of {tenant} must be present"));
+        assert_eq!(policy.map_pattern, format!("{tenant}.**"));
+        assert_eq!(policy.action, PermissionAction::All);
+        assert_eq!(policy.effect, PolicyEffect::Deny);
+        assert!(policy.condition.is_none());
+    }
+
+    fn write_behind_config(write_delay_ms: u64) -> WriteBehindConfig {
+        WriteBehindConfig {
+            write_delay_ms,
+            flush_interval_ms: 10,
+            shutdown_timeout_ms: 10_000,
+            ..WriteBehindConfig::default()
+        }
+    }
+
+    /// An engine store over a memory engine, with a write-behind store above.
+    fn stores(
+        write_delay_ms: u64,
+    ) -> (
+        Arc<EngineMapDataStore<MemKvEngine>>,
+        Arc<WriteBehindDataStore>,
+    ) {
+        let inner = Arc::new(EngineMapDataStore::open(Arc::new(MemKvEngine::new())).unwrap());
+        let store = WriteBehindDataStore::new(
+            Arc::clone(&inner) as Arc<dyn MapDataStore>,
+            write_behind_config(write_delay_ms),
+        );
+        (inner, store)
+    }
+
+    async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !cond() {
+            assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    // ── AC9 ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ac9_create_policy_refuses_a_star_inside_a_segment() {
+        for (pattern, accepted) in [
+            ("users/*", false),
+            ("a*", false),
+            ("a.b*", false),
+            ("*", true),
+            ("**", true),
+            ("a.**", true),
+            ("*.orders", true),
+            ("users/x", true),
+        ] {
+            let state = AppState {
+                policy_store: Some(Arc::new(InMemoryPolicyStore::new())),
+                ..AppState::for_test()
+            };
+            let req = CreatePolicyRequest {
+                id: None,
+                map_pattern: pattern.to_string(),
+                action: PermissionAction::Read,
+                effect: PolicyEffect::Allow,
+                condition: None,
+                condition_expr: None,
+            };
+            let result = create_policy(claims(), State(state.clone()), Json(req)).await;
+            let stored = state.policy_store.unwrap().list_policies().await.unwrap();
+            if accepted {
+                assert!(result.is_ok(), "{pattern} must be accepted");
+                assert_eq!(stored.len(), 1, "{pattern}");
+            } else {
+                let (code, Json(body)) = result.expect_err(pattern);
+                assert_eq!(code, StatusCode::BAD_REQUEST, "{pattern}");
+                assert_eq!(body.field.as_deref(), Some("mapPattern"));
+                assert!(stored.is_empty(), "{pattern} must not be stored");
+            }
+        }
+    }
+
+    // ── AC12 ─────────────────────────────────────────────────────────────
+
+    /// `b.x` (primary), `b.y` (backup rows only), `b.z` (only buffered, not in
+    /// the registry) are dropped, `bb.z` is intact, the deny policy is there,
+    /// the owned descriptors are gone — also on `b.never`, a map that never
+    /// stored a record — and a re-run drops nothing and removes a leftover
+    /// descriptor.
+    #[serial(tenant_delete)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac12_delete_drops_the_owned_maps_and_a_rerun_finishes() {
+        let (inner, store) = stores(300);
+        inner.add("b.x", "k", &lww("x"), 0, 1).await.unwrap();
+        inner.add_backup("b.y", "k", &lww("y"), 0, 1).await.unwrap();
+        inner.add("bb.z", "k", &lww("bbz"), 0, 1).await.unwrap();
+        store.add("b.z", "k", &lww("z"), 0, 1).await.unwrap();
+        assert!(!inner
+            .list_maps()
+            .await
+            .unwrap()
+            .contains(&"b.z".to_string()));
+        let files = Files::new();
+        files.index(&["b.x", "b.never", "bb.z"]);
+        let policies = configured_policies().await;
+        let state = state(store.clone(), Some(policies.clone()), true, &files);
+
+        let (status, body) = delete(&state, TENANT, &files).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["dropped"], serde_json::json!(["b.x", "b.y", "b.z"]));
+        assert_eq!(body["failed"], serde_json::json!([]));
+        assert_denied(&*policies, TENANT).await;
+        assert_eq!(files.indexed(), (names(&["bb.z"]), names(&["bb.z"])));
+        assert!(store.load("bb.z", "k").await.unwrap().is_some());
+        for map in ["b.x", "b.z"] {
+            assert!(store.load(map, "k").await.unwrap().is_none(), "{map}");
+        }
+        // A client of `b` replaying its op on `b.x` is refused; `b.x` stays absent.
+        assert!(store.add("b.x", "k", &lww("again"), 0, 2).await.is_err());
+        assert!(store.load("b.x", "k").await.unwrap().is_none());
+        assert_eq!(inner.list_maps().await.unwrap(), names(&["bb.z"]));
+
+        // A descriptor left from an earlier run is removed by a re-run that
+        // drops nothing.
+        files.index(&["b.x"]);
+        let (status, body) = delete(&state, TENANT, &files).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["dropped"], serde_json::json!([]));
+        assert_eq!(files.indexed(), (names(&["bb.z"]), names(&["bb.z"])));
+    }
+
+    /// The refusals before (a) leave no deny policy and change nothing.
+    #[serial(tenant_delete)]
+    #[tokio::test]
+    async fn ac12_refusals_before_the_upsert_change_nothing() {
+        let files = Files::new();
+        files.index(&["b.x"]);
+        let (inner, store) = stores(0);
+        inner.add("b.x", "k", &lww("x"), 0, 1).await.unwrap();
+
+        // Tenancy off.
+        let policies = configured_policies().await;
+        let off = state(store.clone(), Some(policies.clone()), false, &files);
+        assert_eq!(delete(&off, TENANT, &files).await.0, StatusCode::CONFLICT);
+        assert!(deny_policy(&*policies, TENANT).await.is_none());
+
+        // A policy store that exists but was never configured, and none.
+        let unconfigured = Arc::new(InMemoryPolicyStore::new());
+        let never = state(store.clone(), Some(unconfigured.clone()), true, &files);
+        assert_eq!(delete(&never, TENANT, &files).await.0, StatusCode::CONFLICT);
+        assert!(!unconfigured.is_configured().await.unwrap());
+        assert!(unconfigured.list_policies().await.unwrap().is_empty());
+        let none = state(store.clone(), None, true, &files);
+        assert_eq!(delete(&none, TENANT, &files).await.0, StatusCode::CONFLICT);
+
+        // A tenant the tenant-id rule refuses.
+        let on = state(store.clone(), Some(policies.clone()), true, &files);
+        for tenant in ["a/b", "a.b", "", "_TOPGUN_x"] {
+            let (status, body) = delete(&on, tenant, &files).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{tenant:?}: {body}");
+            assert!(
+                deny_policy(&*policies, tenant).await.is_none(),
+                "{tenant:?}"
+            );
+        }
+
+        assert!(store.load("b.x", "k").await.unwrap().is_some());
+        store.add("b.x", "k2", &lww("x2"), 0, 2).await.unwrap();
+        assert_eq!(files.indexed(), (names(&["b.x"]), names(&["b.x"])));
+    }
+
+    /// `Unsupported` (the Null backend) and `Busy` (a second delete while one
+    /// waits) are 409s answered after (a): the deny policy is present.
+    #[serial(tenant_delete)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac12_busy_and_unsupported_keep_the_deny_policy() {
+        let files = Files::new();
+        let policies = configured_policies().await;
+        let null = state(
+            Arc::new(NullDataStore),
+            Some(policies.clone()),
+            true,
+            &files,
+        );
+        let (status, body) = delete(&null, TENANT, &files).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("is denied"), "{body}");
+        assert_denied(&*policies, TENANT).await;
+
+        let (inner, store) = stores(0);
+        inner.add("b.x", "k0", &lww("x"), 0, 1).await.unwrap();
+        let state = state(store.clone(), Some(policies.clone()), true, &files);
+        let mut park = store.test_park_before_queue_insert("b.x", "k1");
+        let write = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move { store.add("b.x", "k1", &lww("x1"), 0, 2).await })
+        };
+        park.wait_parked().await;
+        let first = {
+            let (state, scalar) = (state.clone(), files.scalar.clone());
+            tokio::spawn(async move { delete_tenant_at(state, TENANT.to_string(), scalar).await })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !first.is_finished(),
+            "the first delete waits for the parked write"
+        );
+
+        let (status, body) = delete(&state, "c", &files).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("is denied"), "{body}");
+        assert_denied(&*policies, "c").await;
+
+        park.release();
+        write.await.unwrap().unwrap();
+        assert_eq!(first.await.unwrap().status(), StatusCode::OK);
+    }
+
+    /// A policy store whose upsert fails, configured as production's is.
+    struct FailingUpsert;
+
+    #[async_trait]
+    impl PolicyStore for FailingUpsert {
+        async fn get_policies(&self, _: &str) -> Result<Vec<PermissionPolicy>, PolicyError> {
+            Ok(Vec::new())
+        }
+        async fn list_policies(&self) -> Result<Vec<PermissionPolicy>, PolicyError> {
+            Ok(Vec::new())
+        }
+        async fn upsert_policy(&self, _: PermissionPolicy) -> Result<(), PolicyError> {
+            Err(PolicyError::Internal("injected upsert failure".to_string()))
+        }
+        async fn delete_policy(&self, _: &str) -> Result<(), PolicyError> {
+            Ok(())
+        }
+        async fn is_configured(&self) -> Result<bool, PolicyError> {
+            Ok(true)
+        }
+    }
+
+    #[serial(tenant_delete)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac12_a_failed_upsert_is_503_and_closes_nothing() {
+        let files = Files::new();
+        files.index(&["b.x"]);
+        let (inner, store) = stores(0);
+        inner.add("b.x", "k", &lww("x"), 0, 1).await.unwrap();
+        let state = state(store.clone(), Some(Arc::new(FailingUpsert)), true, &files);
+        let (status, body) = delete(&state, TENANT, &files).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(body.contains("nothing was closed"), "{body}");
+        store.add("b.x", "k2", &lww("x2"), 0, 2).await.unwrap();
+        assert_eq!(inner.list_maps().await.unwrap(), names(&["b.x"]));
+        assert_eq!(files.indexed(), (names(&["b.x"]), names(&["b.x"])));
+    }
+
+    /// (b) returning an error (a store that is shutting down) → 503, the deny
+    /// policy is present, the descriptors are kept.
+    #[serial(tenant_delete)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac12_a_drop_error_is_503_keeps_the_policy_and_the_descriptors() {
+        let files = Files::new();
+        files.index(&["b.x", "b.never"]);
+        let (inner, store) = stores(0);
+        inner.add("b.x", "k", &lww("x"), 0, 1).await.unwrap();
+        store.hard_flush().await.unwrap();
+        let policies = configured_policies().await;
+        let state = state(store.clone(), Some(policies.clone()), true, &files);
+        let (status, body) = delete(&state, TENANT, &files).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body.contains("is denied") && body.contains("re-run"),
+            "{body}"
+        );
+        assert_denied(&*policies, TENANT).await;
+        assert_eq!(
+            files.indexed(),
+            (names(&["b.never", "b.x"]), names(&["b.never", "b.x"]))
+        );
+        assert_eq!(inner.list_maps().await.unwrap(), names(&["b.x"]));
+    }
+
+    /// An engine whose `n`-th write from arming fails, so the store fails
+    /// exactly one map's drop.
+    struct FailingWrites {
+        inner: MemKvEngine,
+        fail_in: Mutex<Option<u64>>,
+    }
+
+    impl KvEngine for FailingWrites {
+        fn capabilities(&self) -> KvCapabilities {
+            self.inner.capabilities()
+        }
+        fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
+            self.inner.get(key)
+        }
+        fn write(&self, batch: WriteBatch, opts: WriteOptions) -> KvResult<()> {
+            let mut fail_in = self.fail_in.lock();
+            if let Some(n) = fail_in.as_mut() {
+                *n -= 1;
+                if *n == 0 {
+                    *fail_in = None;
+                    return Err(KvError::Other(anyhow::anyhow!("injected write failure")));
+                }
+            }
+            drop(fail_in);
+            self.inner.write(batch, opts)
+        }
+        fn delete(&self, key: &[u8], opts: WriteOptions) -> KvResult<()> {
+            self.inner.delete(key, opts)
+        }
+        fn delete_range(&self, start: &[u8], end: &[u8], opts: WriteOptions) -> KvResult<()> {
+            self.inner.delete_range(start, end, opts)
+        }
+        fn snapshot(&self) -> KvResult<Box<dyn KvSnapshot + '_>> {
+            self.inner.snapshot()
+        }
+        fn ingest(
+            &self,
+            range: KeyRange,
+            sorted: Vec<(Vec<u8>, Vec<u8>)>,
+            opts: WriteOptions,
+        ) -> KvResult<()> {
+            self.inner.ingest(range, sorted, opts)
+        }
+        fn sync(&self) -> KvResult<()> {
+            self.inner.sync()
+        }
+        fn shutdown(&self) -> KvResult<()> {
+            self.inner.shutdown()
+        }
+    }
+
+    /// A map the store failed to drop is answered in `failed` with a 503 and
+    /// keeps its descriptors; the maps it dropped lose theirs.
+    #[serial(tenant_delete)]
+    #[tokio::test]
+    async fn a_map_left_by_the_drop_keeps_its_descriptors() {
+        let engine = Arc::new(FailingWrites {
+            inner: MemKvEngine::new(),
+            fail_in: Mutex::new(None),
+        });
+        let store = Arc::new(EngineMapDataStore::open(Arc::clone(&engine)).unwrap());
+        store.add("b.x", "k", &lww("x"), 0, 1).await.unwrap();
+        store.add("b.y", "k", &lww("y"), 0, 1).await.unwrap();
+        let files = Files::new();
+        files.index(&["b.x", "b.y"]);
+        let policies = configured_policies().await;
+        let state = state(store.clone(), Some(policies.clone()), true, &files);
+
+        // Maps drop in name order, one batch each: the first batch is `b.x`'s.
+        *engine.fail_in.lock() = Some(1);
+        let (status, body) = delete(&state, TENANT, &files).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["dropped"], serde_json::json!(["b.y"]));
+        assert_eq!(json["failed"][0]["map"], "b.x");
+        assert!(json["message"].as_str().unwrap().contains("is denied"));
+        assert_denied(&*policies, TENANT).await;
+        assert_eq!(files.indexed(), (names(&["b.x"]), names(&["b.x"])));
+
+        let (status, body) = delete(&state, TENANT, &files).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(files.indexed(), (Vec::new(), Vec::new()));
+    }
+
+    /// A scalar descriptor file the delete cannot rewrite is a 503, not a
+    /// logged and ignored error.
+    #[cfg(unix)]
+    #[serial(tenant_delete)]
+    #[tokio::test]
+    async fn a_scalar_descriptor_save_error_is_503() {
+        use std::os::unix::fs::PermissionsExt;
+        let files = Files::new();
+        files.index(&["b.x"]);
+        std::fs::set_permissions(&files.scalar, std::fs::Permissions::from_mode(0o444)).unwrap();
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .open(&files.scalar)
+            .is_ok()
+        {
+            eprintln!("skipped: this user can write a read-only file (root)");
+            return;
+        }
+        let store = Arc::new(EngineMapDataStore::open(Arc::new(MemKvEngine::new())).unwrap());
+        store.add("b.x", "k", &lww("x"), 0, 1).await.unwrap();
+        let policies = configured_policies().await;
+        let state = state(store.clone(), Some(policies.clone()), true, &files);
+        let (status, body) = delete(&state, TENANT, &files).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["dropped"], serde_json::json!(["b.x"]));
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap()
+                .contains("scalar index descriptors"),
+            "{body}"
+        );
+        assert_denied(&*policies, TENANT).await;
+    }
+
+    /// A delete whose caller goes away still runs to the end and logs its
+    /// outcome: the request future is dropped while the drop waits for a
+    /// parked write; once the write is released, the maps are gone.
+    #[serial(tenant_delete)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accepted_delete_runs_to_the_end_after_the_caller_left() {
+        use tracing::instrument::WithSubscriber;
+
+        #[derive(Clone, Default)]
+        struct Log(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Log {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = Log::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let log = log.clone();
+                move || log.clone()
+            })
+            .with_ansi(false)
+            .finish();
+
+        let files = Files::new();
+        files.index(&["b.x"]);
+        let (inner, store) = stores(0);
+        inner.add("b.x", "k0", &lww("x"), 0, 1).await.unwrap();
+        let policies = configured_policies().await;
+        let state = state(store.clone(), Some(policies.clone()), true, &files);
+        let mut park = store.test_park_before_queue_insert("b.x", "k1");
+        let write = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move { store.add("b.x", "k1", &lww("x1"), 0, 2).await })
+        };
+        park.wait_parked().await;
+
+        let request = delete_tenant_at(state, TENANT.to_string(), files.scalar.clone())
+            .with_subscriber(subscriber);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), request)
+                .await
+                .is_err(),
+            "the delete waits for the parked write"
+        );
+        park.release();
+        write.await.unwrap().unwrap();
+
+        eventually("the log line of the finished delete", || {
+            String::from_utf8_lossy(&log.0.lock().unwrap()).contains("tenant delete finished")
+        })
+        .await;
+        assert!(inner.list_maps().await.unwrap().is_empty());
+        assert!(store.load("b.x", "k0").await.unwrap().is_none());
+        assert!(store.add("b.x", "k2", &lww("x2"), 0, 3).await.is_err());
+        assert_eq!(files.indexed(), (Vec::new(), Vec::new()));
+        assert_denied(&*policies, TENANT).await;
+        let line = String::from_utf8_lossy(&log.0.lock().unwrap()).into_owned();
+        assert!(line.contains("INFO") && line.contains("b.x"), "{line}");
+    }
+
+    // ── AC13 ─────────────────────────────────────────────────────────────
+
+    /// The listing comes from the store's registry: a map no record store
+    /// holds (as after a restart) is listed, with a resident count of 0; no
+    /// reserved map is, whatever its case.
+    #[tokio::test]
+    async fn ac13_maps_are_listed_from_the_registry_without_reserved_ones() {
+        let store = Arc::new(EngineMapDataStore::open(Arc::new(MemKvEngine::new())).unwrap());
+        for map in [
+            "orders",
+            "_TOPGUN_x",
+            "_topgun_device_credentials",
+            "__topgun_policies",
+            "__TopGun_y",
+            "$sys/z",
+        ] {
+            store.add(map, "k", &lww("v"), 0, 1).await.unwrap();
+        }
+        let files = Files::new();
+        let state = state(store, None, false, &files);
+        let Json(body) = list_maps(claims(), State(state)).await.unwrap();
+        let listed: Vec<(String, u64)> = body
+            .maps
+            .into_iter()
+            .map(|m| (m.name, m.entry_count))
+            .collect();
+        assert_eq!(listed, vec![("orders".to_string(), 0)]);
     }
 }

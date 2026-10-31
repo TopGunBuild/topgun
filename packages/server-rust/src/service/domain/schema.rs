@@ -294,7 +294,6 @@ mod tests {
         let svc = SchemaService::new();
         let ctx = RequestContext {
             node_id: "test".to_string(),
-            tenant_id: None,
             principal: None,
             trace_id: "trace-1".to_string(),
         };
