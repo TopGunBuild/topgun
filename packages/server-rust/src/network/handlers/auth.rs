@@ -18,6 +18,7 @@ use tracing::{debug, warn};
 use super::auth_validator::{AuthValidationContext, AuthValidator};
 use super::AppState;
 use crate::network::OutboundMessage;
+use crate::storage::map_data_store::check_tenant;
 
 /// Normalize a PEM string received from environment variables.
 ///
@@ -311,7 +312,7 @@ impl AuthHandler {
                 raw_claims
                     .get(claim)
                     .and_then(serde_json::Value::as_str)
-                    .filter(|t| is_valid_tenant(t))
+                    .filter(|t| check_tenant(t).is_ok())
                     .map(str::to_owned)
                     .ok_or_else(|| format!("missing or invalid tenant claim `{claim}` in JWT"))?,
             ),
@@ -334,25 +335,6 @@ impl AuthHandler {
             tenant,
         })
     }
-}
-
-/// Whether `tenant` is an admissible tenant id: 1 to 128 bytes of
-/// `[A-Za-z0-9_-]` — so it holds no `.`, glob character, `/` or anything a URL
-/// path must encode — and not starting, ASCII case-insensitively, with
-/// `_topgun_` or `__topgun_`, so no map a tenant owns is a reserved map.
-fn is_valid_tenant(tenant: &str) -> bool {
-    let bytes = tenant.as_bytes();
-    let reserved = |prefix: &[u8]| {
-        bytes
-            .get(..prefix.len())
-            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-    };
-    (1..=128).contains(&bytes.len())
-        && bytes
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
-        && !reserved(b"_topgun_")
-        && !reserved(b"__topgun_")
 }
 
 #[cfg(test)]
