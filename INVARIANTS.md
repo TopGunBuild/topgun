@@ -2577,6 +2577,67 @@ weaker than a test.
 - **Discovered by:** SPEC-398 (TODO-859), part SPEC-398a2.
 - **Status:** decided, **enforced**.
 
+### TG-TEN-002: A tenant drop deletes each owned map only after every write of it is durable, and nothing recreates it
+
+- **Scope:** `WriteBehindDataStore::drop_tenant` over `EngineMapDataStore::drop_tenant`, and every
+  write entry of the write-behind store (`add` / `add_with_witness`, `remove`, `add_backup`,
+  `remove_backup`, `remove_all`), whatever the origin of the write. **Excluded:** the flush path, its
+  retries, WAL recovery and boot seeding, which carry only writes accepted before the close.
+- **Statement:** a drop of tenant `t` (refused, before anything is closed, unless `t` passes
+  `check_tenant`; one at a time, a second call answers `Busy`; refused on a failed, broken or
+  stopping store) closes `t`: from then on every write of a name `t` owns is refused at ingress, as
+  a temporary error, before a WAL sequence is assigned — it creates no retry entry, moves no refusal
+  age and holds no tombstone pruning. A write registers as in flight before it reads the close set
+  (epoch counters, `SeqCst`) and leaves through a drop guard after its queue insert or inner-store
+  call. The drop waits until every write that registered before it switched the epoch has left,
+  snapshots each WAL partition's highest un-applied sequence `S_p` (frames an earlier process left
+  un-applied included), and waits until no entry of an owned name is buffered and every partition's
+  durable applied watermark is at least `S_p`. Only then does the inner drop remove each owned map's
+  registry rows and records in one durable engine batch per map (`TG-ENG-005`). So no WAL frame and
+  no buffered or in-flight write recreates an owned map — in the process, because the close stays
+  for the rest of it once the inner drop has started, or after a restart, because every owned frame
+  is at or below the durable watermark. A deadline (`TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`) in
+  either wait, an error reading the WAL, or the cancellation of the call before the inner drop
+  starts deletes nothing and lifts the close only if this call added it, before the drop slot is
+  released; a close an earlier drop added is never lifted. Until a drop runs the close set is empty
+  and a write takes no lock.
+- **Stated limits:** in-memory copies of dropped maps (record stores, Merkle trees, search and
+  vector indexes) stay until restart. The data stays in old WAL segments and in backups until they
+  are collected or expire. A frame left un-applied at boot, or a write the store keeps refusing in
+  any map, holds every drop to its deadline (the snapshot is the whole WAL, not only owned frames).
+  Index descriptor files are removed by the admin endpoint, not here.
+- **Maintaining code:** `storage/datastores/write_behind.rs` — `TenantCloses` (`enter`, `close`,
+  `lift`, `wait_in_flight`, `try_start_drop`), `InFlightWrite`, `OwnClose`, `DropRunning`,
+  `drop_tenant`, `wal_frontier_snapshot`, `owned_writes_durable` and the `enter` call in each write
+  entry; `storage/datastores/engine_store.rs` — `drop_tenant`, `owned_map_names`, `drop_map`;
+  `storage/map_data_store.rs` — `check_tenant`, `DropOutcome`, `MapDataStore::drop_tenant`.
+- **Enforcing test:** `ac10a_a_drop_waits_for_a_write_parked_in_its_wal_append`,
+  `ac10a_a_drop_waits_for_a_write_parked_before_its_queue_insert`,
+  `ac10b_a_write_after_the_close_is_refused_and_nothing_reappears`,
+  `ac10c_a_drop_waits_while_a_refused_write_holds_the_watermark`,
+  `ac10c_on_the_deadline_nothing_is_deleted_and_the_map_stays_writable`,
+  `ac10d_no_entry_of_a_pre_drop_or_slot_reappears`,
+  `ac10e_a_drop_waits_for_a_backup_write_parked_before_its_inner_call`,
+  `ac10f_a_write_refused_by_the_close_leaves_no_retry_and_no_refusal_age`,
+  `ac10g_a_frame_left_unapplied_at_boot_holds_the_drop`,
+  `ac10h_an_invalid_tenant_is_refused_before_anything_is_closed`,
+  `ac10h_a_second_drop_while_one_runs_is_busy`,
+  `ac10h_a_failed_broken_or_stopping_store_refuses_the_drop`,
+  `ac10h_a_failed_rerun_keeps_the_close_of_an_earlier_drop`,
+  `ac10h_a_cancelled_drop_lifts_its_close_and_frees_the_slot`,
+  `ac10h_a_cancelled_write_leaves_no_in_flight_count`,
+  `a_write_that_begins_after_the_switch_does_not_hold_the_drop`,
+  `continuous_writes_of_another_map_do_not_hold_the_drop`,
+  `a_registration_raced_by_a_switch_is_taken_back_once` and
+  `the_close_is_lifted_before_the_drop_slot_is_freed` (`write_behind.rs`, module
+  `tenant_drop_tests`); the store-level drop under `TG-ENG-005`.
+- **Violation consequence:** a dropped tenant's map comes back — from a write that raced the drop,
+  a buffered entry flushed after it, or a WAL frame replayed at the next start — or a drop that
+  failed leaves a tenant refusing writes with nothing deleted, or lifts the permanent close of an
+  earlier drop.
+- **Discovered by:** SPEC-398 (TODO-859), part SPEC-398b1.
+- **Status:** decided, **enforced**.
+
 ### TG-KEY-001: Every write of a record holds that record's per-key writer
 
 - **Scope:** every production call of `RecordStore::put`, `update_in_place` and `remove`: the
@@ -3053,23 +3114,30 @@ weaker than a test.
 - **Discovered by:** SPEC-394b2.
 - **Status:** decided, **enforced**.
 
-### TG-ENG-005: The map registry is a bijection name ↔ id, an id is issued in the batch of the map's first record, and `list_maps` lists the maps with a primary record ever stored
+### TG-ENG-005: The map registry is a bijection name ↔ id among the maps not dropped, an id is issued in the batch of the map's first record and never reissued, and `list_maps` lists the maps with a primary record ever stored and not dropped since
 
 - **Scope:** the registry of `EngineMapDataStore` (`0x01` map by name, `0x02` map by id,
   `next_map_id`), its cache and `registry_lock`.
-- **Statement:** a map's id is issued, from 1 upward and never reused, in the same engine batch
-  as the map's first record or `Touch`, together with both registry rows and the new
+- **Statement:** among the maps not dropped, the registry is a bijection name ↔ id. A map's id is
+  issued, from 1 upward and never reused — also not after the map is dropped — in the same engine
+  batch as the map's first record or `Touch`, together with both registry rows and the new
   `next_map_id`; a failed first write leaves no registry row and no record. Two first writes of
   two new maps get distinct ids, because a write that issues an id or sets a flag re-reads the
   registry under `registry_lock` and holds it until its batch has returned. `u32::MAX` is never
   issued: when no id is left, a write that needs one fails with `map id space exhausted` and
   changes nothing. No record key carries an id the registry does not hold. A `Delete` never
   issues an id or sets a flag. The cache is filled only from rows that exist. `list_maps` returns
-  every registry name whose primary flag is set, ascending, once. After a crash: no orphan record,
-  inverse registry, `list_maps` = names with a primary put in the recovered prefix; every registered
-  name has a put in that prefix.
+  every registry name whose primary flag is set, ascending, once. A tenant drop
+  (`drop_tenant`, `TG-TEN-002`) removes each owned map — exactly the names `tenant_owns` selects,
+  whatever their flags — in one durable engine batch per map holding its `0x01` and `0x02` rows and
+  every `0x10` / `0x11` record of its id, in every partition; `next_map_id` is untouched, and the
+  map's cache entry is evicted after the batch returned. After a crash: no orphan record, inverse
+  registry, each map either intact or fully dropped, `list_maps` = names with a primary put in the
+  recovered prefix and no drop of the map after the last such put; every registered name has a put
+  in that prefix after its last drop.
 - **Maintaining code:** `engine_store.rs` — `plan_registry`, `cached_row`, `read_map_id`,
-  `write_records`, `list_maps`, the `0x01` / `0x02` codecs and `map_id_in`.
+  `write_records`, `list_maps`, `drop_tenant`, `owned_map_names`, `drop_map`, the `0x01` / `0x02`
+  codecs and `map_id_in`.
 - **Enforcing test:** `k06_redb_registry_after_any_crash_has_no_orphan_and_lists_exactly_the_recovered_maps`,
   `k07_mem_registry_after_any_crash_has_no_orphan_and_lists_exactly_the_recovered_maps` — in
   `storage/datastores/kv_crash_tests.rs`, every crash point of two fixed store workloads and 200
@@ -3081,11 +3149,16 @@ weaker than a test.
   `s26_touch_registers_a_map_without_a_record`,
   `s33_an_exhausted_map_id_space_refuses_a_new_map_and_changes_nothing`,
   `s34_the_public_codecs_read_what_the_store_wrote` — in
-  `storage/datastores/engine_store_tests.rs`, each over the in-memory and the redb engine.
+  `storage/datastores/engine_store_tests.rs`, each over the in-memory and the redb engine;
+  `ac10h_drop_removes_exactly_the_owned_maps_over_the_memory_engine`,
+  `ac10h_drop_removes_exactly_the_owned_maps_over_redb` and
+  `ac10h_a_crash_leaves_each_map_intact_or_dropped_and_a_rerun_finishes` (`engine_store.rs`).
 - **Violation consequence:** two maps would share an id and read each other's records, a record
-  would be stored under an id no name resolves to, or `list_maps` would differ from the redb
-  store's.
-- **Not claimed:** a crash model beyond `TG-ENG-001`'s. No operation deletes a map.
+  would be stored under an id no name resolves to, a dropped map's records would be read under a
+  re-created name, or `list_maps` would differ from the redb store's.
+- **Not claimed:** a crash model beyond `TG-ENG-001`'s. No operation deletes a single map: only a
+  tenant drop deletes maps. Ordering a drop after every write of the dropped maps is the
+  write-behind store's part (`TG-TEN-002`); this store alone has no close.
 - **Discovered by:** SPEC-394b2.
 - **Status:** decided, **enforced**.
 

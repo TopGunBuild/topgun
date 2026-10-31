@@ -218,6 +218,58 @@ pub fn check_map_name(name: &str) -> Result<(), MapNameViolation> {
     Ok(())
 }
 
+/// Longest tenant id, in bytes.
+const MAX_TENANT_BYTES: usize = 128;
+
+/// The one tenant-id rule: 1 to 128 bytes of `[A-Za-z0-9_-]` — so it holds no
+/// `.`, glob character, `/` or anything a URL path must encode — and not
+/// starting, ASCII case-insensitively, with `_topgun_` or `__topgun_`, so no
+/// map a tenant owns is a reserved map. The token check and every
+/// `drop_tenant` call it, so the two cannot drift.
+///
+/// # Errors
+///
+/// When `tenant` breaks the rule; the message names the tenant.
+pub fn check_tenant(tenant: &str) -> anyhow::Result<()> {
+    let bytes = tenant.as_bytes();
+    let reserved = |prefix: &[u8]| {
+        bytes
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    };
+    if (1..=MAX_TENANT_BYTES).contains(&bytes.len())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+        && !reserved(b"_topgun_")
+        && !reserved(b"__topgun_")
+    {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "invalid tenant {tenant:?}: a tenant is 1 to {MAX_TENANT_BYTES} bytes of \
+             [A-Za-z0-9_-] and does not start with `_topgun_` or `__topgun_`"
+        )
+    }
+}
+
+/// What [`MapDataStore::drop_tenant`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DropOutcome {
+    /// This store cannot drop a tenant; nothing was changed.
+    Unsupported,
+    /// Another drop is running on this store; nothing was changed.
+    Busy,
+    /// The drop ran. `dropped` are the maps removed, `failed` the maps whose
+    /// removal failed, each with its error; a re-run drops those.
+    Done {
+        /// The maps removed, in name order.
+        dropped: Vec<String>,
+        /// The maps not removed, with the error each met.
+        failed: Vec<(String, String)>,
+    },
+}
+
 /// A bounded batch of fully-loaded durable records produced by a value-streamed
 /// scan.
 ///
@@ -711,6 +763,21 @@ pub trait MapDataStore: Send + Sync {
     /// map's trees stay empty (the pre-existing behavior), never wrong leaves.
     async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
         Ok(Vec::new())
+    }
+
+    /// Removes every map `tenant` owns (`TG-TEN-002`): each map whose name
+    /// starts with `tenant.` and has at least one byte after it.
+    ///
+    /// The default answers [`DropOutcome::Unsupported`] and changes nothing:
+    /// a store that holds no durable maps has nothing to drop.
+    ///
+    /// # Errors
+    ///
+    /// A tenant [`check_tenant`] refuses; a temporary refusal (the store
+    /// cannot order the drop after every write it accepted); a store error.
+    async fn drop_tenant(&self, tenant: &str) -> anyhow::Result<DropOutcome> {
+        let _ = tenant;
+        Ok(DropOutcome::Unsupported)
     }
 
     /// Check if a key is safe to load (not queued for write-behind).

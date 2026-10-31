@@ -68,12 +68,13 @@ use anyhow::{anyhow, bail};
 use async_trait::async_trait;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 use topgun_core::partition::{hash_to_partition, PARTITION_COUNT};
+use topgun_core::types::tenant_owns;
 
 use super::kv_engine::{KeyRange, KvEngine, KvError, KvSnapshot, WriteBatch, WriteOptions};
 use crate::storage::map_data_store::{
-    check_map_name, merkle_leaf_hash, AppliedWatermarks, FlushCommit, LeafSink, MapDataStore,
-    MerkleLeaf, PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder, StoreErrorClass,
-    StoreWrite,
+    check_map_name, check_tenant, merkle_leaf_hash, AppliedWatermarks, DropOutcome, FlushCommit,
+    LeafSink, MapDataStore, MerkleLeaf, PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder,
+    StoreErrorClass, StoreWrite,
 };
 use crate::storage::record::RecordValue;
 use crate::storage::sealing::{
@@ -1363,6 +1364,66 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         })
     }
 
+    /// The names of every map `tenant` owns (`tenant_owns`), whatever their
+    /// flags, from one snapshot of the `0x01` registry: a scan of the names
+    /// starting `tenant.`, filtered by the predicate, so the name `tenant.`
+    /// itself is not owned.
+    fn owned_map_names(&self, tenant: &str) -> anyhow::Result<Vec<String>> {
+        let start = map_by_name_key(&format!("{tenant}."));
+        // `/` is the byte after `.`, so the range holds exactly the names
+        // starting `tenant.`.
+        let end = map_by_name_key(&format!("{tenant}/"));
+        let snapshot = self.engine.snapshot()?;
+        let mut names = Vec::new();
+        for entry in snapshot.iter(KeyRange {
+            start: Some(start),
+            end: Some(end),
+        })? {
+            let (key, value) = entry?;
+            let row = decode_map_by_name_row(&key, &value)?;
+            if tenant_owns(tenant, &row.name) {
+                names.push(row.name);
+            }
+        }
+        Ok(names)
+    }
+
+    /// Removes `name`'s registry rows and every record of it, primary and
+    /// backup, in one durable engine batch under `registry_lock`; `false`
+    /// when it has no registry row (dropped already). The cache entry is
+    /// evicted after the batch returned: a reader that re-inserts a stale
+    /// row meanwhile is harmless only because the write-behind close refuses
+    /// every later write of the name in this process (`TG-TEN-002`).
+    fn drop_map(&self, name: &str) -> anyhow::Result<bool> {
+        let guard = self.registry_lock.lock();
+        let row = self
+            .engine
+            .get(&map_by_name_key(name))?
+            .map(|value| decode_map_by_name_value(&value))
+            .transpose()?;
+        let Some((map_id, _)) = row else {
+            drop(guard);
+            self.cache.write().remove(name);
+            return Ok(false);
+        };
+        let mut batch = WriteBatch::new();
+        batch.delete(map_by_name_key(name));
+        batch.delete(map_by_id_key(map_id));
+        for space in [RecordSpace::Primary, RecordSpace::Backup] {
+            for partition in 0..PARTITION_COUNT {
+                let range = partition_range(space, partition, map_id, None);
+                batch.delete_range(
+                    range.start.unwrap_or_default(),
+                    range.end.unwrap_or_default(),
+                );
+            }
+        }
+        self.engine.write(batch, WriteOptions { sync: true })?;
+        drop(guard);
+        self.cache.write().remove(name);
+        Ok(true)
+    }
+
     /// Writes one op for `(map, key)` and nothing else.
     fn write_one(&self, op: RecordOp<'_>) -> anyhow::Result<()> {
         self.write_records(&[op], WriteOptions { sync: true })
@@ -1698,8 +1759,8 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
     }
 
     async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
-        // A map is listed from its first primary write on and never
-        // dropped, as a redb primary table is (TG-ENG-005).
+        // A map is listed from its first primary write on until its tenant
+        // is dropped (TG-ENG-005).
         let snapshot = self.engine.snapshot()?;
         let range = KeyRange {
             start: Some(vec![KS_MAP_BY_NAME]),
@@ -1715,6 +1776,24 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         }
         // Rows come in byte order of the UTF-8 names, which is `String` order.
         Ok(names)
+    }
+
+    /// Drops every map `tenant` owns, one durable batch per map
+    /// (`TG-TEN-002`, `TG-ENG-005`); `next_map_id` is untouched, so no id is
+    /// issued twice. Ordering the drop after every write of those maps is the
+    /// caller's part: this store has no buffer and no close.
+    async fn drop_tenant(&self, tenant: &str) -> anyhow::Result<DropOutcome> {
+        check_tenant(tenant)?;
+        let mut dropped = Vec::new();
+        let mut failed = Vec::new();
+        for name in self.owned_map_names(tenant)? {
+            match self.drop_map(&name) {
+                Ok(true) => dropped.push(name),
+                Ok(false) => {}
+                Err(err) => failed.push((name, format!("{err:#}"))),
+            }
+        }
+        Ok(DropOutcome::Done { dropped, failed })
     }
 
     fn is_loadable(&self, _key: &str) -> bool {
@@ -2485,5 +2564,179 @@ mod sealing_tests {
     #[test]
     fn the_seal_pass_resumes_to_the_same_end_after_a_crash_over_redb() {
         pass_survives_crashes::<RedbTarget>(&[CrashMode::DropUnsynced]);
+    }
+}
+
+#[cfg(test)]
+mod tenant_drop_tests {
+    use std::collections::BTreeMap;
+
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    use super::super::kv_crash::read_all;
+    use super::super::kv_engine::MemKvEngine;
+    use super::super::redb_engine::RedbKvEngine;
+    use super::*;
+
+    type Rows = BTreeMap<Vec<u8>, Vec<u8>>;
+
+    fn bytes(value: &str) -> Vec<u8> {
+        rmp_serde::to_vec_named(&RecordValue::Lww {
+            value: Value::String(value.to_string()),
+            timestamp: Timestamp {
+                millis: 1,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
+        })
+        .expect("encode")
+    }
+
+    fn put(store: &EngineMapDataStore<impl KvEngine>, map: &str, backup: bool, key: &str) {
+        let bytes = bytes(&format!("{map}/{key}"));
+        store
+            .write_records(
+                &[RecordOp::Put {
+                    map,
+                    backup,
+                    key,
+                    bytes: &bytes,
+                }],
+                WriteOptions { sync: true },
+            )
+            .expect("put");
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(future)
+    }
+
+    fn id_of(store: &EngineMapDataStore<impl KvEngine>, name: &str) -> u32 {
+        map_id_in(&*store.engine.snapshot().expect("snapshot"), name)
+            .expect("registry")
+            .expect("registered")
+    }
+
+    /// Whether `key` is a registry or record row of the map `(name, id)`.
+    fn row_of(key: &[u8], name: &str, id: u32) -> bool {
+        key == map_by_name_key(name).as_slice()
+            || key == map_by_id_key(id).as_slice()
+            || ((key[0] == KS_PRIMARY || key[0] == KS_BACKUP)
+                && key.len() >= 9
+                && be_u32(&key[5..9]) == id)
+    }
+
+    /// `AC10h` on one engine: maps `b.x` (primary and backup rows, keys in
+    /// many partitions), `b.y` (backup rows only), `bb.z`, `b.` and `b`.
+    fn drop_removes_exactly_the_owned_maps<E: KvEngine>(engine: &Arc<E>) {
+        let store = EngineMapDataStore::open(Arc::clone(engine)).expect("open");
+        for i in 0..40 {
+            put(&store, "b.x", false, &format!("k{i}"));
+            put(&store, "b.x", true, &format!("k{i}"));
+        }
+        put(&store, "b.y", true, "k");
+        for name in ["bb.z", "b.", "b"] {
+            put(&store, name, false, "k");
+            put(&store, name, true, "k");
+        }
+        let (x, y) = (id_of(&store, "b.x"), id_of(&store, "b.y"));
+        let next_map_id = store.stored_next_map_id().expect("next id");
+        let before: Rows = read_all(&**engine).expect("rows");
+
+        assert_eq!(
+            block_on(store.drop_tenant("b")).expect("drop"),
+            DropOutcome::Done {
+                dropped: vec!["b.x".to_string(), "b.y".to_string()],
+                failed: Vec::new(),
+            }
+        );
+
+        let expected: Rows = before
+            .iter()
+            .filter(|(key, _)| !row_of(key, "b.x", x) && !row_of(key, "b.y", y))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        assert!(expected.len() < before.len());
+        assert_eq!(
+            read_all(&**engine).expect("rows"),
+            expected,
+            "exactly the rows of b.x and b.y are gone; bb.z, b., b and the \
+             metadata (next_map_id included) are byte-identical"
+        );
+        assert_eq!(store.stored_next_map_id().expect("next id"), next_map_id);
+        assert_eq!(
+            block_on(store.list_maps()).expect("list"),
+            vec!["b".to_string(), "b.".to_string(), "bb.z".to_string()]
+        );
+
+        // A later write of b.x is a new map: a new id, none of the old values.
+        put(&store, "b.x", false, "new");
+        assert_eq!(id_of(&store, "b.x"), next_map_id);
+        assert_eq!(block_on(store.load("b.x", "k0")).expect("load"), None);
+        assert!(block_on(store.load("b.x", "new")).expect("load").is_some());
+        assert_eq!(block_on(store.load("b.y", "k")).expect("load"), None);
+
+        // Refused tenants change nothing.
+        let now: Rows = read_all(&**engine).expect("rows");
+        for tenant in ["", "_topgun_x", "__Topgun_x", "a.b"] {
+            assert!(block_on(store.drop_tenant(tenant)).is_err(), "{tenant:?}");
+        }
+        assert_eq!(read_all(&**engine).expect("rows"), now);
+        // A tenant that owns nothing.
+        assert_eq!(
+            block_on(store.drop_tenant("zz")).expect("drop"),
+            DropOutcome::Done {
+                dropped: Vec::new(),
+                failed: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn ac10h_drop_removes_exactly_the_owned_maps_over_the_memory_engine() {
+        drop_removes_exactly_the_owned_maps(&Arc::new(MemKvEngine::new()));
+    }
+
+    #[test]
+    fn ac10h_drop_removes_exactly_the_owned_maps_over_redb() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = Arc::new(RedbKvEngine::open(&dir.path().join("engine.redb")).expect("open"));
+        drop_removes_exactly_the_owned_maps(&engine);
+    }
+
+    /// TG-ENG-005 crash clause: a map is intact or fully dropped after a
+    /// crash at any point of the drop, and a re-run drops the remainder.
+    #[test]
+    fn ac10h_a_crash_leaves_each_map_intact_or_dropped_and_a_rerun_finishes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("engine.redb");
+        let (x, y);
+        {
+            let engine = Arc::new(RedbKvEngine::open(&path).expect("open"));
+            let store = EngineMapDataStore::open(Arc::clone(&engine)).expect("open");
+            put(&store, "b.x", false, "k");
+            put(&store, "b.y", true, "k");
+            (x, y) = (id_of(&store, "b.x"), id_of(&store, "b.y"));
+            // The crash between the two maps' batches: only b.x is dropped.
+            assert!(store.drop_map("b.x").expect("drop b.x"));
+        }
+        let engine = Arc::new(RedbKvEngine::open(&path).expect("reopen"));
+        let store = EngineMapDataStore::open(Arc::clone(&engine)).expect("open");
+        let rows = read_all(&*engine).expect("rows");
+        assert!(!rows.keys().any(|key| row_of(key, "b.x", x)));
+        assert!(rows.keys().any(|key| row_of(key, "b.y", y)));
+        assert_eq!(
+            block_on(store.drop_tenant("b")).expect("re-run"),
+            DropOutcome::Done {
+                dropped: vec!["b.y".to_string()],
+                failed: Vec::new(),
+            }
+        );
+        let rows = read_all(&*engine).expect("rows");
+        assert!(!rows.keys().any(|key| row_of(key, "b.y", y)));
     }
 }
