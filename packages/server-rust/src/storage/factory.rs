@@ -13,7 +13,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use topgun_core::hlc::Timestamp;
+use topgun_core::hlc::{ClockSource, SystemClock, Timestamp};
 
 use crate::storage::engines::HashMapStorage;
 use crate::storage::impls::{DefaultRecordStore, StorageConfig};
@@ -53,6 +53,13 @@ pub struct RecordStoreFactory {
     observers: Vec<Arc<dyn MutationObserver>>,
     observer_factories: Vec<Arc<dyn ObserverFactory>>,
     store_cache: DashMap<(String, u32), Arc<dyn RecordStore>>,
+    /// The clock every expiry decision on a record of this factory reads
+    /// (TG-TTL-001), so a test can decide expiry at an exact millisecond.
+    clock: Arc<dyn ClockSource>,
+    /// Per map, how many values with a TTL were stored since start, so an
+    /// expiry sweep can skip a map that never had one. In memory only: a
+    /// restart resets it.
+    ttl_writes: DashMap<String, u64>,
 }
 
 impl std::fmt::Debug for RecordStoreFactory {
@@ -82,7 +89,38 @@ impl RecordStoreFactory {
             observers,
             observer_factories: Vec::new(),
             store_cache: DashMap::new(),
+            clock: Arc::new(SystemClock),
+            ttl_writes: DashMap::new(),
         }
+    }
+
+    /// Builder method that replaces the wall clock expiry decisions read.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn ClockSource>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// The current time, in milliseconds since the Unix epoch, against which a
+    /// record of this factory is judged expired (TG-TTL-001).
+    #[must_use]
+    pub fn now_ms(&self) -> u64 {
+        self.clock.now()
+    }
+
+    /// Records that a value with a TTL was stored in `map`.
+    pub fn note_ttl_write(&self, map: &str) {
+        if let Some(mut count) = self.ttl_writes.get_mut(map) {
+            *count += 1;
+            return;
+        }
+        *self.ttl_writes.entry(map.to_string()).or_insert(0) += 1;
+    }
+
+    /// How many values with a TTL were stored in `map` since start; 0 when none.
+    #[must_use]
+    pub fn ttl_write_generation(&self, map: &str) -> u64 {
+        self.ttl_writes.get(map).map_or(0, |count| *count)
     }
 
     /// Builder method that adds per-map observer factories.
@@ -679,6 +717,37 @@ mod tests {
         let record = store.get("alice", false).await.unwrap();
         assert!(record.is_some());
         assert_eq!(store.size(), 1);
+    }
+
+    #[test]
+    fn factory_reads_time_from_the_injected_clock() {
+        let clock = Arc::new(crate::storage::expiry::ManualClock::new(42));
+        let factory = RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        )
+        .with_clock(clock.clone());
+        assert_eq!(factory.now_ms(), 42);
+        clock.advance(8);
+        assert_eq!(factory.now_ms(), 50);
+    }
+
+    #[test]
+    fn ttl_write_generation_counts_per_map() {
+        let factory = RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        );
+        assert_eq!(factory.ttl_write_generation("a"), 0);
+        factory.note_ttl_write("a");
+        assert_eq!(factory.ttl_write_generation("a"), 1, "created at 1");
+        factory.note_ttl_write("a");
+        factory.note_ttl_write("b");
+        assert_eq!(factory.ttl_write_generation("a"), 2);
+        assert_eq!(factory.ttl_write_generation("b"), 1);
+        assert_eq!(factory.ttl_write_generation("c"), 0);
     }
 
     /// StorageConfig::default() has all fields set to 0
