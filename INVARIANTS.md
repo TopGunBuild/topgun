@@ -3550,9 +3550,6 @@ weaker than a test.
 - **Scope:** the scalar indexes `HashIndex`, `NavigableIndex` and `InvertedIndex`
   (`service/domain/index/`) and `IndexMutationObserver`, which feeds them from the record store's
   observer callbacks. Vector indexes are out of scope (TODO-896).
-- **Precondition:** the map's `IndexRegistry` existed when each partition store of the map was
-  created. This holds for every index restored at startup and for `create_index` on a map with no
-  live store (TODO-898 covers the rest).
 - **Statement:** once the startup rebuild or backfill reports `done`, and with no write in flight, every key with a stored or resident `Lww` value has exactly one reverse entry,
   holding the attribute value of its current value, and the index's buckets hold the key under
   exactly that value. Eviction removes no entry. A delete removes the key's entry, resident or not.
@@ -3571,7 +3568,9 @@ weaker than a test.
   The startup rebuild and the `create_index` backfill share `backfill_scalar_index`
   (`scalar_rebuild.rs`): it reads the map through `RecordStoreFactory::scan_merged`
   (`TG-READ-001`), stored and resident records alike, gives every `Lww` row to the index with
-  `insert_if_absent`, and sets `done` only when the scan completes.
+  `insert_if_absent`, and sets `done` only when the scan completes. The observer resolves the map's
+  registry at each event, so an index created on a map with live stores receives every later
+  mutation; `create_observer` registers no map.
 - **Not claimed:**
   - a delete that runs before a concurrent backfill reaches its key can leave one stale entry for
     the deleted key;
@@ -3580,15 +3579,15 @@ weaker than a test.
   - a load that races a delete can leave one stale entry for good: `get` takes no writer
     (`TG-KEY-002`), so a load that read the row before the delete was staged can run `on_load`'s
     `insert_if_absent` after the delete's `remove_key`, and nothing removes that entry later;
-  - writes to partition stores created before the registry (TODO-898);
   - lookups are not atomic with respect to a concurrent mutation of the same key (pre-existing);
   - `entry_count` counts `(value, key)` pairs, so an array attribute counts once per element;
   - vector indexes (TODO-896);
   - index memory (O(map), outside `TOPGUN_MAX_RAM_MB`).
 - **Maintaining code:** `service/domain/index/mod.rs` — the `Index` contract; `hash_index.rs`,
   `navigable_index.rs`, `inverted_index.rs` — the reverse entry and its lock;
-  `mutation_observer.rs` — `IndexMutationObserver`.
-- **Enforcing test:** `on_evict_keeps_index_entries`, `tg_idx_001_rewrite_after_evict_replaces_the_entry`, `tg_idx_001_on_load_keeps_a_newer_put`, `tg_idx_001_on_remove_key_removes_from_every_index` (`mutation_observer.rs`); `backfill_keeps_a_newer_entry_and_skips_non_lww_rows`, `a_failed_scan_leaves_done_false_and_the_next_descriptor_runs` (`scalar_rebuild.rs`);
+  `mutation_observer.rs` — `IndexMutationObserver`, `IndexObserverFactory`; `storage/factory.rs` —
+  the `ObserverFactory` contract.
+- **Enforcing test:** `on_evict_keeps_index_entries`, `tg_idx_001_rewrite_after_evict_replaces_the_entry`, `tg_idx_001_on_load_keeps_a_newer_put`, `tg_idx_001_on_remove_key_removes_from_every_index`, `tg_idx_001_create_index_on_existing_store_indexes_later_writes`, `tg_idx_001_overwrite_after_backfill_on_existing_store_replaces_entry`, `tg_idx_001_clear_reset_destroy_on_store_created_before_registry_empty_the_index` (`mutation_observer.rs`); `backfill_keeps_a_newer_entry_and_skips_non_lww_rows`, `a_failed_scan_leaves_done_false_and_the_next_descriptor_runs`, `tg_idx_001_create_index_racing_writes_leaves_current_entries` (`scalar_rebuild.rs`);
   per scalar index type (`hash_index.rs`, `navigable_index.rs`, `inverted_index.rs`): `tg_idx_001_insert_replaces_the_key_entry`, `tg_idx_001_remove_key_removes_without_old_value`,
   `tg_idx_001_insert_if_absent_keeps_the_existing_entry`, `tg_idx_001_concurrent_replacements_leave_one_entry`, `tg_idx_001_update_and_remove_ignore_a_stale_old_value`,
   `tg_idx_001_clear_clears_the_reverse_entries`.
@@ -3596,7 +3595,8 @@ weaker than a test.
   `AC14: the scalar index keeps every evicted key`,
   `AC22: rewriting evicted keys replaces their index entries`,
   `AC12: the index restored at start holds every stored record`,
-  `AC13: create_index after a restart backfills every stored record`.
+  `AC13: create_index after a restart backfills every stored record`,
+  `AC-898: create_index on a map with live stores indexes later writes and deletes`.
 - **Violation consequence:** a scalar index drops the keys of evicted records, or keeps a second
   entry for a rewritten key under its old value, so a consumer that trusts the index as a candidate
   set misses matching records or carries stale ones.

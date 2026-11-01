@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server): a scalar index created on a map that already holds records receives
+  every later write and delete of that map.** Writes to the map's existing partitions did not
+  reach an index created at runtime: its `entryCount` stayed at the backfill count, and deleted
+  keys kept their entries. A restart repaired it.
 - **Fixed (server): after a restart, a scalar index restored at start and one created with
   `create_index` cover the stored records, not only the ones in memory.** Start-up time now grows
   with the stored rows of indexed maps.

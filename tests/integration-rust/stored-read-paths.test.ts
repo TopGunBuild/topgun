@@ -15,10 +15,11 @@
  * Under the same eviction, the scalar index keeps one entry per stored record,
  * also after evicted keys are rewritten; after a restart, a scalar index
  * restored at start and one created with `create_index` hold every stored
- * record (TG-IDX-001).
+ * record, and an index created on a map whose stores already exist receives
+ * every later write and delete (TG-IDX-001).
  */
 
-import { serialize, deserialize } from '@topgunbuild/core';
+import { serialize, deserialize, hashString, PARTITION_COUNT } from '@topgunbuild/core';
 import * as fs from 'fs';
 import * as jwt from 'jsonwebtoken';
 import * as os from 'os';
@@ -525,5 +526,86 @@ describe('Integration: a scalar index after a restart covers the stored records 
     }, 30_000);
     expect(progress).toMatchObject({ done: true, total: N, processed: N });
     expect(await statusIndexEntries(port)).toBe(N);
+  }, 60_000);
+});
+
+describe('Integration: create_index on a map with live stores (TG-IDX-001)', () => {
+  const N1 = 20;
+  const N2 = 15;
+  const D = 5;
+  const s = storedServer();
+
+  beforeAll(async () => {
+    s.ctx.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-stored-live-index-'));
+    await s.start();
+  });
+
+  afterAll(async () => {
+    await s.stop();
+    if (s.ctx.dir) fs.rmSync(s.ctx.dir, { recursive: true, force: true });
+  });
+
+  test('AC-898: create_index on a map with live stores indexes later writes and deletes', async () => {
+    // The test's partition function is the server's.
+    expect(hashString('hello') % PARTITION_COUNT).toBe(95);
+    const partition = (key: string): number => hashString(key) % PARTITION_COUNT;
+    const port = s.ctx.server!.port;
+    const writer = await s.connect('writer');
+
+    // A write creates only the store of its key's partition.
+    const first = Array.from({ length: N1 }, (_, i) => `k${i}`);
+    await writeMany(
+      writer,
+      first.map((key, i) => ({ key, value: { id: key, status: `first-${i}` } })),
+    );
+    const existing = new Set(first.map(partition));
+
+    await s.createStatusIndex();
+    let progress: any;
+    await waitUntil(async () => {
+      progress = await statusIndexProgress(port);
+      return progress.done === true;
+    }, 30_000);
+    expect(await statusIndexEntries(port)).toBe(N1);
+
+    // New keys on the stores the first batch created, so every put and delete
+    // below lands on a store that existed before the index.
+    const second: string[] = [];
+    for (let i = 0; i < 10_000 && second.length < N2; i++) {
+      if (existing.has(partition(`n${i}`))) second.push(`n${i}`);
+    }
+    expect(second).toEqual([
+      'n90',
+      'n91',
+      'n92',
+      'n93',
+      'n124',
+      'n126',
+      'n127',
+      'n130',
+      'n131',
+      'n133',
+      'n136',
+      'n138',
+      'n360',
+      'n361',
+      'n362',
+    ]);
+    await writeMany(
+      writer,
+      second.map((key, i) => ({ key, value: { id: key, status: `second-${i}` } })),
+    );
+    for (const key of first.slice(0, D)) await remove(writer, key);
+
+    // The observer runs inside the write, so no wait.
+    expect(await statusIndexEntries(port)).toBe(N1 + N2 - D);
+
+    // Guard, passes without the fix too: hybrid exact scans the store.
+    const exact = await hybrid(writer, {
+      methods: ['exact'],
+      predicate: { op: 'eq', attribute: 'status', value: 'second-3' },
+      includeValue: false,
+    });
+    expect(exact.map((r: any) => r.key)).toEqual([second[3]]);
   }, 60_000);
 });
