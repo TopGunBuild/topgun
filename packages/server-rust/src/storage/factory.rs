@@ -29,7 +29,11 @@ use crate::storage::record_store::RecordStore;
 pub trait ObserverFactory: Send + Sync {
     /// Creates an observer for the given `(map_name, partition_id)` pair.
     ///
-    /// Returns `None` if this factory does not need to observe the given map.
+    /// Called once, when the store of that pair is created; the store keeps
+    /// what this returns for its lifetime. Returns `None` if this factory does
+    /// not need to observe the given map. A factory whose need for a map can
+    /// begin after the map's stores exist (an index created at runtime) must
+    /// not return `None` for it, but an observer that decides at each event.
     fn create_observer(
         &self,
         map_name: &str,
@@ -104,7 +108,10 @@ impl RecordStoreFactory {
     /// instances. The resulting store is cached and returned as an `Arc`.
     ///
     /// On subsequent calls for the same pair, returns `Arc::clone()` of the
-    /// cached store without invoking observer factories again.
+    /// cached store without invoking observer factories again: each factory is
+    /// consulted once per store, so a factory whose need for a map can begin
+    /// later must return an observer that decides at each event (see
+    /// [`ObserverFactory::create_observer`]).
     #[must_use]
     pub fn get_or_create(&self, map_name: &str, partition_id: u32) -> Arc<dyn RecordStore> {
         let key = (map_name.to_string(), partition_id);

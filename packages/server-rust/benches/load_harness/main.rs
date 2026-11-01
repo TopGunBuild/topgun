@@ -655,13 +655,23 @@ fn build_services() -> (
     let merkle_observer_factory: Arc<dyn ObserverFactory> =
         Arc::new(MerkleObserverFactory::new(Arc::clone(&merkle_manager)));
 
+    // Wired into the record store factory as the production binary does, so the
+    // harness measures the index observer on every write, not a write path
+    // without it.
+    let index_observer_factory =
+        Arc::new(topgun_server::service::domain::index::IndexObserverFactory::new());
+
     let record_store_factory = Arc::new(
         RecordStoreFactory::new(
             StorageConfig::default(),
             Arc::new(NullDataStore),
             Vec::new(),
         )
-        .with_observer_factories(vec![search_observer_factory_dyn, merkle_observer_factory]),
+        .with_observer_factories(vec![
+            search_observer_factory_dyn,
+            merkle_observer_factory,
+            Arc::clone(&index_observer_factory) as Arc<dyn ObserverFactory>,
+        ]),
     );
 
     let write_validator = {
@@ -728,8 +738,6 @@ fn build_services() -> (
         cluster_state,
         Arc::clone(&connection_registry),
     ));
-    let index_observer_factory =
-        Arc::new(topgun_server::service::domain::index::IndexObserverFactory::new());
     let search_svc = Arc::new(SearchService::new(
         search_registry,
         hybrid_registry,
