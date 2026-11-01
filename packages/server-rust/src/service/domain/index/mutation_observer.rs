@@ -82,18 +82,15 @@ impl MutationObserver for IndexMutationObserver {
         &self,
         key: &str,
         _record: &Record,
-        old_value: &RecordValue,
+        _old_value: &RecordValue,
         new_value: &RecordValue,
         _is_backup: bool,
     ) {
-        let Some(old_rmpv) = Self::extract_rmpv(old_value) else {
-            return;
-        };
         let Some(new_rmpv) = Self::extract_rmpv(new_value) else {
             return;
         };
         for index in self.registry.indexes() {
-            index.update(key, &old_rmpv, &new_rmpv);
+            index.insert(key, &new_rmpv);
         }
     }
 
@@ -101,26 +98,30 @@ impl MutationObserver for IndexMutationObserver {
         let Some(rmpv_val) = Self::extract_rmpv(&record.value) else {
             return;
         };
+        // A scalar index removes by its reverse entry and ignores the value;
+        // the vector index still needs it to forget the vector's hash.
         for index in self.registry.indexes() {
             index.remove(key, &rmpv_val);
         }
     }
 
-    fn on_evict(&self, key: &str, record: &Record, _is_backup: bool) {
-        let Some(rmpv_val) = Self::extract_rmpv(&record.value) else {
-            return;
-        };
+    fn on_remove_key(&self, key: &str, _is_backup: bool) {
         for index in self.registry.indexes() {
-            index.remove(key, &rmpv_val);
+            index.remove_key(key);
         }
     }
+
+    // An index covers the map's data, not its residency: an evicted record is
+    // still stored, so its entry stays (`TG-IDX-001`).
+    fn on_evict(&self, _key: &str, _record: &Record, _is_backup: bool) {}
 
     fn on_load(&self, key: &str, record: &Record, _is_backup: bool) {
         let Some(rmpv_val) = Self::extract_rmpv(&record.value) else {
             return;
         };
+        // A loaded value is never newer than an entry a write put there.
         for index in self.registry.indexes() {
-            index.insert(key, &rmpv_val);
+            index.insert_if_absent(key, &rmpv_val);
         }
     }
 
@@ -240,6 +241,8 @@ impl ObserverFactory for IndexObserverFactory {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use topgun_core::hlc::Timestamp;
     use topgun_core::types::Value;
 
@@ -364,22 +367,124 @@ mod tests {
         assert!(!result.contains("k1"), "k1 should be removed from index");
     }
 
-    #[test]
-    fn on_evict_removes_from_index() {
+    /// One index of each scalar type, on attributes `h`, `n` and `i`, so one
+    /// record value `{h, n, i}` reaches all three.
+    fn scalar_registry() -> Arc<IndexRegistry> {
         let registry = Arc::new(IndexRegistry::new());
-        registry.add_hash_index("status");
+        registry.add_hash_index("h");
+        registry.add_navigable_index("n");
+        registry.add_inverted_index("i");
+        registry
+    }
+
+    fn scalar_record(v: &str) -> Record {
+        make_lww_record(vec![
+            ("h", rmpv::Value::String(v.into())),
+            ("n", rmpv::Value::String(v.into())),
+            ("i", rmpv::Value::String(v.into())),
+        ])
+    }
+
+    /// Keys the index of `attribute` holds under `v`, through the lookup its
+    /// type supports.
+    fn scalar_lookup(registry: &IndexRegistry, attribute: &str, v: &str) -> HashSet<String> {
+        let idx = registry.get_index(attribute).unwrap();
+        if attribute == "i" {
+            idx.lookup_contains(v)
+        } else {
+            idx.lookup_eq(&rmpv::Value::String(v.into()))
+        }
+    }
+
+    const SCALAR_ATTRIBUTES: [&str; 3] = ["h", "n", "i"];
+
+    #[test]
+    fn on_evict_keeps_index_entries() {
+        let registry = scalar_registry();
         let observer = IndexMutationObserver::new(Arc::clone(&registry));
 
-        let record = make_lww_record(vec![("status", rmpv::Value::String("active".into()))]);
+        let record = scalar_record("active");
         observer.on_put("k1", &record, None, false);
         observer.on_evict("k1", &record, false);
 
-        let idx = registry.get_index("status").unwrap();
-        let result = idx.lookup_eq(&rmpv::Value::String("active".into()));
-        assert!(
-            !result.contains("k1"),
-            "evicted record should be removed from index"
-        );
+        for attribute in SCALAR_ATTRIBUTES {
+            assert!(
+                scalar_lookup(&registry, attribute, "active").contains("k1"),
+                "an evicted record is still stored, so index {attribute} keeps it"
+            );
+            assert_eq!(registry.get_index(attribute).unwrap().entry_count(), 1);
+        }
+    }
+
+    #[test]
+    fn tg_idx_001_rewrite_after_evict_replaces_the_entry() {
+        const N: usize = 50;
+        let registry = scalar_registry();
+        let observer = IndexMutationObserver::new(Arc::clone(&registry));
+        let (old, new) = (scalar_record("old"), scalar_record("new"));
+
+        for k in 0..N {
+            let key = format!("k{k}");
+            observer.on_put(&key, &old, None, false);
+            observer.on_evict(&key, &old, false);
+            // A rewrite of a key that is not resident has no old value.
+            observer.on_put(&key, &new, None, false);
+        }
+
+        for attribute in SCALAR_ATTRIBUTES {
+            assert!(
+                scalar_lookup(&registry, attribute, "old").is_empty(),
+                "index {attribute} keeps no entry under the old value"
+            );
+            let new_keys = scalar_lookup(&registry, attribute, "new");
+            assert_eq!(
+                new_keys.len(),
+                N,
+                "index {attribute} holds every key under new"
+            );
+            assert_eq!(
+                registry.get_index(attribute).unwrap().entry_count(),
+                N as u64,
+                "index {attribute} holds one entry per key"
+            );
+        }
+    }
+
+    #[test]
+    fn tg_idx_001_on_load_keeps_a_newer_put() {
+        let registry = scalar_registry();
+        let observer = IndexMutationObserver::new(Arc::clone(&registry));
+
+        observer.on_put("k1", &scalar_record("newer"), None, false);
+        observer.on_load("k1", &scalar_record("older"), false);
+
+        for attribute in SCALAR_ATTRIBUTES {
+            assert!(scalar_lookup(&registry, attribute, "newer").contains("k1"));
+            assert!(
+                !scalar_lookup(&registry, attribute, "older").contains("k1"),
+                "a load must not replace the entry of index {attribute}"
+            );
+            assert_eq!(registry.get_index(attribute).unwrap().entry_count(), 1);
+        }
+    }
+
+    #[test]
+    fn tg_idx_001_on_remove_key_removes_from_every_index() {
+        let registry = scalar_registry();
+        let observer = IndexMutationObserver::new(Arc::clone(&registry));
+
+        observer.on_put("k1", &scalar_record("gone"), None, false);
+        observer.on_put("k2", &scalar_record("kept"), None, false);
+        observer.on_remove_key("k1", false);
+
+        for attribute in SCALAR_ATTRIBUTES {
+            assert!(
+                scalar_lookup(&registry, attribute, "gone").is_empty(),
+                "index {attribute} must drop the removed key"
+            );
+            assert!(scalar_lookup(&registry, attribute, "kept").contains("k2"));
+            assert_eq!(registry.get_index(attribute).unwrap().entry_count(), 1);
+        }
     }
 
     #[test]

@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server): a scalar index no longer loses the keys of evicted records, and a rewrite
+  replaces the key's entry instead of adding a second one.**
 - **Fixed (server): HTTP `/sync`, full-text search and hybrid search see stored records after a
   restart or eviction.** They answered only over the records loaded in memory, so after a restart
   `/sync` returned nothing, `SEARCH` and hybrid `fullText` found nothing, hybrid `exact` dropped
