@@ -1,11 +1,13 @@
 //! Mutation observer that keeps secondary indexes in sync with record mutations.
 //!
 //! [`IndexMutationObserver`] implements [`MutationObserver`] and routes each
-//! mutation event to all indexes registered in the associated [`IndexRegistry`].
+//! mutation event to all indexes registered in its map's [`IndexRegistry`].
 //!
-//! [`IndexObserverFactory`] implements [`ObserverFactory`] and creates
-//! [`IndexMutationObserver`] instances for maps that have registered indexes.
-//! Maps without a registry entry return `None` from `create_observer`.
+//! [`IndexObserverFactory`] implements [`ObserverFactory`] and gives every
+//! store an [`IndexMutationObserver`]. The observer looks its map's registry up
+//! at each event and does nothing while the map has none, so an index created
+//! on a map whose stores already exist receives every later mutation
+//! (`TG-IDX-001`).
 //!
 //! Vector indexes receive mutations through the same path as scalar indexes.
 //! The observer passes the full record `rmpv::Value` to every registered
@@ -31,21 +33,41 @@ use super::registry::{IndexRegistry, IndexStats};
 // IndexMutationObserver
 // ---------------------------------------------------------------------------
 
-/// `MutationObserver` that routes mutations to all indexes in an [`IndexRegistry`].
+/// `MutationObserver` that routes mutations to all indexes in its map's
+/// [`IndexRegistry`].
+///
+/// The registry is looked up at each event, not captured when the store is
+/// created: the factory is consulted once per store, and the map's first index
+/// can be created after its stores exist (`TG-IDX-001`). An event of a map with
+/// no registry changes nothing.
 ///
 /// Each method extracts the attribute value from the record's `RecordValue` and
 /// dispatches to the appropriate index operation. Only `RecordValue::Lww` records
 /// are indexed; `OrMap` and `OrTombstones` are skipped because OR-Map records are
 /// multi-entry and not suitable for single-attribute indexes.
 pub struct IndexMutationObserver {
-    registry: Arc<IndexRegistry>,
+    registries: Arc<DashMap<String, Arc<IndexRegistry>>>,
+    map_name: String,
 }
 
 impl IndexMutationObserver {
-    /// Creates a new observer backed by the given registry.
-    #[must_use]
-    pub fn new(registry: Arc<IndexRegistry>) -> Self {
-        Self { registry }
+    /// An observer of a map named `test` whose registry is `registry`.
+    #[cfg(test)]
+    fn new(registry: Arc<IndexRegistry>) -> Self {
+        let registries = DashMap::new();
+        registries.insert("test".to_string(), registry);
+        Self {
+            registries: Arc::new(registries),
+            map_name: "test".to_string(),
+        }
+    }
+
+    /// The map's registry at this moment. The shard guard is dropped before
+    /// this returns, so no `DashMap` guard is held while an index is mutated.
+    fn registry(&self) -> Option<Arc<IndexRegistry>> {
+        self.registries
+            .get(&self.map_name)
+            .map(|registry| Arc::clone(registry.value()))
     }
 
     /// Converts a `RecordValue` to `rmpv::Value` for index operations.
@@ -71,9 +93,12 @@ impl MutationObserver for IndexMutationObserver {
         let Some(rmpv_val) = Self::extract_rmpv(&record.value) else {
             return;
         };
+        let Some(registry) = self.registry() else {
+            return;
+        };
         // Each index internally uses its own AttributeExtractor to pull its
         // attribute from the full record value, so we pass the whole map.
-        for index in self.registry.indexes() {
+        for index in registry.indexes() {
             index.insert(key, &rmpv_val);
         }
     }
@@ -89,7 +114,10 @@ impl MutationObserver for IndexMutationObserver {
         let Some(new_rmpv) = Self::extract_rmpv(new_value) else {
             return;
         };
-        for index in self.registry.indexes() {
+        let Some(registry) = self.registry() else {
+            return;
+        };
+        for index in registry.indexes() {
             index.insert(key, &new_rmpv);
         }
     }
@@ -98,15 +126,21 @@ impl MutationObserver for IndexMutationObserver {
         let Some(rmpv_val) = Self::extract_rmpv(&record.value) else {
             return;
         };
+        let Some(registry) = self.registry() else {
+            return;
+        };
         // A scalar index removes by its reverse entry and ignores the value;
         // the vector index still needs it to forget the vector's hash.
-        for index in self.registry.indexes() {
+        for index in registry.indexes() {
             index.remove(key, &rmpv_val);
         }
     }
 
     fn on_remove_key(&self, key: &str, _is_backup: bool) {
-        for index in self.registry.indexes() {
+        let Some(registry) = self.registry() else {
+            return;
+        };
+        for index in registry.indexes() {
             index.remove_key(key);
         }
     }
@@ -119,8 +153,11 @@ impl MutationObserver for IndexMutationObserver {
         let Some(rmpv_val) = Self::extract_rmpv(&record.value) else {
             return;
         };
+        let Some(registry) = self.registry() else {
+            return;
+        };
         // A loaded value is never newer than an entry a write put there.
-        for index in self.registry.indexes() {
+        for index in registry.indexes() {
             index.insert_if_absent(key, &rmpv_val);
         }
     }
@@ -132,25 +169,37 @@ impl MutationObserver for IndexMutationObserver {
         let Some(rmpv_val) = Self::extract_rmpv(&record.value) else {
             return;
         };
-        for index in self.registry.indexes() {
+        let Some(registry) = self.registry() else {
+            return;
+        };
+        for index in registry.indexes() {
             index.insert(key, &rmpv_val);
         }
     }
 
     fn on_clear(&self) {
-        for index in self.registry.indexes() {
+        let Some(registry) = self.registry() else {
+            return;
+        };
+        for index in registry.indexes() {
             index.clear();
         }
     }
 
     fn on_reset(&self) {
-        for index in self.registry.indexes() {
+        let Some(registry) = self.registry() else {
+            return;
+        };
+        for index in registry.indexes() {
             index.clear();
         }
     }
 
     fn on_destroy(&self, _is_shutdown: bool) {
-        for index in self.registry.indexes() {
+        let Some(registry) = self.registry() else {
+            return;
+        };
+        for index in registry.indexes() {
             index.clear();
         }
     }
@@ -160,14 +209,15 @@ impl MutationObserver for IndexMutationObserver {
 // IndexObserverFactory
 // ---------------------------------------------------------------------------
 
-/// Factory that creates [`IndexMutationObserver`] instances for maps that
-/// have registered indexes.
+/// Factory that gives every store an [`IndexMutationObserver`] over the
+/// registries it holds.
 ///
-/// Maps that have not been pre-registered via `register_map` return `None`
-/// from `create_observer`, meaning they do not participate in index maintenance.
+/// Only `register_map` creates a registry; `create_observer` never does, so a
+/// map without an index has no registry and its events reach no index.
 pub struct IndexObserverFactory {
-    /// Map from map name to its [`IndexRegistry`].
-    registries: DashMap<String, Arc<IndexRegistry>>,
+    /// Map from map name to its [`IndexRegistry`], shared with every observer
+    /// this factory created.
+    registries: Arc<DashMap<String, Arc<IndexRegistry>>>,
 }
 
 impl IndexObserverFactory {
@@ -175,7 +225,7 @@ impl IndexObserverFactory {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            registries: DashMap::new(),
+            registries: Arc::new(DashMap::new()),
         }
     }
 
@@ -227,11 +277,10 @@ impl ObserverFactory for IndexObserverFactory {
         map_name: &str,
         _partition_id: u32,
     ) -> Option<Arc<dyn MutationObserver>> {
-        self.registries
-            .get(map_name)
-            .map(|registry| -> Arc<dyn MutationObserver> {
-                Arc::new(IndexMutationObserver::new(Arc::clone(registry.value())))
-            })
+        Some(Arc::new(IndexMutationObserver {
+            registries: Arc::clone(&self.registries),
+            map_name: map_name.to_string(),
+        }))
     }
 }
 
@@ -672,12 +721,16 @@ mod tests {
     }
 
     #[test]
-    fn factory_returns_none_for_unregistered_map() {
+    fn factory_creates_observer_for_unregistered_map_without_registering_it() {
         let factory = IndexObserverFactory::new();
         let observer = factory.create_observer("unknown", 0);
         assert!(
-            observer.is_none(),
-            "should return None for unregistered map"
+            observer.is_some(),
+            "the map's first index can be created after its stores exist"
+        );
+        assert!(
+            factory.get_registry("unknown").is_none(),
+            "creating an observer registers no map"
         );
     }
 
@@ -839,5 +892,238 @@ mod tests {
             0,
             "insert with no vector field should not queue a mutation"
         );
+    }
+
+    // --- TG-IDX-001: stores created before the map's registry ---
+
+    mod existing_stores {
+        use std::collections::{BTreeMap, HashSet};
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        use std::sync::Arc;
+
+        use topgun_core::hlc::Timestamp;
+        use topgun_core::types::Value;
+
+        use super::super::*;
+        use crate::network::handlers::admin_types::{BackfillProgress, RebuildType};
+        use crate::service::domain::index::scalar_rebuild::backfill_scalar_index;
+        use crate::storage::datastores::NullDataStore;
+        use crate::storage::factory::RecordStoreFactory;
+        use crate::storage::impls::StorageConfig;
+        use crate::storage::key_writer::KeyWriteToken;
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy, RecordStore};
+
+        /// A store factory with `index_factory` wired in, as the server wires it.
+        fn wired() -> (Arc<IndexObserverFactory>, Arc<RecordStoreFactory>) {
+            let index_factory = Arc::new(IndexObserverFactory::new());
+            let store_factory = Arc::new(
+                RecordStoreFactory::new(
+                    StorageConfig::default(),
+                    Arc::new(NullDataStore),
+                    Vec::new(),
+                )
+                .with_observer_factories(vec![
+                    Arc::clone(&index_factory) as Arc<dyn ObserverFactory>
+                ]),
+            );
+            (index_factory, store_factory)
+        }
+
+        fn status_record(status: &str) -> RecordValue {
+            RecordValue::Lww {
+                value: Value::Map(BTreeMap::from([(
+                    "status".to_string(),
+                    Value::String(status.to_string()),
+                )])),
+                timestamp: Timestamp {
+                    millis: 1_000,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+            }
+        }
+
+        async fn put(store: &Arc<dyn RecordStore>, key: &str, status: &str) {
+            store
+                .put(
+                    &KeyWriteToken::for_test(store.name(), key),
+                    key,
+                    status_record(status),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .expect("put");
+        }
+
+        async fn remove(store: &Arc<dyn RecordStore>, key: &str) {
+            store
+                .remove(
+                    &KeyWriteToken::for_test(store.name(), key),
+                    key,
+                    CallerProvenance::Client,
+                )
+                .await
+                .expect("remove");
+        }
+
+        /// Registers `map` with a hash index on `status` and backfills it from
+        /// the stored records, as `create_index` does.
+        async fn create_status_index(
+            index_factory: &IndexObserverFactory,
+            store_factory: &RecordStoreFactory,
+            map: &str,
+        ) -> Arc<dyn crate::service::domain::index::Index> {
+            let registry = index_factory.register_map(map);
+            registry.add_hash_index("status");
+            let progress = BackfillProgress {
+                total: AtomicU64::new(0),
+                processed: AtomicU64::new(0),
+                done: AtomicBool::new(false),
+                rebuild_type: RebuildType::Backfill,
+            };
+            backfill_scalar_index(store_factory, map, "status", &registry, &progress)
+                .await
+                .expect("backfill");
+            registry.get_index("status").expect("index registered")
+        }
+
+        fn lookup(
+            index: &Arc<dyn crate::service::domain::index::Index>,
+            status: &str,
+        ) -> HashSet<String> {
+            index.lookup_eq(&rmpv::Value::from(status))
+        }
+
+        fn keys(names: &[&str]) -> HashSet<String> {
+            names.iter().map(ToString::to_string).collect()
+        }
+
+        /// R4.1: a put and a delete on a store created before the map's first
+        /// index reach that index.
+        #[tokio::test]
+        async fn tg_idx_001_create_index_on_existing_store_indexes_later_writes() {
+            let (index_factory, store_factory) = wired();
+            let store = store_factory.get_or_create("m", 7);
+            put(&store, "k1", "one").await;
+
+            let index = create_status_index(&index_factory, &store_factory, "m").await;
+            assert_eq!(
+                lookup(&index, "one"),
+                keys(&["k1"]),
+                "the backfill holds k1"
+            );
+
+            put(&store, "k2", "two").await;
+            assert_eq!(
+                lookup(&index, "two"),
+                keys(&["k2"]),
+                "a put on a store created before the index reaches it"
+            );
+
+            remove(&store, "k1").await;
+            assert!(
+                lookup(&index, "one").is_empty(),
+                "a delete on a store created before the index reaches it"
+            );
+            assert_eq!(lookup(&index, "two"), keys(&["k2"]));
+            assert_eq!(index.entry_count(), 1);
+        }
+
+        /// R4.2: an overwrite (`on_update`) on a store created before the map's
+        /// first index replaces the entry the backfill made.
+        #[tokio::test]
+        async fn tg_idx_001_overwrite_after_backfill_on_existing_store_replaces_entry() {
+            let (index_factory, store_factory) = wired();
+            let store = store_factory.get_or_create("m", 7);
+            put(&store, "k1", "old").await;
+
+            let index = create_status_index(&index_factory, &store_factory, "m").await;
+            assert_eq!(
+                lookup(&index, "old"),
+                keys(&["k1"]),
+                "the backfill holds k1"
+            );
+            assert_eq!(index.entry_count(), 1);
+
+            put(&store, "k1", "new").await;
+            assert_eq!(
+                lookup(&index, "new"),
+                keys(&["k1"]),
+                "the overwrite moves k1 under its new value"
+            );
+            assert!(
+                lookup(&index, "old").is_empty(),
+                "no entry stays under the old value"
+            );
+            assert_eq!(index.entry_count(), 1);
+        }
+
+        /// R4.4: writes to a map without an index register no map and reach no
+        /// other map's index.
+        #[tokio::test]
+        async fn tg_idx_001_index_observer_registers_no_map_without_an_index() {
+            let (index_factory, store_factory) = wired();
+            let index_a = create_status_index(&index_factory, &store_factory, "A").await;
+            let store_a = store_factory.get_or_create("A", 1);
+            put(&store_a, "a1", "a-active").await;
+            put(&store_a, "a2", "a-idle").await;
+            let count_a = index_a.entry_count();
+            let stats = index_factory.all_index_stats();
+
+            let b_values = ["b-open", "b-closed", "b-held"];
+            for (partition, status) in (0u32..).zip(b_values) {
+                let store_b = store_factory.get_or_create("B", partition);
+                put(&store_b, &format!("b{partition}"), status).await;
+            }
+            remove(&store_factory.get_or_create("B", 0), "b0").await;
+
+            // This assertion, not `all_index_stats()`, catches an observer
+            // that registers the map: `all_index_stats()` drops registries
+            // without indexes, so an empty registry for `B` would not show
+            // there.
+            assert!(
+                index_factory.get_registry("B").is_none(),
+                "writes to a map without an index create no registry"
+            );
+            assert_eq!(index_factory.all_index_stats(), stats);
+            assert_eq!(index_a.entry_count(), count_a);
+            for status in b_values {
+                assert!(
+                    lookup(&index_a, status).is_empty(),
+                    "B's value {status} must not reach A's index"
+                );
+            }
+            assert_eq!(lookup(&index_a, "a-active"), keys(&["a1"]));
+        }
+
+        /// R4.5: `clear`, `reset` and `destroy` on a store created before the
+        /// map's first index empty that index.
+        #[tokio::test]
+        async fn tg_idx_001_clear_reset_destroy_on_store_created_before_registry_empty_the_index() {
+            let (index_factory, store_factory) = wired();
+            for map in ["cleared", "reset", "destroyed"] {
+                let store = store_factory.get_or_create(map, 3);
+                put(&store, "k1", "one").await;
+                put(&store, "k2", "two").await;
+
+                let index = create_status_index(&index_factory, &store_factory, map).await;
+                assert_eq!(
+                    index.entry_count(),
+                    2,
+                    "{map}: the backfill fills the index"
+                );
+
+                match map {
+                    "cleared" => {
+                        store.clear(false);
+                    }
+                    "reset" => store.reset(),
+                    _ => store.destroy(),
+                }
+                assert_eq!(index.entry_count(), 0, "{map}: the index is emptied");
+                assert!(lookup(&index, "one").is_empty(), "{map}");
+            }
+        }
     }
 }

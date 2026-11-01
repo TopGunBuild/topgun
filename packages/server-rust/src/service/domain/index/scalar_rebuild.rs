@@ -613,4 +613,164 @@ mod tests {
             assert_eq!(progress.total.load(Ordering::Relaxed), 1);
         }
     }
+
+    // ── TG-IDX-001: create_index racing writes on existing stores ────────
+
+    mod racing_writes {
+        use std::collections::BTreeMap;
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        use std::sync::Arc;
+
+        use topgun_core::hlc::Timestamp;
+        use topgun_core::types::Value;
+
+        use super::super::*;
+        use crate::service::domain::key_writer::KeyWriterRegistry;
+        use crate::storage::datastores::NullDataStore;
+        use crate::storage::factory::ObserverFactory;
+        use crate::storage::impls::StorageConfig;
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+
+        const ITERATIONS: usize = 50;
+        const KEYS: u32 = 8;
+        const WRITERS: usize = 4;
+        const ROUNDS: usize = 40;
+
+        fn status_record(status: &str) -> RecordValue {
+            RecordValue::Lww {
+                value: Value::Map(BTreeMap::from([(
+                    "status".to_string(),
+                    Value::String(status.to_string()),
+                )])),
+                timestamp: Timestamp {
+                    millis: 1_000,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+            }
+        }
+
+        fn stored_status(value: &RecordValue) -> String {
+            match value {
+                RecordValue::Lww {
+                    value: Value::Map(fields),
+                    ..
+                } => match fields.get("status") {
+                    Some(Value::String(status)) => status.clone(),
+                    other => panic!("unexpected status field {other:?}"),
+                },
+                other => panic!("unexpected record {other:?}"),
+            }
+        }
+
+        /// R4.3: writes racing `create_index` on stores created before the
+        /// map's registry leave exactly one entry per key, under the key's
+        /// current value. A regression net for the race argument of
+        /// `TG-IDX-001`, not a proof of it.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn tg_idx_001_create_index_racing_writes_leaves_current_entries() {
+            for iteration in 0..ITERATIONS {
+                let index_factory = Arc::new(IndexObserverFactory::new());
+                let store_factory = Arc::new(
+                    RecordStoreFactory::new(
+                        StorageConfig::default(),
+                        Arc::new(NullDataStore),
+                        Vec::new(),
+                    )
+                    .with_observer_factories(vec![
+                        Arc::clone(&index_factory) as Arc<dyn ObserverFactory>
+                    ]),
+                );
+                let writers = Arc::new(KeyWriterRegistry::new());
+                let map = "m";
+                let keys: Vec<String> = (0..KEYS).map(|k| format!("k{k}")).collect();
+
+                // One store per key, each created before the registry.
+                for (partition, key) in (0u32..).zip(&keys) {
+                    let store = store_factory.get_or_create(map, partition);
+                    let token = writers.acquire(map, key).await;
+                    store
+                        .put(
+                            &token,
+                            key,
+                            status_record(&format!("{key}-initial")),
+                            ExpiryPolicy::NONE,
+                            CallerProvenance::Client,
+                        )
+                        .await
+                        .expect("initial put");
+                }
+
+                let start = Arc::new(tokio::sync::Barrier::new(WRITERS + 1));
+                let mut tasks = Vec::new();
+                for writer in 0..WRITERS {
+                    let (store_factory, writers, start, keys) = (
+                        Arc::clone(&store_factory),
+                        Arc::clone(&writers),
+                        Arc::clone(&start),
+                        keys.clone(),
+                    );
+                    tasks.push(tokio::spawn(async move {
+                        start.wait().await;
+                        for round in 0..ROUNDS {
+                            for (partition, key) in (0u32..).zip(&keys) {
+                                let store = store_factory.get_or_create(map, partition);
+                                let token = writers.acquire(map, key).await;
+                                store
+                                    .put(
+                                        &token,
+                                        key,
+                                        status_record(&format!("{key}-w{writer}-r{round}")),
+                                        ExpiryPolicy::NONE,
+                                        CallerProvenance::Client,
+                                    )
+                                    .await
+                                    .expect("racing put");
+                                drop(token);
+                                tokio::task::yield_now().await;
+                            }
+                        }
+                    }));
+                }
+
+                start.wait().await;
+                let registry = index_factory.register_map(map);
+                registry.add_hash_index("status");
+                let progress = BackfillProgress {
+                    total: AtomicU64::new(0),
+                    processed: AtomicU64::new(0),
+                    done: AtomicBool::new(false),
+                    rebuild_type: RebuildType::Backfill,
+                };
+                backfill_scalar_index(&store_factory, map, "status", &registry, &progress)
+                    .await
+                    .expect("backfill");
+                for task in tasks {
+                    task.await.expect("writer task");
+                }
+
+                let index = registry.get_index("status").expect("index registered");
+                for (partition, key) in (0u32..).zip(&keys) {
+                    let record = store_factory
+                        .get_or_create(map, partition)
+                        .get(key, false)
+                        .await
+                        .expect("get")
+                        .expect("the key is stored");
+                    let status = stored_status(&record.value);
+                    assert!(
+                        index
+                            .lookup_eq(&rmpv::Value::from(status.as_str()))
+                            .contains(key),
+                        "iteration {iteration}: {key} is not indexed under its stored value {status}"
+                    );
+                }
+                assert_eq!(
+                    index.entry_count(),
+                    u64::from(KEYS),
+                    "iteration {iteration}: one entry per key"
+                );
+            }
+        }
+    }
 }
