@@ -49,9 +49,40 @@ pub trait Index: Send + Sync {
     fn attribute_name(&self) -> &str;
 
     // Mutation hooks -- called by the mutation observer when records change.
+    //
+    // A scalar index (hash, navigable, inverted) holds one entry per key
+    // (`TG-IDX-001`): it keeps a reverse entry `key -> indexed attribute value`
+    // and changes it and its buckets in one critical section. Every scalar
+    // index must therefore override `insert_if_absent` and `remove_key`; the
+    // default bodies serve the vector index only, which does not yet keep one
+    // entry per key (TODO-896).
+
+    /// Indexes `key` under the attribute value of `value`, **replacing** the
+    /// key's entry: afterwards the key is indexed under that value only.
     fn insert(&self, key: &str, value: &rmpv::Value);
+
+    /// Indexes `key` only when it has no entry. A value loaded from the store
+    /// is never newer than an entry a write put there, so a load that races a
+    /// write must not replace the write's entry with the older value.
+    fn insert_if_absent(&self, key: &str, value: &rmpv::Value) {
+        self.insert(key, value);
+    }
+
+    /// Replaces the key's entry with `new_value`. A scalar index uses its
+    /// reverse entry and ignores `old_value`, so a caller holding a stale old
+    /// value cannot leave a second entry.
     fn update(&self, key: &str, old_value: &rmpv::Value, new_value: &rmpv::Value);
+
+    /// Removes the key's entry. A scalar index uses its reverse entry and
+    /// ignores `old_value`.
     fn remove(&self, key: &str, old_value: &rmpv::Value);
+
+    /// Removes the key's entry without needing its old value (a delete of a
+    /// key that is not resident has none).
+    fn remove_key(&self, key: &str) {
+        let _ = key;
+    }
+
     fn clear(&self);
 
     // Query methods -- unsupported operations return empty sets rather than

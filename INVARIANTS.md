@@ -8,7 +8,7 @@ an explicit `NAKED` marker; the gate is "the NAKED count never grows silently", 
 
 Conventions: IDs are `TG-<DOMAIN>-<NNN>` (domains: WAL, WB write-behind, OR, LWW, MRK merkle,
 EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch, ENG byte engine, AUTHZ
-authorization, ENC encryption at rest, READ whole-map reads). Cite the ID verbatim in code comments and test names. Statuses:
+authorization, ENC encryption at rest, READ whole-map reads, IDX scalar indexes). Cite the ID verbatim in code comments and test names. Statuses:
 `decided` (holds by design) · `open (SPEC/TODO-nnn)` (not yet true / not yet wired) ·
 `aspirational`. Precedent: omnigraph `docs/invariants.md` (structure) — improved here with the
 CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
@@ -3544,3 +3544,55 @@ weaker than a test.
   left incomplete.
 - **Discovered by:** SPEC-398b2 (TODO-897); fixed by SPEC-401a.
 - **Status:** decided, **enforced**.
+
+### TG-IDX-001: A scalar index holds exactly one entry per stored LWW record of its map, under its current value
+
+- **Scope:** the scalar indexes `HashIndex`, `NavigableIndex` and `InvertedIndex`
+  (`service/domain/index/`) and `IndexMutationObserver`, which feeds them from the record store's
+  observer callbacks. Vector indexes are out of scope (TODO-896).
+- **Precondition:** the map's `IndexRegistry` existed when each partition store of the map was
+  created. This holds for every index restored at startup and for `create_index` on a map with no
+  live store (TODO-898 covers the rest).
+- **Statement:** once the startup rebuild or backfill reports `done` (SPEC-401b2), and with no
+  write in flight, every key with a stored or resident `Lww` value has exactly one reverse entry,
+  holding the attribute value of its current value, and the index's buckets hold the key under
+  exactly that value. Eviction removes no entry. A delete removes the key's entry, resident or not.
+  Rewriting an evicted key replaces its entry. Every consumer still verifies candidates against the
+  record, as `index_aware_evaluate` does.
+- **Mechanism:** each scalar index keeps a reverse map `key → indexed attribute value` (the result
+  of its own `AttributeExtractor::extract`, `Nil` for a record without the attribute). `insert`
+  replaces the key's entry, `insert_if_absent` inserts only when the key has none, `update` and
+  `remove` use the reverse entry and ignore the passed old value, `remove_key` removes by key, and
+  `clear` clears both. Each of them reads the reverse entry, changes the buckets and writes the
+  reverse entry inside one per-index mutation lock (the `RwLock` write guard of `NavigableIndex`,
+  a `parking_lot::Mutex` around the reverse map of `HashIndex` and `InvertedIndex`); readers do not
+  take it. The observer's `on_evict` does nothing, `on_put` / `on_update` / `on_replication_put`
+  replace, `on_load` calls `insert_if_absent`, and `on_remove` / `on_remove_key` remove the key's
+  entry. The lock does not rely on `TG-KEY-001`, which does not cover `on_load` and `on_evict`.
+- **Not claimed:**
+  - a delete that runs before a concurrent backfill reaches its key can leave one stale entry for
+    the deleted key;
+  - a load that races a delete can leave one stale entry for good: `get` takes no writer
+    (`TG-KEY-002`), so a load that read the row before the delete was staged can run `on_load`'s
+    `insert_if_absent` after the delete's `remove_key`, and nothing removes that entry later;
+  - writes to partition stores created before the registry (TODO-898);
+  - lookups are not atomic with respect to a concurrent mutation of the same key (pre-existing);
+  - `entry_count` counts `(value, key)` pairs, so an array attribute counts once per element;
+  - vector indexes (TODO-896);
+  - index memory (O(map), outside `TOPGUN_MAX_RAM_MB`).
+- **Maintaining code:** `service/domain/index/mod.rs` — the `Index` contract; `hash_index.rs`,
+  `navigable_index.rs`, `inverted_index.rs` — the reverse entry and its lock;
+  `mutation_observer.rs` — `IndexMutationObserver`.
+- **Enforcing test:** `on_evict_keeps_index_entries`, `tg_idx_001_rewrite_after_evict_replaces_the_entry`, `tg_idx_001_on_load_keeps_a_newer_put`, `tg_idx_001_on_remove_key_removes_from_every_index` (`mutation_observer.rs`);
+  per scalar index type (`hash_index.rs`, `navigable_index.rs`, `inverted_index.rs`): `tg_idx_001_insert_replaces_the_key_entry`, `tg_idx_001_remove_key_removes_without_old_value`,
+  `tg_idx_001_insert_if_absent_keeps_the_existing_entry`, `tg_idx_001_concurrent_replacements_leave_one_entry`, `tg_idx_001_update_and_remove_ignore_a_stale_old_value`,
+  `tg_idx_001_clear_clears_the_reverse_entries`.
+- **Integration tests:** `tests/integration-rust/stored-read-paths.test.ts` —
+  `AC14: the scalar index keeps every evicted key`,
+  `AC22: rewriting evicted keys replaces their index entries`.
+- **Violation consequence:** a scalar index drops the keys of evicted records, or keeps a second
+  entry for a rewritten key under its old value, so a consumer that trusts the index as a candidate
+  set misses matching records or carries stale ones.
+- **Discovered by:** SPEC-398b2 (TODO-897); part SPEC-401b1.
+- **Status:** open (SPEC-401b2) — until the startup rebuild and the `create_index` backfill read the
+  stored map, after a restart the index holds only what was written or loaded since.
