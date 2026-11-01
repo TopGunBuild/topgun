@@ -3,7 +3,7 @@
 //! Provides O(log N) range queries and O(log N) equality lookups. All
 //! concurrent access is mediated by a `parking_lot::RwLock`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 
 use parking_lot::RwLock;
@@ -17,20 +17,22 @@ use super::{AttributeExtractor, ComparableValue, Index, IndexType};
 pub struct NavigableIndex {
     attribute_name: String,
     extractor: AttributeExtractor,
-    map: RwLock<BTreeMap<ComparableValue, HashSet<String>>>,
+    inner: RwLock<Inner>,
 }
 
-impl NavigableIndex {
-    #[must_use]
-    pub fn new(attribute_name: String) -> Self {
-        NavigableIndex {
-            extractor: AttributeExtractor::new(attribute_name.clone()),
-            attribute_name,
-            map: RwLock::new(BTreeMap::new()),
-        }
-    }
+/// The buckets and the reverse map live under one lock, so every mutation
+/// reads the reverse entry, changes the buckets and writes the reverse entry
+/// in one write-guard critical section (`TG-IDX-001`).
+#[derive(Default)]
+struct Inner {
+    /// Map from indexed value → set of record keys.
+    buckets: BTreeMap<ComparableValue, HashSet<String>>,
+    /// Reverse map: record key → the attribute value it is indexed under.
+    entries: HashMap<String, rmpv::Value>,
+}
 
-    fn index_value(&self, key: &str, attr_val: &rmpv::Value) {
+impl Inner {
+    fn index_value(&mut self, key: &str, attr_val: &rmpv::Value) {
         match attr_val {
             rmpv::Value::Array(elements) => {
                 for elem in elements {
@@ -41,13 +43,12 @@ impl NavigableIndex {
         }
     }
 
-    fn index_single(&self, key: &str, val: &rmpv::Value) {
+    fn index_single(&mut self, key: &str, val: &rmpv::Value) {
         let cv = ComparableValue::from_value(val);
-        let mut guard = self.map.write();
-        guard.entry(cv).or_default().insert(key.to_owned());
+        self.buckets.entry(cv).or_default().insert(key.to_owned());
     }
 
-    fn deindex_value(&self, key: &str, attr_val: &rmpv::Value) {
+    fn deindex_value(&mut self, key: &str, attr_val: &rmpv::Value) {
         match attr_val {
             rmpv::Value::Array(elements) => {
                 for elem in elements {
@@ -58,15 +59,45 @@ impl NavigableIndex {
         }
     }
 
-    fn deindex_single(&self, key: &str, val: &rmpv::Value) {
+    fn deindex_single(&mut self, key: &str, val: &rmpv::Value) {
         let cv = ComparableValue::from_value(val);
-        let mut guard = self.map.write();
-        if let Some(set) = guard.get_mut(&cv) {
+        if let Some(set) = self.buckets.get_mut(&cv) {
             set.remove(key);
+            if set.is_empty() {
+                self.buckets.remove(&cv);
+            }
         }
-        if guard.get(&cv).is_some_and(HashSet::is_empty) {
-            guard.remove(&cv);
+    }
+
+    fn remove_key(&mut self, key: &str) {
+        if let Some(old_attr) = self.entries.remove(key) {
+            self.deindex_value(key, &old_attr);
         }
+    }
+}
+
+impl NavigableIndex {
+    #[must_use]
+    pub fn new(attribute_name: String) -> Self {
+        NavigableIndex {
+            extractor: AttributeExtractor::new(attribute_name.clone()),
+            attribute_name,
+            inner: RwLock::new(Inner::default()),
+        }
+    }
+
+    /// Indexes `key` under the attribute value of `value`, replacing its entry,
+    /// or does nothing when `only_if_absent` and the key has an entry.
+    fn put_entry(&self, key: &str, value: &rmpv::Value, only_if_absent: bool) {
+        let attr_val = self.extractor.extract(value);
+        let mut inner = self.inner.write();
+        if only_if_absent && inner.entries.contains_key(key) {
+            return;
+        }
+        if let Some(old_attr) = inner.entries.insert(key.to_owned(), attr_val.clone()) {
+            inner.deindex_value(key, &old_attr);
+        }
+        inner.index_value(key, &attr_val);
     }
 }
 
@@ -80,29 +111,39 @@ impl Index for NavigableIndex {
     }
 
     fn insert(&self, key: &str, value: &rmpv::Value) {
-        let attr_val = self.extractor.extract(value);
-        self.index_value(key, &attr_val);
+        self.put_entry(key, value, false);
     }
 
-    fn update(&self, key: &str, old_value: &rmpv::Value, new_value: &rmpv::Value) {
-        let old_attr = self.extractor.extract(old_value);
-        let new_attr = self.extractor.extract(new_value);
-        self.deindex_value(key, &old_attr);
-        self.index_value(key, &new_attr);
+    fn insert_if_absent(&self, key: &str, value: &rmpv::Value) {
+        self.put_entry(key, value, true);
     }
 
-    fn remove(&self, key: &str, old_value: &rmpv::Value) {
-        let attr_val = self.extractor.extract(old_value);
-        self.deindex_value(key, &attr_val);
+    fn update(&self, key: &str, _old_value: &rmpv::Value, new_value: &rmpv::Value) {
+        self.put_entry(key, new_value, false);
+    }
+
+    fn remove(&self, key: &str, _old_value: &rmpv::Value) {
+        self.remove_key(key);
+    }
+
+    fn remove_key(&self, key: &str) {
+        self.inner.write().remove_key(key);
     }
 
     fn clear(&self) {
-        self.map.write().clear();
+        let mut inner = self.inner.write();
+        inner.buckets.clear();
+        inner.entries.clear();
     }
 
     fn lookup_eq(&self, value: &rmpv::Value) -> HashSet<String> {
         let cv = ComparableValue::from_value(value);
-        self.map.read().get(&cv).cloned().unwrap_or_default()
+        self.inner
+            .read()
+            .buckets
+            .get(&cv)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn lookup_range(
@@ -135,8 +176,9 @@ impl Index for NavigableIndex {
             }
         };
 
-        let guard = self.map.read();
-        guard
+        let inner = self.inner.read();
+        inner
+            .buckets
             .range((lower_bound, upper_bound))
             .flat_map(|(_, set)| set.iter().cloned())
             .collect()
@@ -148,7 +190,12 @@ impl Index for NavigableIndex {
     }
 
     fn entry_count(&self) -> u64 {
-        self.map.read().values().map(|s| s.len() as u64).sum()
+        self.inner
+            .read()
+            .buckets
+            .values()
+            .map(|s| s.len() as u64)
+            .sum()
     }
 }
 
@@ -260,5 +307,113 @@ mod tests {
 
         let result = idx.lookup_range(None, true, None, true);
         assert_eq!(result.len(), 2);
+    }
+
+    // --- TG-IDX-001: one entry per key, through the reverse entry ---
+
+    fn holds(idx: &NavigableIndex, v: i64, key: &str) -> bool {
+        idx.lookup_eq(&rmpv::Value::Integer(v.into())).contains(key)
+    }
+
+    #[test]
+    fn tg_idx_001_insert_replaces_the_key_entry() {
+        let idx = NavigableIndex::new("price".to_string());
+        idx.insert("k", &price_record(1));
+        idx.insert("k", &price_record(2));
+        assert!(!holds(&idx, 1, "k"), "the replaced value must not hold k");
+        assert!(holds(&idx, 2, "k"));
+        assert_eq!(idx.lookup_range(None, true, None, true).len(), 1);
+        assert_eq!(idx.entry_count(), 1);
+    }
+
+    #[test]
+    fn tg_idx_001_remove_key_removes_without_old_value() {
+        let idx = NavigableIndex::new("price".to_string());
+        idx.insert("k", &price_record(1));
+        idx.insert("other", &price_record(1));
+        idx.remove_key("k");
+        assert!(!holds(&idx, 1, "k"));
+        assert!(holds(&idx, 1, "other"));
+        assert_eq!(idx.entry_count(), 1);
+        idx.remove_key("k");
+        assert_eq!(
+            idx.entry_count(),
+            1,
+            "removing an absent key changes nothing"
+        );
+    }
+
+    #[test]
+    fn tg_idx_001_insert_if_absent_keeps_the_existing_entry() {
+        let idx = NavigableIndex::new("price".to_string());
+        idx.insert("k", &price_record(2));
+        idx.insert_if_absent("k", &price_record(1));
+        assert!(holds(&idx, 2, "k"));
+        assert!(!holds(&idx, 1, "k"));
+        assert_eq!(idx.entry_count(), 1);
+        idx.insert_if_absent("fresh", &price_record(1));
+        assert!(holds(&idx, 1, "fresh"), "an absent key is inserted");
+    }
+
+    #[test]
+    fn tg_idx_001_update_and_remove_ignore_a_stale_old_value() {
+        let idx = NavigableIndex::new("price".to_string());
+        idx.insert("k", &price_record(1));
+        idx.update("k", &price_record(0), &price_record(2));
+        assert!(
+            !holds(&idx, 1, "k"),
+            "the current value is replaced, not the passed one"
+        );
+        assert!(holds(&idx, 2, "k"));
+        assert_eq!(idx.entry_count(), 1);
+        idx.remove("k", &price_record(0));
+        assert!(!holds(&idx, 2, "k"));
+        assert_eq!(idx.entry_count(), 0);
+    }
+
+    #[test]
+    fn tg_idx_001_clear_clears_the_reverse_entries() {
+        let idx = NavigableIndex::new("price".to_string());
+        idx.insert("k", &price_record(1));
+        idx.clear();
+        idx.insert_if_absent("k", &price_record(2));
+        assert!(
+            holds(&idx, 2, "k"),
+            "after clear the key has no entry to keep"
+        );
+        assert_eq!(idx.entry_count(), 1);
+        idx.remove_key("k");
+        assert_eq!(idx.entry_count(), 0);
+    }
+
+    #[test]
+    fn tg_idx_001_concurrent_replacements_leave_one_entry() {
+        use std::sync::Arc;
+        use std::thread;
+
+        const THREADS: i64 = 8;
+        const ROUNDS: i64 = 10_000;
+        let idx = Arc::new(NavigableIndex::new("price".to_string()));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let idx = Arc::clone(&idx);
+                thread::spawn(move || {
+                    for r in 0..ROUNDS {
+                        idx.insert("k", &price_record(t * ROUNDS + r));
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+        assert_eq!(idx.entry_count(), 1);
+        let named = idx.inner.read().entries["k"]
+            .as_i64()
+            .expect("integer attribute");
+        assert!(
+            holds(&idx, named, "k"),
+            "k sits in the bucket its reverse entry names"
+        );
     }
 }

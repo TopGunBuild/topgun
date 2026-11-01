@@ -5,22 +5,30 @@
 //! This is a lightweight complement to the tantivy `SearchService`; it is NOT
 //! a replacement.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use dashmap::DashMap;
 use dashmap::DashSet;
+use parking_lot::Mutex;
 
 use super::{AttributeExtractor, Index, IndexType};
 
 /// An in-memory inverted index supporting O(K) token lookups where K is the
 /// number of records containing the queried token.
 ///
-/// Backed by `DashMap<String, DashSet<String>>` for concurrent access.
+/// Backed by `DashMap<String, DashSet<String>>`, so readers take no
+/// index-wide lock; mutations are serialized by one mutex around the reverse
+/// map (`TG-IDX-001`).
 pub struct InvertedIndex {
     attribute_name: String,
     extractor: AttributeExtractor,
     /// Map from token → set of record keys.
     map: DashMap<String, DashSet<String>>,
+    /// Reverse map: record key → the attribute value it is indexed under (the
+    /// value, re-tokenized on deindex, not its token list). Its mutex is the
+    /// index's mutation lock: every mutation reads the reverse entry, changes
+    /// the token sets and writes the reverse entry while holding it.
+    entries: Mutex<HashMap<String, rmpv::Value>>,
 }
 
 impl InvertedIndex {
@@ -30,7 +38,22 @@ impl InvertedIndex {
             extractor: AttributeExtractor::new(attribute_name.clone()),
             attribute_name,
             map: DashMap::new(),
+            entries: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Indexes `key` under the attribute value of `value`, replacing its entry,
+    /// or does nothing when `only_if_absent` and the key has an entry.
+    fn put_entry(&self, key: &str, value: &rmpv::Value, only_if_absent: bool) {
+        let attr_val = self.extractor.extract(value);
+        let mut entries = self.entries.lock();
+        if only_if_absent && entries.contains_key(key) {
+            return;
+        }
+        if let Some(old_attr) = entries.insert(key.to_owned(), attr_val.clone()) {
+            self.deindex_value(key, &old_attr);
+        }
+        self.index_value(key, &attr_val);
     }
 
     /// Returns the set of record keys whose indexed text contains ALL of the
@@ -139,23 +162,31 @@ impl Index for InvertedIndex {
     }
 
     fn insert(&self, key: &str, value: &rmpv::Value) {
-        let attr_val = self.extractor.extract(value);
-        self.index_value(key, &attr_val);
+        self.put_entry(key, value, false);
     }
 
-    fn update(&self, key: &str, old_value: &rmpv::Value, new_value: &rmpv::Value) {
-        let old_attr = self.extractor.extract(old_value);
-        let new_attr = self.extractor.extract(new_value);
-        self.deindex_value(key, &old_attr);
-        self.index_value(key, &new_attr);
+    fn insert_if_absent(&self, key: &str, value: &rmpv::Value) {
+        self.put_entry(key, value, true);
     }
 
-    fn remove(&self, key: &str, old_value: &rmpv::Value) {
-        let attr_val = self.extractor.extract(old_value);
-        self.deindex_value(key, &attr_val);
+    fn update(&self, key: &str, _old_value: &rmpv::Value, new_value: &rmpv::Value) {
+        self.put_entry(key, new_value, false);
+    }
+
+    fn remove(&self, key: &str, _old_value: &rmpv::Value) {
+        self.remove_key(key);
+    }
+
+    fn remove_key(&self, key: &str) {
+        let mut entries = self.entries.lock();
+        if let Some(old_attr) = entries.remove(key) {
+            self.deindex_value(key, &old_attr);
+        }
     }
 
     fn clear(&self) {
+        let mut entries = self.entries.lock();
+        entries.clear();
         self.map.clear();
     }
 
@@ -304,5 +335,117 @@ mod tests {
         assert!(idx.lookup_contains("computer").is_empty());
         assert!(idx.lookup_contains("desktop").contains("k1"));
         assert!(idx.lookup_contains("monitor").contains("k1"));
+    }
+
+    // --- TG-IDX-001: one entry per key, through the reverse entry ---
+
+    fn holds(idx: &InvertedIndex, v: &str, key: &str) -> bool {
+        idx.lookup_contains(v).contains(key)
+    }
+
+    #[test]
+    fn tg_idx_001_insert_replaces_the_key_entry() {
+        let idx = InvertedIndex::new("description".to_string());
+        idx.insert("k", &text_record("first"));
+        idx.insert("k", &text_record("second"));
+        assert!(
+            !holds(&idx, "first", "k"),
+            "the replaced value must not hold k"
+        );
+        assert!(holds(&idx, "second", "k"));
+        assert_eq!(idx.entry_count(), 1);
+    }
+
+    #[test]
+    fn tg_idx_001_remove_key_removes_without_old_value() {
+        let idx = InvertedIndex::new("description".to_string());
+        idx.insert("k", &text_record("first"));
+        idx.insert("other", &text_record("first"));
+        idx.remove_key("k");
+        assert!(!holds(&idx, "first", "k"));
+        assert!(holds(&idx, "first", "other"));
+        assert_eq!(idx.entry_count(), 1);
+        idx.remove_key("k");
+        assert_eq!(
+            idx.entry_count(),
+            1,
+            "removing an absent key changes nothing"
+        );
+    }
+
+    #[test]
+    fn tg_idx_001_insert_if_absent_keeps_the_existing_entry() {
+        let idx = InvertedIndex::new("description".to_string());
+        idx.insert("k", &text_record("second"));
+        idx.insert_if_absent("k", &text_record("first"));
+        assert!(holds(&idx, "second", "k"));
+        assert!(!holds(&idx, "first", "k"));
+        assert_eq!(idx.entry_count(), 1);
+        idx.insert_if_absent("fresh", &text_record("first"));
+        assert!(holds(&idx, "first", "fresh"), "an absent key is inserted");
+    }
+
+    #[test]
+    fn tg_idx_001_update_and_remove_ignore_a_stale_old_value() {
+        let idx = InvertedIndex::new("description".to_string());
+        idx.insert("k", &text_record("first"));
+        idx.update("k", &text_record("stale"), &text_record("second"));
+        assert!(
+            !holds(&idx, "first", "k"),
+            "the current value is replaced, not the passed one"
+        );
+        assert!(holds(&idx, "second", "k"));
+        assert_eq!(idx.entry_count(), 1);
+        idx.remove("k", &text_record("stale"));
+        assert!(!holds(&idx, "second", "k"));
+        assert_eq!(idx.entry_count(), 0);
+    }
+
+    #[test]
+    fn tg_idx_001_clear_clears_the_reverse_entries() {
+        let idx = InvertedIndex::new("description".to_string());
+        idx.insert("k", &text_record("first"));
+        idx.clear();
+        idx.insert_if_absent("k", &text_record("second"));
+        assert!(
+            holds(&idx, "second", "k"),
+            "after clear the key has no entry to keep"
+        );
+        assert_eq!(idx.entry_count(), 1);
+        idx.remove_key("k");
+        assert_eq!(idx.entry_count(), 0);
+    }
+
+    #[test]
+    fn tg_idx_001_concurrent_replacements_leave_one_entry() {
+        use std::sync::Arc;
+        use std::thread;
+
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 10_000;
+        let idx = Arc::new(InvertedIndex::new("description".to_string()));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let idx = Arc::clone(&idx);
+                thread::spawn(move || {
+                    for r in 0..ROUNDS {
+                        let v = format!("v{t}x{r}");
+                        idx.insert("k", &text_record(&v));
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+        assert_eq!(idx.entry_count(), 1);
+        let named = idx.entries.lock()["k"]
+            .as_str()
+            .expect("string attribute")
+            .to_owned();
+        assert!(
+            holds(&idx, &named, "k"),
+            "k sits in the bucket its reverse entry names"
+        );
     }
 }
