@@ -311,3 +311,272 @@ mod tests {
         assert_eq!(clock.now(), 3);
     }
 }
+
+/// The TTL is part of the stored value, so it survives everything the value
+/// survives (TG-TTL-001): eviction and reload from the durable store, and WAL
+/// replay of a snapshot frame and of an OR delta frame after a restart. Each
+/// proof reopens the store from disk and compares the encoded bytes.
+#[cfg(all(test, feature = "redb"))]
+mod durability {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    use crate::storage::datastores::RedbDataStore;
+    use crate::storage::factory::RecordStoreFactory;
+    use crate::storage::impls::StorageConfig;
+    use crate::storage::key_writer::KeyWriteToken;
+    use crate::storage::map_data_store::MapDataStore;
+    use crate::storage::record::{OrMapEntry, RecordValue};
+    use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+    use crate::storage::wal::{
+        Wal, WalEntry, WalFsyncPolicy, WalOp, WalRecovery, WalStorePayload, WalWriter,
+    };
+
+    const MAP: &str = "ttl";
+
+    fn ts(millis: u64) -> Timestamp {
+        Timestamp {
+            millis,
+            counter: 3,
+            node_id: "node-a".to_string(),
+        }
+    }
+
+    fn lww_with_ttl() -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String("expiring".to_string()),
+            timestamp: ts(1_700_000_000_000),
+            ttl_ms: Some(60_000),
+        }
+    }
+
+    fn entry_with_ttl(tag: &str, ttl_ms: Option<u64>) -> OrMapEntry {
+        OrMapEntry {
+            value: Value::Int(7),
+            tag: tag.to_string(),
+            timestamp: ts(1_700_000_000_000),
+            ttl_ms,
+        }
+    }
+
+    fn bytes(value: &RecordValue) -> Vec<u8> {
+        rmp_serde::to_vec_named(value).expect("encode")
+    }
+
+    async fn load_from_disk(data_dir: &Path, key: &str) -> RecordValue {
+        let store = RedbDataStore::new(data_dir).expect("reopen store");
+        store
+            .load(MAP, key)
+            .await
+            .expect("load")
+            .expect("the record is stored")
+    }
+
+    #[tokio::test]
+    async fn ttl_survives_eviction_and_reload_from_the_durable_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let value = lww_with_ttl();
+        {
+            let data_store = Arc::new(RedbDataStore::new(&data_dir).expect("store"));
+            let factory = RecordStoreFactory::new(StorageConfig::default(), data_store, Vec::new());
+            let store = factory.get_or_create(MAP, 0);
+            store
+                .put(
+                    &KeyWriteToken::for_test(MAP, "k"),
+                    "k",
+                    value.clone(),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .expect("put");
+            assert!(store.evict("k", false).is_some(), "the record was resident");
+            assert!(!store.exists_in_memory("k"));
+
+            let reloaded = store
+                .get("k", false)
+                .await
+                .expect("get")
+                .expect("reloaded from the store");
+            assert_eq!(bytes(&reloaded.value), bytes(&value));
+        }
+        let from_disk = load_from_disk(&data_dir, "k").await;
+        assert_eq!(bytes(&from_disk), bytes(&value));
+        assert_eq!(from_disk, value);
+    }
+
+    /// Appends `entries` to a store-mode WAL over a fresh store, closes both,
+    /// reopens them and runs recovery, as a restart does.
+    async fn replay(dir: &Path, entries: Vec<WalEntry>) {
+        let data_dir = dir.join("data");
+        let wal_dir = dir.join("wal");
+        {
+            let store: Arc<dyn MapDataStore> =
+                Arc::new(RedbDataStore::new(&data_dir).expect("store"));
+            let wal = WalWriter::open_over_store(wal_dir.clone(), WalFsyncPolicy::PerOp, store)
+                .expect("WAL");
+            for entry in &entries {
+                wal.append(0, entry).await.expect("append");
+            }
+        }
+        let store: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&data_dir).expect("store"));
+        let wal = WalWriter::open_over_store(wal_dir, WalFsyncPolicy::PerOp, Arc::clone(&store))
+            .expect("WAL");
+        WalRecovery::new(wal, vec![0])
+            .run(store)
+            .await
+            .expect("recovery");
+    }
+
+    #[tokio::test]
+    async fn ttl_survives_wal_replay_of_a_store_frame() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lww = lww_with_ttl();
+        let slot = RecordValue::OrMap {
+            records: vec![entry_with_ttl("a", Some(1_000)), entry_with_ttl("b", None)],
+            tombstones: vec!["gone".to_string()],
+        };
+        replay(
+            dir.path(),
+            vec![
+                WalEntry {
+                    map: MAP.to_string(),
+                    key: "lww".to_string(),
+                    op: WalOp::Store {
+                        value: WalStorePayload::Record(lww.clone()),
+                        expiration_time: None,
+                    },
+                    timestamp: Some(ts(1_700_000_000_000)),
+                    sequence: 1,
+                },
+                WalEntry {
+                    map: MAP.to_string(),
+                    key: "or".to_string(),
+                    op: WalOp::Store {
+                        value: WalStorePayload::Record(slot.clone()),
+                        expiration_time: None,
+                    },
+                    timestamp: None,
+                    sequence: 2,
+                },
+            ],
+        )
+        .await;
+        let data_dir = dir.path().join("data");
+        let replayed_lww = load_from_disk(&data_dir, "lww").await;
+        assert_eq!(bytes(&replayed_lww), bytes(&lww));
+        let replayed_slot = load_from_disk(&data_dir, "or").await;
+        assert_eq!(bytes(&replayed_slot), bytes(&slot));
+    }
+
+    /// The OR delta frame is written by the write-behind store, the one
+    /// sanctioned emitter (TG-OR-003), from the witness of an OR add; the store
+    /// is then abandoned without a flush, as by `kill -9` (its runtime is
+    /// dropped), and the restart folds the frame onto the empty store. The same
+    /// frame also decodes with the frozen shapes of the binary before `ttl_ms`.
+    #[test]
+    fn ttl_survives_wal_replay_of_an_or_delta_add_frame() {
+        use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
+        use crate::storage::map_data_store::ttl_bytes::{
+            BaseOrDelta, BaseOrMapEntry, BaseWalEntry, EarlierFrameOp,
+        };
+        use crate::storage::map_data_store::WriteSource;
+        use crate::storage::wal::OrDelta;
+
+        let runtime = || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let wal_dir = dir.path().join("wal");
+        let added = entry_with_ttl("t1", Some(30_000));
+        let slot = RecordValue::OrMap {
+            records: vec![added.clone()],
+            tombstones: Vec::new(),
+        };
+
+        let frames = runtime().block_on(async {
+            let store: Arc<dyn MapDataStore> =
+                Arc::new(RedbDataStore::new(&data_dir).expect("store"));
+            let wal = WalWriter::open_over_store(
+                wal_dir.clone(),
+                WalFsyncPolicy::PerOp,
+                Arc::clone(&store),
+            )
+            .expect("WAL");
+            let write_behind = WriteBehindDataStore::new_with_wal(
+                store,
+                WriteBehindConfig {
+                    write_delay_ms: 3_600_000,
+                    flush_interval_ms: 3_600_000,
+                    or_delta_wal: true,
+                    ..WriteBehindConfig::default()
+                },
+                Some(WalBootstrap {
+                    wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                    sequence_start: 1,
+                }),
+            );
+            write_behind
+                .add_with_witness(
+                    MAP,
+                    "or",
+                    WriteSource::Value(&slot),
+                    0,
+                    1_700_000_000_000,
+                    Some(&OrDelta::Add {
+                        entry: added.clone(),
+                    }),
+                )
+                .await
+                .expect("add");
+            let mut frames = Vec::new();
+            for partition in 0..topgun_core::PARTITION_COUNT {
+                frames.extend(wal.unapplied(partition).await.expect("unapplied"));
+            }
+            frames
+        });
+        assert_eq!(frames.len(), 1, "one frame, not flushed");
+        assert!(
+            !frames[0].op.subsumes_on_coalesce(),
+            "the frame is a delta, not a snapshot: {:?}",
+            frames[0].op
+        );
+        let earlier: BaseWalEntry =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&frames[0]).expect("encode"))
+                .expect("the earlier shapes decode the delta frame");
+        assert_eq!(
+            earlier.op,
+            EarlierFrameOp::OrDelta {
+                delta: BaseOrDelta::Add {
+                    entry: BaseOrMapEntry {
+                        value: added.value.clone(),
+                        tag: added.tag.clone(),
+                        timestamp: added.timestamp.clone(),
+                    },
+                },
+            }
+        );
+
+        runtime().block_on(async {
+            let store: Arc<dyn MapDataStore> =
+                Arc::new(RedbDataStore::new(&data_dir).expect("store"));
+            let wal =
+                WalWriter::open_over_store(wal_dir, WalFsyncPolicy::PerOp, Arc::clone(&store))
+                    .expect("WAL");
+            WalRecovery::new(wal, Vec::new())
+                .run(store)
+                .await
+                .expect("recovery");
+        });
+        let replayed = runtime().block_on(load_from_disk(&data_dir, "or"));
+        assert_eq!(bytes(&replayed), bytes(&slot));
+    }
+}

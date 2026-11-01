@@ -1822,8 +1822,9 @@ mod tests {
     struct OrRecordCase {
         tag: String,
         value: serde_json::Value,
-        /// Carried only so the TypeScript side can prove TTL never reaches the
-        /// leaf; the server stores no TTL on an OR entry.
+        /// TTL never reaches the leaf (TG-TTL-001): the TypeScript side proves it
+        /// on its entries, and the slot built here carries the case's `ttl_ms` on
+        /// its entries as the server stores it, so this side proves it too.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ttl_ms: Option<u64>,
     }
@@ -1924,6 +1925,7 @@ mod tests {
             .iter()
             .map(|r| OrMapEntry {
                 value: value_from_json(&r.value),
+                ttl_ms: r.ttl_ms,
                 ..entry(r.tag.clone())
             })
             .collect();
@@ -2233,5 +2235,265 @@ mod tests {
                 "N={n}: merkle_leaf_hash allocated {bytes} bytes, bound {bound}"
             );
         }
+    }
+}
+
+/// Byte identity and rollback decoding of the record value's `ttl_ms`
+/// (TG-TTL-001), beside the golden vectors above: a value without a TTL encodes
+/// to exactly the bytes it encoded to before the field existed, and the shapes
+/// of that earlier binary (frozen copies below) still decode a stored row, a
+/// `Store` frame and an `OrDelta::Add` frame that carry `ttlMs` (the last one
+/// in `storage::expiry`'s durability proofs).
+#[cfg(test)]
+pub(crate) mod ttl_bytes {
+    use serde::{Deserialize, Serialize};
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    use crate::storage::record::{OrMapEntry, RecordValue};
+    use crate::storage::wal::{WalEntry, WalOp, WalStorePayload};
+
+    // Frozen copies of the value and WAL shapes as they were before `ttl_ms`
+    // existed. They must never follow later changes to the real types: they
+    // stand for the binary a node may be rolled back to. The frame-op copy is
+    // named apart from the real op type so that the WAL's delta-frame belts
+    // (TG-OR-003), which look for the real type's delta variant by name, keep
+    // meaning the real type.
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub(crate) enum BaseRecordValue {
+        Lww {
+            value: Value,
+            timestamp: Timestamp,
+        },
+        OrMap {
+            records: Vec<BaseOrMapEntry>,
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            tombstones: Vec<String>,
+        },
+        OrTombstones {
+            tags: Vec<String>,
+        },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub(crate) struct BaseOrMapEntry {
+        pub(crate) value: Value,
+        pub(crate) tag: String,
+        pub(crate) timestamp: Timestamp,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(untagged)]
+    pub(crate) enum BaseWalStorePayload {
+        Record(BaseRecordValue),
+        Legacy(Value),
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub(crate) enum BaseOrDelta {
+        Add {
+            entry: BaseOrMapEntry,
+        },
+        Remove {
+            tag: String,
+        },
+        Prune {
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            tags: Vec<String>,
+        },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub(crate) enum EarlierFrameOp {
+        Store {
+            value: BaseWalStorePayload,
+            #[serde(skip_serializing_if = "Option::is_none", default)]
+            expiration_time: Option<i64>,
+        },
+        Remove,
+        OrDelta {
+            delta: BaseOrDelta,
+        },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub(crate) struct BaseWalEntry {
+        pub(crate) map: String,
+        pub(crate) key: String,
+        pub(crate) op: EarlierFrameOp,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        pub(crate) timestamp: Option<Timestamp>,
+        pub(crate) sequence: u64,
+    }
+
+    fn ts() -> Timestamp {
+        Timestamp {
+            millis: 1_700_000_000_000,
+            counter: 7,
+            node_id: "node-a".to_string(),
+        }
+    }
+
+    fn lww(ttl_ms: Option<u64>) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String("v".to_string()),
+            timestamp: ts(),
+            ttl_ms,
+        }
+    }
+
+    fn entry(tag: &str, ttl_ms: Option<u64>) -> OrMapEntry {
+        OrMapEntry {
+            value: Value::Int(1),
+            tag: tag.to_string(),
+            timestamp: ts(),
+            ttl_ms,
+        }
+    }
+
+    fn slot(ttl_ms: Option<u64>) -> RecordValue {
+        RecordValue::OrMap {
+            records: vec![entry("a", ttl_ms), entry("b", ttl_ms)],
+            tombstones: vec!["gone".to_string()],
+        }
+    }
+
+    fn base_entry(tag: &str) -> BaseOrMapEntry {
+        BaseOrMapEntry {
+            value: Value::Int(1),
+            tag: tag.to_string(),
+            timestamp: ts(),
+        }
+    }
+
+    fn base_lww() -> BaseRecordValue {
+        BaseRecordValue::Lww {
+            value: Value::String("v".to_string()),
+            timestamp: ts(),
+        }
+    }
+
+    fn base_slot() -> BaseRecordValue {
+        BaseRecordValue::OrMap {
+            records: vec![base_entry("a"), base_entry("b")],
+            tombstones: vec!["gone".to_string()],
+        }
+    }
+
+    /// `rmp_serde::to_vec_named` of `lww(None)`, as the binary before `ttl_ms`
+    /// wrote it: `{"lww": {"value": {"String": "v"}, "timestamp": {...}}}`.
+    const LWW_WITHOUT_TTL_NAMED: &str = "81a36c777782a576616c756581a6537472696e67a176a974696d657374616d7083a66d696c6c6973cf0000018bcfe56800a7636f756e74657207a66e6f64654964a66e6f64652d61";
+
+    fn hex(bytes: &[u8]) -> String {
+        use std::fmt::Write;
+        bytes.iter().fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+    }
+
+    #[test]
+    fn a_value_without_ttl_encodes_to_the_bytes_of_before_the_field() {
+        for (new, base) in [(lww(None), base_lww()), (slot(None), base_slot())] {
+            assert_eq!(
+                rmp_serde::to_vec_named(&new).unwrap(),
+                rmp_serde::to_vec_named(&base).unwrap(),
+                "named encoding of {new:?}"
+            );
+            assert_eq!(
+                rmp_serde::to_vec(&new).unwrap(),
+                rmp_serde::to_vec(&base).unwrap(),
+                "positional encoding of {new:?}"
+            );
+        }
+        assert_eq!(
+            hex(&rmp_serde::to_vec_named(&lww(None)).unwrap()),
+            LWW_WITHOUT_TTL_NAMED
+        );
+    }
+
+    #[test]
+    fn ttl_round_trips_under_the_name_ttl_ms() {
+        for value in [lww(None), lww(Some(5_000)), slot(None), slot(Some(5_000))] {
+            let named = rmp_serde::to_vec_named(&value).unwrap();
+            assert_eq!(rmp_serde::from_slice::<RecordValue>(&named).unwrap(), value);
+            let positional = rmp_serde::to_vec(&value).unwrap();
+            assert_eq!(
+                rmp_serde::from_slice::<RecordValue>(&positional).unwrap(),
+                value
+            );
+        }
+        let named = rmp_serde::to_vec_named(&lww(Some(5_000))).unwrap();
+        let contains = |needle: &[u8]| named.windows(needle.len()).any(|w| w == needle);
+        assert!(contains(b"ttlMs"), "the wire name is ttlMs");
+        assert!(!contains(b"ttl_ms"));
+        let named = rmp_serde::to_vec_named(&entry("a", Some(5_000))).unwrap();
+        assert!(named.windows(5).any(|w| w == b"ttlMs"));
+    }
+
+    #[test]
+    fn bytes_written_before_the_field_decode_without_ttl() {
+        let lww_bytes = rmp_serde::to_vec_named(&base_lww()).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<RecordValue>(&lww_bytes).unwrap(),
+            lww(None)
+        );
+        let slot_bytes = rmp_serde::to_vec_named(&base_slot()).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<RecordValue>(&slot_bytes).unwrap(),
+            slot(None)
+        );
+    }
+
+    /// The earlier binary ignores `ttlMs`: it decodes a stored row and a
+    /// `Store` frame written with a TTL, and sees the same value and timestamp.
+    /// Rows and WAL payloads are both `rmp_serde::to_vec_named` (the redb row
+    /// value; the frame payload of `wal::format::encode`). The OR delta frame
+    /// is decoded in `storage::expiry`'s durability proofs, from a frame the
+    /// write-behind emitter wrote: only the WAL's own modules may build one.
+    #[test]
+    fn the_earlier_shapes_decode_a_row_and_a_store_frame_with_ttl() {
+        let row = rmp_serde::to_vec_named(&lww(Some(5_000))).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<BaseRecordValue>(&row).unwrap(),
+            base_lww()
+        );
+        let row = rmp_serde::to_vec_named(&slot(Some(5_000))).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<BaseRecordValue>(&row).unwrap(),
+            base_slot()
+        );
+
+        let store_frame = WalEntry {
+            map: "m".to_string(),
+            key: "k".to_string(),
+            op: WalOp::Store {
+                value: WalStorePayload::Record(lww(Some(5_000))),
+                expiration_time: None,
+            },
+            timestamp: Some(ts()),
+            sequence: 9,
+        };
+        let decoded: BaseWalEntry =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&store_frame).unwrap()).unwrap();
+        assert_eq!(
+            decoded,
+            BaseWalEntry {
+                map: "m".to_string(),
+                key: "k".to_string(),
+                op: EarlierFrameOp::Store {
+                    value: BaseWalStorePayload::Record(base_lww()),
+                    expiration_time: None,
+                },
+                timestamp: Some(ts()),
+                sequence: 9,
+            }
+        );
     }
 }
