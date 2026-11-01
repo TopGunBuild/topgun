@@ -1615,6 +1615,7 @@ mod tests {
                 counter: 0,
                 node_id: "node-a".to_string(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -1987,6 +1988,7 @@ mod tests {
                 counter: case.counter,
                 node_id: case.node_id.clone(),
             },
+            ttl_ms: None,
         };
         match merkle_leaf_hash(&case.key, &record) {
             Some((MerkleLeafKind::Lww, hash)) => hash,

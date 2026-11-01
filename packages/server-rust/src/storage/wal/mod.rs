@@ -3083,6 +3083,7 @@ impl WalRecovery {
                         RecordValue::Lww {
                             value: v.clone(),
                             timestamp: ts,
+                            ttl_ms: None,
                         }
                     }
                 };
@@ -4736,6 +4737,7 @@ mod tests {
                 value: WalStorePayload::Record(RecordValue::Lww {
                     value: TgValue::String("v".to_string()),
                     timestamp: timestamp.clone(),
+                    ttl_ms: None,
                 }),
                 expiration_time: None,
             },
@@ -4882,6 +4884,7 @@ mod tests {
                 value: WalStorePayload::Record(RecordValue::Lww {
                     value: TgValue::Int(i64::try_from(millis).unwrap()),
                     timestamp: ts(millis),
+                    ttl_ms: None,
                 }),
                 expiration_time: None,
             },
@@ -4920,6 +4923,7 @@ mod tests {
         let newer = RecordValue::Lww {
             value: TgValue::Int(20),
             timestamp: ts(20),
+            ttl_ms: None,
         };
 
         // Gate ON: an older (ts=10) frame over a newer (ts=20) durable value is discarded.
@@ -5013,6 +5017,7 @@ mod tests {
                 &RecordValue::Lww {
                     value: TgValue::Int(50),
                     timestamp: ts(50),
+                    ttl_ms: None,
                 },
                 0,
                 0,
@@ -5043,6 +5048,7 @@ mod tests {
                     counter: 0,
                     node_id: String::new(),
                 },
+                ttl_ms: None,
             }),
             "a legacy frame must always-merge (bypass the gate) even over a newer value"
         );
@@ -5053,6 +5059,7 @@ mod tests {
             value: TgValue::Int(value),
             tag: tag.to_string(),
             timestamp: ts(u64::try_from(value).unwrap()),
+            ttl_ms: None,
         }
     }
 
@@ -5268,6 +5275,7 @@ mod tests {
         let newer = RecordValue::Lww {
             value: TgValue::Int(20),
             timestamp: ts(20),
+            ttl_ms: None,
         };
         let sentinel_remove = WalEntry {
             map: "m".to_string(),
@@ -6220,6 +6228,7 @@ mod tests {
                     counter: 0,
                     node_id: "n1".to_string(),
                 },
+                ttl_ms: None,
             }),
             expiration_time: None,
         }
@@ -6253,6 +6262,7 @@ mod tests {
                     counter: 0,
                     node_id: "n1".to_string(),
                 },
+                ttl_ms: None,
             }),
             expiration_time: None,
         };
@@ -6299,6 +6309,7 @@ mod tests {
                             counter: 0,
                             node_id: "n1".to_string(),
                         },
+                        ttl_ms: None,
                     },
                 },
             }
@@ -6359,6 +6370,7 @@ mod tests {
                 counter: 0,
                 node_id: "n1".to_string(),
             },
+            ttl_ms: None,
         };
         store.add("m", "k", &value, 0, 0).await.unwrap();
 

@@ -142,6 +142,7 @@ fn or_slot(n: usize) -> RecordValue {
                 value: topgun_core::types::Value::Null,
                 tag: format!("{i:020}:0:{NODE}"),
                 timestamp: ts(),
+                ttl_ms: None,
             })
             .collect(),
         tombstones: Vec::new(),

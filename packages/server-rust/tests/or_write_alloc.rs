@@ -158,6 +158,7 @@ fn entry(tag: String) -> OrMapEntry {
         value: Value::Null,
         tag,
         timestamp: ts(1_700_000_000_000),
+        ttl_ms: None,
     }
 }
 
@@ -439,6 +440,7 @@ fn lww(i: u64) -> RecordValue {
     RecordValue::Lww {
         value: Value::Int(i as i64),
         timestamp: ts(1_700_000_000_000 + i),
+        ttl_ms: None,
     }
 }
 

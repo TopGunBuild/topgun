@@ -141,6 +141,7 @@ async fn tiebreak_equal_sort_field_produces_deterministic_key_order() {
                 m
             }),
             timestamp: ts(1),
+            ttl_ms: None,
         };
         data_store
             .add(map_name, key, &value, 0, 1_704_067_200)
@@ -251,6 +252,7 @@ async fn tiebreak_equal_sort_field_key_ascending_regardless_of_desc_sort() {
                 m
             }),
             timestamp: ts(1),
+            ttl_ms: None,
         };
         data_store
             .add(map_name, key, &value, 0, 1_704_067_200)

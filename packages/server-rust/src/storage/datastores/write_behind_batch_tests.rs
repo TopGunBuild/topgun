@@ -665,6 +665,7 @@ fn lww(text: &str, millis: u64) -> RecordValue {
             counter: 0,
             node_id: "n".to_string(),
         },
+        ttl_ms: None,
     }
 }
 

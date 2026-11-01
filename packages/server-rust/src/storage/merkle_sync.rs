@@ -557,6 +557,7 @@ mod tests {
                     counter,
                     node_id: node_id.to_string(),
                 },
+                ttl_ms: None,
             },
             #[allow(clippy::cast_possible_wrap)]
             metadata: RecordMetadata::new(millis as i64, 64),
@@ -574,6 +575,7 @@ mod tests {
                         counter: 0,
                         node_id: "node-1".to_string(),
                     },
+                    ttl_ms: None,
                 }],
                 tombstones: vec![],
             },
@@ -749,6 +751,7 @@ mod tests {
                 counter: 1,
                 node_id: "node-1".to_string(),
             },
+            ttl_ms: None,
         };
         observer.on_update("user-1", &old_record, &old_record.value, &new_value, false);
         let hash_v2 = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
@@ -1227,6 +1230,7 @@ mod rebuild_tests {
                 counter,
                 node_id: node_id.to_string(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -1240,6 +1244,7 @@ mod rebuild_tests {
                     counter: 0,
                     node_id: "node-1".to_string(),
                 },
+                ttl_ms: None,
             }],
             tombstones: vec![],
         }
@@ -1670,6 +1675,7 @@ mod rebuild_tests {
                 counter: 0,
                 node_id: "n1".to_string(),
             },
+            ttl_ms: None,
         };
         let (lww_kind, lww) = merkle_leaf_hash("alice", &lww_value).expect("LWW yields a leaf");
         assert_eq!(lww_kind, MerkleLeafKind::Lww);
@@ -1688,6 +1694,7 @@ mod rebuild_tests {
                     counter: 0,
                     node_id: "n".to_string(),
                 },
+                ttl_ms: None,
             }],
             tombstones: vec![],
         };

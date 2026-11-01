@@ -97,6 +97,7 @@ async fn full_scan_returns_all_records_regardless_of_hlc_skew() {
         let value = RecordValue::Lww {
             value: Value::String(format!("val-{i}")),
             timestamp: ts.clone(),
+            ttl_ms: None,
         };
         data_store
             .add(map_name, &key, &value, 0, 1_704_067_200)

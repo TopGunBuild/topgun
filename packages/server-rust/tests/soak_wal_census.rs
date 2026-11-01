@@ -97,6 +97,7 @@ fn or_snapshot_entry(sequence: u64, slot_entries: usize) -> WalEntry {
             value: Value::String(format!("value-padding-{i:016}")),
             tag: format!("tag-{i:016}"),
             timestamp: stamp(1_000 + i as u64),
+            ttl_ms: None,
         })
         .collect();
     let tombstones: Vec<String> = (0..slot_entries).map(|i| format!("dead-{i:016}")).collect();
@@ -123,6 +124,7 @@ fn lww_entry(sequence: u64) -> WalEntry {
             value: WalStorePayload::Record(RecordValue::Lww {
                 value: Value::String("v".to_string()),
                 timestamp: stamp(sequence),
+                ttl_ms: None,
             }),
             expiration_time: None,
         },

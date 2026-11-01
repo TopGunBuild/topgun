@@ -664,7 +664,9 @@ impl SimCluster {
 
             if let Some(rec) = record {
                 match rec.value {
-                    RecordValue::Lww { value, timestamp } => {
+                    RecordValue::Lww {
+                        value, timestamp, ..
+                    } => {
                         let lww = LWWRecord {
                             value: Some(value_to_rmpv(&value)),
                             timestamp,
@@ -815,6 +817,7 @@ impl SimCluster {
                 RecordValue::Lww {
                     value: v,
                     timestamp,
+                    ..
                 } => {
                     // Skip if destination already has an equal or newer timestamp.
                     // Full Timestamp ordering includes node_id as tiebreaker (millis → counter → node_id),
@@ -1319,6 +1322,7 @@ mod tests {
                         counter: 0,
                         node_id: "sim-node-1".to_string(),
                     },
+                    ttl_ms: None,
                 },
                 ExpiryPolicy::NONE,
                 CallerProvenance::Client,
@@ -1837,6 +1841,7 @@ mod tests {
                             counter: 0,
                             node_id,
                         },
+                        ttl_ms: None,
                     },
                     ExpiryPolicy::NONE,
                     CallerProvenance::Client,
@@ -2036,6 +2041,7 @@ mod tests {
                             counter: 0,
                             node_id,
                         },
+                        ttl_ms: None,
                     },
                     ExpiryPolicy::NONE,
                     CallerProvenance::Client,
@@ -3096,6 +3102,7 @@ mod tests {
                 value: topgun_core::Value::Int(1),
                 tag: tag.to_string(),
                 timestamp: zero_ts(node),
+                ttl_ms: None,
             };
             let op = Operation::ClientOp {
                 ctx: op_ctx(node, key),
@@ -3253,6 +3260,7 @@ mod tests {
                         value: topgun_core::Value::Int(0),
                         tag: LEGACY.to_string(),
                         timestamp: zero_ts(&cluster.nodes[0]),
+                        ttl_ms: None,
                     }],
                     tombstones: Vec::new(),
                 },

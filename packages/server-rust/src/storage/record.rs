@@ -622,6 +622,13 @@ pub enum RecordValue {
         value: Value,
         /// HLC timestamp of the last write.
         timestamp: Timestamp,
+        /// Time to live in milliseconds, anchored at `timestamp.millis` (TG-TTL-001).
+        ///
+        /// Renamed explicitly: an enum's `rename_all` renames variants, not the
+        /// fields of a struct variant. Skipped when absent so a value without a
+        /// TTL encodes to the same bytes as before the field existed.
+        #[serde(rename = "ttlMs", default, skip_serializing_if = "Option::is_none")]
+        ttl_ms: Option<u64>,
     },
     /// Observed-Remove Map value with tagged entries.
     OrMap {
@@ -669,6 +676,11 @@ pub struct OrMapEntry {
     pub tag: String,
     /// HLC timestamp when this entry was created.
     pub timestamp: Timestamp,
+    /// Time to live in milliseconds, anchored at `timestamp.millis` (TG-TTL-001).
+    /// Skipped when absent so an entry without a TTL encodes to the same bytes
+    /// as before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
 }
 
 /// A complete record: CRDT value + server-internal metadata.
@@ -756,6 +768,7 @@ mod tombstone_bytes_gauge_tests {
                         counter: 0,
                         node_id: "node-a".to_string(),
                     },
+                    ttl_ms: None,
                 }],
                 tombstones: vec!["tag-removed".to_string()],
             };
@@ -792,6 +805,7 @@ mod tombstone_bytes_gauge_tests {
                     counter: 0,
                     node_id: "node-a".to_string(),
                 },
+                ttl_ms: None,
             }],
             tombstones,
         }
@@ -807,6 +821,7 @@ mod tombstone_bytes_gauge_tests {
                 counter: 0,
                 node_id: "node-a".to_string(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -924,6 +939,7 @@ mod tombstone_bytes_gauge_tests {
                         counter: 0,
                         node_id: "node-a".to_string(),
                     },
+                    ttl_ms: None,
                 })
                 .collect(),
             tombstones: Vec::new(),
@@ -1151,11 +1167,13 @@ mod or_map_tombstone_tests {
                     value: Value::String("alice".to_string()),
                     tag: "tag-1".to_string(),
                     timestamp: ts(100, 0),
+                    ttl_ms: None,
                 },
                 OrMapEntry {
                     value: Value::Int(42),
                     tag: "tag-2".to_string(),
                     timestamp: ts(101, 0),
+                    ttl_ms: None,
                 },
             ],
             tombstones: vec!["tag-removed-1".to_string(), "tag-removed-2".to_string()],

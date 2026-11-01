@@ -3291,6 +3291,7 @@ mod tests {
                 counter: 0,
                 node_id: String::new(),
             },
+            ttl_ms: None,
         };
         store
             .add("bin-cause", "in-the-dead-batch", &value, 0, 0)
@@ -3708,6 +3709,7 @@ mod tests {
                     counter: 0,
                     node_id: "n".to_string(),
                 },
+                ttl_ms: None,
             }
         }
 

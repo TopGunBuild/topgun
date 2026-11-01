@@ -636,6 +636,7 @@ mod tests {
                 value: WalStorePayload::Record(RecordValue::Lww {
                     value: Value::String("hello".to_string()),
                     timestamp: timestamp.clone(),
+                    ttl_ms: None,
                 }),
                 expiration_time: Some(1_700_000_000_000),
             },
@@ -693,6 +694,7 @@ mod tests {
                             counter: 0,
                             node_id: "node-c".to_string(),
                         },
+                        ttl_ms: None,
                     },
                 },
             },

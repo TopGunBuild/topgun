@@ -88,6 +88,7 @@ async fn full_scan_accepts_all_records_with_monotone_hlc() {
         let value = RecordValue::Lww {
             value: Value::String(format!("record-{i}")),
             timestamp: ts,
+            ttl_ms: None,
         };
         data_store
             .add(map_name, &format!("mono{i:04}"), &value, 0, 1_704_067_200)

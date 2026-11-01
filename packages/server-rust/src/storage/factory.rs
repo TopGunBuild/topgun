@@ -647,6 +647,7 @@ mod tests {
                 counter: 0,
                 node_id: "node-1".to_string(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -991,6 +992,7 @@ mod tests {
             RecordValue::Lww {
                 value: Value::String(value.to_string()),
                 timestamp: ts(millis),
+                ttl_ms: None,
             }
         }
 
@@ -1000,6 +1002,7 @@ mod tests {
                     value: Value::String(value.to_string()),
                     tag: format!("tag-{value}"),
                     timestamp: ts(1_000),
+                    ttl_ms: None,
                 }],
                 tombstones: Vec::new(),
             }

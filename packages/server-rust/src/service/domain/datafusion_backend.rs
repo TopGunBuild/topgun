@@ -255,6 +255,7 @@ mod tests {
                     RecordValue::Lww {
                         value: make_user(name, age),
                         timestamp: test_timestamp(),
+                        ttl_ms: None,
                     },
                     ExpiryPolicy::NONE,
                     CallerProvenance::Client,
@@ -474,6 +475,7 @@ mod tests {
                 RecordValue::Lww {
                     value: make_user("Bob", 25),
                     timestamp: test_timestamp(),
+                    ttl_ms: None,
                 },
                 ExpiryPolicy::NONE,
                 CallerProvenance::Client,

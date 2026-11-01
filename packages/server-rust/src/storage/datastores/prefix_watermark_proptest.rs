@@ -73,6 +73,7 @@ fn lww(millis: u64) -> RecordValue {
             counter: 0,
             node_id: String::new(),
         },
+        ttl_ms: None,
     }
 }
 
@@ -2884,6 +2885,7 @@ fn or_entry(tag: &str) -> OrMapEntry {
             counter: 0,
             node_id: "node-1".to_string(),
         },
+        ttl_ms: None,
     }
 }
 
