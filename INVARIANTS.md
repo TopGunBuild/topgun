@@ -3553,8 +3553,7 @@ weaker than a test.
 - **Precondition:** the map's `IndexRegistry` existed when each partition store of the map was
   created. This holds for every index restored at startup and for `create_index` on a map with no
   live store (TODO-898 covers the rest).
-- **Statement:** once the startup rebuild or backfill reports `done` (SPEC-401b2), and with no
-  write in flight, every key with a stored or resident `Lww` value has exactly one reverse entry,
+- **Statement:** once the startup rebuild or backfill reports `done`, and with no write in flight, every key with a stored or resident `Lww` value has exactly one reverse entry,
   holding the attribute value of its current value, and the index's buckets hold the key under
   exactly that value. Eviction removes no entry. A delete removes the key's entry, resident or not.
   Rewriting an evicted key replaces its entry. Every consumer still verifies candidates against the
@@ -3569,9 +3568,15 @@ weaker than a test.
   take it. The observer's `on_evict` does nothing, `on_put` / `on_update` / `on_replication_put`
   replace, `on_load` calls `insert_if_absent`, and `on_remove` / `on_remove_key` remove the key's
   entry. The lock does not rely on `TG-KEY-001`, which does not cover `on_load` and `on_evict`.
+  The startup rebuild and the `create_index` backfill share `backfill_scalar_index`
+  (`scalar_rebuild.rs`): it reads the map through `RecordStoreFactory::scan_merged`
+  (`TG-READ-001`), stored and resident records alike, gives every `Lww` row to the index with
+  `insert_if_absent`, and sets `done` only when the scan completes.
 - **Not claimed:**
   - a delete that runs before a concurrent backfill reaches its key can leave one stale entry for
     the deleted key;
+  - after a failed rebuild or backfill scan (`done == false`, one `ERROR` line) the index is partial
+    and holds only the rows visited before the error, until the next restart or `create_index`;
   - a load that races a delete can leave one stale entry for good: `get` takes no writer
     (`TG-KEY-002`), so a load that read the row before the delete was staged can run `on_load`'s
     `insert_if_absent` after the delete's `remove_key`, and nothing removes that entry later;
@@ -3583,16 +3588,17 @@ weaker than a test.
 - **Maintaining code:** `service/domain/index/mod.rs` — the `Index` contract; `hash_index.rs`,
   `navigable_index.rs`, `inverted_index.rs` — the reverse entry and its lock;
   `mutation_observer.rs` — `IndexMutationObserver`.
-- **Enforcing test:** `on_evict_keeps_index_entries`, `tg_idx_001_rewrite_after_evict_replaces_the_entry`, `tg_idx_001_on_load_keeps_a_newer_put`, `tg_idx_001_on_remove_key_removes_from_every_index` (`mutation_observer.rs`);
+- **Enforcing test:** `on_evict_keeps_index_entries`, `tg_idx_001_rewrite_after_evict_replaces_the_entry`, `tg_idx_001_on_load_keeps_a_newer_put`, `tg_idx_001_on_remove_key_removes_from_every_index` (`mutation_observer.rs`); `backfill_keeps_a_newer_entry_and_skips_non_lww_rows`, `a_failed_scan_leaves_done_false_and_the_next_descriptor_runs` (`scalar_rebuild.rs`);
   per scalar index type (`hash_index.rs`, `navigable_index.rs`, `inverted_index.rs`): `tg_idx_001_insert_replaces_the_key_entry`, `tg_idx_001_remove_key_removes_without_old_value`,
   `tg_idx_001_insert_if_absent_keeps_the_existing_entry`, `tg_idx_001_concurrent_replacements_leave_one_entry`, `tg_idx_001_update_and_remove_ignore_a_stale_old_value`,
   `tg_idx_001_clear_clears_the_reverse_entries`.
 - **Integration tests:** `tests/integration-rust/stored-read-paths.test.ts` —
   `AC14: the scalar index keeps every evicted key`,
-  `AC22: rewriting evicted keys replaces their index entries`.
+  `AC22: rewriting evicted keys replaces their index entries`,
+  `AC12: the index restored at start holds every stored record`,
+  `AC13: create_index after a restart backfills every stored record`.
 - **Violation consequence:** a scalar index drops the keys of evicted records, or keeps a second
   entry for a rewritten key under its old value, so a consumer that trusts the index as a candidate
   set misses matching records or carries stale ones.
-- **Discovered by:** SPEC-398b2 (TODO-897); part SPEC-401b1.
-- **Status:** open (SPEC-401b2) — until the startup rebuild and the `create_index` backfill read the
-  stored map, after a restart the index holds only what was written or loaded since.
+- **Discovered by:** SPEC-398b2 (TODO-897); parts SPEC-401b1 and SPEC-401b2.
+- **Status:** decided.
