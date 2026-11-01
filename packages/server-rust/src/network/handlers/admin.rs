@@ -1210,32 +1210,25 @@ pub async fn create_index(
         backfill_progress.insert((map_name.clone(), attribute.clone()), Arc::clone(&progress));
 
         tokio::spawn(async move {
-            let stores = store_factory.get_all_for_map(&map_name);
-
-            // Count total records across all partition stores.
-            let total: u64 = stores.iter().map(|s| s.size() as u64).sum();
-            progress.total.store(total, Ordering::Relaxed);
-
-            // Iterate each record and insert into the index.
-            for store in &stores {
-                store.for_each_boxed(
-                    &mut |key, record| {
-                        if let crate::storage::record::RecordValue::Lww { ref value, .. } =
-                            record.value
-                        {
-                            let rmpv_val = crate::service::domain::predicate::value_to_rmpv(value);
-                            if let Some(idx) = registry_clone.get_index(&attribute) {
-                                idx.insert(key, &rmpv_val);
-                            }
-                        }
-                        progress.processed.fetch_add(1, Ordering::Relaxed);
-                    },
-                    false,
-                );
+            match crate::service::domain::index::scalar_rebuild::backfill_scalar_index(
+                &store_factory,
+                &map_name,
+                &attribute,
+                &registry_clone,
+                &progress,
+            )
+            .await
+            {
+                Ok(total) => {
+                    info!(map = %map_name, attribute = %attribute, total = total, "index backfill complete");
+                }
+                Err(error) => tracing::error!(
+                    map = %map_name,
+                    attribute = %attribute,
+                    error = %error,
+                    "index backfill failed: the index holds only the records scanned before the error"
+                ),
             }
-
-            progress.done.store(true, Ordering::Relaxed);
-            info!(map = %map_name, attribute = %attribute, total = total, "index backfill complete");
         });
     }
 
