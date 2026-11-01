@@ -165,6 +165,7 @@ impl DeviceIdentityStore {
                 counter: 0,
                 node_id: String::new(),
             },
+            ttl_ms: None,
         };
         self.store
             .add(

@@ -448,6 +448,7 @@ mod tests {
                     counter: 0,
                     node_id: String::new(),
                 },
+                ttl_ms: None,
             },
             metadata: RecordMetadata::new(0, cost),
         }
@@ -785,6 +786,7 @@ mod tests {
                     counter: 0,
                     node_id: "node-a".to_string(),
                 },
+                ttl_ms: None,
             },
             metadata: RecordMetadata::new(same_now, 64),
         };
@@ -800,6 +802,7 @@ mod tests {
                     counter: 0,
                     node_id: "node-b".to_string(),
                 },
+                ttl_ms: None,
             },
             metadata: RecordMetadata::new(same_now, 64),
         };

@@ -1141,6 +1141,7 @@ mod tests {
                             counter: 0,
                             node_id: "node-1".to_string(),
                         },
+                        ttl_ms: None,
                     },
                     ExpiryPolicy::NONE,
                     CallerProvenance::Client,
@@ -1195,6 +1196,7 @@ mod tests {
                     counter: 0,
                     node_id: "n".to_string(),
                 },
+                ttl_ms: None,
             },
         );
         let factory = Arc::new(RecordStoreFactory::new(

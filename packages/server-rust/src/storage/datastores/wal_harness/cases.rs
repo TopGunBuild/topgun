@@ -1954,6 +1954,7 @@ fn tg_or_003_ac7b_an_or_delta_survivor_carries_the_retired_sequences_forward() {
                     counter: 0,
                     node_id: String::new(),
                 },
+                ttl_ms: None,
             },
         },
     }

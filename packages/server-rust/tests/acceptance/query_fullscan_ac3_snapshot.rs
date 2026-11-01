@@ -108,6 +108,7 @@ async fn snapshot_reflects_durable_state_at_scan_time() {
         let value = RecordValue::Lww {
             value: Value::String(format!("initial-{i}")),
             timestamp: make_ts(i),
+            ttl_ms: None,
         };
         data_store
             .add(map_name, &format!("key{i:04}"), &value, 0, 1_704_067_200)
@@ -143,6 +144,7 @@ async fn snapshot_reflects_durable_state_at_scan_time() {
         let value = RecordValue::Lww {
             value: Value::String(format!("later-{i}")),
             timestamp: make_ts(i),
+            ttl_ms: None,
         };
         data_store
             .add(map_name, &format!("key{i:04}"), &value, 0, 1_704_067_200)
@@ -202,6 +204,7 @@ async fn snapshot_merges_resident_over_datastore_by_hlc_direction() {
         let value = RecordValue::Lww {
             value: Value::String(val.to_string()),
             timestamp: ts,
+            ttl_ms: None,
         };
         data_store
             .add(map_name, key, &value, 0, 1_704_067_200)
@@ -223,6 +226,7 @@ async fn snapshot_merges_resident_over_datastore_by_hlc_direction() {
         let value = RecordValue::Lww {
             value: Value::String(val.to_string()),
             timestamp: ts,
+            ttl_ms: None,
         };
         let writer = key_writer.acquire(map_name, key).await;
         store

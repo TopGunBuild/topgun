@@ -181,6 +181,7 @@ mod tests {
                             value: Value::Int(1),
                             tag: (*t).to_string(),
                             timestamp: make_timestamp(),
+                            ttl_ms: None,
                         })
                         .collect(),
                     tombstones: tombstones.iter().copied().map(String::from).collect(),

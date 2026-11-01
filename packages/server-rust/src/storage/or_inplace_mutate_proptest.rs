@@ -371,6 +371,7 @@ mod tests {
                     value: Value::Int(*val),
                     tag: tag.clone(),
                     timestamp: ts(u64::try_from(val.rem_euclid(1_000_000)).unwrap_or(0)),
+                    ttl_ms: None,
                 };
                 let mut entry_opt = Some(entry);
                 let mut merge = move |value: &mut RecordValue| {
@@ -475,6 +476,7 @@ mod tests {
                     value: Value::Int(*val),
                     tag: tag.clone(),
                     timestamp: ts(u64::try_from(val.rem_euclid(1_000_000)).unwrap_or(0)),
+                    ttl_ms: None,
                 };
                 let existing = store.get(KEY, false).await.unwrap();
                 let (mut records, tombstones) = read_state(existing.map(|r| r.value));
@@ -737,6 +739,7 @@ mod tests {
                     value: Value::Int(i as i64 * 7 + 1),
                     tag: format!("{}:{}:node-1", 1_700_000_000_000_u64 + i as u64, i),
                     timestamp: ts(1_700_000_000_000 + i as u64),
+                    ttl_ms: None,
                 })
                 .collect(),
             tombstones: (0..tombstones)
@@ -1064,6 +1067,7 @@ mod tests {
                 value: Value::Int(7),
                 tag: "t-once".to_string(),
                 timestamp: ts(1),
+                ttl_ms: None,
             });
             let mut merge_once = move |value: &mut RecordValue| {
                 normalize(value);
@@ -1132,6 +1136,7 @@ mod tests {
             let lww = RecordValue::Lww {
                 value: Value::Int(4242),
                 timestamp: ts(1_700_000_000_000),
+                ttl_ms: None,
             };
             store
                 .put(
@@ -1337,6 +1342,7 @@ mod tests {
                 value: Value::Int(1),
                 tag: tag.to_string(),
                 timestamp: ts(1),
+                ttl_ms: None,
             }],
             tombstones: Vec::new(),
         }
@@ -1378,6 +1384,7 @@ mod tests {
                         value: Value::Int(2),
                         tag: "t-new".to_string(),
                         timestamp: ts(2),
+                        ttl_ms: None,
                     });
                 }
                 write_owed(true)

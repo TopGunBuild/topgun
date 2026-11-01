@@ -2032,6 +2032,7 @@ mod sealing_tests {
                 counter: 0,
                 node_id: "n".to_string(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -2589,6 +2590,7 @@ mod tenant_drop_tests {
                 counter: 0,
                 node_id: "n".to_string(),
             },
+            ttl_ms: None,
         })
         .expect("encode")
     }

@@ -400,6 +400,7 @@ mod tests {
                     counter: 0,
                     node_id: "n".to_string(),
                 },
+                ttl_ms: None,
             }
         }
 
@@ -473,6 +474,7 @@ mod tests {
                             counter: 0,
                             node_id: "n".to_string(),
                         },
+                        ttl_ms: None,
                     }],
                     tombstones: Vec::new(),
                 },
@@ -647,6 +649,7 @@ mod tests {
                     counter: 0,
                     node_id: "n".to_string(),
                 },
+                ttl_ms: None,
             }
         }
 

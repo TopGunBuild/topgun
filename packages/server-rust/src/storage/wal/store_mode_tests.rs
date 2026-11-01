@@ -398,6 +398,7 @@ pub(super) fn lww(text: &str, millis: u64) -> RecordValue {
             counter: 0,
             node_id: "n".to_string(),
         },
+        ttl_ms: None,
     }
 }
 
@@ -3222,6 +3223,7 @@ async fn a90_one_entry_commits_cost_no_more_than_base() {
                 counter: 0,
                 node_id: "n".to_string(),
             },
+            ttl_ms: None,
         };
         wb.add("m", &key, &value, 0, 0).await.expect("add");
     }
