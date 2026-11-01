@@ -12,6 +12,8 @@
  * hybrid `fullText`, hybrid `includeValue`, deletes before and after a
  * restart, and the same reads after eviction has thinned the resident set
  * (`TOPGUN_MAX_RAM_MB=1`, witnessed by the admin map listing's resident count).
+ * Under the same eviction, the scalar index keeps one entry per stored record,
+ * also after evicted keys are rewritten (TG-IDX-001).
  */
 
 import { serialize, deserialize } from '@topgunbuild/core';
@@ -393,5 +395,75 @@ describe('Integration: whole-map reads see evicted records (TG-READ-001)', () =>
     const client = await s.connect('ac5');
     expect(await search(client, 'sharedterm', N + 10)).toHaveLength(N);
     expect(await exactKeys(client, N + 10)).toHaveLength(N);
+  }, 120_000);
+});
+
+/** The admin index listing's `entryCount` of the index on `MAP`.`status`. */
+async function statusIndexEntries(port: number): Promise<number> {
+  const listed = await admin(port, 'GET', '/api/admin/indexes');
+  expect(listed.status).toBe(200);
+  const index = listed.json.indexes.find((i: any) => i.mapName === MAP && i.attribute === 'status');
+  expect(index).toBeDefined();
+  return index.entryCount;
+}
+
+/** Writes keys `k0000…` with ~4 KiB values, `status` chosen per key. */
+async function writePadded(
+  client: TestClient,
+  n: number,
+  status: (i: number) => string,
+): Promise<void> {
+  const pad = 'x'.repeat(4000);
+  for (let from = 0; from < n; from += 50) {
+    const batch = [];
+    for (let i = from; i < Math.min(n, from + 50); i++) {
+      const key = `k${String(i).padStart(4, '0')}`;
+      batch.push({ key, value: { id: key, status: status(i), pad } });
+    }
+    await writeMany(client, batch);
+  }
+}
+
+/** Waits until the resident count of `MAP` drops below `n`, so eviction has run. */
+async function evictionWitness(port: number, n: number): Promise<void> {
+  let resident = n;
+  await waitUntil(async () => {
+    resident = await residentCount(port);
+    return resident < n;
+  }, 30_000);
+  process.stderr.write(`[stored-read-paths] eviction witness: entry_count ${resident} < ${n}\n`);
+}
+
+describe('Integration: a scalar index under eviction (TG-IDX-001)', () => {
+  const N = 600;
+  let s: ReturnType<typeof storedServer>;
+
+  beforeEach(async () => {
+    s = storedServer({ TOPGUN_MAX_RAM_MB: '1' });
+    s.ctx.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-stored-index-'));
+    await s.start();
+    await s.createStatusIndex();
+  });
+
+  afterEach(async () => {
+    await s.stop();
+    if (s.ctx.dir) fs.rmSync(s.ctx.dir, { recursive: true, force: true });
+  });
+
+  test('AC14: the scalar index keeps every evicted key', async () => {
+    const port = s.ctx.server!.port;
+    const writer = await s.connect('writer');
+    await writePadded(writer, N, (i) => `s${i}`);
+    await evictionWitness(port, N);
+    expect(await statusIndexEntries(port)).toBe(N);
+  }, 120_000);
+
+  test('AC22: rewriting evicted keys replaces their index entries', async () => {
+    const port = s.ctx.server!.port;
+    const writer = await s.connect('writer');
+    await writePadded(writer, N, () => 'old');
+    await evictionWitness(port, N);
+    await writePadded(writer, N, () => 'new');
+    expect(await statusIndexEntries(port)).toBe(N);
   }, 120_000);
 });
