@@ -13,7 +13,9 @@
  * restart, and the same reads after eviction has thinned the resident set
  * (`TOPGUN_MAX_RAM_MB=1`, witnessed by the admin map listing's resident count).
  * Under the same eviction, the scalar index keeps one entry per stored record,
- * also after evicted keys are rewritten (TG-IDX-001).
+ * also after evicted keys are rewritten; after a restart, a scalar index
+ * restored at start and one created with `create_index` hold every stored
+ * record (TG-IDX-001).
  */
 
 import { serialize, deserialize } from '@topgunbuild/core';
@@ -466,4 +468,62 @@ describe('Integration: a scalar index under eviction (TG-IDX-001)', () => {
     await writePadded(writer, N, () => 'new');
     expect(await statusIndexEntries(port)).toBe(N);
   }, 120_000);
+});
+
+/** The backfill status of the index on `MAP`.`status`. */
+async function statusIndexProgress(port: number): Promise<any> {
+  const status = await admin(port, 'GET', `/api/admin/indexes/${MAP}/status/status`);
+  expect(status.status).toBe(200);
+  return status.json;
+}
+
+describe('Integration: a scalar index after a restart covers the stored records (TG-IDX-001)', () => {
+  const N = 50;
+  let s: ReturnType<typeof storedServer>;
+
+  const writeDistinct = async (): Promise<void> => {
+    const writer = await s.connect('writer');
+    const records = [];
+    for (let i = 0; i < N; i++)
+      records.push({ key: `k${i}`, value: { id: `k${i}`, status: `s${i}` } });
+    await writeMany(writer, records);
+  };
+
+  beforeEach(async () => {
+    s = storedServer();
+    s.ctx.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-stored-rebuild-'));
+    await s.start();
+  });
+
+  afterEach(async () => {
+    await s.stop();
+    if (s.ctx.dir) fs.rmSync(s.ctx.dir, { recursive: true, force: true });
+  });
+
+  test('AC12: the index restored at start holds every stored record', async () => {
+    await s.createStatusIndex();
+    await writeDistinct();
+    const port = await s.restart();
+    expect(await statusIndexEntries(port)).toBe(N);
+    expect(await statusIndexProgress(port)).toMatchObject({
+      done: true,
+      total: N,
+      processed: N,
+      rebuildType: 'startupRebuild',
+    });
+  }, 60_000);
+
+  test('AC13: create_index after a restart backfills every stored record', async () => {
+    await writeDistinct();
+    const port = await s.restart();
+    // No read of the map before the index is created.
+    await s.createStatusIndex();
+    let progress: any;
+    await waitUntil(async () => {
+      progress = await statusIndexProgress(port);
+      return progress.done === true;
+    }, 30_000);
+    expect(progress).toMatchObject({ done: true, total: N, processed: N });
+    expect(await statusIndexEntries(port)).toBe(N);
+  }, 60_000);
 });
