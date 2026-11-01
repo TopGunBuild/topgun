@@ -484,7 +484,8 @@ describe('Integration: a scalar index after a restart covers the stored records 
   const writeDistinct = async (): Promise<void> => {
     const writer = await s.connect('writer');
     const records = [];
-    for (let i = 0; i < N; i++) records.push({ key: `k${i}`, value: { id: `k${i}`, status: `s${i}` } });
+    for (let i = 0; i < N; i++)
+      records.push({ key: `k${i}`, value: { id: `k${i}`, status: `s${i}` } });
     await writeMany(writer, records);
   };
 
