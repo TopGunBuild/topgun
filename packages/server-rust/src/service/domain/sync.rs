@@ -737,7 +737,9 @@ impl SyncService {
                     match store.get(key, false).await {
                         Ok(Some(record)) => {
                             if let RecordValue::Lww {
-                                value, timestamp, ..
+                                value,
+                                timestamp,
+                                ttl_ms,
                             } = record.value
                             {
                                 records.push(SyncLeafRecord {
@@ -745,7 +747,7 @@ impl SyncService {
                                     record: LWWRecord {
                                         value: Some(value_to_rmpv(&value)),
                                         timestamp,
-                                        ttl_ms: None,
+                                        ttl_ms,
                                     },
                                 });
                             }
@@ -807,7 +809,9 @@ impl SyncService {
                         match store.get(key, false).await {
                             Ok(Some(record)) => {
                                 if let RecordValue::Lww {
-                                    value, timestamp, ..
+                                    value,
+                                    timestamp,
+                                    ttl_ms,
                                 } = record.value
                                 {
                                     records.push(SyncLeafRecord {
@@ -815,7 +819,7 @@ impl SyncService {
                                         record: LWWRecord {
                                             value: Some(value_to_rmpv(&value)),
                                             timestamp,
-                                            ttl_ms: None,
+                                            ttl_ms,
                                         },
                                     });
                                 }
@@ -895,7 +899,9 @@ impl SyncService {
                 match store.get(key, false).await {
                     Ok(Some(record)) => {
                         if let RecordValue::Lww {
-                            value, timestamp, ..
+                            value,
+                            timestamp,
+                            ttl_ms,
                         } = record.value
                         {
                             records.push(SyncLeafRecord {
@@ -903,7 +909,7 @@ impl SyncService {
                                 record: LWWRecord {
                                     value: Some(value_to_rmpv(&value)),
                                     timestamp,
-                                    ttl_ms: None,
+                                    ttl_ms,
                                 },
                             });
                         }
@@ -1181,7 +1187,7 @@ impl SyncService {
                                         value: value_to_rmpv(&r.value),
                                         timestamp: r.timestamp,
                                         tag: r.tag,
-                                        ttl_ms: None,
+                                        ttl_ms: r.ttl_ms,
                                     })
                                     .collect();
                                 // Carry tombstones so remove-wins suppression and
@@ -1279,7 +1285,7 @@ impl SyncService {
                                             value: value_to_rmpv(&r.value),
                                             timestamp: r.timestamp,
                                             tag: r.tag,
-                                            ttl_ms: None,
+                                            ttl_ms: r.ttl_ms,
                                         })
                                         .collect();
                                     // Carry tombstones so remove-wins suppression and
@@ -1388,7 +1394,7 @@ impl SyncService {
                                     value: value_to_rmpv(&r.value),
                                     timestamp: r.timestamp,
                                     tag: r.tag,
-                                    ttl_ms: None,
+                                    ttl_ms: r.ttl_ms,
                                 })
                                 .collect();
                             // Carry tombstones so remove-wins suppression and
@@ -1481,7 +1487,7 @@ impl SyncService {
                                 value: value_to_rmpv(&r.value),
                                 timestamp: r.timestamp,
                                 tag: r.tag,
-                                ttl_ms: None,
+                                ttl_ms: r.ttl_ms,
                             })
                             .collect();
                         // Carry tombstones so remove-wins suppression and
