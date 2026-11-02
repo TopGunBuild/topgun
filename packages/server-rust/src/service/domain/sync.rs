@@ -20,7 +20,7 @@ use topgun_core::messages::{
     SyncRespLeafMessage, SyncRespLeafPayload, SyncRespRootMessage, SyncRespRootPayload,
 };
 use topgun_core::types::Value;
-use topgun_core::{hash_to_partition, LWWRecord, ORMapRecord};
+use topgun_core::{hash_to_partition, LWWRecord, ORMapRecord, SystemClock, HLC};
 
 // Helper enum for Merkle tree node classification (extracted to module level
 // to avoid "adding items after statements" clippy warning).
@@ -162,6 +162,11 @@ pub struct SyncService {
     /// sweep race an OR write. `new` installs a fresh registry so standalone
     /// construction (tests, null-store) still has a writer.
     key_writer: Arc<KeyWriterRegistry>,
+    /// The server clock a push diff stamps each newly accepted OR entry with
+    /// (TG-TTL-001). Every wiring that also builds a `WriteAdmission` MUST pass
+    /// the SAME `Arc` it mints from (`with_hlc`): two clocks with one node id
+    /// could mint the same timestamp for two different writes.
+    hlc: Arc<parking_lot::Mutex<HLC>>,
 }
 
 /// Per-`(map_name, connection_id)` cache of materialised Merkle sync sessions.
@@ -262,7 +267,9 @@ impl SyncSessionRegistry {
 }
 
 impl SyncService {
-    /// Creates a new `SyncService`.
+    /// Creates a new `SyncService` with a private server clock on
+    /// `SystemClock`. For unit tests without a `WriteAdmission` only: a wiring
+    /// that also builds one passes its clock with [`Self::with_hlc`].
     #[must_use]
     pub fn new(
         merkle_manager: Arc<MerkleSyncManager>,
@@ -291,7 +298,20 @@ impl SyncService {
             session_registry,
             frontier: None,
             key_writer: Arc::new(KeyWriterRegistry::new()),
+            hlc: Arc::new(parking_lot::Mutex::new(HLC::new(
+                "sync-service".to_string(),
+                Box::new(SystemClock),
+            ))),
         }
+    }
+
+    /// Replace the private clock with the server clock the `WriteAdmission`
+    /// of the same node mints from, so a push diff and a client write never
+    /// stamp one timestamp twice and stay ordered on one clock (TG-TTL-001).
+    #[must_use]
+    pub fn with_hlc(mut self, hlc: Arc<parking_lot::Mutex<HLC>>) -> Self {
+        self.hlc = hlc;
+        self
     }
 
     /// Wire the shared causal frontier + per-key writer so OR-Map sync responses
