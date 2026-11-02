@@ -30,7 +30,8 @@
 // Profile ttl-field (insertion only): walk R and A together; where they
 // differ, A must begin, at that point and outside any literal or comment, with
 // an insertion allowed there, which is skipped before the walk goes on: inside
-// a brace field list, `,..` or `..` directly before its `}` (`..` only after
+// a brace field list (its `{` found in the hunk or, above it, in the whole new
+// file, and preceded by a path rather than a macro name or a block opener), `,..` or `..` directly before its `}` (`..` only after
 // `,` or `{`), `,ttl_ms:None` before `}` or `,`, `ttl_ms:None,` after `{` or
 // `,`; anywhere, a single `,` directly before `}` or `)` (rustfmt's trailing
 // comma). Any other difference, or text of R left over, rejects the hunk. So
@@ -208,15 +209,25 @@ function lex(text, state) {
   return { out, state: st };
 }
 
-// Lexer state at the start of every line (index 0 = line 1) of a whole file.
-function lineStartStates(text) {
-  const states = [];
+// At the start of every line (index 0 = line 1) of a whole file: the lexer
+// state, the open brackets that enclose the line (each with the code just
+// before it), and the code just before the line.
+function lineStarts(text) {
+  const starts = [];
   let st = CODE;
+  const stack = [];
+  let tail = '';
   for (const line of text.split('\n')) {
-    states.push(st);
-    st = lex(line + '\n', st).state;
+    starts.push({ state: st, stack: stack.slice(), tail });
+    const r = lex(line + '\n', st);
+    st = r.state;
+    for (const c of codeOf(r.out).replace(/ /g, '')) {
+      if (c === '{' || c === '(' || c === '[') stack.push({ ch: c, before: tail });
+      else if (c === '}' || c === ')' || c === ']') stack.pop();
+      tail = (tail + c).slice(-16);
+    }
   }
-  return states;
+  return starts;
 }
 
 // Lexes consecutive lines; returns one normalised piece per line.
@@ -241,10 +252,19 @@ const codeOf = (s) => mapCode(s, (x) => x).split(new RegExp(`${OPEN}[^${CLOSE}]*
 const trailingComma = (s) => s.replace(/,\)/g, ')').replace(/,\}/g, '}');
 const singleItemGroup = (s) => s.replace(/::\{([^{},]*),?\}/g, '::$1');
 
-// Whether position `j` of a normalised text may be in a brace field list:
-// false when the bracket enclosing it in the hunk is `(` or `[`; true when it
-// is `{` or lies above the hunk, where only the position rules decide.
-function inBraceList(s, j) {
+// A `{` opens a struct literal or pattern only after a path: an identifier
+// that is not a keyword opening a block, or the `>` of generic arguments. A
+// macro (`m! {`), a block after `=>`, `)`, `|`, `=` or `;`, and a body after
+// `else` / `loop` / `unsafe` / `async` / `move` / `try` / `const` are not field lists.
+const isFieldBrace = (before) =>
+  (/[A-Za-z0-9_]$/.test(before) && !/(^|[^A-Za-z0-9_])(else|loop|unsafe|async|move|try|const)$/.test(before)) ||
+  (/>$/.test(before) && !/[=-]>$/.test(before));
+
+// Whether position `j` of the normalised new side of a hunk lies directly in a
+// brace field list. The enclosing bracket is looked for in the hunk first and
+// then among the brackets the whole file has open at the hunk's first line
+// (`outer`); none at all means not in a field list.
+function inBraceList(s, j, outer) {
   let depth = 0;
   for (let k = j - 1; k >= 0; k -= 1) {
     const c = s[k];
@@ -253,11 +273,15 @@ function inBraceList(s, j) {
     } else if (c === '}' || c === ')' || c === ']') {
       depth += 1;
     } else if (c === '{' || c === '(' || c === '[') {
-      if (depth === 0) return c === '{';
-      depth -= 1;
+      if (depth > 0) {
+        depth -= 1;
+      } else {
+        return c === '{' && isFieldBrace((outer.tail + codeOf(s.slice(0, k)).replace(/ /g, '')).slice(-16));
+      }
     }
   }
-  return true;
+  const open = outer.stack[outer.stack.length - 1 - depth];
+  return open !== undefined && open.ch === '{' && isFieldBrace(open.before);
 }
 
 // Each insertion with the position it is allowed at: inside a brace field
@@ -270,7 +294,7 @@ const TTL_INSERTIONS = [
 ];
 
 // Insertion-only alignment of the ttl-field profile.
-function ttlAlign(r, a) {
+function ttlAlign(r, a, outer) {
   let i = 0;
   let j = 0;
   let inLiteral = false;
@@ -285,7 +309,7 @@ function ttlAlign(r, a) {
     if (j >= a.length) return 'the old side has text the new side lacks';
     if (inLiteral) return 'a literal or a comment differs';
     const ins = TTL_INSERTIONS.find(
-      ([t, allowed]) => a.startsWith(t, j) && allowed(a, j, j + t.length) && inBraceList(a, j),
+      ([t, allowed]) => a.startsWith(t, j) && allowed(a, j, j + t.length) && inBraceList(a, j, outer),
     );
     if (ins) {
       j += ins[0].length;
@@ -299,7 +323,9 @@ function ttlAlign(r, a) {
 }
 
 // A hunk is a list of lines { kind: ' ' | '-' | '+', text }. `states` gives the
-// lexer state at the first line of the old and of the new side (code when absent).
+// lexer state at the first line of the old and of the new side (code when
+// absent), and, for the new side, the brackets the file has open there and the
+// code before it (`newOuter`; none when absent).
 export function checkHunk(profileName, lines, states = {}) {
   const profile = PROFILES[profileName];
   if (!profile) throw new Error(`unknown profile ${profileName}`);
@@ -315,7 +341,7 @@ export function checkHunk(profileName, lines, states = {}) {
   )
     .map((p) => p.out)
     .join('');
-  if (profile.kind === 'ttl') return ttlAlign(oldLex.map((p) => p.out).join(''), a);
+  if (profile.kind === 'ttl') return ttlAlign(oldLex.map((p) => p.out).join(''), a, states.newOuter ?? { stack: [], tail: '' });
 
   const regexes = [...profile.regexes];
   const stripAll = (s, res) => mapCode(s, (code) => res.reduce((acc, re) => acc.replace(re, ''), code));
@@ -425,6 +451,7 @@ export function checkRange({ cwd, base, head, profile, counted }) {
     throw new Error(`--base and --head did not resolve to two commits: ${shas.join(' ')}`);
   }
   const [baseSha, headSha] = shas;
+  if (baseSha === headSha) throw new Error('--base and --head name the same commit: there is nothing to check');
   const status = git(cwd, ['diff', '--no-ext-diff', '-z', '--name-status', '-M', '-C', baseSha, headSha, '--']);
   for (const { code, paths } of parseNameStatusZ(status)) {
     if (paths.every((p) => countedSet.has(p))) {
@@ -454,13 +481,15 @@ export function checkRange({ cwd, base, head, profile, counted }) {
       rejected.push({ file: path, reason: 'the file contains U+0001 or U+0002, which the filter cannot check' });
       continue;
     }
-    const oldStates = lineStartStates(oldText);
-    const newStates = lineStartStates(newText);
+    const oldStarts = lineStarts(oldText);
+    const newStarts = lineStarts(newText);
     for (const hunk of hunks) {
       hunkCount += 1;
+      const newStart = stateAt(newStarts, hunk.newStart, hunk.lines.filter((l) => l.kind !== '-').length);
       const states = {
-        old: stateAt(oldStates, hunk.oldStart, hunk.lines.filter((l) => l.kind !== '+').length),
-        new: stateAt(newStates, hunk.newStart, hunk.lines.filter((l) => l.kind !== '-').length),
+        old: stateAt(oldStarts, hunk.oldStart, hunk.lines.filter((l) => l.kind !== '+').length).state,
+        new: newStart.state,
+        newOuter: newStart,
       };
       const reason = checkHunk(profile, hunk.lines, states);
       if (reason) rejected.push({ file: path, header: hunk.header, reason, lines: hunk.lines });
@@ -491,6 +520,7 @@ const FIXTURES = [
 +    let v = RecordValue::Lww { value: Value::Int(1), timestamp: ts, ttl_ms: None };
 `)],
   ['ttl-field', true, 'multi-line literal gains a field line', hunk(`
+     let v = RecordValue::Lww {
          timestamp: ts.clone(),
 +        ttl_ms: None,
      };
@@ -512,6 +542,7 @@ const FIXTURES = [
 +    RecordValue::Lww { value, timestamp, .. } => (value, timestamp),
 `)],
   ['ttl-field', true, 'multi-line pattern gains a .. line', hunk(`
+     RecordValue::Lww {
          timestamp,
 +        ..
      } => {
@@ -614,6 +645,14 @@ const FIXTURES = [
   ['ttl-field', false, 'ttl_ms: None inserted into a call', hunk(`
 -    f(x);
 +    f(x, ttl_ms: None);
+`)],
+  ['ttl-field', false, '.. inserted into a macro brace', hunk(`
+-    m! { a, b }
++    m! { a, b, .. }
+`)],
+  ['ttl-field', false, 'ttl_ms: None inserted into a block', hunk(`
+-    x => { a; b }
++    x => { a; b, ttl_ms: None }
 `)],
   ['ttl-field', false, 'comma inserted before ]', hunk(`
 -    let v = [a];
@@ -753,6 +792,10 @@ function selfTestRange() {
     write('café.rs', 'fn g() {\n    let n = 1;\n}\n');
     write('long.rs', LONG_STRING('a b'));
     write('marks.rs', 'fn m() {\n    let s = "a\u0002}";\n}\n');
+    const LIT = (extra) => `fn l() {\n    let v = RecordValue::Lww {\n        a: 1,\n        b: 2,\n        c: 3,\n        d: 4,\n        e: 5,\n${extra}    };\n}\n`;
+    write('lit.rs', LIT(''));
+    const MAC = (extra) => `fn m() {\n    m!(\n        a,\n        b,\n        c,\n        d,\n${extra}        e,\n        f,\n    );\n}\n`;
+    write('mac.rs', MAC(''));
     write('ünï.rs', 'fn u() {\n    let v = RecordValue::Lww { value: x, timestamp: t };\n}\n');
     runGit(dir, ['add', '-A']);
     runGit(dir, ['commit', '-q', '-m', 'base']);
@@ -761,6 +804,7 @@ function selfTestRange() {
     // Mechanical change in a.rs and in a non-ASCII path; counted file rewritten; new counted file.
     write('a.rs', 'fn a() {\n    let v = RecordValue::Lww { value: x, timestamp: t, ttl_ms: None };\n}\n');
     write('ünï.rs', 'fn u() {\n    let v = RecordValue::Lww { value: x, timestamp: t, ttl_ms: None };\n}\n');
+    write('lit.rs', LIT('        ttl_ms: None,\n'));
     write('counted.rs', 'fn d() { anything_goes(); }\n');
     write('new_counted.rs', 'fn g() {}\n');
     runGit(dir, ['add', '-A']);
@@ -780,6 +824,7 @@ function selfTestRange() {
       ['non-mechanical hunk in a non-ASCII path', () => write('café.rs', 'fn g() {\n    let n = 2;\n}\n')],
       ['counted file renamed to a non-counted path', () => renameSync(join(dir, 'kept_counted.rs'), join(dir, 'evil.rs'))],
       ['whitespace removed in a hunk wholly inside a string literal', () => write('long.rs', LONG_STRING('ab'))],
+      ['ttl_ms: None inserted into a macro call opened above the hunk', () => write('mac.rs', MAC('        ttl_ms: None,\n'))],
       ['a file holding the lexer marks', () => write('marks.rs', 'fn m() {\n    let s = "a\u0002,}";\n}\n')],
     ];
     for (const [name, change] of forbidden) {
@@ -822,8 +867,8 @@ function selfTest() {
   const range = selfTestRange();
   if (range.length === 0) {
     console.log(
-      'ok   range: counted files skipped; mechanical range (non-ASCII path included) accepted; non-mechanical hunk, add, delete, rename, ' +
-        'non-ASCII path, counted-to-non-counted rename, an edit inside a multi-line string and a file holding the lexer marks rejected',
+      'ok   range: counted files skipped; mechanical range (non-ASCII path and a literal opened above the hunk included) accepted; non-mechanical hunk, add, delete, rename, ' +
+        'non-ASCII path, counted-to-non-counted rename, an edit inside a multi-line string, ttl_ms: None in a macro call opened above the hunk and a file holding the lexer marks rejected',
     );
   }
   failures.push(...range);
