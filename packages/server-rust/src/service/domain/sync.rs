@@ -1728,10 +1728,11 @@ impl SyncService {
             // additions (add-wins broken).
             //
             // The closure runs at most once per call (TG-OR-001), so the
-            // tombstone-bytes gauge is charged once per genuinely-new tag; because
-            // `init` is `Some` it runs exactly once on every `Ok`, so the broadcast
-            // set it records is always defined.
-            let mut tombstoned_inbound: HashSet<String> = HashSet::new();
+            // tombstone-bytes gauge is charged once per genuinely-new tag and the
+            // server clock is read once per newly accepted tag; because `init` is
+            // `Some` it runs exactly once on every `Ok`, so the broadcast list it
+            // records is always defined.
+            let mut broadcast: Vec<ORMapRecord<rmpv::Value>> = Vec::new();
             let mut merge = |value: &mut RecordValue| {
                 // A legacy `OrTombstones` blob folds into an `OrMap`; an `Lww` value
                 // under a key pushed as OR becomes an empty `OrMap` and is replaced.
@@ -1771,27 +1772,38 @@ impl SyncService {
                     // Apply inbound records (add-wins): keep a record unless its tag
                     // is tombstoned. De-duplicate by tag so repeated pushes are
                     // idempotent; on a same-tag conflict the stored record is kept.
+                    // Each surviving inbound record is broadcast as the entry stored
+                    // for its tag.
                     for r in &entry.records {
                         if known.contains(r.tag.as_str()) {
-                            tombstoned_inbound.insert(r.tag.clone());
                             continue;
                         }
-                        if records.iter().any(|existing| existing.tag == r.tag) {
-                            continue;
-                        }
-                        crate::storage::record::add_live_census(1, r.tag.len() as u64);
-                        records.push(crate::storage::record::OrMapEntry {
-                            value: crate::service::domain::crdt::rmpv_to_value(&r.value),
-                            // Tag stays verbatim (OR identity — re-stamping breaks
-                            // fleet tag identity / CRDT convergence). The `timestamp`
-                            // is copied verbatim too and is an ACCEPTED-AS-UNTRUSTED,
-                            // client-supplied value used only for LWW tie-breaking
-                            // WITHIN this OR entry — the server neither re-stamps nor
-                            // clamps it (authenticity of the identity is enforced by
-                            // the connection-keyed gate above, not by this field).
+                        let stored = if let Some(i) =
+                            records.iter().position(|existing| existing.tag == r.tag)
+                        {
+                            i
+                        } else {
+                            crate::storage::record::add_live_census(1, r.tag.len() as u64);
+                            records.push(crate::storage::record::OrMapEntry {
+                                value: crate::service::domain::crdt::rmpv_to_value(&r.value),
+                                // The tag stays verbatim: it is the OR identity, and
+                                // re-stamping it would break fleet tag identity and
+                                // CRDT convergence. The timestamp is minted by the
+                                // server clock under this key's writer instead of
+                                // taken from the client: it is the entry's expiry
+                                // anchor and orders entries within this OR slot, so
+                                // both stay server-authoritative (TG-TTL-001).
+                                tag: r.tag.clone(),
+                                timestamp: self.hlc.lock().now(),
+                                ttl_ms: None,
+                            });
+                            records.len() - 1
+                        };
+                        broadcast.push(ORMapRecord {
+                            value: value_to_rmpv(&records[stored].value),
+                            timestamp: records[stored].timestamp.clone(),
                             tag: r.tag.clone(),
-                            timestamp: r.timestamp.clone(),
-                            ttl_ms: None,
+                            ttl_ms: r.ttl_ms,
                         });
                     }
                     tombstones.extend(new_tags);
@@ -1821,21 +1833,18 @@ impl SyncService {
                 .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
 
             // Send OR_ADD only for inbound records that actually survived the
-            // merge. A record whose tag is tombstoned (remove-wins) was suppressed
-            // from stored state, so emitting an OR_ADD for it would tell subscribers
-            // to resurrect a removed entry. This runs while `key_guard` is still
-            // held (see above).
-            for record in &entry.records {
-                if tombstoned_inbound.contains(&record.tag) {
-                    continue;
-                }
+            // merge, each carrying the entry as stored for its tag. A record whose
+            // tag is tombstoned (remove-wins) was suppressed from stored state, so
+            // emitting an OR_ADD for it would tell subscribers to resurrect a
+            // removed entry. This runs while `key_guard` is still held (see above).
+            for record in broadcast {
                 let event_payload = ServerEventPayload {
                     map_name: map_name.clone(),
                     key: entry.key.clone(),
                     event_type: ServerEventType::OR_ADD,
                     record: None,
-                    or_record: Some(record.clone()),
                     or_tag: Some(record.tag.clone()),
+                    or_record: Some(record),
                 };
                 broadcast_server_event(
                     &self.query_registry,
@@ -3060,8 +3069,276 @@ mod tests {
         assert_eq!(events[0].event_type, ServerEventType::OR_ADD);
         assert_eq!(events[0].map_name, "tags");
         assert_eq!(events[0].key, "tag-1");
-        assert_eq!(events[0].or_record.as_ref(), Some(&record));
+        // The record is broadcast as stored: the timestamp is the server's, so
+        // only the value, the tag and the TTL are the pushed ones.
+        let sent = events[0]
+            .or_record
+            .as_ref()
+            .expect("an OR_ADD carries its record");
+        assert_eq!(
+            (&sent.value, &sent.tag, sent.ttl_ms),
+            (&record.value, &record.tag, record.ttl_ms)
+        );
         assert_eq!(events[0].or_tag.as_deref(), Some(record.tag.as_str()));
+    }
+
+    // -------------------------------------------------------------------------
+    // Push diff stamps newly accepted OR entries at receipt (TG-TTL-001)
+    // -------------------------------------------------------------------------
+
+    /// The server clock's fixed reading: with the clock standing still, every
+    /// mint raises the HLC counter by one, so counters count mints.
+    const SERVER_MS: u64 = 1_800_000_000_000;
+
+    /// A `SyncService` whose clock is `hlc`, with one writer connection and one
+    /// subscriber of `map`.
+    struct StampRig {
+        svc: Arc<SyncService>,
+        factory: Arc<RecordStoreFactory>,
+        hlc: Arc<parking_lot::Mutex<HLC>>,
+        writer: ConnectionId,
+        subscriber_rx: tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>,
+    }
+
+    fn stamp_rig(map: &str) -> StampRig {
+        let hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
+            "server-node".to_string(),
+            Box::new(crate::storage::expiry::ManualClock::new(SERVER_MS)),
+        )));
+        let factory = make_factory();
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let svc = Arc::new(
+            SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                Arc::clone(&factory),
+                Arc::clone(&connection_registry),
+                Arc::clone(&query_registry),
+            )
+            .with_hlc(Arc::clone(&hlc)),
+        );
+        let (writer, _) = register_client(&connection_registry, &query_registry, Some(map));
+        let (_, subscriber_rx) = register_client(&connection_registry, &query_registry, Some(map));
+        StampRig {
+            svc,
+            factory,
+            hlc,
+            writer,
+            subscriber_rx,
+        }
+    }
+
+    impl StampRig {
+        /// Pushes `entry` to `map` from the writer connection.
+        async fn push(&self, map: &str, entry: ORMapEntry) {
+            use topgun_core::messages::{ORMapPushDiff, ORMapPushDiffPayload};
+            let mut ctx = make_ctx(service_names::SYNC);
+            ctx.connection_id = Some(self.writer);
+            let op = Operation::ORMapPushDiff {
+                ctx,
+                payload: ORMapPushDiff {
+                    payload: ORMapPushDiffPayload {
+                        map_name: map.to_string(),
+                        entries: vec![entry],
+                    },
+                },
+            };
+            let resp = Arc::clone(&self.svc).oneshot(op).await.unwrap();
+            assert!(matches!(resp, OperationResponse::Empty), "got {resp:?}");
+        }
+
+        /// Mints one timestamp from the service's clock.
+        fn mint(&self) -> Timestamp {
+            self.hlc.lock().now()
+        }
+
+        /// The entries stored for `key`, in stored order.
+        async fn stored(&self, map: &str, key: &str) -> Vec<crate::storage::record::OrMapEntry> {
+            let store = self.factory.get_or_create(map, hash_to_partition(key));
+            match store.get(key, false).await.unwrap().map(|r| r.value) {
+                Some(RecordValue::OrMap { records, .. }) => records,
+                other => panic!("expected an OR value under {key}, got {other:?}"),
+            }
+        }
+
+        /// The `OR_ADD` records the subscriber has received since the last call.
+        fn or_adds(&mut self) -> Vec<ORMapRecord<rmpv::Value>> {
+            received_events(&mut self.subscriber_rx)
+                .into_iter()
+                .map(|e| e.or_record.expect("an OR_ADD carries its record"))
+                .collect()
+        }
+    }
+
+    fn client_record(value: &str, millis: u64, tag: &str) -> ORMapRecord<rmpv::Value> {
+        ORMapRecord {
+            value: rmpv::Value::String(value.into()),
+            timestamp: Timestamp {
+                millis,
+                counter: 7,
+                node_id: "client-node".to_string(),
+            },
+            tag: tag.to_string(),
+            ttl_ms: Some(60_000),
+        }
+    }
+
+    fn server_ts(counter: u32) -> Timestamp {
+        Timestamp {
+            millis: SERVER_MS,
+            counter,
+            node_id: "server-node".to_string(),
+        }
+    }
+
+    /// A client clock 10 minutes ahead of or behind the server does not reach
+    /// the stored entry: the server mints its timestamp, keeps the tag verbatim,
+    /// and broadcasts the stored timestamp.
+    #[tokio::test]
+    async fn push_diff_stamps_new_entry_at_receipt() {
+        const MAP: &str = "stamped";
+        for (case, client_ms) in [
+            ("ahead", SERVER_MS + 600_000),
+            ("behind", SERVER_MS - 600_000),
+        ] {
+            let mut rig = stamp_rig(MAP);
+            let tag = format!("{client_ms}:7:client-node");
+            let pushed = client_record("v", client_ms, &tag);
+
+            let before = rig.mint();
+            rig.push(
+                MAP,
+                ORMapEntry {
+                    key: "k".to_string(),
+                    records: vec![pushed.clone()],
+                    tombstones: Vec::new(),
+                },
+            )
+            .await;
+            let after = rig.mint();
+
+            // Exactly one mint between the two reads, and it is the stored one.
+            let minted = server_ts(before.counter + 1);
+            assert_eq!(
+                after,
+                server_ts(before.counter + 2),
+                "{case}: one mint per new tag"
+            );
+            let stored = rig.stored(MAP, "k").await;
+            assert_eq!(stored.len(), 1, "{case}");
+            assert_eq!(
+                stored[0].timestamp, minted,
+                "{case}: stored timestamp is the server's"
+            );
+            assert_ne!(stored[0].timestamp, pushed.timestamp, "{case}");
+            assert_eq!(stored[0].tag, tag, "{case}: tag verbatim");
+
+            let sent = rig.or_adds();
+            assert_eq!(
+                sent,
+                vec![ORMapRecord {
+                    value: pushed.value.clone(),
+                    timestamp: minted,
+                    tag: tag.clone(),
+                    ttl_ms: pushed.ttl_ms,
+                }],
+                "{case}: the broadcast carries the stored entry"
+            );
+        }
+    }
+
+    /// A tag the slot already holds keeps its stored timestamp and value, and so
+    /// does a tag repeated within one entry; neither mints, and each inbound
+    /// record is broadcast as the entry stored for its tag.
+    #[tokio::test]
+    async fn push_diff_keeps_the_stored_entry_of_a_known_tag() {
+        const MAP: &str = "known";
+        let mut rig = stamp_rig(MAP);
+        let first = client_record("first", SERVER_MS + 1, "1:0:c");
+        rig.push(
+            MAP,
+            ORMapEntry {
+                key: "k".to_string(),
+                records: vec![first.clone()],
+                tombstones: Vec::new(),
+            },
+        )
+        .await;
+        let stored_first = rig.stored(MAP, "k").await;
+        let _ = rig.or_adds();
+
+        let again = client_record("changed", SERVER_MS - 5, "1:0:c");
+        let fresh = client_record("fresh", SERVER_MS + 9, "2:0:c");
+        let fresh_again = client_record("fresh-dup", SERVER_MS + 3, "2:0:c");
+        let before = rig.mint();
+        rig.push(
+            MAP,
+            ORMapEntry {
+                key: "k".to_string(),
+                records: vec![again.clone(), fresh.clone(), fresh_again.clone()],
+                tombstones: Vec::new(),
+            },
+        )
+        .await;
+        let after = rig.mint();
+
+        assert_eq!(
+            after,
+            server_ts(before.counter + 2),
+            "only the one new tag mints"
+        );
+        let stored = rig.stored(MAP, "k").await;
+        assert_eq!(stored.len(), 2);
+        assert_eq!(
+            stored[0], stored_first[0],
+            "the known tag keeps its stored entry"
+        );
+        assert_eq!(stored[1].tag, "2:0:c");
+        assert_eq!(stored[1].timestamp, server_ts(before.counter + 1));
+        assert_eq!(stored[1].value, Value::String("fresh".to_string()));
+
+        let as_sent = |e: &crate::storage::record::OrMapEntry, ttl_ms| ORMapRecord {
+            value: value_to_rmpv(&e.value),
+            timestamp: e.timestamp.clone(),
+            tag: e.tag.clone(),
+            ttl_ms,
+        };
+        assert_eq!(
+            rig.or_adds(),
+            vec![
+                as_sent(&stored[0], again.ttl_ms),
+                as_sent(&stored[1], fresh.ttl_ms),
+                as_sent(&stored[1], fresh_again.ttl_ms),
+            ],
+            "one OR_ADD per inbound record, each the stored entry of its tag"
+        );
+    }
+
+    /// An inbound record whose tag is tombstoned is neither stored nor
+    /// broadcast, and mints nothing.
+    #[tokio::test]
+    async fn push_diff_mints_nothing_for_a_tombstoned_tag() {
+        const MAP: &str = "tombstoned";
+        let mut rig = stamp_rig(MAP);
+        let before = rig.mint();
+        rig.push(
+            MAP,
+            ORMapEntry {
+                key: "k".to_string(),
+                records: vec![client_record("v", SERVER_MS, "3:0:c")],
+                tombstones: vec!["3:0:c".to_string()],
+            },
+        )
+        .await;
+        let after = rig.mint();
+
+        assert_eq!(
+            after,
+            server_ts(before.counter + 1),
+            "no mint for a tombstoned tag"
+        );
+        assert!(rig.stored(MAP, "k").await.is_empty());
+        assert!(rig.or_adds().is_empty());
     }
 
     // -------------------------------------------------------------------------
