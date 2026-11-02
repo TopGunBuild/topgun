@@ -8,29 +8,45 @@
 //       --profile ttl-field|g1|g2 [--counted <path>...]
 //   node scripts/check-mechanical-completion.mjs --self-test
 //
-// Every path given to --counted (repo-relative) is skipped entirely, whether
-// the diff adds it or modifies it: counted files are reviewed by hand and are
-// not limited by this filter. For every other file changed between base and
-// head:
+// --base and --head are resolved to commit SHAs once, at the start, so a ref
+// that moves during the run cannot make the listing and the per-file diffs
+// disagree.
+//
+// A row of the change listing (`git diff -z --name-status -M -C`, NUL-separated
+// so no path is quoted or escaped) is skipped only when every path in it is
+// given to --counted (repo-relative): counted files are reviewed by hand and
+// are not limited by this filter. A rename or copy with one counted side is
+// checked like any other row. For every other row:
 //   - the file must be modified in place: an added, deleted, renamed, copied
-//     or type-changed file is rejected;
-//   - every hunk (git's default three lines of context) is reduced to its old side
-//     R and its new side A, with all whitespace removed so that a rustfmt
-//     reflow compares equal, and the profile decides whether R -> A is
-//     mechanical.
+//     or type-changed file is rejected, and so is a file holding U+0001 or
+//     U+0002, the marks the lexer frames literals with;
+//   - every hunk (git's default three lines of context) is reduced to its old
+//     side R and its new side A. Whitespace is removed outside string and char
+//     literals and comments, so that a rustfmt reflow compares equal; inside a
+//     literal or a comment every character is kept, so an edit there is never
+//     mechanical. Whether a hunk side starts inside a literal or a block
+//     comment is read from the whole file, not guessed from the hunk.
 //
-// Profile ttl-field: strip `ttl_ms:None,?` and `,?\.\.(?=\})` from both sides,
-// then turn a trailing comma before a closing delimiter (`,)` / `,}`) into the
-// delimiter alone; the results must be equal, and A must hold at least as
-// many `ttl_ms:None` and `..}` as R. The trailing-comma step is needed because
-// rustfmt writes `ttl_ms: None` as the last field of a one-line literal
-// without a trailing comma, and `..` on its own line after `timestamp,`.
+// Profile ttl-field (insertion only): walk R and A together; where they
+// differ, A must begin, at that point and outside any literal or comment, with
+// an insertion allowed there, which is skipped before the walk goes on: inside
+// a brace field list (its `{` found in the hunk or, above it, in the whole new
+// file, and preceded by a path rather than a macro name or a block opener), `,..` or `..` directly before its `}` (`..` only after
+// `,` or `{`), `,ttl_ms:None` before `}` or `,`, `ttl_ms:None,` after `{` or
+// `,`; anywhere, a single `,` directly before `}` or `)` (rustfmt's trailing
+// comma). Any other difference, or text of R left over, rejects the hunk. So
+// nothing is ever removed, and moving `..` or `ttl_ms: None` from one pattern
+// or literal to another is rejected.
 //
-// Profiles g1 / g2: drop from R the removed lines that are `//` comments
-// naming a removed identifier; strip from R every match of the profile's
-// regexes; normalise both sides (a single-item brace group after a path
-// separator, `::{X}` / `::{X,}`, becomes `::X`, and `,)` / `,}` become `)` /
-// `}`); the results must be equal and A must contain none of the regexes.
+// Profiles g1 / g2: a removed `//` comment line is dropped from R only when it
+// belongs to a run of removed comment lines that ends directly above removed
+// code lines the profile's regexes change, taken together (the doc comment of the removed
+// item). The profile's regexes are stripped from the code of R (never from
+// literals or comments); g2's gated regex is applied only when R calls one of
+// its trigger functions or variants in code. Both sides are normalised (a
+// single-item brace group after a path separator, `::{X}` / `::{X,}`, becomes
+// `::X`, and `,)` / `,}` become `)` / `}`); the results must be equal and the
+// code of A must match none of the regexes.
 //
 // Exit code 0: every hunk accepted. 1: at least one file or hunk rejected
 // (each is printed). 2: usage or git error.
@@ -44,7 +60,6 @@ const PROFILES = {
   'ttl-field': { kind: 'ttl' },
   g1: {
     kind: 'strip',
-    identifiers: ['ExpiryPolicy', 'ExpiryReason', 'expiry', 'default_ttl_millis', 'default_max_idle_millis'],
     regexes: [
       /ExpiryPolicy::NONE,?/g,
       /,?_?expiry:&?([A-Za-z_]+::)*ExpiryPolicy/g,
@@ -58,56 +73,321 @@ const PROFILES = {
   },
   g2: {
     kind: 'strip',
-    identifiers: ['expiration_time'],
     regexes: [
       /,?_?expiration_time:(i64|u64|Option<i64>|Option<u64>)/g,
       /,\*?expiration_time(?=[,)])/g,
       /expiration_time(:[A-Za-z0-9_*]+)?,/g,
     ],
-    // Applied only to hunks whose R names one of the functions or variants
-    // that lose the argument; the compiler rejects the deletion anywhere else.
+    // Applied only to hunks whose R calls one of the functions or names one of
+    // the variants that lose the argument, in code; the compiler rejects the
+    // deletion anywhere else.
     gated: {
-      triggers: ['add(', 'add_encoded(', 'add_backup(', 'Put{', 'Store{'],
+      trigger: /(?<![A-Za-z0-9_])(add|add_encoded|add_backup)\(|(?<![A-Za-z0-9_])(Put|Store)\{/,
       regex: /,(0|0i64|None)(?=[,)])/g,
     },
   },
 };
 
-const noWs = (s) => s.replace(/\s+/g, '');
-const count = (s, needle) => s.split(needle).length - 1;
+// ------------------------------------------------------------------ lexing
+//
+// The normalised form of a text is its code with whitespace removed, and each
+// literal or comment kept verbatim between OPEN and CLOSE marks. A lexer state
+// says where a line starts: in code, in a (raw) string, or in a block comment.
+
+const OPEN = '\u0001';
+const CLOSE = '\u0002';
+const CODE = Object.freeze({ mode: 'code' });
+const isIdent = (c) => c !== undefined && /[A-Za-z0-9_]/.test(c);
+
+// Lexes `text` from `state`; returns the normalised text and the state at its end.
+function lex(text, state) {
+  let out = '';
+  let st = state;
+  let i = 0;
+  if (st.mode !== 'code') out += OPEN;
+  while (i < text.length) {
+    const c = text[i];
+    if (st.mode === 'str') {
+      out += c;
+      if (c === '\\' && i + 1 < text.length) {
+        out += text[i + 1];
+        i += 2;
+        continue;
+      }
+      i += 1;
+      if (c === '"') {
+        out += CLOSE;
+        st = CODE;
+      }
+      continue;
+    }
+    if (st.mode === 'raw') {
+      const end = '"' + '#'.repeat(st.hashes);
+      if (text.startsWith(end, i)) {
+        out += end + CLOSE;
+        i += end.length;
+        st = CODE;
+      } else {
+        out += c;
+        i += 1;
+      }
+      continue;
+    }
+    if (st.mode === 'block') {
+      if (text.startsWith('*/', i)) {
+        out += '*/';
+        i += 2;
+        st = st.depth === 1 ? CODE : { mode: 'block', depth: st.depth - 1 };
+        if (st.mode === 'code') out += CLOSE;
+      } else if (text.startsWith('/*', i)) {
+        out += '/*';
+        i += 2;
+        st = { mode: 'block', depth: st.depth + 1 };
+      } else {
+        out += c;
+        i += 1;
+      }
+      continue;
+    }
+    // code
+    if (/\s/.test(c)) {
+      i += 1;
+      continue;
+    }
+    if (text.startsWith('//', i)) {
+      const nl = text.indexOf('\n', i);
+      const end = nl === -1 ? text.length : nl;
+      out += OPEN + text.slice(i, end) + CLOSE;
+      i = end;
+      continue;
+    }
+    if (text.startsWith('/*', i)) {
+      out += OPEN + '/*';
+      i += 2;
+      st = { mode: 'block', depth: 1 };
+      continue;
+    }
+    // Raw string: r"..", r#".."#, br#".."# (not a raw identifier r#name).
+    const rawAt = c === 'r' ? i : c === 'b' && text[i + 1] === 'r' ? i + 1 : -1;
+    if (rawAt !== -1 && !isIdent(text[i - 1])) {
+      let j = rawAt + 1;
+      while (text[j] === '#') j += 1;
+      if (text[j] === '"') {
+        out += OPEN + text.slice(i, j + 1);
+        st = { mode: 'raw', hashes: j - rawAt - 1 };
+        i = j + 1;
+        continue;
+      }
+    }
+    if (c === '"') {
+      out += OPEN + '"';
+      st = { mode: 'str' };
+      i += 1;
+      continue;
+    }
+    if (c === "'") {
+      // A char literal is an escape or one code point closed by `'`; anything
+      // else is a lifetime or a label.
+      let end = -1;
+      if (text[i + 1] === '\\') {
+        end = text.indexOf("'", i + 3);
+      } else if (i + 1 < text.length) {
+        const cp = text.codePointAt(i + 1);
+        const width = cp > 0xffff ? 2 : 1;
+        if (text[i + 1 + width] === "'") end = i + 1 + width;
+      }
+      if (end !== -1) {
+        out += OPEN + text.slice(i, end + 1) + CLOSE;
+        i = end + 1;
+        continue;
+      }
+    }
+    out += c;
+    i += 1;
+  }
+  if (st.mode !== 'code') out += CLOSE;
+  return { out, state: st };
+}
+
+// At the start of every line (index 0 = line 1) of a whole file: the lexer
+// state, the open brackets that enclose the line (each with the code just
+// before it), and the code just before the line.
+function lineStarts(text) {
+  const starts = [];
+  let st = CODE;
+  const stack = [];
+  let tail = '';
+  for (const line of text.split('\n')) {
+    starts.push({ state: st, stack: stack.slice(), tail });
+    const r = lex(line + '\n', st);
+    st = r.state;
+    for (const c of codeOf(r.out).replace(/ /g, '')) {
+      if (c === '{' || c === '(' || c === '[') stack.push({ ch: c, before: tail });
+      else if (c === '}' || c === ')' || c === ']') stack.pop();
+      tail = (tail + c).slice(-16);
+    }
+  }
+  return starts;
+}
+
+// Lexes consecutive lines; returns one normalised piece per line.
+function lexLines(texts, state) {
+  let st = state;
+  return texts.map((t) => {
+    const startState = st;
+    const r = lex(t + '\n', st);
+    st = r.state;
+    return { out: r.out, startState };
+  });
+}
+
+// Applies `fn` to the code pieces of a normalised text, leaving literals and comments untouched.
+const mapCode = (s, fn) =>
+  s
+    .split(new RegExp(`(${OPEN}[^${CLOSE}]*${CLOSE}?)`))
+    .map((piece) => (piece.startsWith(OPEN) ? piece : fn(piece)))
+    .join('');
+const codeOf = (s) => mapCode(s, (x) => x).split(new RegExp(`${OPEN}[^${CLOSE}]*${CLOSE}?`)).join(' ');
+
 const trailingComma = (s) => s.replace(/,\)/g, ')').replace(/,\}/g, '}');
 const singleItemGroup = (s) => s.replace(/::\{([^{},]*),?\}/g, '::$1');
 
-// A hunk is a list of lines { kind: ' ' | '-' | '+', text }.
-export function checkHunk(profileName, lines) {
+// A `{` opens a struct literal or pattern only after a path: an identifier
+// that is not a keyword opening a block, or the `>` of generic arguments. A
+// macro (`m! {`), a block after `=>`, `)`, `|`, `=` or `;`, and a body after
+// `else` / `loop` / `unsafe` / `async` / `move` / `try` / `const` are not field lists.
+const isFieldBrace = (before) =>
+  (/[A-Za-z0-9_]$/.test(before) && !/(^|[^A-Za-z0-9_])(else|loop|unsafe|async|move|try|const)$/.test(before)) ||
+  (/>$/.test(before) && !/[=-]>$/.test(before));
+
+// Whether position `j` of the normalised new side of a hunk lies directly in a
+// brace field list. The enclosing bracket is looked for in the hunk first and
+// then among the brackets the whole file has open at the hunk's first line
+// (`outer`); none at all means not in a field list.
+function inBraceList(s, j, outer) {
+  let depth = 0;
+  for (let k = j - 1; k >= 0; k -= 1) {
+    const c = s[k];
+    if (c === CLOSE) {
+      k = s.lastIndexOf(OPEN, k);
+    } else if (c === '}' || c === ')' || c === ']') {
+      depth += 1;
+    } else if (c === '{' || c === '(' || c === '[') {
+      if (depth > 0) {
+        depth -= 1;
+      } else {
+        return c === '{' && isFieldBrace((outer.tail + codeOf(s.slice(0, k)).replace(/ /g, '')).slice(-16));
+      }
+    }
+  }
+  const open = outer.stack[outer.stack.length - 1 - depth];
+  return open !== undefined && open.ch === '{' && isFieldBrace(open.before);
+}
+
+// Each insertion with the position it is allowed at: inside a brace field
+// list, `..` last before the closing brace, `ttl_ms: None` as a whole field.
+const TTL_INSERTIONS = [
+  [',..', (a, j, end) => a[end] === '}'],
+  ['..', (a, j, end) => (a[j - 1] === ',' || a[j - 1] === '{') && a[end] === '}'],
+  [',ttl_ms:None', (a, j, end) => a[end] === '}' || a[end] === ','],
+  ['ttl_ms:None,', (a, j) => a[j - 1] === '{' || a[j - 1] === ','],
+];
+
+// Insertion-only alignment of the ttl-field profile.
+function ttlAlign(r, a, outer) {
+  let i = 0;
+  let j = 0;
+  let inLiteral = false;
+  while (i < r.length || j < a.length) {
+    if (i < r.length && j < a.length && r[i] === a[j]) {
+      if (r[i] === OPEN) inLiteral = true;
+      else if (r[i] === CLOSE) inLiteral = false;
+      i += 1;
+      j += 1;
+      continue;
+    }
+    if (j >= a.length) return 'the old side has text the new side lacks';
+    if (inLiteral) return 'a literal or a comment differs';
+    const ins = TTL_INSERTIONS.find(
+      ([t, allowed]) => a.startsWith(t, j) && allowed(a, j, j + t.length) && inBraceList(a, j, outer),
+    );
+    if (ins) {
+      j += ins[0].length;
+    } else if (a[j] === ',' && (a[j + 1] === '}' || a[j + 1] === ')')) {
+      j += 1;
+    } else {
+      return 'the new side differs by more than an inserted field-list `..`, `ttl_ms: None` or trailing comma';
+    }
+  }
+  return null;
+}
+
+// A hunk is a list of lines { kind: ' ' | '-' | '+', text }. `states` gives the
+// lexer state at the first line of the old and of the new side (code when
+// absent), and, for the new side, the brackets the file has open there and the
+// code before it (`newOuter`; none when absent).
+export function checkHunk(profileName, lines, states = {}) {
   const profile = PROFILES[profileName];
   if (!profile) throw new Error(`unknown profile ${profileName}`);
-  if (profile.kind === 'ttl') {
-    const r = noWs(lines.filter((l) => l.kind !== '+').map((l) => l.text).join('\n'));
-    const a = noWs(lines.filter((l) => l.kind !== '-').map((l) => l.text).join('\n'));
-    const strip = (s) => trailingComma(s.replace(/ttl_ms:None,?/g, '').replace(/,?\.\.(?=\})/g, ''));
-    if (strip(r) !== strip(a)) return 'old and new side differ beyond `ttl_ms: None` and `..`';
-    if (count(a, 'ttl_ms:None') < count(r, 'ttl_ms:None')) return 'the hunk removes a `ttl_ms: None`';
-    if (count(a, '..}') < count(r, '..}')) return 'the hunk removes a `..`';
-    return null;
-  }
-  const namesRemoved = (text) =>
-    /^\s*\/\//.test(text) && profile.identifiers.some((id) => new RegExp(`\\b${id}\\b`).test(text));
-  let r = noWs(
-    lines
-      .filter((l) => l.kind === ' ' || (l.kind === '-' && !namesRemoved(l.text)))
-      .map((l) => l.text)
-      .join('\n'),
+  const oldLines = lines.filter((l) => l.kind !== '+');
+  const newLines = lines.filter((l) => l.kind !== '-');
+  const oldLex = lexLines(
+    oldLines.map((l) => l.text),
+    states.old ?? CODE,
   );
-  const a = noWs(lines.filter((l) => l.kind !== '-').map((l) => l.text).join('\n'));
+  const a = lexLines(
+    newLines.map((l) => l.text),
+    states.new ?? CODE,
+  )
+    .map((p) => p.out)
+    .join('');
+  if (profile.kind === 'ttl') return ttlAlign(oldLex.map((p) => p.out).join(''), a, states.newOuter ?? { stack: [], tail: '' });
+
   const regexes = [...profile.regexes];
-  if (profile.gated && profile.gated.triggers.some((t) => r.includes(t))) regexes.push(profile.gated.regex);
-  for (const re of regexes) r = r.replace(re, '');
-  const norm = (s) => trailingComma(singleItemGroup(s));
+  const stripAll = (s, res) => mapCode(s, (code) => res.reduce((acc, re) => acc.replace(re, ''), code));
+  const oldCode = codeOf(oldLex.map((p) => p.out).join(''));
+  if (profile.gated && profile.gated.trigger.test(oldCode)) regexes.push(profile.gated.regex);
+
+  // A removed line that is a `//` comment and nothing else.
+  const isCommentLine = (k) =>
+    oldLines[k].kind === '-' &&
+    oldLex[k].startState.mode === 'code' &&
+    /^\s*\/\//.test(oldLines[k].text);
+  // The run of removed code lines starting at `k`, joined, so that a match a
+  // rustfmt line break splits is still seen.
+  const stripsSomething = (k) => {
+    let code = '';
+    for (let m = k; m < oldLines.length && oldLines[m].kind === '-' && !isCommentLine(m); m += 1) {
+      code += oldLex[m].out;
+    }
+    return code !== '' && stripAll(code, regexes) !== code;
+  };
+  const drop = new Set();
+  for (let k = 0; k < oldLines.length; k += 1) {
+    if (!isCommentLine(k)) continue;
+    let end = k;
+    while (end < oldLines.length && isCommentLine(end)) end += 1;
+    if (stripsSomething(end)) {
+      for (let m = k; m < end; m += 1) drop.add(m);
+    }
+    k = end - 1;
+  }
+  const r = stripAll(
+    oldLex
+      .filter((_, k) => !drop.has(k))
+      .map((p) => p.out)
+      .join(''),
+    regexes,
+  );
+  const norm = (s) => mapCode(s, (code) => trailingComma(singleItemGroup(code)));
   if (norm(r) !== norm(a)) return 'old side minus the removed items differs from the new side';
+  const newCode = codeOf(a);
   for (const re of regexes) {
     re.lastIndex = 0;
-    if (re.test(a)) return `the new side still matches ${re}`;
+    if (re.test(newCode)) {
+      re.lastIndex = 0;
+      return `the new side still matches ${re}`;
+    }
     re.lastIndex = 0;
   }
   return null;
@@ -122,7 +402,8 @@ function parseHunks(diffText) {
   let current = null;
   for (const line of diffText.split('\n')) {
     if (line.startsWith('@@')) {
-      current = { header: line, lines: [] };
+      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      current = { header: line, oldStart: Number(m[1]), newStart: Number(m[2]), lines: [] };
       hunks.push(current);
     } else if (current && (line.startsWith(' ') || line.startsWith('-') || line.startsWith('+'))) {
       current.lines.push({ kind: line[0], text: line.slice(1) });
@@ -133,6 +414,30 @@ function parseHunks(diffText) {
   return hunks;
 }
 
+// Parses `git diff -z --name-status` output into rows { code, paths }.
+function parseNameStatusZ(out) {
+  const tokens = out.split('\0');
+  const rows = [];
+  let k = 0;
+  while (k < tokens.length && tokens[k] !== '') {
+    const code = tokens[k];
+    const n = /^[RC]/.test(code) ? 2 : 1;
+    rows.push({ code, paths: tokens.slice(k + 1, k + 1 + n) });
+    k += 1 + n;
+  }
+  return rows;
+}
+
+// The lexer state at line `start` (1-based) of a file whose hunk side has
+// `count` lines; a file shorter than the hunk is a contradiction, not code.
+export function stateAt(states, start, count) {
+  const first = Math.max(start, 1) - 1;
+  if (first + Math.max(count, 1) > states.length) {
+    throw new Error(`a hunk at line ${start} with ${count} lines does not fit a file of ${states.length} lines`);
+  }
+  return states[first];
+}
+
 // Returns { rejected: [...], files, hunks, skipped }.
 export function checkRange({ cwd, base, head, profile, counted }) {
   const countedSet = new Set(counted);
@@ -140,12 +445,16 @@ export function checkRange({ cwd, base, head, profile, counted }) {
   let files = 0;
   let hunkCount = 0;
   const skipped = [];
-  const status = git(cwd, ['diff', '--no-ext-diff', '--name-status', '-M', '-C', base, head, '--']);
-  for (const row of status.split('\n').filter(Boolean)) {
-    const parts = row.split('\t');
-    const code = parts[0];
-    const paths = parts.slice(1);
-    if (paths.some((p) => countedSet.has(p))) {
+  if ([base, head].some((ref) => ref.startsWith('-'))) throw new Error('--base and --head must not start with -');
+  const shas = git(cwd, ['rev-parse', `${base}^{commit}`, `${head}^{commit}`]).trim().split('\n');
+  if (shas.length !== 2 || !shas.every((sha) => /^[0-9a-f]{40,64}$/.test(sha))) {
+    throw new Error(`--base and --head did not resolve to two commits: ${shas.join(' ')}`);
+  }
+  const [baseSha, headSha] = shas;
+  if (baseSha === headSha) throw new Error('--base and --head name the same commit: there is nothing to check');
+  const status = git(cwd, ['diff', '--no-ext-diff', '-z', '--name-status', '-M', '-C', baseSha, headSha, '--']);
+  for (const { code, paths } of parseNameStatusZ(status)) {
+    if (paths.every((p) => countedSet.has(p))) {
       skipped.push(`${code}\t${paths.join(' -> ')}`);
       continue;
     }
@@ -155,18 +464,38 @@ export function checkRange({ cwd, base, head, profile, counted }) {
     }
     files += 1;
     const path = paths[0];
-    const diff = git(cwd, ['diff', '--no-ext-diff', '--no-color', '-U3', base, head, '--', path]);
+    const diff = git(cwd, ['diff', '--no-ext-diff', '--no-color', '-U3', baseSha, headSha, '--', path]);
     if (/^Binary files /m.test(diff)) {
       rejected.push({ file: path, reason: 'binary change' });
       continue;
     }
-    for (const hunk of parseHunks(diff)) {
+    const hunks = parseHunks(diff);
+    if (hunks.length === 0) {
+      rejected.push({ file: path, reason: 'listed as modified but its diff has no hunk' });
+      continue;
+    }
+    const oldText = git(cwd, ['show', `${baseSha}:${path}`]);
+    const newText = git(cwd, ['show', `${headSha}:${path}`]);
+    // The lexer frames literals and comments with these two characters.
+    if (/[\u0001\u0002]/.test(oldText + newText)) {
+      rejected.push({ file: path, reason: 'the file contains U+0001 or U+0002, which the filter cannot check' });
+      continue;
+    }
+    const oldStarts = lineStarts(oldText);
+    const newStarts = lineStarts(newText);
+    for (const hunk of hunks) {
       hunkCount += 1;
-      const reason = checkHunk(profile, hunk.lines);
+      const newStart = stateAt(newStarts, hunk.newStart, hunk.lines.filter((l) => l.kind !== '-').length);
+      const states = {
+        old: stateAt(oldStarts, hunk.oldStart, hunk.lines.filter((l) => l.kind !== '+').length).state,
+        new: newStart.state,
+        newOuter: newStart,
+      };
+      const reason = checkHunk(profile, hunk.lines, states);
       if (reason) rejected.push({ file: path, header: hunk.header, reason, lines: hunk.lines });
     }
   }
-  return { rejected, files, hunks: hunkCount, skipped };
+  return { rejected, files, hunks: hunkCount, skipped, base: baseSha, head: headSha };
 }
 
 function printRejected(rejected) {
@@ -191,6 +520,7 @@ const FIXTURES = [
 +    let v = RecordValue::Lww { value: Value::Int(1), timestamp: ts, ttl_ms: None };
 `)],
   ['ttl-field', true, 'multi-line literal gains a field line', hunk(`
+     let v = RecordValue::Lww {
          timestamp: ts.clone(),
 +        ttl_ms: None,
      };
@@ -212,6 +542,7 @@ const FIXTURES = [
 +    RecordValue::Lww { value, timestamp, .. } => (value, timestamp),
 `)],
   ['ttl-field', true, 'multi-line pattern gains a .. line', hunk(`
+     RecordValue::Lww {
          timestamp,
 +        ..
      } => {
@@ -219,6 +550,18 @@ const FIXTURES = [
   ['ttl-field', true, 'OrMapEntry literal gains a middle field', hunk(`
 -    OrMapEntry { value: v, tag: t, timestamp: ts }
 +    OrMapEntry { value: v, tag: t, timestamp: ts, ttl_ms: None }
+`)],
+  ['ttl-field', true, 'one-line pattern reflowed by rustfmt to the multi-line form with ..', hunk(`
+         match stored {
+-            RecordValue::Lww { value, timestamp } => Some((value.clone(), timestamp.clone())),
++            RecordValue::Lww {
++                value, timestamp, ..
++            } => Some((value.clone(), timestamp.clone())),
+             _ => None,
+`)],
+  ['ttl-field', true, 'literals with a quote char, a lifetime and a raw string gain a field', hunk(`
+-    let v = Foo::<'a> { q: '"', s: r#"a "b" c"#, timestamp: ts };
++    let v = Foo::<'a> { q: '"', s: r#"a "b" c"#, timestamp: ts, ttl_ms: None };
 `)],
   // ttl-field, rejected
   ['ttl-field', false, 'value changed next to the new field', hunk(`
@@ -244,6 +587,77 @@ const FIXTURES = [
 +    let b = 2;
      let c = 3;
 `)],
+  ['ttl-field', false, 'whitespace removed inside a string literal', hunk(`
+-    println!("a b");
++    println!("ab");
+`)],
+  ['ttl-field', false, 'comment re-flowed', hunk(`
+-    /* the store keeps the record
+-       until it is read */
++    /* the store keeps
++       the record until it is read */
+     let a = 1;
+`)],
+  ['ttl-field', false, 'whitespace removed in a string after a char literal holding a quote', hunk(`
+-    let q = '"'; let s = "a b";
++    let q = '"'; let s = "ab";
+`)],
+  ['ttl-field', false, 'whitespace removed inside a raw string holding quotes', hunk(`
+-    let s = r#"x" y"#;
++    let s = r#"x"y"#;
+`)],
+  ['ttl-field', false, '.. moved from one pattern to another', hunk(`
+-        Foo { a, .. } => f(a),
+-        Bar { b } => g(b),
++        Foo { a } => f(a),
++        Bar { b, .. } => g(b),
+`)],
+  ['ttl-field', false, 'ttl_ms: None moved from one literal to another', hunk(`
+-    let a = Foo { x: 1, ttl_ms: None };
+-    let b = Bar { y: 2 };
++    let a = Foo { x: 1 };
++    let b = Bar { y: 2, ttl_ms: None };
+`)],
+  ['ttl-field', false, '.. inserted inside a string literal', hunk(`
+-    let s = "ab";
++    let s = "a..b";
+`)],
+  ['ttl-field', false, '.. inserted into an index, making a range', hunk(`
+-    g(&v[1]);
++    g(&v[1..]);
+`)],
+  ['ttl-field', false, '.. inserted before an index, making a range', hunk(`
+-    let s = &x[0];
++    let s = &x[..0];
+`)],
+  ['ttl-field', false, '.. inserted before a field, making a struct update', hunk(`
+-    let a = S { x, y };
++    let a = S { x, ..y };
+`)],
+  ['ttl-field', false, '.. inserted into a range', hunk(`
+-    for i in 0..n {}
++    for i in 0....n {}
+`)],
+  ['ttl-field', false, '.. inserted after a field value, making a range', hunk(`
+-    let a = S { x: 0 };
++    let a = S { x: 0.. };
+`)],
+  ['ttl-field', false, 'ttl_ms: None inserted into a call', hunk(`
+-    f(x);
++    f(x, ttl_ms: None);
+`)],
+  ['ttl-field', false, '.. inserted into a macro brace', hunk(`
+-    m! { a, b }
++    m! { a, b, .. }
+`)],
+  ['ttl-field', false, 'ttl_ms: None inserted into a block', hunk(`
+-    x => { a; b }
++    x => { a; b, ttl_ms: None }
+`)],
+  ['ttl-field', false, 'comma inserted before ]', hunk(`
+-    let v = [a];
++    let v = [a,];
+`)],
   // g1, accepted
   ['g1', true, 'argument deleted from a one-line call', hunk(`
 -    store.put("k", value, ExpiryPolicy::NONE, CallerProvenance::Client);
@@ -264,6 +678,14 @@ const FIXTURES = [
 +    fn put(&self, key: &str, value: RecordValue, p: CallerProvenance) -> R {
 +        self.inner.put(key, value, p)
 `)],
+  ['g1', true, 'doc comment above a removed field that rustfmt split over two lines', hunk(`
+     let c = StorageConfig {
+         a: 1,
+-        /// Records expire after this long by default.
+-        default_ttl_millis:
+-            5000,
+         b: 2,
+`)],
   ['g1', true, 'comment naming the removed identifier deleted', hunk(`
      let p = CallerProvenance::Client;
 -    // ExpiryPolicy::NONE because client writes never expire here.
@@ -278,6 +700,15 @@ const FIXTURES = [
   ['g1', false, 'new side still names the removed type', hunk(`
 -    store.put("k", value, ExpiryPolicy::NONE, p);
 +    store.put("k", value, ExpiryPolicy::default(), p);
+`)],
+  ['g1', false, 'unrelated comment line deleted with no removed item below it', hunk(`
+     let p = 1;
+-    // see docs/expiry.md - the old default was buggy
+     let q = 2;
+`)],
+  ['g1', false, 'removed type name deleted from a string literal', hunk(`
+-    log("ExpiryPolicy::NONE, used");
++    log("used");
 `)],
   // g2, accepted
   ['g2', true, 'literal 0 deleted from an add call', hunk(`
@@ -314,6 +745,11 @@ const FIXTURES = [
 -    ds.add("m", "k", &v, 0, now).await?;
 +    ds.add("m", "k", &w, now).await?;
 `)],
+  ['g2', false, 'trigger only in a comment does not arm the gated regex', hunk(`
+     // add(0) was here
+-    let x = compute(a, 0);
++    let x = compute(a);
+`)],
 ];
 
 function runGit(cwd, args, env = {}) {
@@ -333,6 +769,10 @@ function runGit(cwd, args, env = {}) {
   });
 }
 
+// A string literal long enough that a hunk in its middle has no line outside it.
+const LONG_STRING = (middle) =>
+  `fn s() {\n    let t = "\nl1\nl2\nl3\nl4\n${middle}\nl6\nl7\nl8\nl9\n";\n}\n`;
+
 function selfTestRange() {
   const dir = mkdtempSync(join(tmpdir(), 'mech-completion-'));
   const failures = [];
@@ -346,20 +786,31 @@ function selfTestRange() {
     write('b.rs', 'fn b() {\n    let n = 1;\n}\n');
     write('c.rs', 'fn c() {\n    let n = 1;\n}\n');
     write('counted.rs', 'fn d() {}\n');
+    write('kept_counted.rs', 'fn k() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\n');
     write('gone.rs', 'fn e() {}\n');
     write('moved.rs', 'fn f() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\n');
+    write('café.rs', 'fn g() {\n    let n = 1;\n}\n');
+    write('long.rs', LONG_STRING('a b'));
+    write('marks.rs', 'fn m() {\n    let s = "a\u0002}";\n}\n');
+    const LIT = (extra) => `fn l() {\n    let v = RecordValue::Lww {\n        a: 1,\n        b: 2,\n        c: 3,\n        d: 4,\n        e: 5,\n${extra}    };\n}\n`;
+    write('lit.rs', LIT(''));
+    const MAC = (extra) => `fn m() {\n    m!(\n        a,\n        b,\n        c,\n        d,\n${extra}        e,\n        f,\n    );\n}\n`;
+    write('mac.rs', MAC(''));
+    write('ünï.rs', 'fn u() {\n    let v = RecordValue::Lww { value: x, timestamp: t };\n}\n');
     runGit(dir, ['add', '-A']);
     runGit(dir, ['commit', '-q', '-m', 'base']);
     const base = runGit(dir, ['rev-parse', 'HEAD']).trim();
 
-    // Mechanical change in a.rs; counted file rewritten; new counted file.
+    // Mechanical change in a.rs and in a non-ASCII path; counted file rewritten; new counted file.
     write('a.rs', 'fn a() {\n    let v = RecordValue::Lww { value: x, timestamp: t, ttl_ms: None };\n}\n');
+    write('ünï.rs', 'fn u() {\n    let v = RecordValue::Lww { value: x, timestamp: t, ttl_ms: None };\n}\n');
+    write('lit.rs', LIT('        ttl_ms: None,\n'));
     write('counted.rs', 'fn d() { anything_goes(); }\n');
     write('new_counted.rs', 'fn g() {}\n');
     runGit(dir, ['add', '-A']);
     runGit(dir, ['commit', '-q', '-m', 'ok']);
     const ok = runGit(dir, ['rev-parse', 'HEAD']).trim();
-    const counted = ['counted.rs', 'new_counted.rs'];
+    const counted = ['counted.rs', 'new_counted.rs', 'kept_counted.rs'];
     const good = checkRange({ cwd: dir, base, head: ok, profile: 'ttl-field', counted });
     if (good.rejected.length !== 0) failures.push(`range: a mechanical range was rejected: ${JSON.stringify(good.rejected)}`);
     if (good.skipped.length !== 2) failures.push(`range: expected 2 counted files skipped, got ${good.skipped.length}`);
@@ -370,6 +821,11 @@ function selfTestRange() {
       ['added file', () => write('added.rs', 'fn h() {}\n')],
       ['deleted file', () => rmSync(join(dir, 'gone.rs'))],
       ['renamed file', () => renameSync(join(dir, 'moved.rs'), join(dir, 'renamed.rs'))],
+      ['non-mechanical hunk in a non-ASCII path', () => write('café.rs', 'fn g() {\n    let n = 2;\n}\n')],
+      ['counted file renamed to a non-counted path', () => renameSync(join(dir, 'kept_counted.rs'), join(dir, 'evil.rs'))],
+      ['whitespace removed in a hunk wholly inside a string literal', () => write('long.rs', LONG_STRING('ab'))],
+      ['ttl_ms: None inserted into a macro call opened above the hunk', () => write('mac.rs', MAC('        ttl_ms: None,\n'))],
+      ['a file holding the lexer marks', () => write('marks.rs', 'fn m() {\n    let s = "a\u0002,}";\n}\n')],
     ];
     for (const [name, change] of forbidden) {
       runGit(dir, ['checkout', '-q', ok]);
@@ -401,8 +857,20 @@ function selfTest() {
       if (!seen[`${profile}:${accept}`]) failures.push(`${profile}: no ${accept ? 'accepted' : 'rejected'} fixture`);
     }
   }
+  try {
+    stateAt([CODE, CODE], 2, 3);
+    failures.push('stateAt: a hunk longer than its file was accepted');
+  } catch {
+    console.log('ok   stateAt: a hunk longer than its file is an error');
+  }
+  if (stateAt([CODE, { mode: 'str' }, CODE], 2, 2).mode !== 'str') failures.push('stateAt: wrong line');
   const range = selfTestRange();
-  if (range.length === 0) console.log('ok   range: counted files skipped; mechanical range accepted; non-mechanical hunk, add, delete and rename rejected');
+  if (range.length === 0) {
+    console.log(
+      'ok   range: counted files skipped; mechanical range (non-ASCII path and a literal opened above the hunk included) accepted; non-mechanical hunk, add, delete, rename, ' +
+        'non-ASCII path, counted-to-non-counted rename, an edit inside a multi-line string, ttl_ms: None in a macro call opened above the hunk and a file holding the lexer marks rejected',
+    );
+  }
   failures.push(...range);
   for (const f of failures) console.log(`FAIL ${f}`);
   console.log(failures.length === 0 ? `self-test passed (${FIXTURES.length} fixtures + range)` : `self-test FAILED (${failures.length})`);
@@ -446,6 +914,7 @@ function main() {
     console.error(e.message);
     return 2;
   }
+  console.log(`base ${res.base}, head ${res.head}`);
   for (const s of res.skipped) console.log(`counted (skipped): ${s}`);
   printRejected(res.rejected);
   console.log(

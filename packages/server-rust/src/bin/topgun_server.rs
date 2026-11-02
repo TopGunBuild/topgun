@@ -2224,16 +2224,17 @@ fn build_services(
     // Phase 2: inject the factory Arc and spawn the background embedding task.
     embedding_factory.init(Arc::clone(&record_store_factory), Arc::clone(&key_writer));
 
-    let write_validator = {
-        let wv_hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
-            config.node_id.clone(),
-            Box::new(SystemClock),
-        )));
-        Arc::new(WriteAdmission::new(
-            Arc::new(SecurityConfig::default()),
-            wv_hlc,
-        ))
-    };
+    // The clock client writes are stamped with. The SYNC service stamps pushed
+    // OR entries from the SAME `Arc`: a second clock with this node id could
+    // mint one timestamp for two writes (TG-TTL-001).
+    let wv_hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
+        config.node_id.clone(),
+        Box::new(SystemClock),
+    )));
+    let write_validator = Arc::new(WriteAdmission::new(
+        Arc::new(SecurityConfig::default()),
+        Arc::clone(&wv_hlc),
+    ));
 
     // Event Journal: one shared ring buffer, written by the CRDT mutation path
     // and read/subscribed by the persistence service. Enabled by default so
@@ -2334,7 +2335,8 @@ fn build_services(
     // Same frontier + per-key writer as CrdtService: covering-epoch conveyance
     // reads the epoch counter CrdtService stamps, and the SYNC-leaf prune
     // serializes against OR writes on the shared writer.
-    .with_frontier(Arc::clone(&frontier), Arc::clone(&key_writer));
+    .with_frontier(Arc::clone(&frontier), Arc::clone(&key_writer))
+    .with_hlc(wv_hlc);
     let sync_svc = Arc::new(if datastore_for_merkle_seed.is_null() {
         sync_base
     } else {
