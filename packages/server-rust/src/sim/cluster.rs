@@ -4395,4 +4395,153 @@ mod tests {
         }
         cluster.assert_converged(MAP, KEY).await.expect("read");
     }
+
+    // -----------------------------------------------------------------------
+    // A record's TTL travels with it between nodes (TG-TTL-001)
+    // -----------------------------------------------------------------------
+
+    const TTL: u64 = 45_000;
+
+    /// Writes `key` on `node_idx` through its CRDT service as a trusted op, so
+    /// the stamp and the TTL are stored as given: an LWW PUT, or an OR_ADD of
+    /// the tag `ttl-{key}` when `or` is set.
+    async fn write_with_ttl(cluster: &SimCluster, node_idx: usize, map: &str, key: &str, or: bool) {
+        let node = &cluster.nodes[node_idx];
+        let ts = Timestamp {
+            millis: 1_000,
+            counter: 3,
+            node_id: node.node_id.clone(),
+        };
+        let mut ctx = OperationContext::new(0, service_names::CRDT, ts.clone(), 5000);
+        ctx.partition_id = Some(topgun_core::hash_to_partition(key));
+        ctx.caller_origin = CallerOrigin::System;
+        let client_op = if or {
+            or_add_client_op(
+                map,
+                key,
+                &OrMapEntry {
+                    value: topgun_core::Value::Int(1),
+                    tag: format!("ttl-{key}"),
+                    timestamp: ts,
+                    ttl_ms: Some(TTL),
+                },
+            )
+        } else {
+            ClientOp {
+                id: Some(format!("{map}/{key}")),
+                map_name: map.to_string(),
+                key: key.to_string(),
+                op_type: None,
+                record: Some(Some(LWWRecord {
+                    value: Some(rmpv::Value::Integer(1.into())),
+                    timestamp: ts,
+                    ttl_ms: Some(TTL),
+                })),
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            }
+        };
+        let op = Operation::ClientOp {
+            ctx,
+            payload: ClientOpMessage { payload: client_op },
+        };
+        let mut svc = Arc::clone(&node.crdt_service);
+        Service::call(&mut svc, op).await.expect("write");
+    }
+
+    /// The stamp and TTL `node_idx` stores for `key` (of its one OR entry, for an
+    /// OR slot); `None` when the key is absent.
+    async fn stored_stamp_and_ttl(
+        cluster: &SimCluster,
+        node_idx: usize,
+        map: &str,
+        key: &str,
+    ) -> Option<(Timestamp, Option<u64>)> {
+        let store = cluster.nodes[node_idx]
+            .record_store_factory
+            .get_or_create(map, topgun_core::hash_to_partition(key));
+        match store.get(key, false).await.expect("read").map(|r| r.value) {
+            Some(RecordValue::Lww {
+                timestamp, ttl_ms, ..
+            }) => Some((timestamp, ttl_ms)),
+            Some(RecordValue::OrMap { records, .. }) if records.len() == 1 => {
+                Some((records[0].timestamp.clone(), records[0].ttl_ms))
+            }
+            Some(other) => panic!("unexpected value under {key}: {other:?}"),
+            None => None,
+        }
+    }
+
+    /// Both propagation paths, `sync_all` and `merkle_sync_pair`, carry the TTL
+    /// of an LWW record and of an OR entry to the peer, with the stamp intact.
+    #[tokio::test]
+    async fn sim_propagate_carries_ttl() {
+        let mut cluster = SimCluster::new(2, 7);
+        cluster.start().expect("cluster start");
+
+        for (map, or) in [("ttl-lww", false), ("ttl-or", true)] {
+            write_with_ttl(&cluster, 0, map, "via-sync-all", or).await;
+            write_with_ttl(&cluster, 0, map, "via-merkle", or).await;
+            cluster
+                .sync_all(map, "via-sync-all")
+                .await
+                .expect("sync_all");
+            let delivered = stored_stamp_and_ttl(&cluster, 1, map, "via-sync-all").await;
+            assert_eq!(
+                delivered,
+                stored_stamp_and_ttl(&cluster, 0, map, "via-sync-all").await,
+                "{map}: sync_all"
+            );
+            assert_eq!(delivered.map(|d| d.1), Some(Some(TTL)), "{map}: sync_all");
+
+            cluster
+                .merkle_sync_pair(0, 1, map)
+                .await
+                .expect("merkle_sync_pair");
+            let delivered = stored_stamp_and_ttl(&cluster, 1, map, "via-merkle").await;
+            assert_eq!(
+                delivered,
+                stored_stamp_and_ttl(&cluster, 0, map, "via-merkle").await,
+                "{map}: merkle_sync_pair"
+            );
+            assert_eq!(
+                delivered.map(|d| d.1),
+                Some(Some(TTL)),
+                "{map}: merkle_sync_pair"
+            );
+        }
+    }
+
+    /// A TTL record written on one side of a partition does not cross it, and
+    /// reaches the peer after the heal with its TTL and its stamp intact.
+    #[tokio::test]
+    async fn sim_ttl_record_crosses_a_healed_partition() {
+        let mut cluster = SimCluster::new(2, 11);
+        cluster.start().expect("cluster start");
+        cluster.inject_partition(&[0], &[1]);
+
+        for (map, or) in [("ttl-part-lww", false), ("ttl-part-or", true)] {
+            write_with_ttl(&cluster, 0, map, "k", or).await;
+            cluster.merkle_sync_pair(0, 1, map).await.expect("sync");
+            assert_eq!(
+                stored_stamp_and_ttl(&cluster, 1, map, "k").await,
+                None,
+                "{map}: nothing crosses the partition"
+            );
+        }
+
+        cluster.heal_partition();
+        for map in ["ttl-part-lww", "ttl-part-or"] {
+            cluster.merkle_sync_pair(0, 1, map).await.expect("sync");
+            let written = stored_stamp_and_ttl(&cluster, 0, map, "k").await;
+            assert_eq!(written.as_ref().map(|w| w.1), Some(Some(TTL)), "{map}");
+            assert_eq!(
+                stored_stamp_and_ttl(&cluster, 1, map, "k").await,
+                written,
+                "{map}: the peer holds the stamp and TTL the writer stored"
+            );
+        }
+    }
 }

@@ -15426,4 +15426,305 @@ mod tests {
             failures.join("\n  ")
         );
     }
+
+    // -----------------------------------------------------------------------
+    // TTL at ingest (TG-TTL-001): a client write stores its `ttlMs`, with 0
+    // meaning none, bumps the map's TTL-write generation when a TTL is stored,
+    // and broadcasts the TTL as stored. Each case runs on both stamp branches.
+    // -----------------------------------------------------------------------
+
+    /// The two stamp branches of a client write: minted by the server (an HTTP
+    /// origin) and kept verbatim (a trusted origin).
+    const STAMP_CASES: [&str; 2] = ["mint", "verbatim"];
+
+    /// The context of a client write of `key` on the stamp branch `case`.
+    fn ttl_ctx(case: &str, key: &str) -> OperationContext {
+        if case == "mint" {
+            return make_http_ctx_for_key(key);
+        }
+        let mut trusted = make_ctx();
+        trusted.partition_id = Some(hash_to_partition(key));
+        trusted
+    }
+
+    struct TtlRig {
+        svc: Arc<CrdtService>,
+        factory: Arc<RecordStoreFactory>,
+        listener: tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>,
+    }
+
+    fn ttl_rig(map: &str) -> TtlRig {
+        let factory = make_factory();
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let svc = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            Arc::clone(&conn_registry),
+            make_validator(),
+            Arc::clone(&query_registry),
+            Arc::new(SchemaService::new()),
+        ));
+        let listener = subscribe_listener(&conn_registry, &query_registry, map);
+        TtlRig {
+            svc,
+            factory,
+            listener,
+        }
+    }
+
+    fn ttl_op(
+        ctx: OperationContext,
+        map: &str,
+        key: &str,
+        record: Option<topgun_core::LWWRecord<rmpv::Value>>,
+        or_record: Option<topgun_core::ORMapRecord<rmpv::Value>>,
+    ) -> Operation {
+        Operation::ClientOp {
+            ctx,
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some(format!("ttl-{key}")),
+                    map_name: map.to_string(),
+                    key: key.to_string(),
+                    op_type: None,
+                    record: record.map(Some),
+                    or_record: or_record.map(Some),
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        }
+    }
+
+    impl TtlRig {
+        /// Writes `key` as an LWW PUT carrying `ttl_ms` and returns the TTL of
+        /// the PUT event the subscriber received, as decoded off the wire.
+        async fn put(
+            &mut self,
+            ctx: OperationContext,
+            map: &str,
+            key: &str,
+            ttl_ms: Option<u64>,
+        ) -> Option<u64> {
+            let record = topgun_core::LWWRecord {
+                value: Some(rmpv::Value::String("v".into())),
+                timestamp: make_timestamp(),
+                ttl_ms,
+            };
+            self.svc
+                .clone()
+                .oneshot(ttl_op(ctx, map, key, Some(record), None))
+                .await
+                .expect("the PUT is applied");
+            let events = drain_server_events(&mut self.listener);
+            assert_eq!(events.len(), 1, "one event per write, got {events:?}");
+            events[0]
+                .record
+                .as_ref()
+                .expect("a PUT carries its record")
+                .ttl_ms
+        }
+
+        /// Writes `key` as an OR_ADD carrying `ttl_ms` and returns the TTL of
+        /// the OR_ADD event the subscriber received, as decoded off the wire.
+        async fn or_add(
+            &mut self,
+            ctx: OperationContext,
+            map: &str,
+            key: &str,
+            ttl_ms: Option<u64>,
+        ) -> Option<u64> {
+            let or_record = topgun_core::ORMapRecord {
+                value: rmpv::Value::String("v".into()),
+                timestamp: make_timestamp(),
+                tag: format!("1700000000000:1:{key}"),
+                ttl_ms,
+            };
+            self.svc
+                .clone()
+                .oneshot(ttl_op(ctx, map, key, None, Some(or_record)))
+                .await
+                .expect("the OR_ADD is applied");
+            let events = drain_server_events(&mut self.listener);
+            assert_eq!(events.len(), 1, "one event per write, got {events:?}");
+            events[0]
+                .or_record
+                .as_ref()
+                .expect("an OR_ADD carries its record")
+                .ttl_ms
+        }
+
+        async fn stored(&self, map: &str, key: &str) -> RecordValue {
+            self.factory
+                .get_or_create(map, hash_to_partition(key))
+                .get(key, false)
+                .await
+                .expect("read")
+                .expect("the write is stored")
+                .value
+        }
+
+        async fn stored_lww_ttl(&self, map: &str, key: &str) -> Option<u64> {
+            match self.stored(map, key).await {
+                RecordValue::Lww { ttl_ms, .. } => ttl_ms,
+                other => panic!("expected an LWW value, got {other:?}"),
+            }
+        }
+
+        async fn stored_or_ttls(&self, map: &str, key: &str) -> Vec<Option<u64>> {
+            match self.stored(map, key).await {
+                RecordValue::OrMap { records, .. } => records.iter().map(|r| r.ttl_ms).collect(),
+                other => panic!("expected an OR value, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn lww_put_stores_ttl() {
+        const MAP: &str = "ttl-put";
+        let mut rig = ttl_rig(MAP);
+        for case in STAMP_CASES {
+            let key = format!("k-{case}");
+            rig.put(ttl_ctx(case, &key), MAP, &key, Some(5_000)).await;
+            assert_eq!(rig.stored_lww_ttl(MAP, &key).await, Some(5_000), "{case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn or_add_stores_ttl() {
+        const MAP: &str = "ttl-or-add";
+        let mut rig = ttl_rig(MAP);
+        for case in STAMP_CASES {
+            let key = format!("k-{case}");
+            rig.or_add(ttl_ctx(case, &key), MAP, &key, Some(5_000))
+                .await;
+            assert_eq!(
+                rig.stored_or_ttls(MAP, &key).await,
+                vec![Some(5_000)],
+                "{case}"
+            );
+        }
+    }
+
+    /// A `ttlMs` of 0 is no TTL, as on the client: it is stored as `None`, bumps
+    /// nothing, and is broadcast as absent.
+    #[tokio::test]
+    async fn lww_put_with_ttl_zero_stores_none() {
+        const MAP: &str = "ttl-zero";
+        let mut rig = ttl_rig(MAP);
+        for case in STAMP_CASES {
+            let key = format!("lww-{case}");
+            let sent = rig.put(ttl_ctx(case, &key), MAP, &key, Some(0)).await;
+            assert_eq!(rig.stored_lww_ttl(MAP, &key).await, None, "{case}: PUT");
+            assert_eq!(sent, None, "{case}: PUT broadcast");
+        }
+        for case in STAMP_CASES {
+            let key = format!("or-{case}");
+            let sent = rig.or_add(ttl_ctx(case, &key), MAP, &key, Some(0)).await;
+            assert_eq!(
+                rig.stored_or_ttls(MAP, &key).await,
+                vec![None],
+                "{case}: OR_ADD"
+            );
+            assert_eq!(sent, None, "{case}: OR_ADD broadcast");
+        }
+        assert_eq!(
+            rig.factory.ttl_write_generation(MAP),
+            0,
+            "no TTL was stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn lww_put_with_ttl_bumps_generation() {
+        const MAP: &str = "ttl-gen-put";
+        let mut rig = ttl_rig(MAP);
+        let mut expected = 0;
+        for case in STAMP_CASES {
+            let key = format!("k-{case}");
+            rig.put(ttl_ctx(case, &key), MAP, &key, Some(5_000)).await;
+            expected += 1;
+            assert_eq!(
+                rig.factory.ttl_write_generation(MAP),
+                expected,
+                "{case}: TTL"
+            );
+        }
+        for case in STAMP_CASES {
+            rig.put(
+                ttl_ctx(case, &format!("plain-{case}")),
+                MAP,
+                &format!("plain-{case}"),
+                None,
+            )
+            .await;
+            assert_eq!(
+                rig.factory.ttl_write_generation(MAP),
+                expected,
+                "{case}: no TTL"
+            );
+        }
+        assert_eq!(rig.factory.ttl_write_generation("other-map"), 0);
+    }
+
+    #[tokio::test]
+    async fn or_add_with_ttl_bumps_generation() {
+        const MAP: &str = "ttl-gen-or";
+        let mut rig = ttl_rig(MAP);
+        let mut expected = 0;
+        for case in STAMP_CASES {
+            let key = format!("k-{case}");
+            rig.or_add(ttl_ctx(case, &key), MAP, &key, Some(5_000))
+                .await;
+            expected += 1;
+            assert_eq!(
+                rig.factory.ttl_write_generation(MAP),
+                expected,
+                "{case}: TTL"
+            );
+        }
+        for case in STAMP_CASES {
+            rig.or_add(
+                ttl_ctx(case, &format!("plain-{case}")),
+                MAP,
+                &format!("plain-{case}"),
+                None,
+            )
+            .await;
+            assert_eq!(
+                rig.factory.ttl_write_generation(MAP),
+                expected,
+                "{case}: no TTL"
+            );
+        }
+    }
+
+    /// The PUT broadcast carries the TTL as stored, on both stamp branches.
+    #[tokio::test]
+    async fn lww_put_broadcasts_stored_ttl() {
+        const MAP: &str = "ttl-put-bcast";
+        let mut rig = ttl_rig(MAP);
+        for case in STAMP_CASES {
+            let key = format!("k-{case}");
+            let sent = rig.put(ttl_ctx(case, &key), MAP, &key, Some(5_000)).await;
+            assert_eq!(sent, Some(5_000), "{case}");
+            assert_eq!(sent, rig.stored_lww_ttl(MAP, &key).await, "{case}");
+        }
+    }
+
+    /// The OR_ADD broadcast carries the TTL as stored, on both stamp branches.
+    #[tokio::test]
+    async fn or_add_broadcasts_stored_ttl() {
+        const MAP: &str = "ttl-or-bcast";
+        let mut rig = ttl_rig(MAP);
+        for case in STAMP_CASES {
+            let key = format!("k-{case}");
+            let sent = rig
+                .or_add(ttl_ctx(case, &key), MAP, &key, Some(5_000))
+                .await;
+            assert_eq!(sent, Some(5_000), "{case}");
+            assert_eq!(vec![sent], rig.stored_or_ttls(MAP, &key).await, "{case}");
+        }
+    }
 }
