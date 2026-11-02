@@ -737,7 +737,9 @@ impl SyncService {
                     match store.get(key, false).await {
                         Ok(Some(record)) => {
                             if let RecordValue::Lww {
-                                value, timestamp, ..
+                                value,
+                                timestamp,
+                                ttl_ms,
                             } = record.value
                             {
                                 records.push(SyncLeafRecord {
@@ -745,7 +747,7 @@ impl SyncService {
                                     record: LWWRecord {
                                         value: Some(value_to_rmpv(&value)),
                                         timestamp,
-                                        ttl_ms: None,
+                                        ttl_ms,
                                     },
                                 });
                             }
@@ -807,7 +809,9 @@ impl SyncService {
                         match store.get(key, false).await {
                             Ok(Some(record)) => {
                                 if let RecordValue::Lww {
-                                    value, timestamp, ..
+                                    value,
+                                    timestamp,
+                                    ttl_ms,
                                 } = record.value
                                 {
                                     records.push(SyncLeafRecord {
@@ -815,7 +819,7 @@ impl SyncService {
                                         record: LWWRecord {
                                             value: Some(value_to_rmpv(&value)),
                                             timestamp,
-                                            ttl_ms: None,
+                                            ttl_ms,
                                         },
                                     });
                                 }
@@ -895,7 +899,9 @@ impl SyncService {
                 match store.get(key, false).await {
                     Ok(Some(record)) => {
                         if let RecordValue::Lww {
-                            value, timestamp, ..
+                            value,
+                            timestamp,
+                            ttl_ms,
                         } = record.value
                         {
                             records.push(SyncLeafRecord {
@@ -903,7 +909,7 @@ impl SyncService {
                                 record: LWWRecord {
                                     value: Some(value_to_rmpv(&value)),
                                     timestamp,
-                                    ttl_ms: None,
+                                    ttl_ms,
                                 },
                             });
                         }
@@ -1181,7 +1187,7 @@ impl SyncService {
                                         value: value_to_rmpv(&r.value),
                                         timestamp: r.timestamp,
                                         tag: r.tag,
-                                        ttl_ms: None,
+                                        ttl_ms: r.ttl_ms,
                                     })
                                     .collect();
                                 // Carry tombstones so remove-wins suppression and
@@ -1279,7 +1285,7 @@ impl SyncService {
                                             value: value_to_rmpv(&r.value),
                                             timestamp: r.timestamp,
                                             tag: r.tag,
-                                            ttl_ms: None,
+                                            ttl_ms: r.ttl_ms,
                                         })
                                         .collect();
                                     // Carry tombstones so remove-wins suppression and
@@ -1388,7 +1394,7 @@ impl SyncService {
                                     value: value_to_rmpv(&r.value),
                                     timestamp: r.timestamp,
                                     tag: r.tag,
-                                    ttl_ms: None,
+                                    ttl_ms: r.ttl_ms,
                                 })
                                 .collect();
                             // Carry tombstones so remove-wins suppression and
@@ -1481,7 +1487,7 @@ impl SyncService {
                                 value: value_to_rmpv(&r.value),
                                 timestamp: r.timestamp,
                                 tag: r.tag,
-                                ttl_ms: None,
+                                ttl_ms: r.ttl_ms,
                             })
                             .collect();
                         // Carry tombstones so remove-wins suppression and
@@ -1784,6 +1790,15 @@ impl SyncService {
                             i
                         } else {
                             crate::storage::record::add_live_census(1, r.tag.len() as u64);
+                            // A known tag keeps its stored TTL, as it keeps its
+                            // timestamp; only a newly accepted tag takes the pushed one.
+                            // The bump precedes the store write: a bump for a write that
+                            // then fails only stops the expiry sweep from skipping the
+                            // map; a missed bump hides it (TG-TTL-001).
+                            let stored_ttl = crate::service::domain::crdt::stored_ttl_ms(r.ttl_ms);
+                            if stored_ttl.is_some() {
+                                self.record_store_factory.note_ttl_write(&map_name);
+                            }
                             records.push(crate::storage::record::OrMapEntry {
                                 value: crate::service::domain::crdt::rmpv_to_value(&r.value),
                                 // The tag stays verbatim: it is the OR identity, and
@@ -1795,7 +1810,7 @@ impl SyncService {
                                 // both stay server-authoritative (TG-TTL-001).
                                 tag: r.tag.clone(),
                                 timestamp: self.hlc.lock().now(),
-                                ttl_ms: None,
+                                ttl_ms: stored_ttl,
                             });
                             records.len() - 1
                         };
@@ -1803,7 +1818,7 @@ impl SyncService {
                             value: value_to_rmpv(&records[stored].value),
                             timestamp: records[stored].timestamp.clone(),
                             tag: r.tag.clone(),
-                            ttl_ms: r.ttl_ms,
+                            ttl_ms: records[stored].ttl_ms,
                         });
                     }
                     tombstones.extend(new_tags);
@@ -3297,18 +3312,18 @@ mod tests {
         assert_eq!(stored[1].timestamp, server_ts(before.counter + 1));
         assert_eq!(stored[1].value, Value::String("fresh".to_string()));
 
-        let as_sent = |e: &crate::storage::record::OrMapEntry, ttl_ms| ORMapRecord {
+        let as_sent = |e: &crate::storage::record::OrMapEntry| ORMapRecord {
             value: value_to_rmpv(&e.value),
             timestamp: e.timestamp.clone(),
             tag: e.tag.clone(),
-            ttl_ms,
+            ttl_ms: e.ttl_ms,
         };
         assert_eq!(
             rig.or_adds(),
             vec![
-                as_sent(&stored[0], again.ttl_ms),
-                as_sent(&stored[1], fresh.ttl_ms),
-                as_sent(&stored[1], fresh_again.ttl_ms),
+                as_sent(&stored[0]),
+                as_sent(&stored[1]),
+                as_sent(&stored[1]),
             ],
             "one OR_ADD per inbound record, each the stored entry of its tag"
         );
@@ -8110,5 +8125,308 @@ mod tests {
         branch_durable(&b).await;
         branch_routed(&b).await;
         branch_aggregate(&b).await;
+    }
+
+    // -------------------------------------------------------------------------
+    // The TTL at push-diff ingest and on every leaf and diff response
+    // (TG-TTL-001)
+    // -------------------------------------------------------------------------
+
+    /// A newly accepted tag stores the pushed TTL, with 0 stored as none, and
+    /// a stored TTL bumps the map's TTL-write generation.
+    #[tokio::test]
+    async fn push_diff_stores_ttl() {
+        const MAP: &str = "ttl-push";
+        let mut rig = stamp_rig(MAP);
+        let mut zero = client_record("zero", SERVER_MS, "2:0:c");
+        zero.ttl_ms = Some(0);
+        rig.push(
+            MAP,
+            ORMapEntry {
+                key: "k".to_string(),
+                records: vec![client_record("ttl", SERVER_MS, "1:0:c"), zero],
+                tombstones: Vec::new(),
+            },
+        )
+        .await;
+        let stored = rig.stored(MAP, "k").await;
+        let ttls: Vec<_> = stored.iter().map(|e| (e.tag.as_str(), e.ttl_ms)).collect();
+        assert_eq!(ttls, vec![("1:0:c", Some(60_000)), ("2:0:c", None)]);
+        assert_eq!(
+            rig.factory.ttl_write_generation(MAP),
+            1,
+            "only the stored TTL bumps the generation"
+        );
+        let sent: Vec<_> = rig.or_adds().iter().map(|r| r.ttl_ms).collect();
+        assert_eq!(sent, vec![Some(60_000), None], "broadcast as stored");
+    }
+
+    /// A known tag re-pushed with another `ttlMs` keeps its stored TTL, bumps
+    /// nothing, and is broadcast with the TTL it keeps.
+    #[tokio::test]
+    async fn push_diff_known_tag_broadcasts_its_stored_ttl() {
+        const MAP: &str = "ttl-push-known";
+        let mut rig = stamp_rig(MAP);
+        let first = client_record("first", SERVER_MS, "1:0:c");
+        let entry = |record| ORMapEntry {
+            key: "k".to_string(),
+            records: vec![record],
+            tombstones: Vec::new(),
+        };
+        rig.push(MAP, entry(first.clone())).await;
+        let _ = rig.or_adds();
+        assert_eq!(rig.factory.ttl_write_generation(MAP), 1);
+
+        for other_ttl in [Some(1_000), None] {
+            let mut again = first.clone();
+            again.ttl_ms = other_ttl;
+            rig.push(MAP, entry(again)).await;
+            let stored = rig.stored(MAP, "k").await;
+            assert_eq!(stored.len(), 1);
+            assert_eq!(
+                stored[0].ttl_ms,
+                Some(60_000),
+                "{other_ttl:?}: stored TTL kept"
+            );
+            let sent: Vec<_> = rig.or_adds().iter().map(|r| r.ttl_ms).collect();
+            assert_eq!(
+                sent,
+                vec![Some(60_000)],
+                "{other_ttl:?}: broadcast as stored"
+            );
+        }
+        assert_eq!(
+            rig.factory.ttl_write_generation(MAP),
+            1,
+            "a known tag bumps nothing"
+        );
+    }
+
+    /// A TTL does not enter the Merkle leaf, so a record hashes alike with and
+    /// without one and a leaf response can carry it unfiltered.
+    #[test]
+    fn merkle_leaf_hash_ignores_ttl() {
+        use crate::storage::map_data_store::merkle_leaf_hash;
+        for ttl_ms in [Some(1), Some(45_000), Some(u64::MAX)] {
+            assert_eq!(
+                merkle_leaf_hash(TTL_KEY, &ttl_lww_value(ttl_ms)),
+                merkle_leaf_hash(TTL_KEY, &ttl_lww_value(None)),
+                "LWW {ttl_ms:?}"
+            );
+            assert_eq!(
+                merkle_leaf_hash(TTL_KEY, &ttl_or_value(ttl_ms)),
+                merkle_leaf_hash(TTL_KEY, &ttl_or_value(None)),
+                "OR {ttl_ms:?}"
+            );
+        }
+    }
+
+    const TTL_MAP: &str = "ttl-resp";
+    const TTL_KEY: &str = "ttl-key";
+    const TTL: u64 = 45_000;
+
+    fn ttl_lww_value(ttl_ms: Option<u64>) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::Int(1),
+            timestamp: make_timestamp(),
+            ttl_ms,
+        }
+    }
+
+    fn ttl_or_value(ttl_ms: Option<u64>) -> RecordValue {
+        RecordValue::OrMap {
+            records: vec![crate::storage::record::OrMapEntry {
+                value: Value::Int(1),
+                tag: "ttl-tag".to_string(),
+                timestamp: make_timestamp(),
+                ttl_ms,
+            }],
+            tombstones: Vec::new(),
+        }
+    }
+
+    /// The three ways a bucket request reaches a leaf: through the durable
+    /// session, or through the in-memory trees by a partition-prefixed path
+    /// (routed) or a plain one (aggregate).
+    #[derive(Clone, Copy, Debug)]
+    enum LeafBranch {
+        Durable,
+        Routed,
+        Aggregate,
+    }
+
+    /// A sync service whose record store holds `value` under `TTL_KEY` and
+    /// whose leaf for it is read on `branch`, with the path that requests it.
+    async fn ttl_leaf_service(
+        value: &RecordValue,
+        branch: LeafBranch,
+    ) -> (Arc<SyncService>, String, Option<tempfile::TempDir>) {
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::durable_merkle::DurableMerkle;
+        use crate::storage::map_data_store::{merkle_leaf_hash, MerkleLeafKind};
+
+        let factory = make_factory();
+        factory
+            .get_or_create(TTL_MAP, hash_to_partition(TTL_KEY))
+            .put(
+                &KeyWriteToken::for_test(TTL_MAP, TTL_KEY),
+                TTL_KEY,
+                value.clone(),
+                ExpiryPolicy::NONE,
+                CallerProvenance::CrdtMerge,
+            )
+            .await
+            .expect("seed");
+        let leaf = round_leaf_path(TTL_KEY);
+        let manager = Arc::new(MerkleSyncManager::default());
+        let new_service = |manager| {
+            SyncService::new(
+                manager,
+                factory,
+                Arc::new(ConnectionRegistry::new()),
+                Arc::new(QueryRegistry::new()),
+            )
+        };
+        if let LeafBranch::Durable = branch {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let durable: Arc<dyn MapDataStore> =
+                Arc::new(RedbDataStore::new(dir.path().join("ttl.redb")).expect("redb open"));
+            durable
+                .add(TTL_MAP, TTL_KEY, value, 0, 1)
+                .await
+                .expect("durable seed");
+            let index: Arc<dyn DurableMerkleIndex + Send + Sync> = Arc::new(DurableMerkle);
+            let svc = new_service(manager).with_durable_index(index, durable);
+            return (Arc::new(svc), leaf, Some(dir));
+        }
+        let partition = hash_to_partition(TTL_KEY);
+        match merkle_leaf_hash(TTL_KEY, value).expect("a record has a leaf") {
+            (MerkleLeafKind::Lww, hash) => manager.update_lww(TTL_MAP, partition, TTL_KEY, hash),
+            (MerkleLeafKind::OrMap, hash) => {
+                manager.update_ormap(TTL_MAP, partition, TTL_KEY, hash);
+            }
+        }
+        let path = match branch {
+            LeafBranch::Routed => format!("{partition:03}/{leaf}"),
+            _ => leaf,
+        };
+        (Arc::new(new_service(manager)), path, None)
+    }
+
+    /// Sends `message` through the wire codec and back, as a client receives it.
+    fn over_the_wire(response: OperationResponse) -> Message {
+        let OperationResponse::Message(message) = response else {
+            panic!("expected a message, got {response:?}");
+        };
+        let bytes = rmp_serde::to_vec_named(&*message).expect("encode");
+        rmp_serde::from_slice(&bytes).expect("decode")
+    }
+
+    /// The TTLs of the LWW leaf records answered on `branch` for a record
+    /// stored with `TTL`.
+    async fn lww_leaf_ttls(branch: LeafBranch) -> Vec<Option<u64>> {
+        let (svc, path, _dir) = ttl_leaf_service(&ttl_lww_value(Some(TTL)), branch).await;
+        let response = svc
+            .oneshot(Operation::MerkleReqBucket {
+                ctx: make_ctx(service_names::SYNC),
+                payload: messages::MerkleReqBucketMessage {
+                    payload: messages::MerkleReqBucketPayload {
+                        map_name: TTL_MAP.to_string(),
+                        path,
+                    },
+                },
+            })
+            .await
+            .expect("leaf request");
+        match over_the_wire(response) {
+            Message::SyncRespLeaf(leaf) => leaf
+                .payload
+                .records
+                .iter()
+                .map(|r| r.record.ttl_ms)
+                .collect(),
+            other => panic!("{branch:?}: expected SyncRespLeaf, got {other:?}"),
+        }
+    }
+
+    /// The TTLs of the OR leaf records answered on `branch` for an entry
+    /// stored with `TTL`.
+    async fn or_leaf_ttls(branch: LeafBranch) -> Vec<Option<u64>> {
+        let (svc, path, _dir) = ttl_leaf_service(&ttl_or_value(Some(TTL)), branch).await;
+        let response = round_bucket(&svc, TTL_MAP, None, &path)
+            .await
+            .expect("leaf request");
+        match over_the_wire(response) {
+            Message::ORMapSyncRespLeaf(leaf) => leaf
+                .payload
+                .entries
+                .iter()
+                .flat_map(|e| e.records.iter().map(|r| r.ttl_ms))
+                .collect(),
+            other => panic!("{branch:?}: expected ORMapSyncRespLeaf, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lww_leaf_response_carries_ttl() {
+        assert_eq!(lww_leaf_ttls(LeafBranch::Durable).await, vec![Some(TTL)]);
+    }
+
+    #[tokio::test]
+    async fn lww_diff_response_carries_ttl() {
+        assert_eq!(lww_leaf_ttls(LeafBranch::Routed).await, vec![Some(TTL)]);
+    }
+
+    #[tokio::test]
+    async fn lww_bucket_response_carries_ttl() {
+        assert_eq!(lww_leaf_ttls(LeafBranch::Aggregate).await, vec![Some(TTL)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn or_leaf_response_carries_ttl() {
+        assert_eq!(or_leaf_ttls(LeafBranch::Durable).await, vec![Some(TTL)]);
+    }
+
+    #[tokio::test]
+    async fn or_diff_response_carries_ttl() {
+        assert_eq!(or_leaf_ttls(LeafBranch::Routed).await, vec![Some(TTL)]);
+    }
+
+    #[tokio::test]
+    async fn or_bucket_response_carries_ttl() {
+        assert_eq!(or_leaf_ttls(LeafBranch::Aggregate).await, vec![Some(TTL)]);
+    }
+
+    /// The answer to an `ORMapDiffRequest`, which a client sends for the keys
+    /// whose leaves differ, carries the stored TTL of each entry.
+    #[tokio::test]
+    async fn or_push_reply_carries_ttl() {
+        use topgun_core::messages::{ORMapDiffRequest, ORMapDiffRequestPayload};
+        let (svc, _path, _dir) =
+            ttl_leaf_service(&ttl_or_value(Some(TTL)), LeafBranch::Aggregate).await;
+        let response = svc
+            .oneshot(Operation::ORMapDiffRequest {
+                ctx: make_ctx(service_names::SYNC),
+                payload: ORMapDiffRequest {
+                    payload: ORMapDiffRequestPayload {
+                        map_name: TTL_MAP.to_string(),
+                        keys: vec![TTL_KEY.to_string()],
+                    },
+                },
+            })
+            .await
+            .expect("diff request");
+        match over_the_wire(response) {
+            Message::ORMapDiffResponse(diff) => {
+                let ttls: Vec<_> = diff
+                    .payload
+                    .entries
+                    .iter()
+                    .flat_map(|e| e.records.iter().map(|r| r.ttl_ms))
+                    .collect();
+                assert_eq!(ttls, vec![Some(TTL)]);
+            }
+            other => panic!("expected ORMapDiffResponse, got {other:?}"),
+        }
     }
 }

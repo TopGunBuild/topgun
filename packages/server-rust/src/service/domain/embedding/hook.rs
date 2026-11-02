@@ -631,6 +631,20 @@ enum WriteBackOutcome {
     Failed,
 }
 
+/// The TTL the write-back stores so that the record expires at the same instant
+/// as before (TG-TTL-001): the write-back re-stamps the record with `now_millis`,
+/// and expiry is anchored on the stamp, so the TTL is shortened by the time
+/// that has passed. Carried verbatim it would extend the record's life; dropped
+/// it would make the record immortal.
+///
+/// `None` means skip the write-back: the record expires at or before
+/// `now_millis`, and no TTL of at least 1 ms keeps that instant (at the equal
+/// instant a TTL of 1 would move expiry by 1 ms).
+fn write_back_ttl_ms(stored_millis: u64, ttl_ms: u64, now_millis: u64) -> Option<u64> {
+    let expires_at = stored_millis.saturating_add(ttl_ms);
+    (expires_at > now_millis).then(|| expires_at - now_millis)
+}
+
 /// Writes one record's `_embedding` back via read-modify-write, preserving all
 /// existing user fields.
 ///
@@ -656,6 +670,9 @@ enum WriteBackOutcome {
 /// on restart after an unclean stop. This is known from reading the two code
 /// paths, not from a test, and the per-key writer does not change it
 /// (TODO-778).
+// One read-check-put critical section under the key's writer; splitting it to
+// meet the line limit would scatter what the writer guards.
+#[allow(clippy::too_many_lines)]
 async fn write_back_one_embedding(
     evt: &EmbeddingEvent,
     embedding: Vec<f32>,
@@ -713,7 +730,9 @@ async fn write_back_one_embedding(
     WriteBackPark::pass(evt.write_back_park.as_ref()).await;
 
     let RecordValue::Lww {
-        value, timestamp, ..
+        value,
+        timestamp,
+        ttl_ms,
     } = existing.value
     else {
         tracing::warn!(
@@ -746,6 +765,19 @@ async fn write_back_one_embedding(
         .unwrap_or_default()
         .as_millis() as u64;
 
+    // A record without TTL stays without.
+    let ttl_ms = match ttl_ms.map(|t| write_back_ttl_ms(timestamp.millis, t, now_millis)) {
+        Some(None) => {
+            tracing::debug!(
+                "embedding write-back skipped for {}/{}: the record has expired",
+                evt.map_name,
+                evt.key
+            );
+            return WriteBackOutcome::Skipped;
+        }
+        kept => kept.flatten(),
+    };
+
     let record_value = RecordValue::Lww {
         value: merged_value,
         timestamp: Timestamp {
@@ -753,7 +785,7 @@ async fn write_back_one_embedding(
             counter: 0,
             node_id: "_embedding_hook".to_string(),
         },
-        ttl_ms: None,
+        ttl_ms,
     };
 
     // Mark in-flight before write so the observer's re-entrancy guard fires.
@@ -2193,5 +2225,133 @@ mod tests {
                  of V2 is still being computed the record must carry none, never that of V1"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The write-back keeps the expiry instant (TG-TTL-001)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_back_ttl_keeps_the_expiry_instant() {
+        use super::write_back_ttl_ms;
+        // stamp 1_000 + ttl 500 expires at 1_500.
+        assert_eq!(write_back_ttl_ms(1_000, 500, 1_200), Some(300), "e > now");
+        assert_eq!(
+            write_back_ttl_ms(1_000, 500, 1_499),
+            Some(1),
+            "e == now + 1"
+        );
+        assert_eq!(write_back_ttl_ms(1_000, 500, 1_500), None, "e == now: skip");
+        assert_eq!(write_back_ttl_ms(1_000, 500, 9_000), None, "e < now: skip");
+        assert_eq!(
+            write_back_ttl_ms(u64::MAX - 1, 10, u64::MAX - 5),
+            Some(5),
+            "the expiry instant saturates instead of wrapping"
+        );
+    }
+
+    /// Through the real write-back: a record whose expiry lies hours ahead keeps
+    /// its expiry instant, and one that expired hours ago is not written back.
+    #[tokio::test]
+    async fn embedding_write_back_keeps_expires_at() {
+        use super::{write_back_one_embedding, EmbeddingEvent, WriteBackOutcome};
+        use dashmap::DashSet;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        const HOUR_MS: u64 = 3_600_000;
+        let now = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_millis(),
+        )
+        .expect("millis fit u64");
+
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        ));
+        let key_writer = KeyWriterRegistry::new();
+        let in_flight = Arc::new(DashSet::new());
+
+        let write_back = |key: &'static str, stamp: u64, ttl_ms: Option<u64>| {
+            let factory = Arc::clone(&factory);
+            let in_flight = Arc::clone(&in_flight);
+            let key_writer = &key_writer;
+            async move {
+                let timestamp = Timestamp {
+                    millis: stamp,
+                    counter: 0,
+                    node_id: "node-1".to_string(),
+                };
+                let mut fields = BTreeMap::new();
+                fields.insert("title".to_string(), Value::String("t".to_string()));
+                let store = factory.get_or_create("docs", 0);
+                store
+                    .put(
+                        &KeyWriteToken::for_test("docs", key),
+                        key,
+                        RecordValue::Lww {
+                            value: Value::Map(fields),
+                            timestamp: timestamp.clone(),
+                            ttl_ms,
+                        },
+                        ExpiryPolicy::NONE,
+                        CallerProvenance::CrdtMerge,
+                    )
+                    .await
+                    .expect("seed");
+                let evt = EmbeddingEvent {
+                    map_name: "docs".to_string(),
+                    key: key.to_string(),
+                    partition_id: 0,
+                    text: "t".to_string(),
+                    source_timestamp: timestamp,
+                    write_back_park: None,
+                };
+                let outcome =
+                    write_back_one_embedding(&evt, vec![0.0; 4], &factory, key_writer, &in_flight)
+                        .await;
+                let stored = store.get(key, false).await.expect("read").expect("stored");
+                (outcome, stored.value)
+            }
+        };
+
+        // Written an hour ago with a two-hour TTL: expires an hour from now.
+        let (outcome, value) = write_back("live", now - HOUR_MS, Some(2 * HOUR_MS)).await;
+        assert_eq!(outcome, WriteBackOutcome::Embedded);
+        let RecordValue::Lww {
+            timestamp, ttl_ms, ..
+        } = value
+        else {
+            panic!("expected an LWW value, got {value:?}");
+        };
+        assert!(
+            timestamp.millis >= now,
+            "the write-back re-stamps the record"
+        );
+        assert_eq!(
+            timestamp.millis + ttl_ms.expect("the TTL is kept"),
+            now + HOUR_MS,
+            "the record still expires at the same instant"
+        );
+
+        // Written two hours ago with a one-hour TTL: expired an hour ago.
+        let (outcome, value) = write_back("expired", now - 2 * HOUR_MS, Some(HOUR_MS)).await;
+        assert_eq!(outcome, WriteBackOutcome::Skipped);
+        assert!(
+            matches!(&value, RecordValue::Lww { timestamp, ttl_ms: Some(t), .. }
+                if timestamp.millis == now - 2 * HOUR_MS && *t == HOUR_MS),
+            "an expired record is left as it was, got {value:?}"
+        );
+
+        // A record without TTL stays without.
+        let (outcome, value) = write_back("plain", now - HOUR_MS, None).await;
+        assert_eq!(outcome, WriteBackOutcome::Embedded);
+        assert!(
+            matches!(&value, RecordValue::Lww { ttl_ms: None, .. }),
+            "got {value:?}"
+        );
     }
 }

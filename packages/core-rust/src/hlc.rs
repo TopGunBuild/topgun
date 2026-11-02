@@ -514,7 +514,12 @@ pub struct LWWRecord<V> {
     /// Causal timestamp assigned by the writing node's HLC.
     pub timestamp: Timestamp,
     /// Optional time-to-live in milliseconds. Checked against `HLC::clock_source().now()`.
-    #[serde(default, deserialize_with = "serde_number::deserialize_option_u64")]
+    /// Absent on the wire when `None`: the TS schema takes `ttlMs` as optional, not nullable.
+    #[serde(
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ttl_ms: Option<u64>,
 }
 
@@ -536,8 +541,12 @@ pub struct ORMapRecord<V> {
     pub timestamp: Timestamp,
     /// Unique tag identifying this particular addition (typically `"millis:counter:nodeId"`).
     pub tag: String,
-    /// Optional time-to-live in milliseconds.
-    #[serde(default, deserialize_with = "serde_number::deserialize_option_u64")]
+    /// Optional time-to-live in milliseconds. Absent on the wire when `None`, as on `LWWRecord`.
+    #[serde(
+        default,
+        deserialize_with = "serde_number::deserialize_option_u64",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ttl_ms: Option<u64>,
 }
 
@@ -1325,5 +1334,114 @@ mod tests {
             node_id: "n1".to_string(),
         };
         assert_eq!(format!("{ts}"), "100:5:n1");
+    }
+
+    // ---- Wire omission of `ttlMs` ----
+
+    fn encoded_keys<T: Serialize>(record: &T) -> Vec<String> {
+        let bytes = rmp_serde::to_vec_named(record).expect("encode");
+        let value: rmpv::Value = rmp_serde::from_slice(&bytes).expect("decode as rmpv");
+        value
+            .as_map()
+            .expect("a record encodes as a map")
+            .iter()
+            .map(|(k, _)| k.as_str().expect("string key").to_string())
+            .collect()
+    }
+
+    fn ts() -> Timestamp {
+        Timestamp {
+            millis: 1_000,
+            counter: 2,
+            node_id: "n1".to_string(),
+        }
+    }
+
+    #[test]
+    fn lww_record_without_ttl_omits_ttl_key() {
+        let without = LWWRecord {
+            value: Some(7u32),
+            timestamp: ts(),
+            ttl_ms: None,
+        };
+        assert!(!encoded_keys(&without).contains(&"ttlMs".to_string()));
+
+        let with = LWWRecord {
+            ttl_ms: Some(500),
+            ..without.clone()
+        };
+        assert!(encoded_keys(&with).contains(&"ttlMs".to_string()));
+        let bytes = rmp_serde::to_vec_named(&with).expect("encode");
+        let back: LWWRecord<u32> = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(back, with);
+        let bytes = rmp_serde::to_vec_named(&without).expect("encode");
+        let back: LWWRecord<u32> = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(back.ttl_ms, None);
+    }
+
+    #[test]
+    fn ormap_record_without_ttl_omits_ttl_key() {
+        let without = ORMapRecord {
+            value: 7u32,
+            timestamp: ts(),
+            tag: "1000:2:n1".to_string(),
+            ttl_ms: None,
+        };
+        assert!(!encoded_keys(&without).contains(&"ttlMs".to_string()));
+
+        let with = ORMapRecord {
+            ttl_ms: Some(500),
+            ..without.clone()
+        };
+        assert!(encoded_keys(&with).contains(&"ttlMs".to_string()));
+        let bytes = rmp_serde::to_vec_named(&with).expect("encode");
+        let back: ORMapRecord<u32> = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(back, with);
+        let bytes = rmp_serde::to_vec_named(&without).expect("encode");
+        let back: ORMapRecord<u32> = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(back.ttl_ms, None);
+    }
+
+    /// A map that carries no `ttlMs` key decodes to `None`, and one that carries it to `Some`,
+    /// so a peer that omits the key and a peer that still sends it both decode.
+    #[test]
+    fn records_decode_with_and_without_ttl_key() {
+        let ts_map = || {
+            rmpv::Value::Map(vec![
+                ("millis".into(), 1_000u64.into()),
+                ("counter".into(), 2u32.into()),
+                ("nodeId".into(), "n1".into()),
+            ])
+        };
+        let lww = |ttl: Option<u64>| {
+            let mut m = vec![
+                ("value".into(), 7u32.into()),
+                ("timestamp".into(), ts_map()),
+            ];
+            if let Some(t) = ttl {
+                m.push(("ttlMs".into(), t.into()));
+            }
+            rmp_serde::to_vec(&rmpv::Value::Map(m)).expect("encode")
+        };
+        let rec: LWWRecord<u32> = rmp_serde::from_slice(&lww(None)).expect("decode");
+        assert_eq!(rec.ttl_ms, None);
+        let rec: LWWRecord<u32> = rmp_serde::from_slice(&lww(Some(9))).expect("decode");
+        assert_eq!(rec.ttl_ms, Some(9));
+
+        let or = |ttl: Option<u64>| {
+            let mut m = vec![
+                ("value".into(), 7u32.into()),
+                ("timestamp".into(), ts_map()),
+                ("tag".into(), "1000:2:n1".into()),
+            ];
+            if let Some(t) = ttl {
+                m.push(("ttlMs".into(), t.into()));
+            }
+            rmp_serde::to_vec(&rmpv::Value::Map(m)).expect("encode")
+        };
+        let rec: ORMapRecord<u32> = rmp_serde::from_slice(&or(None)).expect("decode");
+        assert_eq!(rec.ttl_ms, None);
+        let rec: ORMapRecord<u32> = rmp_serde::from_slice(&or(Some(9))).expect("decode");
+        assert_eq!(rec.ttl_ms, Some(9));
     }
 }
