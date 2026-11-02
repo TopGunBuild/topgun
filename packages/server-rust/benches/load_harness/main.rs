@@ -674,16 +674,16 @@ fn build_services() -> (
         ]),
     );
 
-    let write_validator = {
-        let wv_hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
-            config.node_id.clone(),
-            Box::new(SystemClock),
-        )));
-        Arc::new(WriteAdmission::new(
-            Arc::new(SecurityConfig::default()),
-            wv_hlc,
-        ))
-    };
+    // One clock for client writes and pushed OR entries, as in the production
+    // binary (TG-TTL-001).
+    let wv_hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
+        config.node_id.clone(),
+        Box::new(SystemClock),
+    )));
+    let write_validator = Arc::new(WriteAdmission::new(
+        Arc::new(SecurityConfig::default()),
+        Arc::clone(&wv_hlc),
+    ));
 
     // Shared Event Journal store, default-on (mirrors production build_services)
     // so the harness measures the real journal-on write-path cost rather than a
@@ -718,12 +718,15 @@ fn build_services() -> (
     // in-memory MerkleSyncManager fallback is the only valid SYNC source for an
     // in-process NullDataStore run. The production binary (which runs on
     // redb) wires the durable index via `with_durable_index`.
-    let sync_svc = Arc::new(SyncService::new(
-        merkle_manager,
-        Arc::clone(&record_store_factory),
-        Arc::clone(&connection_registry),
-        Arc::clone(&query_registry),
-    ));
+    let sync_svc = Arc::new(
+        SyncService::new(
+            merkle_manager,
+            Arc::clone(&record_store_factory),
+            Arc::clone(&connection_registry),
+            Arc::clone(&query_registry),
+        )
+        .with_hlc(wv_hlc),
+    );
     let query_svc = Arc::new(QueryService::new(
         Arc::clone(&query_registry),
         Arc::clone(&record_store_factory),

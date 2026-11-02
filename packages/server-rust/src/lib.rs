@@ -153,18 +153,31 @@ mod integration_tests {
     use crate::storage::factory::{ObserverFactory, RecordStoreFactory};
     use crate::storage::impls::StorageConfig;
     use crate::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
-    fn make_write_validator(node_id: &str) -> Arc<WriteAdmission> {
+    /// A `WriteAdmission` and the clock it mints from; the SYNC service of the
+    /// same node is given that clock (TG-TTL-001).
+    fn make_write_validator(node_id: &str) -> (Arc<WriteAdmission>, Arc<parking_lot::Mutex<HLC>>) {
         let hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
             node_id.to_string(),
             Box::new(topgun_core::SystemClock),
         )));
-        Arc::new(WriteAdmission::new(
+        let admission = Arc::new(WriteAdmission::new(
             Arc::new(SecurityConfig::default()),
-            hlc,
-        ))
+            Arc::clone(&hlc),
+        ));
+        (admission, hlc)
     }
 
     fn setup() -> (OperationService, OperationRouter, ServerConfig) {
+        let (classify_svc, router, config, _) = setup_with_factory();
+        (classify_svc, router, config)
+    }
+
+    fn setup_with_factory() -> (
+        OperationService,
+        OperationRouter,
+        ServerConfig,
+        Arc<RecordStoreFactory>,
+    ) {
         let config = ServerConfig {
             node_id: "integration-test-node".to_string(),
             default_operation_timeout_ms: 5000,
@@ -227,25 +240,29 @@ mod integration_tests {
 
         let query_registry = Arc::new(QueryRegistry::new());
 
+        let (write_validator, wv_hlc) = make_write_validator(&config.node_id);
         let mut router = OperationRouter::new();
         router.register(
             service_names::CRDT,
             Arc::new(CrdtService::new(
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
-                make_write_validator(&config.node_id),
+                write_validator,
                 Arc::clone(&query_registry),
                 Arc::new(SchemaService::new()),
             )),
         );
         router.register(
             service_names::SYNC,
-            Arc::new(SyncService::new(
-                merkle_manager,
-                Arc::clone(&record_store_factory),
-                Arc::clone(&connection_registry),
-                Arc::clone(&query_registry),
-            )),
+            Arc::new(
+                SyncService::new(
+                    merkle_manager,
+                    Arc::clone(&record_store_factory),
+                    Arc::clone(&connection_registry),
+                    Arc::clone(&query_registry),
+                )
+                .with_hlc(wv_hlc),
+            ),
         );
         router.register(
             service_names::QUERY,
@@ -295,7 +312,114 @@ mod integration_tests {
             )),
         );
 
-        (classify_svc, router, config)
+        (classify_svc, router, config, record_store_factory)
+    }
+
+    /// Writes in turn through the CRDT service (a client PUT, stamped by its
+    /// `WriteAdmission`) and the SYNC service (a push diff, stamped by its
+    /// clock): PUT, push, PUT, push. Asserts every stored stamp carries
+    /// `node_id` and the four are strictly ordered in both directions, which
+    /// two clocks cannot guarantee and one clock does (TG-TTL-001).
+    pub(crate) async fn assert_crdt_and_sync_share_one_clock(
+        router: &mut OperationRouter,
+        factory: &RecordStoreFactory,
+        node_id: &str,
+    ) {
+        use crate::service::operation::{Operation, OperationContext};
+        use crate::storage::record::RecordValue;
+        use topgun_core::hlc::Timestamp;
+        use topgun_core::messages::{ORMapEntry, ORMapPushDiff, ORMapPushDiffPayload};
+
+        let client_ts = Timestamp {
+            millis: 1,
+            counter: 0,
+            node_id: "client".to_string(),
+        };
+        let mut stamps = Vec::new();
+        for (i, key) in ["k0", "k1", "k2", "k3"].into_iter().enumerate() {
+            let partition = topgun_core::hash_to_partition(key);
+            let op = if i % 2 == 0 {
+                let mut ctx =
+                    OperationContext::new(1, service_names::CRDT, client_ts.clone(), 5000);
+                ctx.partition_id = Some(partition);
+                // An anonymous client write is stamped by the server and needs no
+                // connection.
+                ctx.caller_origin = CallerOrigin::Anonymous;
+                Operation::ClientOp {
+                    ctx,
+                    payload: topgun_core::messages::ClientOpMessage {
+                        payload: topgun_core::messages::base::ClientOp {
+                            id: Some(key.to_string()),
+                            map_name: "lww".to_string(),
+                            key: key.to_string(),
+                            op_type: None,
+                            record: Some(Some(topgun_core::LWWRecord {
+                                value: Some(rmpv::Value::from(1)),
+                                timestamp: client_ts.clone(),
+                                ttl_ms: None,
+                            })),
+                            or_record: None,
+                            or_tag: None,
+                            write_concern: None,
+                            timeout: None,
+                        },
+                    },
+                }
+            } else {
+                Operation::ORMapPushDiff {
+                    ctx: OperationContext::new(1, service_names::SYNC, client_ts.clone(), 5000),
+                    payload: ORMapPushDiff {
+                        payload: ORMapPushDiffPayload {
+                            map_name: "or".to_string(),
+                            entries: vec![ORMapEntry {
+                                key: key.to_string(),
+                                records: vec![topgun_core::ORMapRecord {
+                                    value: rmpv::Value::from(1),
+                                    timestamp: client_ts.clone(),
+                                    tag: format!("1:{i}:client"),
+                                    ttl_ms: None,
+                                }],
+                                tombstones: Vec::new(),
+                            }],
+                        },
+                    },
+                }
+            };
+            ServiceExt::ready(&mut *router)
+                .await
+                .unwrap()
+                .call(op)
+                .await
+                .unwrap();
+            let map = if i % 2 == 0 { "lww" } else { "or" };
+            let stored = factory
+                .get_or_create(map, partition)
+                .get(key, false)
+                .await
+                .unwrap()
+                .map(|r| r.value);
+            stamps.push(match stored {
+                Some(RecordValue::Lww { timestamp, .. }) => timestamp,
+                Some(RecordValue::OrMap { records, .. }) => records[0].timestamp.clone(),
+                other => panic!("nothing stored under {map}/{key}: {other:?}"),
+            });
+        }
+        for ts in &stamps {
+            assert_eq!(
+                ts.node_id, node_id,
+                "every stamp comes from the node's clock: {stamps:?}"
+            );
+        }
+        assert!(
+            stamps.windows(2).all(|w| w[0] < w[1]),
+            "stamps are strictly ordered in write order: {stamps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn router_sync_and_write_admission_share_one_clock() {
+        let (_, mut router, config, factory) = setup_with_factory();
+        assert_crdt_and_sync_share_one_clock(&mut router, &factory, &config.node_id).await;
     }
 
     #[tokio::test]
@@ -480,19 +604,23 @@ mod integration_tests {
         let query_registry = Arc::new(QueryRegistry::new());
 
         let registry = ServiceRegistry::new();
+        let (write_validator, wv_hlc) = make_write_validator("registry-test-node");
         registry.register(CrdtService::new(
             Arc::clone(&record_store_factory),
             connection_registry_for_crdt,
-            make_write_validator("registry-test-node"),
+            write_validator,
             Arc::clone(&query_registry),
             Arc::new(SchemaService::new()),
         ));
-        registry.register(SyncService::new(
-            merkle_manager_for_sync,
-            Arc::clone(&record_store_factory),
-            connection_registry_for_sync,
-            Arc::clone(&query_registry),
-        ));
+        registry.register(
+            SyncService::new(
+                merkle_manager_for_sync,
+                Arc::clone(&record_store_factory),
+                connection_registry_for_sync,
+                Arc::clone(&query_registry),
+            )
+            .with_hlc(wv_hlc),
+        );
         registry.register(QueryService::new(
             query_registry,
             Arc::clone(&record_store_factory),
@@ -549,6 +677,17 @@ mod integration_tests {
 
         // Also accessible by name.
         assert!(registry.get_by_name("coordination").is_some());
+
+        // The registered SYNC and CRDT services stamp from one clock.
+        let mut router = OperationRouter::new();
+        router.register(service_names::CRDT, registry.get::<CrdtService>().unwrap());
+        router.register(service_names::SYNC, registry.get::<SyncService>().unwrap());
+        assert_crdt_and_sync_share_one_clock(
+            &mut router,
+            &record_store_factory,
+            "registry-test-node",
+        )
+        .await;
 
         // Shutdown all in reverse order.
         registry.shutdown_all(false).await.unwrap();

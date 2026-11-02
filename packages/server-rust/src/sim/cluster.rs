@@ -176,10 +176,12 @@ impl SimNode {
     ) -> anyhow::Result<Self> {
         let node_id = node_id.into();
 
+        // One clock for client writes and pushed OR entries, as in the
+        // production binary (TG-TTL-001).
         let hlc = Arc::new(Mutex::new(HLC::new(node_id.clone(), Box::new(SystemClock))));
         let write_validator = Arc::new(WriteAdmission::new(
             Arc::new(SecurityConfig::default()),
-            hlc,
+            Arc::clone(&hlc),
         ));
 
         let cluster_config = Arc::new(ClusterConfig::default());
@@ -244,7 +246,8 @@ impl SimNode {
                     Arc::clone(&connection_registry),
                     Arc::clone(&query_registry),
                 )
-                .with_key_writer(Arc::clone(&key_writer)),
+                .with_key_writer(Arc::clone(&key_writer))
+                .with_hlc(hlc),
             ),
         );
 
@@ -4271,5 +4274,123 @@ mod tests {
             "(both puts waited for the held writer, node 0 applied them in stamp order, the two \
              sides differ while partitioned, every node holds node 1's stamp after the heal)"
         );
+    }
+
+    /// A `SimNode`'s SYNC service stamps pushed OR entries from the clock its
+    /// `WriteAdmission` stamps client writes with (TG-TTL-001).
+    #[tokio::test]
+    async fn sim_node_sync_and_write_admission_share_one_clock() {
+        let mut cluster = SimCluster::new(1, 7);
+        cluster.start().expect("cluster start");
+        let node = &mut cluster.nodes[0];
+        let node_id = node.node_id.clone();
+        crate::integration_tests::assert_crdt_and_sync_share_one_clock(
+            &mut node.operation_router,
+            &node.record_store_factory,
+            &node_id,
+        )
+        .await;
+    }
+
+    /// Two nodes split by a partition each take a client push of one OR entry.
+    /// Each node stores its entry under its own server stamp, not the client's,
+    /// with the tag verbatim; the peer does not see it while partitioned; after
+    /// the heal the tags converge and every node holds the receiving node's
+    /// stamp for each tag (TG-TTL-001).
+    #[tokio::test]
+    async fn pushed_or_entries_keep_the_receiving_nodes_stamp_across_a_partition() {
+        use topgun_core::messages::{ORMapEntry, ORMapPushDiff, ORMapPushDiffPayload};
+
+        const MAP: &str = "pushed";
+        const KEY: &str = "k";
+        let client_ts = Timestamp {
+            millis: 4_000_000_000_000,
+            counter: 0,
+            node_id: "client".to_string(),
+        };
+        let tags = ["1:0:client-a", "1:0:client-b"];
+
+        let mut cluster = SimCluster::new(2, 13);
+        cluster.start().expect("cluster start");
+        cluster.inject_partition(&[0], &[1]);
+
+        for (idx, tag) in tags.iter().enumerate() {
+            let op = Operation::ORMapPushDiff {
+                ctx: OperationContext::new(0, service_names::SYNC, client_ts.clone(), 5000),
+                payload: ORMapPushDiff {
+                    payload: ORMapPushDiffPayload {
+                        map_name: MAP.to_string(),
+                        entries: vec![ORMapEntry {
+                            key: KEY.to_string(),
+                            records: vec![ORMapRecord {
+                                value: rmpv::Value::from(idx),
+                                timestamp: client_ts.clone(),
+                                tag: (*tag).to_string(),
+                                ttl_ms: None,
+                            }],
+                            tombstones: Vec::new(),
+                        }],
+                    },
+                },
+            };
+            Service::call(&mut cluster.nodes[idx].operation_router, op)
+                .await
+                .expect("push accepted");
+        }
+
+        async fn entries(node: &SimNode) -> Vec<(String, Timestamp)> {
+            let store = node
+                .record_store_factory
+                .get_or_create(MAP, topgun_core::hash_to_partition(KEY));
+            let mut out = match store.get(KEY, false).await.expect("read").map(|r| r.value) {
+                Some(RecordValue::OrMap { records, .. }) => records
+                    .into_iter()
+                    .map(|r| (r.tag, r.timestamp))
+                    .collect::<Vec<_>>(),
+                other => panic!("expected an OR value, got {other:?}"),
+            };
+            out.sort();
+            out
+        }
+
+        // Each node stamped its own entry; the partition kept it from the peer.
+        let mut stamped = Vec::new();
+        for (idx, tag) in tags.iter().enumerate() {
+            cluster
+                .merkle_sync_pair(idx, 1 - idx, MAP)
+                .await
+                .expect("sync");
+            let held = entries(&cluster.nodes[idx]).await;
+            assert_eq!(
+                held.len(),
+                1,
+                "node {idx} holds only its own entry: {held:?}"
+            );
+            let (held_tag, ts) = &held[0];
+            assert_eq!(held_tag, tag, "tag verbatim");
+            assert_eq!(
+                ts.node_id, cluster.nodes[idx].node_id,
+                "stamped by the receiving node"
+            );
+            assert!(
+                ts.millis < client_ts.millis,
+                "not the client's stamp: {ts:?}"
+            );
+            stamped.push(held[0].clone());
+        }
+
+        cluster.heal_partition();
+        cluster.merkle_sync_pair(0, 1, MAP).await.expect("sync");
+        cluster.merkle_sync_pair(1, 0, MAP).await.expect("sync");
+
+        stamped.sort();
+        for idx in 0..2 {
+            assert_eq!(
+                entries(&cluster.nodes[idx]).await,
+                stamped,
+                "node {idx} holds both tags with the receiving nodes' stamps"
+            );
+        }
+        cluster.assert_converged(MAP, KEY).await.expect("read");
     }
 }
