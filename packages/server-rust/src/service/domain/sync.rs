@@ -1784,6 +1784,15 @@ impl SyncService {
                             i
                         } else {
                             crate::storage::record::add_live_census(1, r.tag.len() as u64);
+                            // A known tag keeps its stored TTL, as it keeps its
+                            // timestamp; only a newly accepted tag takes the pushed one.
+                            // The bump precedes the store write: a bump for a write that
+                            // then fails only stops the expiry sweep from skipping the
+                            // map; a missed bump hides it (TG-TTL-001).
+                            let stored_ttl = crate::service::domain::crdt::stored_ttl_ms(r.ttl_ms);
+                            if stored_ttl.is_some() {
+                                self.record_store_factory.note_ttl_write(&map_name);
+                            }
                             records.push(crate::storage::record::OrMapEntry {
                                 value: crate::service::domain::crdt::rmpv_to_value(&r.value),
                                 // The tag stays verbatim: it is the OR identity, and
@@ -1795,7 +1804,7 @@ impl SyncService {
                                 // both stay server-authoritative (TG-TTL-001).
                                 tag: r.tag.clone(),
                                 timestamp: self.hlc.lock().now(),
-                                ttl_ms: None,
+                                ttl_ms: stored_ttl,
                             });
                             records.len() - 1
                         };
@@ -1803,7 +1812,7 @@ impl SyncService {
                             value: value_to_rmpv(&records[stored].value),
                             timestamp: records[stored].timestamp.clone(),
                             tag: r.tag.clone(),
-                            ttl_ms: r.ttl_ms,
+                            ttl_ms: records[stored].ttl_ms,
                         });
                     }
                     tombstones.extend(new_tags);

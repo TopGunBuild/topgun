@@ -618,27 +618,26 @@ impl CrdtService {
                 .expect("or_record is Some(Some(_))");
 
             // Replace client timestamp with sanitized server timestamp if provided.
-            let (new_entry, stored_or_rec) = if let Some(ts) = sanitized_ts {
-                let mut sanitized_rec = or_rec.clone();
-                sanitized_rec.timestamp = ts.clone();
+            let mut stored_or_rec = or_rec.clone();
+            if let Some(ts) = sanitized_ts {
+                stored_or_rec.timestamp = ts.clone();
                 // Regenerate tag from sanitized timestamp: "{millis}:{counter}:{node_id}"
-                sanitized_rec.tag = format!("{}:{}:{}", ts.millis, ts.counter, ts.node_id);
-                let entry = OrMapEntry {
-                    value: rmpv_to_value(&sanitized_rec.value),
-                    tag: sanitized_rec.tag.clone(),
-                    timestamp: sanitized_rec.timestamp.clone(),
-                    ttl_ms: None,
-                };
-                (entry, sanitized_rec)
-            } else {
-                let entry = OrMapEntry {
-                    value: rmpv_to_value(&or_rec.value),
-                    tag: or_rec.tag.clone(),
-                    timestamp: or_rec.timestamp.clone(),
-                    ttl_ms: None,
-                };
-                (entry, or_rec.clone())
+                stored_or_rec.tag = format!("{}:{}:{}", ts.millis, ts.counter, ts.node_id);
+            }
+            // The broadcast carries the TTL as stored, so a `ttlMs: 0` reaches
+            // subscribers as absent, the way it is kept (TG-TTL-001).
+            stored_or_rec.ttl_ms = stored_ttl_ms(stored_or_rec.ttl_ms);
+            let new_entry = OrMapEntry {
+                value: rmpv_to_value(&stored_or_rec.value),
+                tag: stored_or_rec.tag.clone(),
+                timestamp: stored_or_rec.timestamp.clone(),
+                ttl_ms: stored_or_rec.ttl_ms,
             };
+            // Before the store write: a bump for a write that then fails only stops
+            // the expiry sweep from skipping the map; a missed bump hides it.
+            if new_entry.ttl_ms.is_some() {
+                self.record_store_factory.note_ttl_write(&op.map_name);
+            }
 
             // The compound read-modify-write below relies on the key's writer the
             // caller holds: without it, two concurrent OR_ADDs on the SAME key
@@ -873,14 +872,25 @@ impl CrdtService {
 
             let broadcast_rec = if let Some(rec) = lww_rec {
                 // Replace client timestamp with sanitized server timestamp if provided.
-                let (record_value, stored_rec) = if let Some(ts) = sanitized_ts {
-                    let mut sanitized_rec = rec.clone();
-                    sanitized_rec.timestamp = ts.clone();
-                    let rv = lww_record_to_record_value(&sanitized_rec);
-                    (rv, sanitized_rec)
-                } else {
-                    (lww_record_to_record_value(rec), rec.clone())
-                };
+                let mut stored_rec = rec.clone();
+                if let Some(ts) = sanitized_ts {
+                    stored_rec.timestamp = ts.clone();
+                }
+                // The broadcast carries the TTL as stored, so a `ttlMs: 0` reaches
+                // subscribers as absent, the way it is kept (TG-TTL-001).
+                stored_rec.ttl_ms = stored_ttl_ms(stored_rec.ttl_ms);
+                let record_value = lww_record_to_record_value(&stored_rec);
+                // Before the store write: a bump for a write that then fails only stops
+                // the expiry sweep from skipping the map; a missed bump hides it.
+                if matches!(
+                    record_value,
+                    RecordValue::Lww {
+                        ttl_ms: Some(_),
+                        ..
+                    }
+                ) {
+                    self.record_store_factory.note_ttl_write(&op.map_name);
+                }
                 let old = store
                     .put(
                         writer,
@@ -1459,8 +1469,15 @@ fn lww_record_to_record_value(record: &LWWRecord<rmpv::Value>) -> RecordValue {
     RecordValue::Lww {
         value,
         timestamp: record.timestamp.clone(),
-        ttl_ms: None,
+        ttl_ms: stored_ttl_ms(record.ttl_ms),
     }
+}
+
+/// The TTL a client write is stored with: a `ttlMs` of 0 means no TTL, as on the
+/// client, so it is kept as `None` rather than as a record that expires at once
+/// (TG-TTL-001).
+pub(crate) fn stored_ttl_ms(ttl_ms: Option<u64>) -> Option<u64> {
+    ttl_ms.filter(|t| *t > 0)
 }
 
 /// Reads the current OR-Map state (active records + observed-remove tombstones)
