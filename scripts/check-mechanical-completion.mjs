@@ -18,7 +18,8 @@
 // are not limited by this filter. A rename or copy with one counted side is
 // checked like any other row. For every other row:
 //   - the file must be modified in place: an added, deleted, renamed, copied
-//     or type-changed file is rejected;
+//     or type-changed file is rejected, and so is a file holding U+0001 or
+//     U+0002, the marks the lexer frames literals with;
 //   - every hunk (git's default three lines of context) is reduced to its old
 //     side R and its new side A. Whitespace is removed outside string and char
 //     literals and comments, so that a rustfmt reflow compares equal; inside a
@@ -28,15 +29,17 @@
 //
 // Profile ttl-field (insertion only): walk R and A together; where they
 // differ, A must begin, at that point and outside any literal or comment, with
-// one of `,..`, `..`, `,ttl_ms:None`, `ttl_ms:None,`, or a single `,` directly
-// before `}` or `)` (rustfmt's trailing comma); it is skipped and the walk
-// goes on. Any other difference, or text of R left over, rejects the hunk. So
+// an insertion allowed there, which is skipped before the walk goes on: inside
+// a brace field list, `,..` or `..` directly before its `}` (`..` only after
+// `,` or `{`), `,ttl_ms:None` before `}` or `,`, `ttl_ms:None,` after `{` or
+// `,`; anywhere, a single `,` directly before `}` or `)` (rustfmt's trailing
+// comma). Any other difference, or text of R left over, rejects the hunk. So
 // nothing is ever removed, and moving `..` or `ttl_ms: None` from one pattern
 // or literal to another is rejected.
 //
 // Profiles g1 / g2: a removed `//` comment line is dropped from R only when it
-// belongs to a run of removed comment lines that ends directly above a removed
-// code line the profile's regexes change (the doc comment of the removed
+// belongs to a run of removed comment lines that ends directly above removed
+// code lines the profile's regexes change, taken together (the doc comment of the removed
 // item). The profile's regexes are stripped from the code of R (never from
 // literals or comments); g2's gated regex is applied only when R calls one of
 // its trigger functions or variants in code. Both sides are normalised (a
@@ -238,7 +241,33 @@ const codeOf = (s) => mapCode(s, (x) => x).split(new RegExp(`${OPEN}[^${CLOSE}]*
 const trailingComma = (s) => s.replace(/,\)/g, ')').replace(/,\}/g, '}');
 const singleItemGroup = (s) => s.replace(/::\{([^{},]*),?\}/g, '::$1');
 
-const TTL_INSERTIONS = [',..', '..', ',ttl_ms:None', 'ttl_ms:None,'];
+// Whether position `j` of a normalised text may be in a brace field list:
+// false when the bracket enclosing it in the hunk is `(` or `[`; true when it
+// is `{` or lies above the hunk, where only the position rules decide.
+function inBraceList(s, j) {
+  let depth = 0;
+  for (let k = j - 1; k >= 0; k -= 1) {
+    const c = s[k];
+    if (c === CLOSE) {
+      k = s.lastIndexOf(OPEN, k);
+    } else if (c === '}' || c === ')' || c === ']') {
+      depth += 1;
+    } else if (c === '{' || c === '(' || c === '[') {
+      if (depth === 0) return c === '{';
+      depth -= 1;
+    }
+  }
+  return true;
+}
+
+// Each insertion with the position it is allowed at: inside a brace field
+// list, `..` last before the closing brace, `ttl_ms: None` as a whole field.
+const TTL_INSERTIONS = [
+  [',..', (a, j, end) => a[end] === '}'],
+  ['..', (a, j, end) => (a[j - 1] === ',' || a[j - 1] === '{') && a[end] === '}'],
+  [',ttl_ms:None', (a, j, end) => a[end] === '}' || a[end] === ','],
+  ['ttl_ms:None,', (a, j) => a[j - 1] === '{' || a[j - 1] === ','],
+];
 
 // Insertion-only alignment of the ttl-field profile.
 function ttlAlign(r, a) {
@@ -255,13 +284,15 @@ function ttlAlign(r, a) {
     }
     if (j >= a.length) return 'the old side has text the new side lacks';
     if (inLiteral) return 'a literal or a comment differs';
-    const ins = TTL_INSERTIONS.find((t) => a.startsWith(t, j));
+    const ins = TTL_INSERTIONS.find(
+      ([t, allowed]) => a.startsWith(t, j) && allowed(a, j, j + t.length) && inBraceList(a, j),
+    );
     if (ins) {
-      j += ins.length;
+      j += ins[0].length;
     } else if (a[j] === ',' && (a[j + 1] === '}' || a[j + 1] === ')')) {
       j += 1;
     } else {
-      return 'the new side differs by more than an inserted `..`, `ttl_ms: None` or trailing comma';
+      return 'the new side differs by more than an inserted field-list `..`, `ttl_ms: None` or trailing comma';
     }
   }
   return null;
@@ -296,13 +327,21 @@ export function checkHunk(profileName, lines, states = {}) {
     oldLines[k].kind === '-' &&
     oldLex[k].startState.mode === 'code' &&
     /^\s*\/\//.test(oldLines[k].text);
-  const stripsSomething = (k) => stripAll(oldLex[k].out, regexes) !== oldLex[k].out;
+  // The run of removed code lines starting at `k`, joined, so that a match a
+  // rustfmt line break splits is still seen.
+  const stripsSomething = (k) => {
+    let code = '';
+    for (let m = k; m < oldLines.length && oldLines[m].kind === '-' && !isCommentLine(m); m += 1) {
+      code += oldLex[m].out;
+    }
+    return code !== '' && stripAll(code, regexes) !== code;
+  };
   const drop = new Set();
   for (let k = 0; k < oldLines.length; k += 1) {
     if (!isCommentLine(k)) continue;
     let end = k;
     while (end < oldLines.length && isCommentLine(end)) end += 1;
-    if (end < oldLines.length && oldLines[end].kind === '-' && stripsSomething(end)) {
+    if (stripsSomething(end)) {
       for (let m = k; m < end; m += 1) drop.add(m);
     }
     k = end - 1;
@@ -363,6 +402,16 @@ function parseNameStatusZ(out) {
   return rows;
 }
 
+// The lexer state at line `start` (1-based) of a file whose hunk side has
+// `count` lines; a file shorter than the hunk is a contradiction, not code.
+export function stateAt(states, start, count) {
+  const first = Math.max(start, 1) - 1;
+  if (first + Math.max(count, 1) > states.length) {
+    throw new Error(`a hunk at line ${start} with ${count} lines does not fit a file of ${states.length} lines`);
+  }
+  return states[first];
+}
+
 // Returns { rejected: [...], files, hunks, skipped }.
 export function checkRange({ cwd, base, head, profile, counted }) {
   const countedSet = new Set(counted);
@@ -370,8 +419,12 @@ export function checkRange({ cwd, base, head, profile, counted }) {
   let files = 0;
   let hunkCount = 0;
   const skipped = [];
-  const baseSha = git(cwd, ['rev-parse', '--verify', `${base}^{commit}`]).trim();
-  const headSha = git(cwd, ['rev-parse', '--verify', `${head}^{commit}`]).trim();
+  if ([base, head].some((ref) => ref.startsWith('-'))) throw new Error('--base and --head must not start with -');
+  const shas = git(cwd, ['rev-parse', `${base}^{commit}`, `${head}^{commit}`]).trim().split('\n');
+  if (shas.length !== 2 || !shas.every((sha) => /^[0-9a-f]{40,64}$/.test(sha))) {
+    throw new Error(`--base and --head did not resolve to two commits: ${shas.join(' ')}`);
+  }
+  const [baseSha, headSha] = shas;
   const status = git(cwd, ['diff', '--no-ext-diff', '-z', '--name-status', '-M', '-C', baseSha, headSha, '--']);
   for (const { code, paths } of parseNameStatusZ(status)) {
     if (paths.every((p) => countedSet.has(p))) {
@@ -394,13 +447,20 @@ export function checkRange({ cwd, base, head, profile, counted }) {
       rejected.push({ file: path, reason: 'listed as modified but its diff has no hunk' });
       continue;
     }
-    const oldStates = lineStartStates(git(cwd, ['show', `${baseSha}:${path}`]));
-    const newStates = lineStartStates(git(cwd, ['show', `${headSha}:${path}`]));
+    const oldText = git(cwd, ['show', `${baseSha}:${path}`]);
+    const newText = git(cwd, ['show', `${headSha}:${path}`]);
+    // The lexer frames literals and comments with these two characters.
+    if (/[\u0001\u0002]/.test(oldText + newText)) {
+      rejected.push({ file: path, reason: 'the file contains U+0001 or U+0002, which the filter cannot check' });
+      continue;
+    }
+    const oldStates = lineStartStates(oldText);
+    const newStates = lineStartStates(newText);
     for (const hunk of hunks) {
       hunkCount += 1;
       const states = {
-        old: oldStates[Math.max(hunk.oldStart, 1) - 1] ?? CODE,
-        new: newStates[Math.max(hunk.newStart, 1) - 1] ?? CODE,
+        old: stateAt(oldStates, hunk.oldStart, hunk.lines.filter((l) => l.kind !== '+').length),
+        new: stateAt(newStates, hunk.newStart, hunk.lines.filter((l) => l.kind !== '-').length),
       };
       const reason = checkHunk(profile, hunk.lines, states);
       if (reason) rejected.push({ file: path, header: hunk.header, reason, lines: hunk.lines });
@@ -531,6 +591,34 @@ const FIXTURES = [
 -    let s = "ab";
 +    let s = "a..b";
 `)],
+  ['ttl-field', false, '.. inserted into an index, making a range', hunk(`
+-    g(&v[1]);
++    g(&v[1..]);
+`)],
+  ['ttl-field', false, '.. inserted before an index, making a range', hunk(`
+-    let s = &x[0];
++    let s = &x[..0];
+`)],
+  ['ttl-field', false, '.. inserted before a field, making a struct update', hunk(`
+-    let a = S { x, y };
++    let a = S { x, ..y };
+`)],
+  ['ttl-field', false, '.. inserted into a range', hunk(`
+-    for i in 0..n {}
++    for i in 0....n {}
+`)],
+  ['ttl-field', false, '.. inserted after a field value, making a range', hunk(`
+-    let a = S { x: 0 };
++    let a = S { x: 0.. };
+`)],
+  ['ttl-field', false, 'ttl_ms: None inserted into a call', hunk(`
+-    f(x);
++    f(x, ttl_ms: None);
+`)],
+  ['ttl-field', false, 'comma inserted before ]', hunk(`
+-    let v = [a];
++    let v = [a,];
+`)],
   // g1, accepted
   ['g1', true, 'argument deleted from a one-line call', hunk(`
 -    store.put("k", value, ExpiryPolicy::NONE, CallerProvenance::Client);
@@ -550,6 +638,14 @@ const FIXTURES = [
 -        self.inner.put(key, value, expiry, p)
 +    fn put(&self, key: &str, value: RecordValue, p: CallerProvenance) -> R {
 +        self.inner.put(key, value, p)
+`)],
+  ['g1', true, 'doc comment above a removed field that rustfmt split over two lines', hunk(`
+     let c = StorageConfig {
+         a: 1,
+-        /// Records expire after this long by default.
+-        default_ttl_millis:
+-            5000,
+         b: 2,
 `)],
   ['g1', true, 'comment naming the removed identifier deleted', hunk(`
      let p = CallerProvenance::Client;
@@ -656,6 +752,7 @@ function selfTestRange() {
     write('moved.rs', 'fn f() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\n');
     write('café.rs', 'fn g() {\n    let n = 1;\n}\n');
     write('long.rs', LONG_STRING('a b'));
+    write('marks.rs', 'fn m() {\n    let s = "a\u0002}";\n}\n');
     write('ünï.rs', 'fn u() {\n    let v = RecordValue::Lww { value: x, timestamp: t };\n}\n');
     runGit(dir, ['add', '-A']);
     runGit(dir, ['commit', '-q', '-m', 'base']);
@@ -683,6 +780,7 @@ function selfTestRange() {
       ['non-mechanical hunk in a non-ASCII path', () => write('café.rs', 'fn g() {\n    let n = 2;\n}\n')],
       ['counted file renamed to a non-counted path', () => renameSync(join(dir, 'kept_counted.rs'), join(dir, 'evil.rs'))],
       ['whitespace removed in a hunk wholly inside a string literal', () => write('long.rs', LONG_STRING('ab'))],
+      ['a file holding the lexer marks', () => write('marks.rs', 'fn m() {\n    let s = "a\u0002,}";\n}\n')],
     ];
     for (const [name, change] of forbidden) {
       runGit(dir, ['checkout', '-q', ok]);
@@ -714,11 +812,18 @@ function selfTest() {
       if (!seen[`${profile}:${accept}`]) failures.push(`${profile}: no ${accept ? 'accepted' : 'rejected'} fixture`);
     }
   }
+  try {
+    stateAt([CODE, CODE], 2, 3);
+    failures.push('stateAt: a hunk longer than its file was accepted');
+  } catch {
+    console.log('ok   stateAt: a hunk longer than its file is an error');
+  }
+  if (stateAt([CODE, { mode: 'str' }, CODE], 2, 2).mode !== 'str') failures.push('stateAt: wrong line');
   const range = selfTestRange();
   if (range.length === 0) {
     console.log(
       'ok   range: counted files skipped; mechanical range (non-ASCII path included) accepted; non-mechanical hunk, add, delete, rename, ' +
-        'non-ASCII path, counted-to-non-counted rename and an edit inside a multi-line string rejected',
+        'non-ASCII path, counted-to-non-counted rename, an edit inside a multi-line string and a file holding the lexer marks rejected',
     );
   }
   failures.push(...range);
