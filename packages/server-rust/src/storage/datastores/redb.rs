@@ -2070,6 +2070,7 @@ mod tests {
                 counter: 0,
                 node_id: String::new(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -2369,11 +2370,13 @@ mod tests {
                     value: Value::String("first".to_string()),
                     tag: "t-1".to_string(),
                     timestamp: ts(10),
+                    ttl_ms: None,
                 },
                 OrMapEntry {
                     value: Value::Int(42),
                     tag: "t-2".to_string(),
                     timestamp: ts(11),
+                    ttl_ms: None,
                 },
             ],
             tombstones: vec!["t-0".to_string(), "t-9".to_string()],
@@ -2631,6 +2634,7 @@ mod tests {
         let value = RecordValue::Lww {
             value: Value::String("payload".to_string()),
             timestamp: ts.clone(),
+            ttl_ms: None,
         };
         store.add("users", "alice", &value, 0, 1000).await.unwrap();
 
@@ -3297,6 +3301,7 @@ mod tests {
                 counter: 0,
                 node_id: "writer".to_string(),
             },
+            ttl_ms: None,
         };
         let store_frame = |key: &str, value: &RecordValue, sequence: u64| WalEntry {
             map: MAP.to_string(),
@@ -3783,6 +3788,7 @@ mod store_broken_tests {
                 counter: 0,
                 node_id: String::new(),
             },
+            ttl_ms: None,
         }
     }
 

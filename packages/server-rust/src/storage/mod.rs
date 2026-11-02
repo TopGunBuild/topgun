@@ -30,6 +30,7 @@ pub mod engine;
 pub mod engines;
 pub mod eviction_config;
 pub mod eviction_orchestrator;
+pub mod expiry;
 pub mod factory;
 pub mod impls;
 pub mod key_writer;

@@ -716,7 +716,10 @@ impl SyncService {
                         .get_or_create(&map_name, key_partition);
                     match store.get(key, false).await {
                         Ok(Some(record)) => {
-                            if let RecordValue::Lww { value, timestamp } = record.value {
+                            if let RecordValue::Lww {
+                                value, timestamp, ..
+                            } = record.value
+                            {
                                 records.push(SyncLeafRecord {
                                     key: key.clone(),
                                     record: LWWRecord {
@@ -783,7 +786,10 @@ impl SyncService {
                             .get_or_create(&map_name, key_partition);
                         match store.get(key, false).await {
                             Ok(Some(record)) => {
-                                if let RecordValue::Lww { value, timestamp } = record.value {
+                                if let RecordValue::Lww {
+                                    value, timestamp, ..
+                                } = record.value
+                                {
                                     records.push(SyncLeafRecord {
                                         key: key.clone(),
                                         record: LWWRecord {
@@ -868,7 +874,10 @@ impl SyncService {
                     .get_or_create(&map_name, key_partition);
                 match store.get(key, false).await {
                     Ok(Some(record)) => {
-                        if let RecordValue::Lww { value, timestamp } = record.value {
+                        if let RecordValue::Lww {
+                            value, timestamp, ..
+                        } = record.value
+                        {
                             records.push(SyncLeafRecord {
                                 key: key.clone(),
                                 record: LWWRecord {
@@ -1762,6 +1771,7 @@ impl SyncService {
                             // the connection-keyed gate above, not by this field).
                             tag: r.tag.clone(),
                             timestamp: r.timestamp.clone(),
+                            ttl_ms: None,
                         });
                     }
                     tombstones.extend(new_tags);
@@ -2079,6 +2089,7 @@ mod tests {
                         value: Value::Int(1),
                         tag: "R1".to_string(),
                         timestamp: make_timestamp(),
+                        ttl_ms: None,
                     }],
                     tombstones: vec![tomb.to_string()],
                 },
@@ -3302,6 +3313,7 @@ mod tests {
                 &RecordValue::Lww {
                     value: Value::String("val-a".to_string()),
                     timestamp: ts_a,
+                    ttl_ms: None,
                 },
                 0,
                 1,
@@ -3315,6 +3327,7 @@ mod tests {
                 &RecordValue::Lww {
                     value: Value::String("val-b".to_string()),
                     timestamp: ts_b,
+                    ttl_ms: None,
                 },
                 0,
                 2,
@@ -3408,6 +3421,7 @@ mod tests {
                             counter: i,
                             node_id: "n1".to_string(),
                         },
+                        ttl_ms: None,
                     },
                     0,
                     1,
@@ -3518,6 +3532,7 @@ mod tests {
                             counter: i,
                             node_id: "n1".to_string(),
                         },
+                        ttl_ms: None,
                     },
                     0,
                     1,
@@ -3732,6 +3747,7 @@ mod tests {
                             counter: i,
                             node_id: "n1".to_string(),
                         },
+                        ttl_ms: None,
                     },
                     0,
                     1,
@@ -3800,6 +3816,7 @@ mod tests {
                         counter: 0,
                         node_id: "n1".to_string(),
                     },
+                    ttl_ms: None,
                 },
                 0,
                 1,
@@ -3948,6 +3965,7 @@ mod tests {
                             counter: i,
                             node_id: "n1".to_string(),
                         },
+                        ttl_ms: None,
                     },
                     0,
                     1,
@@ -4053,6 +4071,7 @@ mod tests {
                 &RecordValue::Lww {
                     value: new_value.clone(),
                     timestamp: new_timestamp.clone(),
+                    ttl_ms: None,
                 },
                 0,
                 1,
@@ -4142,6 +4161,7 @@ mod tests {
             &RecordValue::Lww {
                 value: old_value.clone(),
                 timestamp: old_timestamp.clone(),
+                ttl_ms: None,
             },
         )
         .expect("LWW leaf hash");
@@ -4150,6 +4170,7 @@ mod tests {
             &RecordValue::Lww {
                 value: new_value.clone(),
                 timestamp: new_timestamp.clone(),
+                ttl_ms: None,
             },
         )
         .expect("LWW leaf hash");
@@ -4189,6 +4210,7 @@ mod tests {
         let RecordValue::Lww {
             value: live_value,
             timestamp: live_timestamp,
+            ..
         } = live.value
         else {
             panic!("target key must be an LWW record");
@@ -4316,6 +4338,7 @@ mod tests {
                                 counter: i,
                                 node_id: "n1".to_string(),
                             },
+                            ttl_ms: None,
                         }],
                         tombstones: Vec::new(),
                     },
@@ -4408,6 +4431,7 @@ mod tests {
                                 counter: 7,
                                 node_id: "n1".to_string(),
                             },
+                            ttl_ms: None,
                         },
                         StoreOrMapEntry {
                             value: Value::Int(70_007),
@@ -4417,6 +4441,7 @@ mod tests {
                                 counter: 0,
                                 node_id: "n1".to_string(),
                             },
+                            ttl_ms: None,
                         },
                     ],
                     tombstones: Vec::new(),
@@ -4534,6 +4559,7 @@ mod tests {
                         counter: 7,
                         node_id: "n1".to_string(),
                     },
+                    ttl_ms: None,
                 }],
                 tombstones: Vec::new(),
             },
@@ -4552,6 +4578,7 @@ mod tests {
                             counter: 7,
                             node_id: "n1".to_string(),
                         },
+                        ttl_ms: None,
                     },
                     StoreOrMapEntry {
                         value: Value::Int(70_007),
@@ -4561,6 +4588,7 @@ mod tests {
                             counter: 0,
                             node_id: "n1".to_string(),
                         },
+                        ttl_ms: None,
                     },
                 ],
                 tombstones: Vec::new(),
@@ -4765,6 +4793,7 @@ mod tests {
                             counter: i,
                             node_id: "n1".to_string(),
                         },
+                        ttl_ms: None,
                     },
                     0,
                     1,
@@ -5032,6 +5061,7 @@ mod tests {
                         value: Value::Int(1),
                         tag: "R1".to_string(),
                         timestamp: make_timestamp(),
+                        ttl_ms: None,
                     }],
                     tombstones: vec!["T1".to_string()],
                 },
@@ -5650,6 +5680,7 @@ mod tests {
                         value: Value::Int(1),
                         tag: LEGACY.to_string(),
                         timestamp: make_timestamp(),
+                        ttl_ms: None,
                     }],
                     tombstones: Vec::new(),
                 },
@@ -6286,6 +6317,7 @@ mod tests {
                         value: Value::Int(1),
                         tag: HELD.to_string(),
                         timestamp: make_timestamp(),
+                        ttl_ms: None,
                     }],
                     tombstones: Vec::new(),
                 }),
@@ -6311,6 +6343,7 @@ mod tests {
                 Some(RecordValue::Lww {
                     value: Value::Int(1),
                     timestamp: make_timestamp(),
+                    ttl_ms: None,
                 }),
                 false,
             ),
@@ -6972,6 +7005,7 @@ mod tests {
                             value: Value::Int(1),
                             tag: (*tag).to_string(),
                             timestamp: make_timestamp(),
+                            ttl_ms: None,
                         })
                         .collect(),
                     tombstones: Vec::new(),
@@ -7649,6 +7683,7 @@ mod tests {
                     value: Value::Int(1),
                     tag: tag.to_string(),
                     timestamp: make_timestamp(),
+                    ttl_ms: None,
                 }],
                 tombstones: Vec::new(),
             }

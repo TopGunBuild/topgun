@@ -130,6 +130,7 @@ fn lww_bytes(tag: &str) -> Vec<u8> {
             counter: 1,
             node_id: "n".to_string(),
         },
+        ttl_ms: None,
     })
     .expect("encode")
 }
@@ -146,11 +147,13 @@ fn or_bytes(tag: &str) -> Vec<u8> {
                 value: Value::String(tag.to_string()),
                 tag: format!("{tag}-1"),
                 timestamp: ts(10),
+                ttl_ms: None,
             },
             OrMapEntry {
                 value: Value::Int(42),
                 tag: format!("{tag}-2"),
                 timestamp: ts(11),
+                ttl_ms: None,
             },
         ],
         tombstones: vec![format!("{tag}-0"), format!("{tag}-9")],
@@ -1511,6 +1514,7 @@ async fn m15_wal_frames_left_by_an_older_binary_replay_into_the_migrated_store()
             counter: 0,
             node_id: "writer".to_string(),
         },
+        ttl_ms: None,
     };
     let store_frame = |key: &str, value: &RecordValue, sequence: u64| WalEntry {
         map: MAP.to_string(),
@@ -2071,6 +2075,7 @@ async fn m90_storage_gate_measurement() {
                 counter: 0,
                 node_id: "gate".to_string(),
             },
+            ttl_ms: None,
         }
     }
 

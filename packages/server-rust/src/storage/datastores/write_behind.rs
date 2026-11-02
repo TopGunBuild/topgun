@@ -6199,6 +6199,7 @@ mod tests {
                 counter: 0,
                 node_id: String::new(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -6210,6 +6211,7 @@ mod tests {
                 counter: 0,
                 node_id: String::new(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -7832,6 +7834,7 @@ mod tests {
                 counter: 0,
                 node_id: "n".to_string(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -7843,6 +7846,7 @@ mod tests {
             RecordValue::Lww {
                 value: Value::String(v),
                 timestamp,
+                ..
             } => {
                 assert_eq!(v, value, "lww value mismatch");
                 assert_eq!(timestamp.millis, millis, "lww hlc millis mismatch");
@@ -7996,6 +8000,7 @@ mod tests {
                     counter: 0,
                     node_id: "n".to_string(),
                 },
+                ttl_ms: None,
             }],
             tombstones: Vec::new(),
         };
@@ -8549,6 +8554,7 @@ mod tests {
                 counter: 7,
                 node_id: "node-a".to_string(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -8658,6 +8664,7 @@ mod tests {
                         counter: 7,
                         node_id: "node-a".to_string(),
                     },
+                    ttl_ms: None,
                 }),
                 expiration_time: None,
             },
@@ -8987,6 +8994,7 @@ mod tests {
                             counter: 0,
                             node_id: "node-a".to_string(),
                         },
+                        ttl_ms: None,
                     },
                     0,
                     1_700_000_000_001,
@@ -9224,6 +9232,7 @@ mod tests {
                 counter: 0,
                 node_id: "n".to_string(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -9919,6 +9928,7 @@ mod tests {
                 RecordValue::Lww {
                     value: Value::String(v),
                     timestamp,
+                    ..
                 } => format!("{key}={v}@{}", timestamp.millis),
                 other => format!("{key}=?{other:?}"),
             })
@@ -13665,6 +13675,7 @@ mod background_task_panic_tests {
                 counter: 0,
                 node_id: String::new(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -14181,6 +14192,7 @@ mod background_task_panic_tests {
                 counter: 0,
                 node_id: "node-a".to_string(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -14668,6 +14680,7 @@ mod background_task_panic_tests {
                 counter: 0,
                 node_id: "node-a".to_string(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -16269,6 +16282,7 @@ mod store_broken_tests {
                 counter: 0,
                 node_id: String::new(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -17020,6 +17034,7 @@ mod tenant_drop_tests {
         RecordValue::Lww {
             value: Value::String(value.to_string()),
             timestamp: ts(1),
+            ttl_ms: None,
         }
     }
 
@@ -17028,6 +17043,7 @@ mod tenant_drop_tests {
             value: Value::String(tag.to_string()),
             tag: tag.to_string(),
             timestamp: ts(1),
+            ttl_ms: None,
         }
     }
 
@@ -17922,6 +17938,7 @@ mod write_path_measure {
                         counter: 0,
                         node_id: "n".to_string(),
                     },
+                    ttl_ms: None,
                 };
                 let end = Instant::now() + Duration::from_secs(secs);
                 let tasks: Vec<_> = (0..writers)

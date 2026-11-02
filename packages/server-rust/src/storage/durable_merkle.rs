@@ -247,6 +247,7 @@ mod tests {
                 counter,
                 node_id: node_id.to_string(),
             },
+            ttl_ms: None,
         }
     }
 
@@ -260,6 +261,7 @@ mod tests {
                     counter: 0,
                     node_id: "node-1".to_string(),
                 },
+                ttl_ms: None,
             }],
             tombstones: vec![],
         }

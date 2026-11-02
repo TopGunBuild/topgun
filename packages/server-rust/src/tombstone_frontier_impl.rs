@@ -2661,6 +2661,7 @@ async fn persist_cursor(
             counter: 0,
             node_id: String::new(),
         },
+        ttl_ms: None,
     };
     store
         .add(
@@ -7989,6 +7990,7 @@ mod persistence_tests {
                 counter: 0,
                 node_id: String::new(),
             },
+            ttl_ms: None,
         };
         store
             .add(PRE_BUMP_CURSOR_MAP, &c, &record, 0, 1)

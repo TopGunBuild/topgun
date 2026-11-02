@@ -30,6 +30,7 @@ fn or_slot(n: usize) -> RecordValue {
                 value: Value::Null,
                 tag: format!("{i:020}:0:node-a"),
                 timestamp: ts.clone(),
+                ttl_ms: None,
             })
             .collect(),
         tombstones: Vec::new(),

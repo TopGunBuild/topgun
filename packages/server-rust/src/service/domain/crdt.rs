@@ -627,6 +627,7 @@ impl CrdtService {
                     value: rmpv_to_value(&sanitized_rec.value),
                     tag: sanitized_rec.tag.clone(),
                     timestamp: sanitized_rec.timestamp.clone(),
+                    ttl_ms: None,
                 };
                 (entry, sanitized_rec)
             } else {
@@ -634,6 +635,7 @@ impl CrdtService {
                     value: rmpv_to_value(&or_rec.value),
                     tag: or_rec.tag.clone(),
                     timestamp: or_rec.timestamp.clone(),
+                    ttl_ms: None,
                 };
                 (entry, or_rec.clone())
             };
@@ -1457,6 +1459,7 @@ fn lww_record_to_record_value(record: &LWWRecord<rmpv::Value>) -> RecordValue {
     RecordValue::Lww {
         value,
         timestamp: record.timestamp.clone(),
+        ttl_ms: None,
     }
 }
 
@@ -3497,6 +3500,7 @@ mod tests {
             value: v,
             tag: tag.to_string(),
             timestamp: ts.clone(),
+            ttl_ms: None,
         };
 
         // Same live set + tombstone set, opposite Vec order → equal views. This is
@@ -7724,6 +7728,7 @@ mod tests {
             value: Value::Int(1),
             tag: tag.to_string(),
             timestamp: make_timestamp(),
+            ttl_ms: None,
         };
 
         let ((), delta) = with_isolated_gauge(async {
@@ -10816,6 +10821,7 @@ mod tests {
                 value: Value::Null,
                 tag: format!("{i:020}:0:node-a"),
                 timestamp: ts.clone(),
+                ttl_ms: None,
             })
             .collect();
         let store = factory.get_or_create("m", hash_to_partition(key));
@@ -11167,6 +11173,7 @@ mod tests {
                 value: rmpv_to_value(&rmpv::Value::String(format!("v-{tag}").into())),
                 tag: tag.to_string(),
                 timestamp: make_timestamp(),
+                ttl_ms: None,
             }
         }
 
@@ -13886,6 +13893,7 @@ mod tests {
                 value: Value::String("seeded".into()),
                 tag: tag.to_string(),
                 timestamp: make_timestamp(),
+                ttl_ms: None,
             }],
             tombstones: Vec::new(),
         }
@@ -14969,6 +14977,7 @@ mod tests {
                         value: Value::String("seeded".into()),
                         tag: "1:0:n#1".to_string(),
                         timestamp: make_timestamp(),
+                        ttl_ms: None,
                     }],
                     tombstones: vec!["2:0:n#1".to_string(), "a|b".to_string()],
                 },

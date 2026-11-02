@@ -361,7 +361,10 @@ impl MutationObserver for EmbeddingMutationObserver {
         _old_value: Option<&RecordValue>,
         _is_backup: bool,
     ) {
-        let RecordValue::Lww { value, timestamp } = &record.value else {
+        let RecordValue::Lww {
+            value, timestamp, ..
+        } = &record.value
+        else {
             return;
         };
         self.enqueue_if_applicable(key, &value_to_rmpv(value), timestamp);
@@ -375,7 +378,10 @@ impl MutationObserver for EmbeddingMutationObserver {
         new_value: &RecordValue,
         _is_backup: bool,
     ) {
-        let RecordValue::Lww { value, timestamp } = new_value else {
+        let RecordValue::Lww {
+            value, timestamp, ..
+        } = new_value
+        else {
             return;
         };
         self.enqueue_if_applicable(key, &value_to_rmpv(value), timestamp);
@@ -706,7 +712,10 @@ async fn write_back_one_embedding(
     #[cfg(test)]
     WriteBackPark::pass(evt.write_back_park.as_ref()).await;
 
-    let RecordValue::Lww { value, timestamp } = existing.value else {
+    let RecordValue::Lww {
+        value, timestamp, ..
+    } = existing.value
+    else {
         tracing::warn!(
             "embedding write-back skipped for {}/{}: non-LWW record",
             evt.map_name,
@@ -744,6 +753,7 @@ async fn write_back_one_embedding(
             counter: 0,
             node_id: "_embedding_hook".to_string(),
         },
+        ttl_ms: None,
     };
 
     // Mark in-flight before write so the observer's re-entrancy guard fires.
@@ -1062,6 +1072,7 @@ mod tests {
                     counter: 0,
                     node_id: "node-1".to_string(),
                 },
+                ttl_ms: None,
             },
             metadata: RecordMetadata::new(1_000_000, 64),
         }
@@ -1205,6 +1216,7 @@ mod tests {
                 counter: 0,
                 node_id: "client".to_string(),
             },
+            ttl_ms: None,
         };
         store
             .put(
@@ -1303,6 +1315,7 @@ mod tests {
                 counter: 0,
                 node_id: "client".to_string(),
             },
+            ttl_ms: None,
         };
         store
             .put(
@@ -1396,6 +1409,7 @@ mod tests {
                 counter: 0,
                 node_id: "client".to_string(),
             },
+            ttl_ms: None,
         };
         store
             .put(
@@ -1502,6 +1516,7 @@ mod tests {
                 counter: 0,
                 node_id: "client".to_string(),
             },
+            ttl_ms: None,
         };
         store
             .put(

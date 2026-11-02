@@ -299,7 +299,9 @@ impl QueryMutationObserver {
         // Extract value + HLC timestamp from the record. Skip non-LWW records (not
         // supported in query evaluation — OrMap/OrTombstones are outside query scope).
         let (rmpv_value, record_timestamp) = match &record.value {
-            RecordValue::Lww { value, timestamp } => (value_to_rmpv(value), timestamp.clone()),
+            RecordValue::Lww {
+                value, timestamp, ..
+            } => (value_to_rmpv(value), timestamp.clone()),
             _ => return,
         };
 
@@ -1622,6 +1624,7 @@ mod tests {
             value: RecordValue::Lww {
                 value,
                 timestamp: make_timestamp(),
+                ttl_ms: None,
             },
             metadata: RecordMetadata::new(1_700_000_000_000, 64),
         }
@@ -1906,10 +1909,12 @@ mod tests {
         let old_value = RecordValue::Lww {
             value: make_value_map(vec![("name", Value::String("Alice".to_string()))]),
             timestamp: make_timestamp(),
+            ttl_ms: None,
         };
         let new_value = RecordValue::Lww {
             value: make_value_map(vec![("name", Value::String("Alice Updated".to_string()))]),
             timestamp: make_timestamp(),
+            ttl_ms: None,
         };
         let record = Record {
             value: new_value.clone(),
@@ -2332,6 +2337,7 @@ mod tests {
                     RecordValue::Lww {
                         value,
                         timestamp: make_timestamp(),
+                        ttl_ms: None,
                     },
                     ExpiryPolicy::NONE,
                     CallerProvenance::Client,
@@ -2446,6 +2452,7 @@ mod tests {
             let value = RecordValue::Lww {
                 value: Value::String(format!("v{i:04}")),
                 timestamp: make_timestamp(),
+                ttl_ms: None,
             };
             data_store
                 .add(map_name, &format!("k{i:04}"), &value, 0, 1000)
@@ -2538,6 +2545,7 @@ mod tests {
             let value = RecordValue::Lww {
                 value: Value::String(format!("v{i:04}")),
                 timestamp: make_timestamp(),
+                ttl_ms: None,
             };
             data_store
                 .add(map_name, &format!("k{i:04}"), &value, 0, 1000)
@@ -2629,6 +2637,7 @@ mod tests {
                     RecordValue::Lww {
                         value,
                         timestamp: make_timestamp(),
+                        ttl_ms: None,
                     },
                     ExpiryPolicy::NONE,
                     CallerProvenance::Client,
@@ -3481,6 +3490,7 @@ mod tests {
                 RecordValue::Lww {
                     value: make_value_map(vec![("name", Value::String("Alice".to_string()))]),
                     timestamp: make_timestamp(),
+                    ttl_ms: None,
                 },
                 ExpiryPolicy::NONE,
                 CallerProvenance::Client,
@@ -3635,6 +3645,7 @@ mod tests {
                 RecordValue::Lww {
                     value: stored_value,
                     timestamp: make_timestamp(),
+                    ttl_ms: None,
                 },
                 ExpiryPolicy::NONE,
                 CallerProvenance::Client,

@@ -5355,6 +5355,7 @@ mod tests {
                     counter: 0,
                     node_id: "live-census-fixture".to_string(),
                 },
+                ttl_ms: None,
             }],
             tombstones: vec!["dead-tag-a".to_string(), "dead-tag-b".to_string()],
         };

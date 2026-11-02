@@ -69,6 +69,7 @@ fn wrap_bytes(bytes: Vec<u8>) -> RecordValue {
     RecordValue::Lww {
         value: Value::Bytes(bytes),
         timestamp: sentinel_timestamp(),
+        ttl_ms: None,
     }
 }
 

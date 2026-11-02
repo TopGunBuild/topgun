@@ -242,6 +242,7 @@ mod tests {
                     counter: 0,
                     node_id: "node-1".to_string(),
                 },
+                ttl_ms: None,
             },
             metadata: RecordMetadata::new(1_000_000, 64),
         }
@@ -255,6 +256,7 @@ mod tests {
                 counter: 0,
                 node_id: "node-1".to_string(),
             },
+            ttl_ms: None,
         }
     }
 

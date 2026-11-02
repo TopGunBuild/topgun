@@ -38,6 +38,8 @@ new LWWMap<K, V>(hlc: HLC)
 
 Write a value. Stamps the record with `hlc.now()`. Optional `ttlMs` for time-bounded entries.
 
+The server does not yet enforce `ttlMs`; expired records are hidden by the client only.
+
 ```typescript
 const record = map.set('u1', { name: 'Alice', email: 'alice@example.com' });
 // { value: {...}, timestamp: { millis, counter, nodeId } }
@@ -138,6 +140,8 @@ new ORMap<K, V>(hlc: HLC)
 **`add(key, value, ttlMs?)`** — `ORMapRecord<V>`
 
 Add a value under a key. Generates a unique tag. Returns the record.
+
+The server does not yet enforce `ttlMs`; expired records are hidden by the client only.
 
 ```typescript
 const tags = new ORMap<string, string>(hlc);

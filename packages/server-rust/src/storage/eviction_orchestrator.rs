@@ -852,6 +852,7 @@ mod tests {
                     counter: 0,
                     node_id: "node-ac1".to_string(),
                 },
+                ttl_ms: None,
             };
             store
                 .put(

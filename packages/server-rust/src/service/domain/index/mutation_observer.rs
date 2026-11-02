@@ -320,6 +320,7 @@ mod tests {
             value: RecordValue::Lww {
                 value: Value::Map(inner_map),
                 timestamp: ts(),
+                ttl_ms: None,
             },
             metadata: RecordMetadata::new(1_000_000, 64),
         }
@@ -839,6 +840,7 @@ mod tests {
             value: RecordValue::Lww {
                 value: Value::Map(inner_map),
                 timestamp: ts(),
+                ttl_ms: None,
             },
             metadata: RecordMetadata::new(1_000_000, 64),
         }
@@ -940,6 +942,7 @@ mod tests {
                     counter: 0,
                     node_id: "n".to_string(),
                 },
+                ttl_ms: None,
             }
         }
 

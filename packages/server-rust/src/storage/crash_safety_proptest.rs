@@ -237,6 +237,7 @@ fn lww_value(value_tag: u64, hlc_millis: u64) -> RecordValue {
             counter: 0,
             node_id: "crash-test".to_string(),
         },
+        ttl_ms: None,
     }
 }
 
@@ -972,6 +973,7 @@ async fn max_observed_sequence_reads_watermark_of_compacted_empty_partition() {
             counter: 0,
             node_id: "n".to_string(),
         },
+        ttl_ms: None,
     };
     let entry = WalEntry {
         map: "m".to_string(),
@@ -1378,11 +1380,13 @@ fn or_record() -> RecordValue {
                 value: Value::String("alpha".to_string()),
                 tag: "tag-a".to_string(),
                 timestamp: or_ts(1),
+                ttl_ms: None,
             },
             OrMapEntry {
                 value: Value::Int(42),
                 tag: "tag-b".to_string(),
                 timestamp: or_ts(2),
+                ttl_ms: None,
             },
         ],
         tombstones: vec!["gone-tag".to_string()],
@@ -1535,7 +1539,9 @@ async fn ac4_legacy_null_value_wal_frame_replays_as_zero_epoch_lww() {
         .unwrap()
         .expect("legacy Value::Null frame must replay");
     match got {
-        RecordValue::Lww { value, timestamp } => {
+        RecordValue::Lww {
+            value, timestamp, ..
+        } => {
             assert_eq!(value, Value::Null, "legacy Null must replay as LWW Null");
             assert_eq!(
                 timestamp.millis, 0,

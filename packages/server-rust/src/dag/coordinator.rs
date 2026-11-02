@@ -1430,6 +1430,7 @@ mod tests {
                     counter: 0,
                     node_id: "test-node".to_string(),
                 },
+                ttl_ms: None,
             };
             store
                 .put(
@@ -1669,6 +1670,7 @@ mod tests {
                         counter: 0,
                         node_id: "test-node".to_string(),
                     },
+                    ttl_ms: None,
                 },
                 ExpiryPolicy::NONE,
                 CallerProvenance::Client,
@@ -1744,6 +1746,7 @@ mod tests {
                         counter: 0,
                         node_id: "test-node".to_string(),
                     },
+                    ttl_ms: None,
                 },
                 ExpiryPolicy::NONE,
                 CallerProvenance::Client,

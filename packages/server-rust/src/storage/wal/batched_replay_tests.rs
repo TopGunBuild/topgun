@@ -468,6 +468,7 @@ fn entry(tag: &str, text: &str) -> OrMapEntry {
         value: Value::String(text.to_string()),
         tag: tag.to_string(),
         timestamp: ts(1),
+        ttl_ms: None,
     }
 }
 
@@ -1607,6 +1608,7 @@ async fn crash_loop_writer(
                         counter: u32::try_from(n).expect("counter"),
                         node_id: "c90".to_string(),
                     },
+                    ttl_ms: None,
                 };
                 wb.add(map, &key, &value, 0, now).await.expect("put");
             }
@@ -1618,6 +1620,7 @@ async fn crash_loop_writer(
                             value: Value::String("x".to_string()),
                             tag: arg.clone(),
                             timestamp: ts(now_millis()),
+                            ttl_ms: None,
                         },
                     }
                 } else {

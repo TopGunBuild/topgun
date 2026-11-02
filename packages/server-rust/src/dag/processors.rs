@@ -301,7 +301,10 @@ impl ScanProcessor {
             let store = self.factory.get_or_create(&self.map_name, pid);
             store.for_each_boxed(
                 &mut |key, record| {
-                    if let RecordValue::Lww { value, timestamp } = &record.value {
+                    if let RecordValue::Lww {
+                        value, timestamp, ..
+                    } = &record.value
+                    {
                         let rmpv_val = crate::service::domain::predicate::value_to_rmpv(value);
                         let row = inject_key(key, rmpv_val);
                         resident.insert(key.to_string(), (row, timestamp.clone()));
@@ -337,7 +340,10 @@ impl ScanProcessor {
                     let mut batch = data_store.scan_values(&map_name, false, batch_cost).await?;
                     loop {
                         for (key, record_value) in batch.records {
-                            let RecordValue::Lww { value, timestamp } = record_value else {
+                            let RecordValue::Lww {
+                                value, timestamp, ..
+                            } = record_value
+                            else {
                                 continue;
                             };
                             // Resident copy wins on `>=`; compute the decision before
@@ -408,7 +414,10 @@ impl ScanProcessor {
                     let mut batch = data_store.scan_values(&map_name, false, batch_cost).await?;
                     loop {
                         for (key, record_value) in batch.records {
-                            let RecordValue::Lww { value, timestamp } = record_value else {
+                            let RecordValue::Lww {
+                                value, timestamp, ..
+                            } = record_value
+                            else {
                                 continue;
                             };
                             let rmpv_val = crate::service::domain::predicate::value_to_rmpv(&value);
@@ -2369,6 +2378,7 @@ mod tests {
                 counter: 0,
                 node_id: "n".to_string(),
             },
+            ttl_ms: None,
         };
         let dir = tempfile::tempdir().expect("tempdir");
         let redb = Arc::new(RedbDataStore::new(dir.path().join("big.redb")).expect("redb open"));

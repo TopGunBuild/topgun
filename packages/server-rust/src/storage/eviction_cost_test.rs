@@ -46,6 +46,7 @@ mod eviction_cost_tests {
                 counter: 0,
                 node_id: "node-test".to_string(),
             },
+            ttl_ms: None,
         }
     }
 

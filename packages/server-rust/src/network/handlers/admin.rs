@@ -2689,6 +2689,7 @@ mod tenant_tests {
                 counter: 0,
                 node_id: "n".to_string(),
             },
+            ttl_ms: None,
         }
     }
 

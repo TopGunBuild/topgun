@@ -1066,6 +1066,7 @@ fn lww_value(stamp: u64) -> RecordValue {
             counter: 0,
             node_id: "crash".to_string(),
         },
+        ttl_ms: None,
     }
 }
 

@@ -402,6 +402,7 @@ mod tests {
                     counter: 0,
                     node_id: "n1".to_string(),
                 },
+                ttl_ms: None,
             },
             metadata: crate::storage::record::RecordMetadata::default(),
         };
@@ -412,6 +413,7 @@ mod tests {
                 counter: 0,
                 node_id: "n1".to_string(),
             },
+            ttl_ms: None,
         };
 
         observer.on_put("k1", &record, None, false);

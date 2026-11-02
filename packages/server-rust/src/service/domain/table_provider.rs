@@ -334,6 +334,7 @@ mod tests {
             let record_value = RecordValue::Lww {
                 value,
                 timestamp: test_timestamp(),
+                ttl_ms: None,
             };
             store
                 .put(

@@ -184,6 +184,7 @@ fn lww(value: &str, millis: u64) -> RecordValue {
             counter: 0,
             node_id: "n".to_string(),
         },
+        ttl_ms: None,
     }
 }
 
@@ -199,6 +200,7 @@ fn or_value(tags: &[&str], tombstones: &[&str]) -> RecordValue {
                     counter: 0,
                     node_id: "n".to_string(),
                 },
+                ttl_ms: None,
             })
             .collect(),
         tombstones: tombstones.iter().map(|t| (*t).to_string()).collect(),
