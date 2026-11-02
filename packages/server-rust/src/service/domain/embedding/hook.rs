@@ -631,6 +631,20 @@ enum WriteBackOutcome {
     Failed,
 }
 
+/// The TTL the write-back stores so that the record expires at the same instant
+/// as before (TG-TTL-001): the write-back re-stamps the record with `now_millis`,
+/// and expiry is anchored on the stamp, so the TTL is shortened by the time
+/// that has passed. Carried verbatim it would extend the record's life; dropped
+/// it would make the record immortal.
+///
+/// `None` means skip the write-back: the record expires at or before
+/// `now_millis`, and no TTL of at least 1 ms keeps that instant (at the equal
+/// instant a TTL of 1 would move expiry by 1 ms).
+fn write_back_ttl_ms(stored_millis: u64, ttl_ms: u64, now_millis: u64) -> Option<u64> {
+    let expires_at = stored_millis.saturating_add(ttl_ms);
+    (expires_at > now_millis).then(|| expires_at - now_millis)
+}
+
 /// Writes one record's `_embedding` back via read-modify-write, preserving all
 /// existing user fields.
 ///
@@ -656,20 +670,6 @@ enum WriteBackOutcome {
 /// on restart after an unclean stop. This is known from reading the two code
 /// paths, not from a test, and the per-key writer does not change it
 /// (TODO-778).
-/// The TTL the write-back stores so that the record expires at the same instant
-/// as before (TG-TTL-001): the write-back re-stamps the record with `now_millis`,
-/// and expiry is anchored on the stamp, so the TTL is shortened by the time
-/// that has passed. Carried verbatim it would extend the record's life; dropped
-/// it would make the record immortal.
-///
-/// `None` means skip the write-back: the record expires at or before
-/// `now_millis`, and no TTL of at least 1 ms keeps that instant (at the equal
-/// instant a TTL of 1 would move expiry by 1 ms).
-fn write_back_ttl_ms(stored_millis: u64, ttl_ms: u64, now_millis: u64) -> Option<u64> {
-    let expires_at = stored_millis.saturating_add(ttl_ms);
-    (expires_at > now_millis).then(|| expires_at - now_millis)
-}
-
 // One read-check-put critical section under the key's writer; splitting it to
 // meet the line limit would scatter what the writer guards.
 #[allow(clippy::too_many_lines)]
