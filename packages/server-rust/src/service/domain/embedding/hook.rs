@@ -656,6 +656,23 @@ enum WriteBackOutcome {
 /// on restart after an unclean stop. This is known from reading the two code
 /// paths, not from a test, and the per-key writer does not change it
 /// (TODO-778).
+/// The TTL the write-back stores so that the record expires at the same instant
+/// as before (TG-TTL-001): the write-back re-stamps the record with `now_millis`,
+/// and expiry is anchored on the stamp, so the TTL is shortened by the time
+/// that has passed. Carried verbatim it would extend the record's life; dropped
+/// it would make the record immortal.
+///
+/// `None` means skip the write-back: the record expires at or before
+/// `now_millis`, and no TTL of at least 1 ms keeps that instant (at the equal
+/// instant a TTL of 1 would move expiry by 1 ms).
+fn write_back_ttl_ms(stored_millis: u64, ttl_ms: u64, now_millis: u64) -> Option<u64> {
+    let expires_at = stored_millis.saturating_add(ttl_ms);
+    (expires_at > now_millis).then(|| expires_at - now_millis)
+}
+
+// One read-check-put critical section under the key's writer; splitting it to
+// meet the line limit would scatter what the writer guards.
+#[allow(clippy::too_many_lines)]
 async fn write_back_one_embedding(
     evt: &EmbeddingEvent,
     embedding: Vec<f32>,
@@ -713,7 +730,9 @@ async fn write_back_one_embedding(
     WriteBackPark::pass(evt.write_back_park.as_ref()).await;
 
     let RecordValue::Lww {
-        value, timestamp, ..
+        value,
+        timestamp,
+        ttl_ms,
     } = existing.value
     else {
         tracing::warn!(
@@ -746,6 +765,19 @@ async fn write_back_one_embedding(
         .unwrap_or_default()
         .as_millis() as u64;
 
+    // A record without TTL stays without.
+    let ttl_ms = match ttl_ms.map(|t| write_back_ttl_ms(timestamp.millis, t, now_millis)) {
+        Some(None) => {
+            tracing::debug!(
+                "embedding write-back skipped for {}/{}: the record has expired",
+                evt.map_name,
+                evt.key
+            );
+            return WriteBackOutcome::Skipped;
+        }
+        kept => kept.flatten(),
+    };
+
     let record_value = RecordValue::Lww {
         value: merged_value,
         timestamp: Timestamp {
@@ -753,7 +785,7 @@ async fn write_back_one_embedding(
             counter: 0,
             node_id: "_embedding_hook".to_string(),
         },
-        ttl_ms: None,
+        ttl_ms,
     };
 
     // Mark in-flight before write so the observer's re-entrancy guard fires.

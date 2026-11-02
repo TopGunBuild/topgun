@@ -397,7 +397,7 @@ fn value_to_rmpv(v: &topgun_core::Value) -> rmpv::Value {
 
 /// Builds an `OR_ADD` `ClientOp` from a stored OR-Map entry.
 ///
-/// Carries the entry's value, tag, and timestamp so the destination merges it
+/// Carries the entry's value, tag, timestamp and TTL so the destination merges it
 /// via add-wins semantics (`or_record: Some(Some(_))`).
 fn or_add_client_op(map: &str, key: &str, entry: &OrMapEntry) -> ClientOp {
     ClientOp {
@@ -410,7 +410,7 @@ fn or_add_client_op(map: &str, key: &str, entry: &OrMapEntry) -> ClientOp {
             value: value_to_rmpv(&entry.value),
             timestamp: entry.timestamp.clone(),
             tag: entry.tag.clone(),
-            ttl_ms: None,
+            ttl_ms: entry.ttl_ms,
         })),
         or_tag: Some(Some(entry.tag.clone())),
         write_concern: None,
@@ -668,12 +668,14 @@ impl SimCluster {
             if let Some(rec) = record {
                 match rec.value {
                     RecordValue::Lww {
-                        value, timestamp, ..
+                        value,
+                        timestamp,
+                        ttl_ms,
                     } => {
                         let lww = LWWRecord {
                             value: Some(value_to_rmpv(&value)),
                             timestamp,
-                            ttl_ms: None,
+                            ttl_ms,
                         };
                         entries.push((
                             node.node_id.clone(),
@@ -820,7 +822,7 @@ impl SimCluster {
                 RecordValue::Lww {
                     value: v,
                     timestamp,
-                    ..
+                    ttl_ms,
                 } => {
                     // Skip if destination already has an equal or newer timestamp.
                     // Full Timestamp ordering includes node_id as tiebreaker (millis → counter → node_id),
@@ -838,7 +840,7 @@ impl SimCluster {
                         record: Some(Some(LWWRecord {
                             value: Some(value_to_rmpv(v)),
                             timestamp: timestamp.clone(),
-                            ttl_ms: None,
+                            ttl_ms: *ttl_ms,
                         })),
                         or_record: None,
                         or_tag: None,
