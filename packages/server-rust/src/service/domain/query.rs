@@ -45,6 +45,7 @@ use crate::service::domain::predicate::{
 };
 use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
+use crate::storage::expiry::lww_is_live;
 use crate::storage::mutation_observer::MutationObserver;
 use crate::storage::record::{Record, RecordValue};
 use crate::storage::RecordStoreFactory;
@@ -1325,22 +1326,34 @@ impl QueryService {
             .unwrap_or(false);
         let need_values = filter.is_some() || include_value || include_vectors;
 
-        let value_map: std::collections::HashMap<String, rmpv::Value> = if need_values {
-            let mut map = std::collections::HashMap::new();
-            for store in &stores {
-                store.for_each_boxed(
-                    &mut |key, record| {
-                        if let RecordValue::Lww { ref value, .. } = record.value {
-                            map.insert(key.to_string(), value_to_rmpv(value));
+        // The resident pass always runs, so an expired resident key is dropped
+        // before the filter, the sort and the top-k cut and never takes a slot
+        // (TG-TTL-001). It records a value only for a record live at `now`.
+        // Non-resident keys are not checked here (TODO-896).
+        let now = self.record_store_factory.now_ms();
+        let mut value_map: std::collections::HashMap<String, rmpv::Value> =
+            std::collections::HashMap::new();
+        let mut expired: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for store in &stores {
+            store.for_each_boxed(
+                &mut |key, record| {
+                    if let RecordValue::Lww {
+                        ref value,
+                        ref timestamp,
+                        ttl_ms,
+                    } = record.value
+                    {
+                        if !lww_is_live(timestamp, ttl_ms, now) {
+                            expired.insert(key.to_string());
+                        } else if need_values {
+                            value_map.insert(key.to_string(), value_to_rmpv(value));
                         }
-                    },
-                    false,
-                );
-            }
-            map
-        } else {
-            std::collections::HashMap::new()
-        };
+                    }
+                },
+                false,
+            );
+        }
+        scored.retain(|(key, _)| !expired.contains(key));
 
         if let Some(pred) = filter {
             scored.retain(|(key, _)| {
@@ -3291,8 +3304,20 @@ mod tests {
         Arc<QueryService>,
         Arc<crate::service::domain::index::registry::IndexRegistry>,
     ) {
+        make_svc_with_vector_index_over(make_factory(), map_name, attr, dim, metric)
+    }
+
+    fn make_svc_with_vector_index_over(
+        factory: Arc<RecordStoreFactory>,
+        map_name: &str,
+        attr: &str,
+        dim: u16,
+        metric: DistanceMetric,
+    ) -> (
+        Arc<QueryService>,
+        Arc<crate::service::domain::index::registry::IndexRegistry>,
+    ) {
         let registry = Arc::new(QueryRegistry::new());
-        let factory = make_factory();
         let conn_registry = Arc::new(ConnectionRegistry::new());
         let observer_factory = Arc::new(IndexObserverFactory::new());
         let index_registry = observer_factory.register_map(map_name);
@@ -3712,5 +3737,98 @@ mod tests {
             resp.results[0].vector.is_none(),
             "expected vector to be None when options is None"
         );
+    }
+
+    /// TG-TTL-001: a resident key that has expired is dropped before the top-k
+    /// cut, whether or not values are wanted, so the nearest key, expired,
+    /// never takes a slot; with the clock before expiry it is served.
+    #[tokio::test]
+    async fn vector_search_hides_expired_resident() {
+        use crate::storage::expiry::ManualClock;
+        use crate::storage::factory::ttl_fixture::{
+            expired_now, live_now, live_stamp, ts, wall_stamp, TTL_MS,
+        };
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+
+        async fn search(stamp: u64, now: u64, include_value: Option<bool>) -> Vec<(String, bool)> {
+            let factory = Arc::new(
+                RecordStoreFactory::new(
+                    StorageConfig::default(),
+                    Arc::new(NullDataStore),
+                    Vec::new(),
+                )
+                .with_clock(Arc::new(ManualClock::new(now))),
+            );
+            let (svc, index_registry) = make_svc_with_vector_index_over(
+                Arc::clone(&factory),
+                "maps",
+                "embedding",
+                2,
+                DistanceMetric::Cosine,
+            );
+            let vi = index_registry.get_vector_index("embedding").unwrap();
+            let store = factory.get_or_create("maps", 0);
+            for (key, vector, ttl_ms) in [
+                ("k1", [1.0f32, 0.0], Some(TTL_MS)),
+                ("k2", [0.9, 0.1], None),
+                ("k3", [0.5, 0.5], None),
+            ] {
+                let rec = make_vector_record("embedding", &vector);
+                vi.insert(key, &rec);
+                store
+                    .put(
+                        &KeyWriteToken::for_test("maps", key),
+                        key,
+                        RecordValue::Lww {
+                            value: make_value_map(vec![("name", Value::String(key.to_string()))]),
+                            timestamp: ts(stamp),
+                            ttl_ms,
+                        },
+                        ExpiryPolicy::NONE,
+                        CallerProvenance::Client,
+                    )
+                    .await
+                    .unwrap();
+            }
+            vi.commit_pending();
+            let payload = VectorSearchPayload {
+                id: "vs-ttl".to_string(),
+                map_name: "maps".to_string(),
+                index_name: Some("embedding".to_string()),
+                query_vector: make_query_vec(&[1.0f32, 0.0f32]),
+                k: 2,
+                ef_search: None,
+                options: Some(topgun_core::messages::vector::VectorSearchOptions {
+                    include_value,
+                    ..Default::default()
+                }),
+            };
+            let op = Operation::VectorSearch {
+                ctx: make_ctx(None),
+                payload,
+            };
+            let resp = extract_vector_resp(svc.oneshot(op).await.unwrap());
+            assert!(resp.error.is_none());
+            resp.results
+                .into_iter()
+                .map(|r| (r.key, r.value.is_some()))
+                .collect()
+        }
+
+        let w = wall_stamp();
+        for include_value in [Some(false), Some(true)] {
+            let wanted = include_value == Some(true);
+            assert_eq!(
+                search(w, expired_now(), include_value).await,
+                vec![("k2".to_string(), wanted), ("k3".to_string(), wanted)],
+                "expired, include_value {include_value:?}"
+            );
+            let stamp = live_stamp();
+            assert_eq!(
+                search(stamp, live_now(stamp), include_value).await,
+                vec![("k1".to_string(), wanted), ("k2".to_string(), wanted)],
+                "live, include_value {include_value:?}"
+            );
+        }
     }
 }

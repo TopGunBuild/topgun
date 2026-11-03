@@ -12,12 +12,11 @@ use topgun_core::messages::base::PredicateNode;
 use topgun_core::messages::search::SearchOptions;
 
 use crate::service::domain::embedding::{EmbeddingError, EmbeddingProvider};
-use topgun_core::hash_to_partition;
 
 use crate::service::domain::index::registry::IndexRegistry;
 use crate::service::domain::predicate::{evaluate_predicate, value_to_rmpv, EvalContext};
 use crate::service::domain::search::rrf::{self, FusedEntry, RankedEntry};
-use crate::service::domain::search::SearchService;
+use crate::service::domain::search::{read_visible, SearchService};
 use crate::storage::record::RecordValue;
 use crate::storage::RecordStoreFactory;
 
@@ -147,6 +146,13 @@ impl HybridSearchEngine {
     /// map's full-text index first when it needs population. No lock guard is
     /// held across an await.
     ///
+    /// Every fused key is checked by one point read and left out unless its
+    /// record is visible at `now`, read once per search (TG-TTL-001); with
+    /// `include_value` the value comes from that read. Stated limits: fusion
+    /// truncates to `k` before this check, so the page may hold fewer than `k`
+    /// results until the expiry sweep removes an expired key from the indexes,
+    /// and a key whose point read fails is left out of that page.
+    ///
     /// # Errors
     ///
     /// Returns `HybridSearchError::Store` when the `exact` scan or the
@@ -238,13 +244,21 @@ impl HybridSearchEngine {
         let fused: Vec<FusedEntry> = rrf::fuse(&ranked_lists, self.rrf_k, params.k);
 
         // --- Map FusedEntry to HybridSearchResult ---
+        // One point read per fused key, at most `k` of them, whether or not the
+        // value is wanted: a key not visible at `now` is left out (TG-TTL-001).
+        let now = self.record_store_factory.now_ms();
         let mut results = Vec::with_capacity(fused.len());
         for fe in fused {
-            // Point reads of the fused keys only, at most `k` of them.
-            let value = if params.include_value {
-                self.load_value(params.map_name, &fe.key).await
-            } else {
-                None
+            let Some(record) =
+                read_visible(&self.record_store_factory, params.map_name, &fe.key, now).await
+            else {
+                continue;
+            };
+            let value = match record {
+                RecordValue::Lww { value, .. } if params.include_value => {
+                    Some(value_to_rmpv(&value))
+                }
+                _ => None,
             };
 
             // Translate list indices back to SearchMethod keys for transparency.
@@ -394,26 +408,6 @@ impl HybridSearchEngine {
             .collect();
 
         Ok(ranked)
-    }
-
-    /// The LWW value of one result key, by the ordinary point read: it loads
-    /// the key into its store, cost-accounted and evictable (`TG-EVI-001`). A
-    /// read error leaves the value out.
-    async fn load_value(&self, map_name: &str, key: &str) -> Option<rmpv::Value> {
-        let store = self
-            .record_store_factory
-            .get_or_create(map_name, hash_to_partition(key));
-        match store.get(key, false).await {
-            Ok(Some(record)) => match record.value {
-                RecordValue::Lww { value, .. } => Some(value_to_rmpv(&value)),
-                _ => None,
-            },
-            Ok(None) => None,
-            Err(error) => {
-                tracing::warn!(map = %map_name, key, error = %error, "hybrid search: value read failed");
-                None
-            }
-        }
     }
 }
 
@@ -763,5 +757,133 @@ mod tests {
             results[0].value.is_some(),
             "includeValue reads the stored value"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // TG-TTL-001: every fused key is checked by a point read
+    // -----------------------------------------------------------------------
+
+    mod ttl_reads {
+        use std::sync::Arc;
+
+        use topgun_core::hash_to_partition;
+        use topgun_core::types::Value;
+
+        use super::make_search_service;
+        use crate::service::domain::index::registry::IndexRegistry;
+        use crate::service::domain::search::hybrid::{
+            FullTextMode, HybridSearchEngine, HybridSearchParams, HybridSearchResult, SearchMethod,
+        };
+        use crate::storage::expiry::ManualClock;
+        use crate::storage::factory::test_store::TestStore;
+        use crate::storage::factory::ttl_fixture::{expired_now, ts, wall_stamp, TTL_MS};
+        use crate::storage::impls::StorageConfig;
+        use crate::storage::key_writer::KeyWriteToken;
+        use crate::storage::record::RecordValue;
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::RecordStoreFactory;
+
+        const MAP: &str = "m";
+
+        fn lww(millis: u64, ttl_ms: Option<u64>) -> RecordValue {
+            RecordValue::Lww {
+                value: Value::String("v".to_string()),
+                timestamp: ts(millis),
+                ttl_ms,
+            }
+        }
+
+        /// A map with an expired stored-only key, an expired resident-only key
+        /// and a stored key without a TTL, read with the clock 30 days on.
+        async fn setup() -> (HybridSearchEngine, Arc<TestStore>) {
+            let w = wall_stamp();
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(MAP, "gone_stored", lww(w, Some(TTL_MS)));
+            store.put_row(MAP, "kept", lww(w, None));
+            let factory = Arc::new(
+                RecordStoreFactory::new(StorageConfig::default(), store.clone(), Vec::new())
+                    .with_clock(Arc::new(ManualClock::new(expired_now()))),
+            );
+            factory
+                .get_or_create(MAP, hash_to_partition("gone_resident"))
+                .put(
+                    &KeyWriteToken::for_test(MAP, "gone_resident"),
+                    "gone_resident",
+                    lww(w, Some(TTL_MS)),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Replication,
+                )
+                .await
+                .unwrap();
+            let svc = make_search_service(Arc::clone(&factory));
+            (HybridSearchEngine::new(svc, factory, None), store)
+        }
+
+        /// The fused list holds every key of the map: the exact leg is given
+        /// them, as an index that has not yet dropped an expired key would.
+        async fn run(engine: &HybridSearchEngine, include_value: bool) -> Vec<HybridSearchResult> {
+            let registry = IndexRegistry::new();
+            engine
+                .hybrid_search_with_exact(
+                    HybridSearchParams {
+                        map_name: MAP,
+                        index_registry: &registry,
+                        query_text: "",
+                        query_vector: None,
+                        predicate: None,
+                        methods: &[SearchMethod::Exact],
+                        k: 10,
+                        include_value,
+                    },
+                    Some(
+                        ["gone_resident", "gone_stored", "kept"]
+                            .map(str::to_string)
+                            .to_vec(),
+                    ),
+                    FullTextMode::CurrentIndex,
+                )
+                .await
+                .expect("the search answers")
+        }
+
+        fn keys(results: &[HybridSearchResult]) -> Vec<String> {
+            let mut keys: Vec<String> = results.iter().map(|r| r.key.clone()).collect();
+            keys.sort();
+            keys
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn hybrid_search_hides_expired_without_include_value() {
+            let (engine, _store) = setup().await;
+            let results = run(&engine, false).await;
+            assert_eq!(keys(&results), vec!["kept"]);
+            assert!(results[0].value.is_none());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn hybrid_search_hides_expired_with_include_value() {
+            let (engine, _store) = setup().await;
+            let results = run(&engine, true).await;
+            assert_eq!(keys(&results), vec!["kept"]);
+            assert_eq!(results[0].value, Some(rmpv::Value::String("v".into())));
+        }
+
+        /// A fused key whose point read fails is left out and the search
+        /// still answers, with every other key.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn hybrid_search_drops_a_hit_whose_read_fails() {
+            let (engine, store) = setup().await;
+            store.put_row(MAP, "gone_stored", lww(wall_stamp(), None));
+            store.fail_loads(MAP, "kept");
+
+            for include_value in [false, true] {
+                let results = run(&engine, include_value).await;
+                assert_eq!(
+                    keys(&results),
+                    vec!["gone_stored"],
+                    "include_value {include_value}"
+                );
+            }
+        }
     }
 }

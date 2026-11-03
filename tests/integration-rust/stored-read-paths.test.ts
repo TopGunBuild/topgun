@@ -350,8 +350,8 @@ describe('Integration: whole-map reads see stored records after a restart (TG-RE
   test('AC4(b): deleting a non-resident key after the restart removes it from search and /sync', async () => {
     const port = await s.restart();
     const client = await s.connect('ac4b');
-    // Populates the index from the store.
-    expect(await search(client, 'epsilon')).toEqual(['d']);
+    // Populates the index from the store; a term with no hit, because every hit is point-read and loaded (TG-TTL-001).
+    expect(await search(client, 'zeta-no-such-term')).toEqual([]);
     // `d` is not resident right before the delete.
     expect(await residentCount(port)).toBe(0);
     await remove(client, 'd');

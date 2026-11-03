@@ -23,6 +23,7 @@ use topgun_core::messages::base::{AggFunc, Aggregation, PredicateNode, SortDirec
 use crate::dag::types::{Inbox, Outbox, Processor, ProcessorContext, ProcessorSupplier};
 use crate::query::full_scan_pager::FullScanPager;
 use crate::service::domain::predicate::{evaluate_predicate, EvalContext};
+use crate::storage::expiry::lww_is_live;
 use crate::storage::factory::RecordStoreFactory;
 use crate::storage::record::RecordValue;
 
@@ -290,24 +291,32 @@ impl ScanProcessor {
     }
 }
 
+/// A row of the scan with the timestamp the HLC-LWW merge compares and the
+/// record's `ttl_ms`, against which the row is judged live (TG-TTL-001).
+type ScanRow = (rmpv::Value, Timestamp, Option<u64>);
+
 impl ScanProcessor {
     /// Takes an up-front key-sorted resident snapshot from all assigned partitions.
     /// The `BTreeMap` gives key-sorted order and deduplication across partitions; the
     /// timestamp is retained so the datastore merge can apply HLC-LWW. This snapshot
     /// is O(resident key-set), which the engine already keeps under the RAM ceiling.
-    fn build_resident_snapshot(&self) -> BTreeMap<String, (rmpv::Value, Timestamp)> {
-        let mut resident: BTreeMap<String, (rmpv::Value, Timestamp)> = BTreeMap::new();
+    /// It keeps expired records too: an expired resident must still beat an older
+    /// stored row of its key in the merge, or the stored copy would be served.
+    fn build_resident_snapshot(&self) -> BTreeMap<String, ScanRow> {
+        let mut resident: BTreeMap<String, ScanRow> = BTreeMap::new();
         for &pid in &self.partition_ids {
             let store = self.factory.get_or_create(&self.map_name, pid);
             store.for_each_boxed(
                 &mut |key, record| {
                     if let RecordValue::Lww {
-                        value, timestamp, ..
+                        value,
+                        timestamp,
+                        ttl_ms,
                     } = &record.value
                     {
                         let rmpv_val = crate::service::domain::predicate::value_to_rmpv(value);
                         let row = inject_key(key, rmpv_val);
-                        resident.insert(key.to_string(), (row, timestamp.clone()));
+                        resident.insert(key.to_string(), (row, timestamp.clone(), *ttl_ms));
                     }
                 },
                 false,
@@ -325,10 +334,14 @@ impl ScanProcessor {
     /// than RAM no longer materialises every non-resident row to return a small page
     /// (the SPEC-322c headline bound). Returns up to limit+1 rows (the `+1` is the
     /// pagination sentinel the downstream `has_more` detection consumes).
+    ///
+    /// Only rows live at `now` reach the pager (TG-TTL-001), so an expired row never
+    /// takes a top-N slot; the merge itself still decides on every row.
     fn scan_bounded(
         &self,
-        mut resident: BTreeMap<String, (rmpv::Value, Timestamp)>,
+        mut resident: BTreeMap<String, ScanRow>,
         limit: u32,
+        now: u64,
     ) -> Vec<rmpv::Value> {
         let mut pager = FullScanPager::new(self.sort_fields.clone(), limit as usize);
         let data_store = self.factory.data_store();
@@ -341,7 +354,9 @@ impl ScanProcessor {
                     loop {
                         for (key, record_value) in batch.records {
                             let RecordValue::Lww {
-                                value, timestamp, ..
+                                value,
+                                timestamp,
+                                ttl_ms,
                             } = record_value
                             else {
                                 continue;
@@ -350,7 +365,7 @@ impl ScanProcessor {
                             // mutating the map so the read borrow is released first.
                             let resident_wins = matches!(
                                 resident.get(&key),
-                                Some((_, resident_ts)) if timestamp <= *resident_ts
+                                Some((_, resident_ts, _)) if timestamp <= *resident_ts
                             );
                             if resident_wins {
                                 // Leave the resident entry in the map; it is fed to the
@@ -361,6 +376,9 @@ impl ScanProcessor {
                             // dirty resident copy). Drop any beaten resident entry so it
                             // is not also fed, then push the durable row.
                             resident.remove(&key);
+                            if !lww_is_live(&timestamp, ttl_ms, now) {
+                                continue;
+                            }
                             let row = inject_key(
                                 &key,
                                 crate::service::domain::predicate::value_to_rmpv(&value),
@@ -386,8 +404,10 @@ impl ScanProcessor {
             }
         }
         // Feed the surviving resident rows (resident-only, or resident-wins keys).
-        for (key, (row, _)) in resident {
-            pager.push(&key, &row);
+        for (key, (row, timestamp, ttl_ms)) in resident {
+            if lww_is_live(&timestamp, ttl_ms, now) {
+                pager.push(&key, &row);
+            }
         }
         pager
             .into_sorted_rows()
@@ -400,10 +420,12 @@ impl ScanProcessor {
     /// result is inherently O(result). Merges each streamed batch into the key-sorted
     /// `BTreeMap` and flattens. Engine residency stays bounded — the datastore scan
     /// never hydrates the in-memory engine — so only the transient result set, which
-    /// the caller explicitly requested in full, is O(result).
+    /// the caller explicitly requested in full, is O(result). The merge keeps every
+    /// row; the rows not live at `now` are dropped when flattening (TG-TTL-001).
     fn scan_unbounded(
         &self,
-        mut resident: BTreeMap<String, (rmpv::Value, Timestamp)>,
+        mut resident: BTreeMap<String, ScanRow>,
+        now: u64,
     ) -> Vec<rmpv::Value> {
         let data_store = self.factory.data_store();
         if !data_store.is_null() {
@@ -415,7 +437,9 @@ impl ScanProcessor {
                     loop {
                         for (key, record_value) in batch.records {
                             let RecordValue::Lww {
-                                value, timestamp, ..
+                                value,
+                                timestamp,
+                                ttl_ms,
                             } = record_value
                             else {
                                 continue;
@@ -424,11 +448,11 @@ impl ScanProcessor {
                             let row = inject_key(&key, rmpv_val);
                             match resident.get(&key) {
                                 None => {
-                                    resident.insert(key, (row, timestamp));
+                                    resident.insert(key, (row, timestamp, ttl_ms));
                                 }
-                                Some((_, resident_ts)) => {
+                                Some((_, resident_ts, _)) => {
                                     if timestamp > *resident_ts {
-                                        resident.insert(key, (row, timestamp));
+                                        resident.insert(key, (row, timestamp, ttl_ms));
                                     }
                                 }
                             }
@@ -451,7 +475,11 @@ impl ScanProcessor {
                 );
             }
         }
-        resident.into_values().map(|(row, _)| row).collect()
+        resident
+            .into_values()
+            .filter(|(_, timestamp, ttl_ms)| lww_is_live(timestamp, *ttl_ms, now))
+            .map(|(row, _, _)| row)
+            .collect()
     }
 }
 
@@ -465,10 +493,11 @@ impl Processor for ScanProcessor {
         // the gap that causes silent divergence post-restart or post-eviction. The
         // resident copy wins on `>=` (the dirty write-behind window means in-memory is
         // often newer); the durable copy wins only when strictly newer.
+        let now = self.factory.now_ms();
         let resident = self.build_resident_snapshot();
         self.buffer = match self.bounded_limit {
-            Some(limit) => self.scan_bounded(resident, limit),
-            None => self.scan_unbounded(resident),
+            Some(limit) => self.scan_bounded(resident, limit, now),
+            None => self.scan_unbounded(resident, now),
         };
         self.initialized = true;
         Ok(())
@@ -2437,7 +2466,7 @@ mod tests {
     async fn a_bounded_scan_returns_a_key_written_after_the_resident_snapshot_once() {
         let (factory, _dir) = big_map_with_a_staged_key().await;
         let processor = ScanProcessor::new("m".to_string(), factory, Vec::new(), Some(5));
-        let mut resident: BTreeMap<String, (rmpv::Value, Timestamp)> = BTreeMap::new();
+        let mut resident: BTreeMap<String, ScanRow> = BTreeMap::new();
         resident.insert(
             "d3".to_string(),
             (
@@ -2447,15 +2476,196 @@ mod tests {
                     counter: 0,
                     node_id: "n".to_string(),
                 },
+                None,
             ),
         );
 
-        let rows = processor.scan_bounded(resident, 5);
+        let rows = processor.scan_bounded(resident, 5, 0);
 
         assert_eq!(
             keys_of(&rows),
             vec!["d0", "d1", "d2", "d3", "d4"],
             "a key written after the resident snapshot reaches the page once"
         );
+    }
+
+    // --- ScanProcessor serves live rows only (TG-TTL-001) ---
+
+    mod ttl_reads {
+        use std::sync::Arc;
+
+        use topgun_core::types::Value;
+
+        use super::{keys_of, make_context};
+        use crate::dag::types::Processor;
+        use crate::storage::expiry::ManualClock;
+        use crate::storage::factory::test_store::TestStore;
+        use crate::storage::factory::ttl_fixture::{
+            expired_now, live_now, live_stamp, ts, wall_stamp, TTL_MS,
+        };
+        use crate::storage::factory::RecordStoreFactory;
+        use crate::storage::key_writer::KeyWriteToken;
+        use crate::storage::record::RecordValue;
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::StorageConfig;
+
+        use super::super::ScanProcessor;
+
+        const MAP: &str = "m";
+
+        fn lww(millis: u64, ttl_ms: Option<u64>) -> RecordValue {
+            RecordValue::Lww {
+                value: Value::String("v".to_string()),
+                timestamp: ts(millis),
+                ttl_ms,
+            }
+        }
+
+        fn tombstone(millis: u64, ttl_ms: Option<u64>) -> RecordValue {
+            RecordValue::Lww {
+                value: Value::Null,
+                timestamp: ts(millis),
+                ttl_ms,
+            }
+        }
+
+        fn clocked(store: Arc<TestStore>, now: u64) -> (Arc<RecordStoreFactory>, Arc<ManualClock>) {
+            let clock = Arc::new(ManualClock::new(now));
+            let factory = RecordStoreFactory::new(StorageConfig::default(), store, Vec::new())
+                .with_clock(Arc::clone(&clock) as _);
+            (Arc::new(factory), clock)
+        }
+
+        /// Puts `value` into the engine of partition 0, the one the test
+        /// context assigns, without writing it through to the data store.
+        async fn put_resident(factory: &RecordStoreFactory, key: &str, value: RecordValue) {
+            factory
+                .get_or_create(MAP, 0)
+                .put(
+                    &KeyWriteToken::for_test(MAP, key),
+                    key,
+                    value,
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Replication,
+                )
+                .await
+                .unwrap();
+        }
+
+        fn scan(factory: &Arc<RecordStoreFactory>, limit: Option<u32>) -> Vec<String> {
+            let mut processor =
+                ScanProcessor::new(MAP.to_string(), Arc::clone(factory), Vec::new(), limit);
+            processor.init(&make_context()).expect("init");
+            keys_of(&processor.buffer)
+        }
+
+        fn live_keys() -> Vec<String> {
+            ["b", "c", "d"].map(str::to_string).to_vec()
+        }
+
+        /// An expired resident sorts first but never takes a top-N slot.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_processor_bounded_hides_expired_resident() {
+            let w = wall_stamp();
+            let (factory, _clock) = clocked(Arc::new(TestStore::new(100)), expired_now());
+            put_resident(&factory, "a", lww(w, Some(TTL_MS))).await;
+            for key in ["b", "c", "d"] {
+                put_resident(&factory, key, lww(w, None)).await;
+            }
+
+            assert_eq!(scan(&factory, Some(2)), live_keys());
+        }
+
+        /// An expired stored row sorts first but never takes a top-N slot.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_processor_bounded_hides_expired_stored() {
+            let w = wall_stamp();
+            let store = Arc::new(TestStore::new(2));
+            store.put_row(MAP, "a", lww(w, Some(TTL_MS)));
+            for key in ["b", "c", "d"] {
+                store.put_row(MAP, key, lww(w, None));
+            }
+            let (factory, _clock) = clocked(store, expired_now());
+
+            assert_eq!(scan(&factory, Some(2)), live_keys());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_processor_unbounded_hides_expired_stored() {
+            let w = wall_stamp();
+            let store = Arc::new(TestStore::new(2));
+            store.put_row(MAP, "a", lww(w, Some(TTL_MS)));
+            for key in ["b", "c", "d"] {
+                store.put_row(MAP, key, lww(w, None));
+            }
+            let (factory, _clock) = clocked(store, expired_now());
+
+            assert_eq!(scan(&factory, None), live_keys());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_processor_unbounded_hides_expired_resident() {
+            let w = wall_stamp();
+            let (factory, _clock) = clocked(Arc::new(TestStore::new(100)), expired_now());
+            put_resident(&factory, "a", lww(w, Some(TTL_MS))).await;
+            for key in ["b", "c", "d"] {
+                put_resident(&factory, key, lww(w, None)).await;
+            }
+
+            assert_eq!(scan(&factory, None), live_keys());
+        }
+
+        /// An expired resident still wins the merge over an older live stored
+        /// row of its key, bounded and unbounded: the stored copy is never
+        /// served in its place.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_processor_expired_resident_still_shadows_stored() {
+            let w = wall_stamp();
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(MAP, "a", lww(w - 1_000, None));
+            store.put_row(MAP, "z", lww(w, None));
+            let (factory, _clock) = clocked(store, expired_now());
+            put_resident(&factory, "a", lww(w, Some(TTL_MS))).await;
+
+            assert_eq!(scan(&factory, Some(5)), vec!["z"], "bounded");
+            assert_eq!(scan(&factory, None), vec!["z"], "unbounded");
+        }
+
+        /// A resident LWW tombstone with an expired TTL shadows an older live
+        /// stored row of its key: the deleted key is not resurrected.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_processor_expired_tombstone_does_not_resurrect_stored() {
+            let w = wall_stamp();
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(MAP, "a", lww(w - 1_000, None));
+            store.put_row(MAP, "z", lww(w, None));
+            let (factory, _clock) = clocked(store, expired_now());
+            put_resident(&factory, "a", tombstone(w, Some(TTL_MS))).await;
+
+            assert_eq!(scan(&factory, Some(5)), vec!["z"], "bounded");
+            assert_eq!(scan(&factory, None), vec!["z"], "unbounded");
+        }
+
+        /// Live rows of both origins are served while the factory clock says
+        /// so (one day before their stamp, ten days before wall time), up to
+        /// and including the millisecond they expire, and not one later.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_processor_live_at_expiry_instant() {
+            let stamp = live_stamp();
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(MAP, "stored", lww(stamp, Some(TTL_MS)));
+            let (factory, clock) = clocked(store, live_now(stamp));
+            put_resident(&factory, "resident", lww(stamp, Some(TTL_MS))).await;
+            let both = vec!["resident".to_string(), "stored".to_string()];
+
+            assert_eq!(scan(&factory, Some(5)), both);
+            assert_eq!(scan(&factory, None), both);
+            clock.set(stamp + TTL_MS);
+            assert_eq!(scan(&factory, Some(5)), both);
+            assert_eq!(scan(&factory, None), both);
+            clock.set(stamp + TTL_MS + 1);
+            assert!(scan(&factory, Some(5)).is_empty());
+            assert!(scan(&factory, None).is_empty());
+        }
     }
 }

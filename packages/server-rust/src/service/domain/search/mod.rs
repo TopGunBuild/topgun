@@ -49,6 +49,7 @@ use crate::service::operation::{
     service_names, Operation, OperationContext, OperationError, OperationResponse,
 };
 use crate::service::registry::{ManagedService, ServiceContext};
+use crate::storage::expiry::is_visible;
 use crate::storage::mutation_observer::MutationObserver;
 use crate::storage::record::{Record, RecordValue};
 use crate::storage::RecordStoreFactory;
@@ -1535,6 +1536,29 @@ fn search_failed(request_id: String) -> SearchRespPayload {
     }
 }
 
+/// The record of `key` in `map_name` when a reader may see it at `now`
+/// (TG-TTL-001), by the ordinary point read: it loads the key into its store,
+/// cost-accounted and evictable (`TG-EVI-001`). `None` when the key is absent,
+/// not visible, or its read failed: a hit whose liveness cannot be decided is
+/// never served, and one unreadable key does not fail the whole search.
+pub(crate) async fn read_visible(
+    factory: &RecordStoreFactory,
+    map_name: &str,
+    key: &str,
+    now: u64,
+) -> Option<RecordValue> {
+    let store = factory.get_or_create(map_name, topgun_core::hash_to_partition(key));
+    match store.get(key, false).await {
+        Ok(record) => record
+            .map(|record| record.value)
+            .filter(|value| is_visible(value, now)),
+        Err(error) => {
+            tracing::warn!(map = %map_name, key, error = %error, "search: point read of a hit failed; the hit is left out");
+            None
+        }
+    }
+}
+
 /// Convert an `Instant` elapsed duration to milliseconds, saturating at `u64::MAX`.
 fn elapsed_ms(start: std::time::Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -1630,6 +1654,12 @@ impl SearchService {
     }
 
     /// Executes a search against the index for a map and builds `SearchResultEntry` list.
+    ///
+    /// Each hit is checked by a point read and kept only when its record is
+    /// visible at `now`, read once per request (TG-TTL-001). Stated limits: the
+    /// page may hold fewer than `limit` hits until the expiry sweep removes an
+    /// expired key from the index, and a hit whose point read fails is left out
+    /// of that page.
     async fn execute_search(
         &self,
         map_name: &str,
@@ -1639,17 +1669,24 @@ impl SearchService {
         let scored_docs = self
             .search_map(map_name, query_str, options, FullTextMode::Populate)
             .await?;
-        Ok(scored_docs
-            .into_iter()
-            .map(|doc| {
-                SearchResultEntry {
-                    key: doc.key,
-                    value: rmpv::Value::Nil, // client fetches full value if needed
-                    score: doc.score,
-                    matched_terms: doc.matched_terms,
-                }
-            })
-            .collect())
+        let factory = &self.populations.factory;
+        let now = factory.now_ms();
+        let mut results = Vec::with_capacity(scored_docs.len());
+        for doc in scored_docs {
+            if read_visible(factory, map_name, &doc.key, now)
+                .await
+                .is_none()
+            {
+                continue;
+            }
+            results.push(SearchResultEntry {
+                key: doc.key,
+                value: rmpv::Value::Nil, // client fetches full value if needed
+                score: doc.score,
+                matched_terms: doc.matched_terms,
+            });
+        }
+        Ok(results)
     }
 
     /// Executes a BM25 full-text search against the tantivy index for `map_name`.
@@ -3204,14 +3241,39 @@ mod tests {
         (svc, rx, conn_id)
     }
 
-    /// Wires a `HybridSearchEngine` (FullText-only) onto the service, then
-    /// populates the tantivy index with the given documents.
-    fn wire_engine_and_index(
+    /// Wires a `HybridSearchEngine` (FullText-only) onto the service, stores a
+    /// record for each document (a fused key is served only when its record
+    /// exists and is visible), then populates the tantivy index with them.
+    async fn wire_engine_and_index(
         svc: &Arc<SearchService>,
         map_name: &str,
         docs: &[(&str, &str)], // key -> text
     ) {
+        use crate::storage::key_writer::KeyWriteToken;
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+
         let store_factory = make_factory();
+        for (key, text) in docs {
+            store_factory
+                .get_or_create(map_name, topgun_core::hash_to_partition(key))
+                .put(
+                    &KeyWriteToken::for_test(map_name, key),
+                    key,
+                    RecordValue::Lww {
+                        value: topgun_core::types::Value::String((*text).to_string()),
+                        timestamp: Timestamp {
+                            millis: 1_000,
+                            counter: 0,
+                            node_id: "test".to_string(),
+                        },
+                        ttl_ms: None,
+                    },
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .unwrap();
+        }
         let engine = HybridSearchEngine::new(Arc::clone(svc), store_factory, None);
         svc.set_hybrid_engine(Arc::new(engine));
 
@@ -3241,7 +3303,7 @@ mod tests {
     async fn hybrid_delta_enter_delivered_when_record_matches_new_subscription() {
         // AC1: A record that matches the query after indexing delivers ENTER.
         let (svc, mut rx, conn_id) = make_service_with_connection();
-        wire_engine_and_index(&svc, "map1", &[("k1", "hello world")]);
+        wire_engine_and_index(&svc, "map1", &[("k1", "hello world")]).await;
 
         // Register subscription with empty initial cache (k1 not yet in cache).
         let sub = HybridSearchSubscription::new(
@@ -3277,7 +3339,7 @@ mod tests {
         // AC2: A key in cache that no longer matches delivers LEAVE.
         let (svc, mut rx, conn_id) = make_service_with_connection();
         // Index is empty — k1 will not be found in search results.
-        wire_engine_and_index(&svc, "map2", &[]);
+        wire_engine_and_index(&svc, "map2", &[]).await;
 
         // Subscription with k1 already in cache.
         let sub = HybridSearchSubscription::new(
@@ -3320,7 +3382,7 @@ mod tests {
     async fn hybrid_delta_update_delivered_when_record_still_matches_but_score_changes() {
         // AC3: A key already in cache that still matches delivers UPDATE.
         let (svc, mut rx, conn_id) = make_service_with_connection();
-        wire_engine_and_index(&svc, "map3", &[("k1", "hello world rust")]);
+        wire_engine_and_index(&svc, "map3", &[("k1", "hello world rust")]).await;
 
         // Subscription with k1 already in cache (from a prior notification).
         let sub = HybridSearchSubscription::new(
@@ -3430,6 +3492,11 @@ mod tests {
         }
 
         fn harness() -> Harness {
+            harness_at(Arc::new(topgun_core::hlc::SystemClock))
+        }
+
+        /// A harness whose factory judges expiry by `clock`.
+        fn harness_at(clock: Arc<dyn topgun_core::hlc::ClockSource>) -> Harness {
             let store = Arc::new(TestStore::new(1000));
             let registry = Arc::new(SearchRegistry::new());
             let hybrid_registry = Arc::new(HybridSearchRegistry::new());
@@ -3450,7 +3517,8 @@ mod tests {
                     Arc::clone(&store) as Arc<dyn crate::storage::MapDataStore>,
                     Vec::new(),
                 )
-                .with_observer_factories(vec![Arc::clone(&observers) as Arc<dyn ObserverFactory>]),
+                .with_observer_factories(vec![Arc::clone(&observers) as Arc<dyn ObserverFactory>])
+                .with_clock(clock),
             );
             let index_factory = Arc::new(IndexObserverFactory::new());
             let svc = Arc::new(SearchService::new(
@@ -3868,6 +3936,89 @@ mod tests {
                 "only registration populated"
             );
             assert_eq!(h.store.scans(M), 1, "only registration scanned");
+        }
+
+        // --- Output filter (TG-TTL-001) ---
+
+        fn doc_ttl(text: &str, millis: u64, ttl_ms: Option<u64>) -> RecordValue {
+            RecordValue::Lww {
+                value: Value::Map(BTreeMap::from([(
+                    "text".to_string(),
+                    Value::String(text.to_string()),
+                )])),
+                timestamp: crate::storage::factory::ttl_fixture::ts(millis),
+                ttl_ms,
+            }
+        }
+
+        /// An expired hit is dropped from the answer whether its record is
+        /// resident or only stored, while it is still in the index; a hit
+        /// without a TTL stays.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn fts_search_hides_expired_hit() {
+            use crate::storage::expiry::ManualClock;
+            use crate::storage::factory::ttl_fixture::{expired_now, wall_stamp, TTL_MS};
+
+            let w = wall_stamp();
+            let clock = Arc::new(ManualClock::new(w));
+            let h = harness_at(Arc::clone(&clock) as _);
+            h.store.put_row(
+                M,
+                "gone_stored",
+                doc_ttl(&format!("{TERM} s"), w, Some(TTL_MS)),
+            );
+            h.store
+                .put_row(M, "kept", doc_ttl(&format!("{TERM} k"), w, None));
+            let resident = h
+                .factory
+                .get_or_create(M, hash_to_partition("gone_resident"));
+            resident
+                .put(
+                    &KeyWriteToken::for_test(M, "gone_resident"),
+                    "gone_resident",
+                    doc_ttl(&format!("{TERM} r"), w, Some(TTL_MS)),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .unwrap();
+            h.store.delete_row(M, "gone_resident");
+            let live = search(&h.svc).await;
+            assert_eq!(keys(&live), vec!["gone_resident", "gone_stored", "kept"]);
+            // The stored-only key was loaded by the point read; evict it so the
+            // next read goes to the data store again.
+            h.factory
+                .get_or_create(M, hash_to_partition("gone_stored"))
+                .evict("gone_stored", false);
+
+            clock.set(expired_now());
+            let expired = search(&h.svc).await;
+            assert_eq!(keys(&expired), vec!["kept"]);
+            assert_eq!(expired.total_count, 1);
+            assert!(expired.error.is_none());
+            assert!(
+                old_index_has(&h, "gone_stored") && old_index_has(&h, "gone_resident"),
+                "the expired keys are still in the index; only the answer drops them"
+            );
+        }
+
+        /// A hit whose point read fails is left out and the search still
+        /// answers, with every other hit.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn fts_search_drops_a_hit_whose_read_fails() {
+            let h = harness();
+            store_rows(&h, 3);
+            assert_eq!(keys(&search(&h.svc).await), vec!["s0", "s1", "s2"]);
+            for key in ["s0", "s1", "s2"] {
+                h.factory
+                    .get_or_create(M, hash_to_partition(key))
+                    .evict(key, false);
+            }
+            h.store.fail_loads(M, "s1");
+
+            let answer = search(&h.svc).await;
+            assert!(answer.error.is_none(), "{answer:?}");
+            assert_eq!(keys(&answer), vec!["s0", "s2"]);
         }
     }
 }
