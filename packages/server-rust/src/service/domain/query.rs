@@ -45,6 +45,7 @@ use crate::service::domain::predicate::{
 };
 use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
+use crate::storage::expiry::lww_is_live;
 use crate::storage::mutation_observer::MutationObserver;
 use crate::storage::record::{Record, RecordValue};
 use crate::storage::RecordStoreFactory;
@@ -1325,22 +1326,34 @@ impl QueryService {
             .unwrap_or(false);
         let need_values = filter.is_some() || include_value || include_vectors;
 
-        let value_map: std::collections::HashMap<String, rmpv::Value> = if need_values {
-            let mut map = std::collections::HashMap::new();
-            for store in &stores {
-                store.for_each_boxed(
-                    &mut |key, record| {
-                        if let RecordValue::Lww { ref value, .. } = record.value {
-                            map.insert(key.to_string(), value_to_rmpv(value));
+        // The resident pass always runs, so an expired resident key is dropped
+        // before the filter, the sort and the top-k cut and never takes a slot
+        // (TG-TTL-001). It records a value only for a record live at `now`.
+        // Non-resident keys are not checked here (TODO-896).
+        let now = self.record_store_factory.now_ms();
+        let mut value_map: std::collections::HashMap<String, rmpv::Value> =
+            std::collections::HashMap::new();
+        let mut expired: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for store in &stores {
+            store.for_each_boxed(
+                &mut |key, record| {
+                    if let RecordValue::Lww {
+                        ref value,
+                        ref timestamp,
+                        ttl_ms,
+                    } = record.value
+                    {
+                        if !lww_is_live(timestamp, ttl_ms, now) {
+                            expired.insert(key.to_string());
+                        } else if need_values {
+                            value_map.insert(key.to_string(), value_to_rmpv(value));
                         }
-                    },
-                    false,
-                );
-            }
-            map
-        } else {
-            std::collections::HashMap::new()
-        };
+                    }
+                },
+                false,
+            );
+        }
+        scored.retain(|(key, _)| !expired.contains(key));
 
         if let Some(pred) = filter {
             scored.retain(|(key, _)| {
