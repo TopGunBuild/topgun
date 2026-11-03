@@ -3467,6 +3467,11 @@ mod tests {
         }
 
         fn harness() -> Harness {
+            harness_at(Arc::new(topgun_core::hlc::SystemClock))
+        }
+
+        /// A harness whose factory judges expiry by `clock`.
+        fn harness_at(clock: Arc<dyn topgun_core::hlc::ClockSource>) -> Harness {
             let store = Arc::new(TestStore::new(1000));
             let registry = Arc::new(SearchRegistry::new());
             let hybrid_registry = Arc::new(HybridSearchRegistry::new());
@@ -3487,7 +3492,8 @@ mod tests {
                     Arc::clone(&store) as Arc<dyn crate::storage::MapDataStore>,
                     Vec::new(),
                 )
-                .with_observer_factories(vec![Arc::clone(&observers) as Arc<dyn ObserverFactory>]),
+                .with_observer_factories(vec![Arc::clone(&observers) as Arc<dyn ObserverFactory>])
+                .with_clock(clock),
             );
             let index_factory = Arc::new(IndexObserverFactory::new());
             let svc = Arc::new(SearchService::new(
@@ -3905,6 +3911,89 @@ mod tests {
                 "only registration populated"
             );
             assert_eq!(h.store.scans(M), 1, "only registration scanned");
+        }
+
+        // --- Output filter (TG-TTL-001) ---
+
+        fn doc_ttl(text: &str, millis: u64, ttl_ms: Option<u64>) -> RecordValue {
+            RecordValue::Lww {
+                value: Value::Map(BTreeMap::from([(
+                    "text".to_string(),
+                    Value::String(text.to_string()),
+                )])),
+                timestamp: crate::storage::factory::ttl_fixture::ts(millis),
+                ttl_ms,
+            }
+        }
+
+        /// An expired hit is dropped from the answer whether its record is
+        /// resident or only stored, while it is still in the index; a hit
+        /// without a TTL stays.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn fts_search_hides_expired_hit() {
+            use crate::storage::expiry::ManualClock;
+            use crate::storage::factory::ttl_fixture::{expired_now, wall_stamp, TTL_MS};
+
+            let w = wall_stamp();
+            let clock = Arc::new(ManualClock::new(w));
+            let h = harness_at(Arc::clone(&clock) as _);
+            h.store.put_row(
+                M,
+                "gone_stored",
+                doc_ttl(&format!("{TERM} s"), w, Some(TTL_MS)),
+            );
+            h.store
+                .put_row(M, "kept", doc_ttl(&format!("{TERM} k"), w, None));
+            let resident = h
+                .factory
+                .get_or_create(M, hash_to_partition("gone_resident"));
+            resident
+                .put(
+                    &KeyWriteToken::for_test(M, "gone_resident"),
+                    "gone_resident",
+                    doc_ttl(&format!("{TERM} r"), w, Some(TTL_MS)),
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .unwrap();
+            h.store.delete_row(M, "gone_resident");
+            let live = search(&h.svc).await;
+            assert_eq!(keys(&live), vec!["gone_resident", "gone_stored", "kept"]);
+            // The stored-only key was loaded by the point read; evict it so the
+            // next read goes to the data store again.
+            h.factory
+                .get_or_create(M, hash_to_partition("gone_stored"))
+                .evict("gone_stored", false);
+
+            clock.set(expired_now());
+            let expired = search(&h.svc).await;
+            assert_eq!(keys(&expired), vec!["kept"]);
+            assert_eq!(expired.total_count, 1);
+            assert!(expired.error.is_none());
+            assert!(
+                old_index_has(&h, "gone_stored") && old_index_has(&h, "gone_resident"),
+                "the expired keys are still in the index; only the answer drops them"
+            );
+        }
+
+        /// A hit whose point read fails is left out and the search still
+        /// answers, with every other hit.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn fts_search_drops_a_hit_whose_read_fails() {
+            let h = harness();
+            store_rows(&h, 3);
+            assert_eq!(keys(&search(&h.svc).await), vec!["s0", "s1", "s2"]);
+            for key in ["s0", "s1", "s2"] {
+                h.factory
+                    .get_or_create(M, hash_to_partition(key))
+                    .evict(key, false);
+            }
+            h.store.fail_loads(M, "s1");
+
+            let answer = search(&h.svc).await;
+            assert!(answer.error.is_none(), "{answer:?}");
+            assert_eq!(keys(&answer), vec!["s0", "s2"]);
         }
     }
 }

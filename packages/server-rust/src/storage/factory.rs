@@ -415,6 +415,7 @@ pub(crate) mod test_store {
         scans: Mutex<HashMap<String, u64>>,
         fail_first: Mutex<HashSet<String>>,
         fail_resumed: Mutex<HashSet<String>>,
+        fail_loads: Mutex<HashSet<(String, String)>>,
         panic_scan: AtomicBool,
         /// `true` while closed: a `scan_values` call fixes its rows, counts
         /// itself as parked and waits until the gate opens.
@@ -433,6 +434,7 @@ pub(crate) mod test_store {
                 scans: Mutex::new(HashMap::new()),
                 fail_first: Mutex::new(HashSet::new()),
                 fail_resumed: Mutex::new(HashSet::new()),
+                fail_loads: Mutex::new(HashSet::new()),
                 panic_scan: AtomicBool::new(false),
                 gate: tokio::sync::watch::channel(false).0,
                 parked: AtomicU64::new(0),
@@ -487,6 +489,13 @@ pub(crate) mod test_store {
 
         pub(crate) fn fail_resumed_scans(&self, map: &str) {
             self.fail_resumed.lock().insert(map.to_string());
+        }
+
+        /// Every later `load` of `key` in `map` fails.
+        pub(crate) fn fail_loads(&self, map: &str, key: &str) {
+            self.fail_loads
+                .lock()
+                .insert((map.to_string(), key.to_string()));
         }
 
         pub(crate) fn panic_scans(&self, panic: bool) {
@@ -580,6 +589,13 @@ pub(crate) mod test_store {
 
         async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
             self.count();
+            if self
+                .fail_loads
+                .lock()
+                .contains(&(map.to_string(), key.to_string()))
+            {
+                anyhow::bail!("injected load failure");
+            }
             Ok(self.row(map, key))
         }
 
@@ -674,6 +690,51 @@ pub(crate) mod test_store {
 
         fn is_null(&self) -> bool {
             self.null
+        }
+    }
+}
+
+/// Times for the TTL read tests (TG-TTL-001). Every case puts the factory
+/// clock far from wall time, so a read path that consulted the wall clock
+/// instead of [`RecordStoreFactory::now_ms`] would flip the outcome:
+/// - an *expired* record is stamped at wall time with [`TTL_MS`] and read with
+///   the clock [`expired_now`], 30 days later (by wall time it is live);
+/// - a *live* record is stamped at [`live_stamp`], 10 days ago, and read with
+///   the clock [`live_now`], one day before its stamp (by wall time it has
+///   expired).
+#[cfg(test)]
+pub(crate) mod ttl_fixture {
+    use topgun_core::hlc::{ClockSource, SystemClock, Timestamp};
+
+    pub(crate) const DAY_MS: u64 = 86_400_000;
+    /// The TTL of every expiring record in these tests: one hour.
+    pub(crate) const TTL_MS: u64 = 3_600_000;
+
+    /// Wall time now, the stamp of an *expired* record.
+    pub(crate) fn wall_stamp() -> u64 {
+        SystemClock.now()
+    }
+
+    /// The factory clock of an *expired* case: 30 days after wall time.
+    pub(crate) fn expired_now() -> u64 {
+        wall_stamp() + 30 * DAY_MS
+    }
+
+    /// The stamp of a *live* record: 10 days before wall time.
+    pub(crate) fn live_stamp() -> u64 {
+        wall_stamp() - 10 * DAY_MS
+    }
+
+    /// The factory clock of a *live* case: one day before `stamp`.
+    pub(crate) fn live_now(stamp: u64) -> u64 {
+        stamp - DAY_MS
+    }
+
+    pub(crate) fn ts(millis: u64) -> Timestamp {
+        Timestamp {
+            millis,
+            counter: 0,
+            node_id: "n".to_string(),
         }
     }
 }
@@ -1285,6 +1346,236 @@ mod tests {
 
             let rows = collect(&factory).await;
             assert_eq!(only(&rows, "o"), or_slot("resident"));
+        }
+
+        // --- Live rows only (TG-TTL-001) ---
+
+        use super::super::ttl_fixture::{expired_now, live_now, live_stamp, wall_stamp, TTL_MS};
+        use crate::storage::expiry::ManualClock;
+
+        fn lww_ttl(value: &str, millis: u64, ttl_ms: Option<u64>) -> RecordValue {
+            RecordValue::Lww {
+                value: Value::String(value.to_string()),
+                timestamp: super::super::ttl_fixture::ts(millis),
+                ttl_ms,
+            }
+        }
+
+        fn entry(tag: &str, millis: u64, ttl_ms: Option<u64>) -> OrMapEntry {
+            OrMapEntry {
+                value: Value::String(tag.to_string()),
+                tag: tag.to_string(),
+                timestamp: super::super::ttl_fixture::ts(millis),
+                ttl_ms,
+            }
+        }
+
+        fn clocked(
+            store: Arc<dyn MapDataStore>,
+            now: u64,
+        ) -> (RecordStoreFactory, Arc<ManualClock>) {
+            let clock = Arc::new(ManualClock::new(now));
+            let factory = factory_over(store).with_clock(Arc::clone(&clock) as _);
+            (factory, clock)
+        }
+
+        fn keys(rows: &[(String, RecordValue)]) -> Vec<String> {
+            let mut keys: Vec<String> = rows.iter().map(|(k, _)| k.clone()).collect();
+            keys.sort();
+            keys
+        }
+
+        /// A stored-only row that has expired is not emitted; a stored row
+        /// without a TTL beside it is.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_hides_expired_non_resident() {
+            let store = Arc::new(TestStore::new(1));
+            store.put_row(MAP, "gone", lww_ttl("x", wall_stamp(), Some(TTL_MS)));
+            store.put_row(MAP, "kept", lww_ttl("y", wall_stamp(), None));
+            let (factory, _clock) = clocked(store, expired_now());
+
+            assert_eq!(keys(&collect(&factory).await), vec!["kept"]);
+        }
+
+        /// A resident-only record that has expired is not emitted.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_hides_expired_resident() {
+            let store = Arc::new(TestStore::new(100));
+            let (factory, _clock) = clocked(store, expired_now());
+            put_resident(&factory, "gone", lww_ttl("x", wall_stamp(), Some(TTL_MS))).await;
+            put_resident(&factory, "kept", lww_ttl("y", wall_stamp(), None)).await;
+
+            assert_eq!(keys(&collect(&factory).await), vec!["kept"]);
+        }
+
+        /// An expired resident still wins the merge over an older live stored
+        /// row of its key, so neither is emitted: the stored copy is never
+        /// served in its place.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_expired_resident_still_shadows_stored() {
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(MAP, "k", lww_ttl("stored", wall_stamp() - 1_000, None));
+            let (factory, _clock) = clocked(store, expired_now());
+            put_resident(
+                &factory,
+                "k",
+                lww_ttl("resident", wall_stamp(), Some(TTL_MS)),
+            )
+            .await;
+
+            let rows = collect(&factory).await;
+            assert!(rows.is_empty(), "the older stored row was served: {rows:?}");
+        }
+
+        /// A resident LWW tombstone with an expired TTL (a delete written with
+        /// `ttlMs`) shadows an older live stored row like any expired
+        /// resident: the deleted key is not resurrected.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_expired_tombstone_does_not_resurrect_stored() {
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(MAP, "k", lww_ttl("stored", wall_stamp() - 1_000, None));
+            let (factory, _clock) = clocked(store, expired_now());
+            put_resident(
+                &factory,
+                "k",
+                RecordValue::Lww {
+                    value: Value::Null,
+                    timestamp: super::super::ttl_fixture::ts(wall_stamp()),
+                    ttl_ms: Some(TTL_MS),
+                },
+            )
+            .await;
+
+            let rows = collect(&factory).await;
+            assert!(rows.is_empty(), "the deleted key was resurrected: {rows:?}");
+        }
+
+        /// A live record is emitted at the exact millisecond it expires and not
+        /// one millisecond later, resident and stored alike.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_live_at_expiry_instant() {
+            let stamp = live_stamp();
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(MAP, "stored", lww_ttl("x", stamp, Some(TTL_MS)));
+            let (factory, clock) = clocked(store, stamp + TTL_MS);
+            put_resident(&factory, "resident", lww_ttl("y", stamp, Some(TTL_MS))).await;
+
+            assert_eq!(
+                keys(&collect(&factory).await),
+                vec!["resident", "stored"],
+                "live at now == expires_at"
+            );
+            clock.set(stamp + TTL_MS + 1);
+            assert!(
+                collect(&factory).await.is_empty(),
+                "expired one millisecond later"
+            );
+        }
+
+        /// The same instant, judged with the clock far before wall time: a
+        /// record stamped 10 days ago with a one-hour TTL is live while the
+        /// factory clock says so, whatever the wall clock says.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn lww_is_live_at_expiry_instant() {
+            let stamp = live_stamp();
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(MAP, "stored", lww_ttl("x", stamp, Some(TTL_MS)));
+            let (factory, clock) = clocked(store, live_now(stamp));
+            put_resident(&factory, "resident", lww_ttl("y", stamp, Some(TTL_MS))).await;
+
+            assert_eq!(keys(&collect(&factory).await), vec!["resident", "stored"]);
+            clock.set(stamp + TTL_MS);
+            assert_eq!(keys(&collect(&factory).await), vec!["resident", "stored"]);
+        }
+
+        /// `ttl_ms: Some(0)` never expires, matching the client.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn ttl_zero_never_expires() {
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(MAP, "stored", lww_ttl("x", live_stamp(), Some(0)));
+            let (factory, _clock) = clocked(store, expired_now());
+            put_resident(&factory, "resident", lww_ttl("y", live_stamp(), Some(0))).await;
+
+            assert_eq!(keys(&collect(&factory).await), vec!["resident", "stored"]);
+        }
+
+        /// A TTL near `u64::MAX` saturates to "never" (in `expires_at`), so the
+        /// record stays live 30 days on.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_huge_ttl_is_live() {
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(MAP, "stored", lww_ttl("x", wall_stamp(), Some(u64::MAX)));
+            let (factory, _clock) = clocked(store, expired_now());
+            put_resident(
+                &factory,
+                "resident",
+                lww_ttl("y", wall_stamp(), Some(u64::MAX)),
+            )
+            .await;
+
+            assert_eq!(keys(&collect(&factory).await), vec!["resident", "stored"]);
+        }
+
+        /// An OR slot keeps its live entries and its tombstones and loses only
+        /// its expired entries; a slot whose entries all expired is still
+        /// emitted, with its key, as `OrMap { records: [], tombstones }`, the
+        /// shape of a slot every entry of which was removed.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn scan_merged_or_slot_keeps_live_tag() {
+            let w = wall_stamp();
+            let store = Arc::new(TestStore::new(100));
+            store.put_row(
+                MAP,
+                "stored",
+                RecordValue::OrMap {
+                    records: vec![entry("old", w, Some(TTL_MS)), entry("live", w, None)],
+                    tombstones: vec!["t1".to_string()],
+                },
+            );
+            store.put_row(
+                MAP,
+                "empty",
+                RecordValue::OrMap {
+                    records: vec![entry("old", w, Some(TTL_MS))],
+                    tombstones: vec!["t2".to_string()],
+                },
+            );
+            let (factory, _clock) = clocked(store, expired_now());
+            put_resident(
+                &factory,
+                "resident",
+                RecordValue::OrMap {
+                    records: vec![
+                        entry("live", w, Some(u64::MAX)),
+                        entry("old", w, Some(TTL_MS)),
+                    ],
+                    tombstones: Vec::new(),
+                },
+            )
+            .await;
+
+            let rows = collect(&factory).await;
+            assert_eq!(
+                only(&rows, "stored"),
+                RecordValue::OrMap {
+                    records: vec![entry("live", w, None)],
+                    tombstones: vec!["t1".to_string()],
+                }
+            );
+            assert_eq!(
+                only(&rows, "resident"),
+                RecordValue::OrMap {
+                    records: vec![entry("live", w, Some(u64::MAX))],
+                    tombstones: Vec::new(),
+                }
+            );
+            assert_eq!(
+                only(&rows, "empty"),
+                RecordValue::OrMap {
+                    records: Vec::new(),
+                    tombstones: vec!["t2".to_string()],
+                }
+            );
         }
     }
 }
