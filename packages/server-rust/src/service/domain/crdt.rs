@@ -33,6 +33,7 @@ use crate::service::operation::{
 };
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::service::security::WriteAdmission;
+use crate::storage::expiry::{expired_or_tags, lww_is_live, ExpiryExpectation};
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::wal::OrDelta;
 use crate::storage::{
@@ -261,6 +262,12 @@ impl Service<Operation> for Arc<CrdtService> {
                         svc.handle_client_op(&ctx, payload).await
                     }
                     Operation::OpBatch { ctx, payload } => svc.handle_op_batch(&ctx, payload).await,
+                    Operation::ExpireRecord {
+                        map_name,
+                        key,
+                        expected,
+                        ..
+                    } => svc.handle_expire_record(&map_name, &key, &expected).await,
                     _ => Err(OperationError::WrongService),
                 }
             }
@@ -999,6 +1006,135 @@ impl CrdtService {
         Ok(())
     }
 
+    /// Removes `key` of `map_name` if it is still expired as the expiry sweep
+    /// saw it (`expected`), as an ordinary REMOVE or `OR_REMOVE` (TG-TTL-001).
+    ///
+    /// The decision is taken again under the key's writer, against the stored
+    /// value and the factory clock, because the sweep read the record without
+    /// the writer: a write that landed since then either replaced the record
+    /// (another LWW timestamp, another shape) or added live OR entries, and
+    /// neither may be deleted. What is removed goes through `apply_single_op`
+    /// and the same fan-out as a client remove, so subscribers, live queries,
+    /// indexes, Merkle trees and the journal see an ordinary delete; the journal
+    /// event also carries `reason = "expired"`.
+    ///
+    /// A map that is neither resident nor in the data store is never created:
+    /// the op bypasses authorization, so this check is what keeps an expiry
+    /// from bringing back the map of a dropped tenant (TG-TEN-002).
+    async fn handle_expire_record(
+        &self,
+        map_name: &str,
+        key: &str,
+        expected: &ExpiryExpectation,
+    ) -> Result<OperationResponse, OperationError> {
+        let partition_id = hash_to_partition(key);
+        // Taken before the pre-read, which may create the map's store object
+        // for itself; the re-check below must not count that object as the map.
+        let resident = !self
+            .record_store_factory
+            .get_all_for_map(map_name)
+            .is_empty();
+        if !resident && !self.map_is_stored(map_name).await? {
+            return Ok(expiry_skipped("absent"));
+        }
+
+        let old_rmpv_value = self
+            .read_old_value_for_queries(map_name, key, partition_id)
+            .await;
+
+        #[cfg(test)]
+        self.before_acquire_park.pass(map_name, key).await;
+        let key_guard = self.key_writer.acquire(map_name, key).await;
+
+        // A tenant drop may have finished while this op waited for the writer.
+        if !resident && !self.map_is_stored(map_name).await? {
+            return Ok(expiry_skipped("absent"));
+        }
+
+        let stored = self
+            .record_store_factory
+            .get_or_create(map_name, partition_id)
+            .get(key, false)
+            .await
+            .map_err(OperationError::Internal)?;
+        let now = self.record_store_factory.now_ms();
+
+        let removals: Vec<ClientOp> = match (stored.map(|record| record.value), expected) {
+            (None, _) => return Ok(expiry_skipped("absent")),
+            (
+                Some(RecordValue::Lww {
+                    timestamp, ttl_ms, ..
+                }),
+                ExpiryExpectation::Lww { timestamp: seen },
+            ) => {
+                if timestamp != *seen {
+                    return Ok(expiry_skipped("changed"));
+                }
+                if lww_is_live(&timestamp, ttl_ms, now) {
+                    return Ok(expiry_skipped("not_expired"));
+                }
+                vec![expiry_client_op(map_name, key, Some("REMOVE"), None)]
+            }
+            // An LWW record where the sweep saw an OR slot, or a legacy
+            // tombstone-only blob, is not the record the sweep saw: it is gone.
+            (Some(RecordValue::Lww { .. } | RecordValue::OrTombstones { .. }), _) => {
+                return Ok(expiry_skipped("changed"));
+            }
+            // Whatever the sweep saw, an expired OR entry is already invisible
+            // to every reader, so removing exactly the entries expired now is
+            // safe: a live entry added since is never among them.
+            (Some(value @ RecordValue::OrMap { .. }), _) => {
+                let tags = expired_or_tags(&value, now);
+                if tags.is_empty() {
+                    return Ok(expiry_skipped("not_expired"));
+                }
+                tags.into_iter()
+                    .map(|tag| expiry_client_op(map_name, key, None, Some(tag)))
+                    .collect()
+            }
+        };
+
+        let reason =
+            std::collections::HashMap::from([("reason".to_string(), rmpv::Value::from("expired"))]);
+        for op in &removals {
+            let event_payload = self
+                .apply_single_op(&key_guard, op, partition_id, None)
+                .await?;
+            let kind = if op.or_tag.is_some() {
+                "or_tag"
+            } else {
+                "lww_record"
+            };
+            metrics::counter!(crate::service::expiry::METRIC_EXPIRY_REMOVED_TOTAL, "kind" => kind)
+                .increment(1);
+            broadcast_server_event(
+                &self.query_registry,
+                &self.connection_registry,
+                &event_payload,
+                None,
+            )?;
+            self.broadcast_query_updates(&event_payload, old_rmpv_value.as_ref(), None);
+            // One stamp per event, as a client remove gets, so no expiry
+            // DELETE falls back to the zero stamp.
+            let stamp = self.write_validator.sanitize_hlc();
+            self.record_journal(&event_payload, Some(&stamp), Some(reason.clone()));
+        }
+
+        drop(key_guard);
+        Ok(OperationResponse::Empty)
+    }
+
+    /// Whether the data store holds `map_name`.
+    async fn map_is_stored(&self, map_name: &str) -> Result<bool, OperationError> {
+        let maps = self
+            .record_store_factory
+            .data_store()
+            .list_maps()
+            .await
+            .map_err(OperationError::Internal)?;
+        Ok(maps.iter().any(|name| name == map_name))
+    }
+
     /// Appends an applied mutation to the Event Journal and pushes a
     /// `JOURNAL_EVENT` to every matching `JournalSubscribe` connection.
     ///
@@ -1363,6 +1499,34 @@ enum OpClass {
     OrRemove,
     /// Last-Write-Wins put: stores no tag.
     Lww,
+}
+
+/// Counts an expiry op that removed nothing, under `reason`, and answers it.
+fn expiry_skipped(reason: &'static str) -> OperationResponse {
+    metrics::counter!(crate::service::expiry::METRIC_EXPIRY_SKIPPED_TOTAL, "reason" => reason)
+        .increment(1);
+    OperationResponse::Empty
+}
+
+/// The REMOVE (`op_type` `"REMOVE"`) or `OR_REMOVE` (`or_tag`) an expiry applies
+/// to `key`; built by the server only, so it never passes the write admission.
+fn expiry_client_op(
+    map_name: &str,
+    key: &str,
+    op_type: Option<&str>,
+    or_tag: Option<String>,
+) -> ClientOp {
+    ClientOp {
+        id: None,
+        map_name: map_name.to_string(),
+        key: key.to_string(),
+        op_type: op_type.map(str::to_string),
+        record: None,
+        or_record: None,
+        or_tag: or_tag.map(Some),
+        write_concern: None,
+        timeout: None,
+    }
 }
 
 /// Classifies `op` by the fields it carries, in priority order:

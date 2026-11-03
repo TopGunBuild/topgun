@@ -15,6 +15,14 @@ use crate::service::operation::{
 };
 use crate::storage::expiry::ExpiryExpectation;
 
+/// Expiry removals applied, by `kind`: `lww_record` per LWW key, `or_tag` per
+/// OR entry.
+pub const METRIC_EXPIRY_REMOVED_TOTAL: &str = "topgun_expiry_removed_total";
+
+/// Expiry ops that removed nothing, by `reason`: `absent`, `changed` or
+/// `not_expired`.
+pub const METRIC_EXPIRY_SKIPPED_TOTAL: &str = "topgun_expiry_skipped_total";
+
 /// Where an expiry removal is sent: the partition dispatcher in production, so
 /// it is routed, ordered and back-pressured like any other operation.
 #[async_trait::async_trait]
