@@ -3241,14 +3241,39 @@ mod tests {
         (svc, rx, conn_id)
     }
 
-    /// Wires a `HybridSearchEngine` (FullText-only) onto the service, then
-    /// populates the tantivy index with the given documents.
-    fn wire_engine_and_index(
+    /// Wires a `HybridSearchEngine` (FullText-only) onto the service, stores a
+    /// record for each document (a fused key is served only when its record
+    /// exists and is visible), then populates the tantivy index with them.
+    async fn wire_engine_and_index(
         svc: &Arc<SearchService>,
         map_name: &str,
         docs: &[(&str, &str)], // key -> text
     ) {
+        use crate::storage::key_writer::KeyWriteToken;
+        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+
         let store_factory = make_factory();
+        for (key, text) in docs {
+            store_factory
+                .get_or_create(map_name, topgun_core::hash_to_partition(key))
+                .put(
+                    &KeyWriteToken::for_test(map_name, key),
+                    key,
+                    RecordValue::Lww {
+                        value: topgun_core::types::Value::String((*text).to_string()),
+                        timestamp: Timestamp {
+                            millis: 1_000,
+                            counter: 0,
+                            node_id: "test".to_string(),
+                        },
+                        ttl_ms: None,
+                    },
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .unwrap();
+        }
         let engine = HybridSearchEngine::new(Arc::clone(svc), store_factory, None);
         svc.set_hybrid_engine(Arc::new(engine));
 
@@ -3278,7 +3303,7 @@ mod tests {
     async fn hybrid_delta_enter_delivered_when_record_matches_new_subscription() {
         // AC1: A record that matches the query after indexing delivers ENTER.
         let (svc, mut rx, conn_id) = make_service_with_connection();
-        wire_engine_and_index(&svc, "map1", &[("k1", "hello world")]);
+        wire_engine_and_index(&svc, "map1", &[("k1", "hello world")]).await;
 
         // Register subscription with empty initial cache (k1 not yet in cache).
         let sub = HybridSearchSubscription::new(
@@ -3314,7 +3339,7 @@ mod tests {
         // AC2: A key in cache that no longer matches delivers LEAVE.
         let (svc, mut rx, conn_id) = make_service_with_connection();
         // Index is empty — k1 will not be found in search results.
-        wire_engine_and_index(&svc, "map2", &[]);
+        wire_engine_and_index(&svc, "map2", &[]).await;
 
         // Subscription with k1 already in cache.
         let sub = HybridSearchSubscription::new(
@@ -3357,7 +3382,7 @@ mod tests {
     async fn hybrid_delta_update_delivered_when_record_still_matches_but_score_changes() {
         // AC3: A key already in cache that still matches delivers UPDATE.
         let (svc, mut rx, conn_id) = make_service_with_connection();
-        wire_engine_and_index(&svc, "map3", &[("k1", "hello world rust")]);
+        wire_engine_and_index(&svc, "map3", &[("k1", "hello world rust")]).await;
 
         // Subscription with k1 already in cache (from a prior notification).
         let sub = HybridSearchSubscription::new(
