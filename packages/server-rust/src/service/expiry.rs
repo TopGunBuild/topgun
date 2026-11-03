@@ -10,6 +10,7 @@
 use topgun_core::{hash_to_partition, Timestamp};
 
 use crate::service::config::ServerConfig;
+use crate::service::dispatch::PartitionDispatcher;
 use crate::service::operation::{
     service_names, CallerOrigin, Operation, OperationContext, OperationError, OperationResponse,
 };
@@ -29,6 +30,13 @@ pub const METRIC_EXPIRY_SKIPPED_TOTAL: &str = "topgun_expiry_skipped_total";
 pub trait ExpiryDispatch: Send + Sync {
     /// Sends `op` and waits for its outcome.
     async fn dispatch(&self, op: Operation) -> Result<OperationResponse, OperationError>;
+}
+
+#[async_trait::async_trait]
+impl ExpiryDispatch for PartitionDispatcher {
+    async fn dispatch(&self, op: Operation) -> Result<OperationResponse, OperationError> {
+        PartitionDispatcher::dispatch(self, op).await
+    }
 }
 
 /// The removal of `key` of `map_name` that the expiry sweep saw expired as
