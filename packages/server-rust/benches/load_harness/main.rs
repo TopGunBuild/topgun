@@ -5,8 +5,9 @@ mod traits;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use dashmap::DashMap;
@@ -35,8 +36,13 @@ use topgun_server::service::domain::search::{
     TantivyMapIndex,
 };
 use topgun_server::service::domain::sync::SyncService;
+use topgun_server::service::expiry::{
+    sweep_tick, ExpiryDispatch, SweepConfig, SweepState, SWEEP_TICK,
+};
 use topgun_server::service::middleware::build_operation_pipeline;
-use topgun_server::service::operation::service_names;
+use topgun_server::service::operation::{
+    service_names, Operation, OperationError, OperationResponse,
+};
 use topgun_server::service::router::OperationRouter;
 use topgun_server::service::security::{SecurityConfig, WriteAdmission};
 use topgun_server::service::OperationService;
@@ -105,6 +111,7 @@ async fn main() {
     let mut send_interval_ms: u64 = 50;
     let mut fire_and_forget = false;
     let mut json_output: Option<String> = None;
+    let mut ttl_ms: Option<u64> = None;
     // Vector search scenario flags
     let mut vector_mode = "build".to_string();
     let mut vector_count: usize = 10_000;
@@ -159,6 +166,18 @@ async fn main() {
                     i += 2;
                 } else {
                     eprintln!("--interval requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "--ttl-ms" => {
+                if i + 1 < args.len() {
+                    ttl_ms = Some(args[i + 1].parse().unwrap_or_else(|_| {
+                        eprintln!("--ttl-ms requires a numeric value");
+                        std::process::exit(1);
+                    }));
+                    i += 2;
+                } else {
+                    eprintln!("--ttl-ms requires a value");
                     std::process::exit(1);
                 }
             }
@@ -243,6 +262,8 @@ async fn main() {
     // This isolates server I/O from harness client tasks, preventing
     // artificial scheduling contention that inflates latency measurements.
     let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
+    let sweep_totals = Arc::new(SweepTotals::default());
+    let server_sweep_totals = Arc::clone(&sweep_totals);
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -252,7 +273,14 @@ async fn main() {
             .expect("failed to build server runtime");
 
         rt.block_on(async {
-            let (classify_svc, dispatcher, connection_registry) = build_services();
+            let (classify_svc, dispatcher, connection_registry, record_store_factory) =
+                build_services(ttl_ms);
+            let dispatcher = Arc::new(dispatcher);
+            spawn_sweep(
+                record_store_factory,
+                Arc::clone(&dispatcher),
+                server_sweep_totals,
+            );
 
             let shutdown = Arc::new(ShutdownController::new());
             let state = AppState {
@@ -262,7 +290,7 @@ async fn main() {
                 start_time: Instant::now(),
                 observability: None,
                 operation_service: Some(classify_svc),
-                dispatcher: Some(Arc::new(dispatcher)),
+                dispatcher: Some(dispatcher),
                 jwt_secret: Some("test-e2e-secret".to_string()),
                 cluster_state: None,
                 store_factory: None,
@@ -384,6 +412,14 @@ async fn main() {
         0
     };
     println!("\nops/sec: {ops_per_sec}");
+    let sweep_rows_scanned = sweep_totals.rows_scanned.load(Ordering::Relaxed);
+    let sweep_maps_skipped = sweep_totals.maps_skipped.load(Ordering::Relaxed);
+    println!(
+        "topgun_expiry_sweep_rows_scanned_total: {sweep_rows_scanned}\n\
+         topgun_expiry_sweep_maps_skipped_total: {sweep_maps_skipped}\n\
+         ttl_ms: {}",
+        ttl_ms.map_or_else(|| "off".to_string(), |t| t.to_string())
+    );
 
     // --- Run assertions ---
     let assertions = scenario.assertions();
@@ -457,6 +493,12 @@ async fn main() {
             assertions: json_assertions,
             timestamp: utc_timestamp_now(),
         };
+        // Beside the common report fields, so readers of the shared schema are
+        // unaffected.
+        let mut report = serde_json::to_value(&report).expect("report serializes");
+        report["topgun_expiry_sweep_rows_scanned_total"] = sweep_rows_scanned.into();
+        report["topgun_expiry_sweep_maps_skipped_total"] = sweep_maps_skipped.into();
+        report["ttl_ms"] = ttl_ms.into();
         match std::fs::File::create(&path) {
             Ok(file) => {
                 if let Err(e) = serde_json::to_writer_pretty(file, &report) {
@@ -604,10 +646,13 @@ impl ObserverFactory for SearchObserverFactory {
 ///
 /// Duplicated from `topgun_server.rs` — keep in sync.
 #[allow(clippy::too_many_lines)]
-fn build_services() -> (
+fn build_services(
+    ttl_ms: Option<u64>,
+) -> (
     Arc<OperationService>,
     PartitionDispatcher,
     Arc<ConnectionRegistry>,
+    Arc<RecordStoreFactory>,
 ) {
     let config = ServerConfig {
         node_id: "bench-server-node".to_string(),
@@ -757,9 +802,19 @@ fn build_services() -> (
         Arc::clone(&journal_store),
     ));
 
+    let sweep_factory = Arc::clone(&record_store_factory);
     let pipeline_factory = move || {
         let mut router = OperationRouter::new();
-        router.register(service_names::CRDT, Arc::clone(&crdt_svc));
+        match ttl_ms {
+            Some(ttl_ms) => router.register(
+                service_names::CRDT,
+                WithTtl {
+                    inner: Arc::clone(&crdt_svc),
+                    ttl_ms,
+                },
+            ),
+            None => router.register(service_names::CRDT, Arc::clone(&crdt_svc)),
+        }
         router.register(service_names::SYNC, Arc::clone(&sync_svc));
         router.register(service_names::QUERY, Arc::clone(&query_svc));
         router.register(service_names::MESSAGING, Arc::clone(&messaging_svc));
@@ -771,5 +826,82 @@ fn build_services() -> (
 
     let dispatch_config = DispatchConfig::default();
     let dispatcher = PartitionDispatcher::new(&dispatch_config, pipeline_factory);
-    (classify_svc, dispatcher, connection_registry)
+    (classify_svc, dispatcher, connection_registry, sweep_factory)
+}
+
+/// What the expiry sweep did over the run, summed from its tick reports.
+#[derive(Default)]
+struct SweepTotals {
+    rows_scanned: AtomicU64,
+    maps_skipped: AtomicU64,
+}
+
+/// Runs the expiry sweep as the binary does — a tick every `SWEEP_TICK`,
+/// removals through the dispatcher, the knobs from the same environment
+/// variables — so its cost is in every run. Driven here rather than by
+/// `spawn_expiry_sweep` so the totals are read from the tick reports: a
+/// metrics recorder installed only to read them would add its own cost to
+/// every metric of the server under measurement.
+fn spawn_sweep(
+    factory: Arc<RecordStoreFactory>,
+    dispatcher: Arc<PartitionDispatcher>,
+    totals: Arc<SweepTotals>,
+) {
+    let env = |name: &str| std::env::var(name).ok();
+    let config = SweepConfig::from_env_values(
+        env("TOPGUN_EXPIRY_SWEEP_INTERVAL_MS").as_deref(),
+        env("TOPGUN_EXPIRY_SWEEP_ROWS_PER_SEC").as_deref(),
+        5000,
+    )
+    .unwrap_or_else(|reason| {
+        eprintln!("{reason}");
+        std::process::exit(1);
+    });
+    let mut state = SweepState::new(factory, dispatcher as Arc<dyn ExpiryDispatch>, config);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(SWEEP_TICK);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let report = sweep_tick(&mut state).await;
+            totals
+                .rows_scanned
+                .fetch_add(report.rows_scanned, Ordering::Relaxed);
+            totals
+                .maps_skipped
+                .fetch_add(report.maps_skipped, Ordering::Relaxed);
+        }
+    });
+}
+
+/// Gives every LWW write of a client op or batch the TTL of `--ttl-ms`, as if
+/// the client had sent it, so the sweep cannot pass over the written map.
+#[derive(Clone)]
+struct WithTtl {
+    inner: Arc<CrdtService>,
+    ttl_ms: u64,
+}
+
+impl tower::Service<Operation> for WithTtl {
+    type Response = OperationResponse;
+    type Error = OperationError;
+    type Future = <Arc<CrdtService> as tower::Service<Operation>>::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut op: Operation) -> Self::Future {
+        let ops = match &mut op {
+            Operation::ClientOp { payload, .. } => std::slice::from_mut(&mut payload.payload),
+            Operation::OpBatch { payload, .. } => payload.payload.ops.as_mut_slice(),
+            _ => &mut [],
+        };
+        for client_op in ops {
+            if let Some(Some(record)) = &mut client_op.record {
+                record.ttl_ms = Some(self.ttl_ms);
+            }
+        }
+        self.inner.call(op)
+    }
 }
