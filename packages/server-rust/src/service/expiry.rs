@@ -1055,3 +1055,1005 @@ mod tests {
         assert!(classified > 0, "some fixtures classify");
     }
 }
+
+#[cfg(test)]
+mod sweep_tests {
+    use std::collections::{BTreeSet, VecDeque};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use parking_lot::Mutex;
+    use tokio::sync::{watch, Notify};
+    use tokio::time::Instant;
+    use topgun_core::types::Value;
+    use topgun_core::{SystemClock, Timestamp, HLC};
+
+    use super::*;
+    use crate::network::connection::ConnectionRegistry;
+    use crate::service::domain::query::QueryRegistry;
+    use crate::service::domain::schema::SchemaService;
+    use crate::service::security::{SecurityConfig, WriteAdmission};
+    use crate::storage::expiry::ManualClock;
+    use crate::storage::factory::test_store::TestStore;
+    use crate::storage::impls::StorageConfig;
+    use crate::storage::map_data_store::{LeafSink, MapDataStore, ScanBatch};
+    use crate::storage::record::OrMapEntry;
+
+    const NOW: u64 = 10_000;
+    const DAY: u64 = 86_400_000;
+    /// Expired at [`NOW`]: stamped 1 000 with a 10 ms TTL.
+    const EXPIRED: Option<u64> = Some(10);
+    /// Live at [`NOW`].
+    const LIVE: Option<u64> = Some(DAY);
+
+    /// A [`TestStore`] that also lists its maps, counts `list_maps` calls and
+    /// can drop a map, as a tenant delete does.
+    struct ListingStore {
+        rows: TestStore,
+        listed: Mutex<BTreeSet<String>>,
+        list_calls: AtomicU64,
+    }
+
+    impl ListingStore {
+        fn put(&self, map: &str, key: &str, value: RecordValue) {
+            self.listed.lock().insert(map.to_string());
+            self.rows.put_row(map, key, value);
+        }
+
+        fn drop_map(&self, map: &str, keys: &[String]) {
+            self.listed.lock().remove(map);
+            for key in keys {
+                self.rows.delete_row(map, key);
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MapDataStore for ListingStore {
+        async fn add(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.rows.add(map, key, value, expiration_time, now).await
+        }
+        async fn add_backup(
+            &self,
+            map: &str,
+            key: &str,
+            value: &RecordValue,
+            expiration_time: i64,
+            now: i64,
+        ) -> anyhow::Result<()> {
+            self.rows
+                .add_backup(map, key, value, expiration_time, now)
+                .await
+        }
+        async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.rows.remove(map, key, now).await
+        }
+        async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+            self.rows.remove_backup(map, key, now).await
+        }
+        async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+            self.rows.load(map, key).await
+        }
+        async fn load_all(
+            &self,
+            map: &str,
+            keys: &[String],
+        ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+            self.rows.load_all(map, keys).await
+        }
+        async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+            self.rows.remove_all(map, keys).await
+        }
+        async fn enumerate_leaves(
+            &self,
+            map: &str,
+            is_backup: bool,
+            sink: &mut dyn LeafSink,
+        ) -> anyhow::Result<()> {
+            self.rows.enumerate_leaves(map, is_backup, sink).await
+        }
+        async fn scan_values(
+            &self,
+            map: &str,
+            is_backup: bool,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            assert_eq!(max_batch_cost, SWEEP_BATCH_COST);
+            self.rows.scan_values(map, is_backup, max_batch_cost).await
+        }
+        async fn scan_values_batched(
+            &self,
+            map: &str,
+            is_backup: bool,
+            cursor: ScanCursor,
+            max_batch_cost: u64,
+        ) -> anyhow::Result<ScanBatch> {
+            assert_eq!(max_batch_cost, SWEEP_BATCH_COST);
+            self.rows
+                .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+                .await
+        }
+        async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.listed.lock().iter().cloned().collect())
+        }
+        fn is_loadable(&self, key: &str) -> bool {
+            self.rows.is_loadable(key)
+        }
+        fn pending_operation_count(&self) -> u64 {
+            self.rows.pending_operation_count()
+        }
+        async fn soft_flush(&self) -> anyhow::Result<u64> {
+            self.rows.soft_flush().await
+        }
+        async fn hard_flush(&self) -> anyhow::Result<()> {
+            self.rows.hard_flush().await
+        }
+        fn is_null(&self) -> bool {
+            self.rows.is_null()
+        }
+    }
+
+    /// Records every removal it is sent and answers from a script, then
+    /// forwards to `inner` (or answers `Empty`).
+    #[derive(Default)]
+    struct Scripted {
+        sent: Mutex<Vec<(String, String, ExpiryExpectation)>>,
+        replies: Mutex<VecDeque<Result<(), OperationError>>>,
+        refuse_all: AtomicBool,
+        inner: Option<Arc<dyn ExpiryDispatch>>,
+    }
+
+    impl Scripted {
+        fn forwarding(inner: Arc<dyn ExpiryDispatch>) -> Self {
+            Self {
+                inner: Some(inner),
+                ..Self::default()
+            }
+        }
+
+        fn refuse_next(&self, err: OperationError) {
+            self.replies.lock().push_back(Err(err));
+        }
+
+        fn accept_next(&self) {
+            self.replies.lock().push_back(Ok(()));
+        }
+
+        fn keys(&self) -> Vec<String> {
+            self.sent
+                .lock()
+                .iter()
+                .map(|(map, key, _)| format!("{map}/{key}"))
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl ExpiryDispatch for Scripted {
+        async fn dispatch(&self, op: Operation) -> Result<OperationResponse, OperationError> {
+            let Operation::ExpireRecord {
+                ref map_name,
+                ref key,
+                ref expected,
+                ref ctx,
+            } = op
+            else {
+                panic!("the sweep sends only ExpireRecord: {op:?}");
+            };
+            assert_eq!(
+                ctx.call_timeout_ms, 4321,
+                "the configured operation timeout"
+            );
+            self.sent
+                .lock()
+                .push((map_name.clone(), key.clone(), expected.clone()));
+            if self.refuse_all.load(Ordering::SeqCst) {
+                return Err(OperationError::Overloaded);
+            }
+            if let Some(Err(err)) = self.replies.lock().pop_front() {
+                return Err(err);
+            }
+            match &self.inner {
+                Some(inner) => inner.dispatch(op).await,
+                None => Ok(OperationResponse::Empty),
+            }
+        }
+    }
+
+    struct Fixture {
+        store: Arc<ListingStore>,
+        factory: Arc<RecordStoreFactory>,
+    }
+
+    fn fixture_over(rows: TestStore) -> Fixture {
+        let store = Arc::new(ListingStore {
+            rows,
+            listed: Mutex::new(BTreeSet::new()),
+            list_calls: AtomicU64::new(0),
+        });
+        let factory = Arc::new(
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::clone(&store) as Arc<dyn MapDataStore>,
+                Vec::new(),
+            )
+            .with_clock(Arc::new(ManualClock::new(NOW))),
+        );
+        Fixture { store, factory }
+    }
+
+    fn fixture(batch_rows: usize) -> Fixture {
+        fixture_over(TestStore::new(batch_rows))
+    }
+
+    fn config(rows_per_sec: u64) -> SweepConfig {
+        SweepConfig {
+            interval_ms: 1_000,
+            rows_per_sec,
+            operation_timeout_ms: 4321,
+        }
+    }
+
+    /// A sweep whose first cycle may start at once.
+    fn ready(fx: &Fixture, dispatch: Arc<dyn ExpiryDispatch>, rows_per_sec: u64) -> SweepState {
+        let mut state = SweepState::new(Arc::clone(&fx.factory), dispatch, config(rows_per_sec));
+        state.next_cycle_at = Instant::now();
+        state
+    }
+
+    /// Starts a cycle now and ticks until it completes.
+    async fn run_cycle(state: &mut SweepState) -> SweepTickReport {
+        assert!(state.cycle.is_none(), "no cycle runs");
+        state.next_cycle_at = Instant::now();
+        let mut total = SweepTickReport::default();
+        for _ in 0..10_000 {
+            let r = sweep_tick(state).await;
+            total.cycle_started |= r.cycle_started;
+            total.rows_scanned += r.rows_scanned;
+            total.candidates += r.candidates;
+            total.maps_skipped += r.maps_skipped;
+            total.dispatched += r.dispatched;
+            if r.cycle_completed {
+                total.cycle_completed = true;
+                return total;
+            }
+        }
+        panic!("the cycle did not complete");
+    }
+
+    fn ts(millis: u64) -> Timestamp {
+        Timestamp {
+            millis,
+            counter: 0,
+            node_id: "n".to_string(),
+        }
+    }
+
+    fn lww(ttl_ms: Option<u64>) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::Int(1),
+            timestamp: ts(1_000),
+            ttl_ms,
+        }
+    }
+
+    fn keys(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("k{i:04}")).collect()
+    }
+
+    fn fill(fx: &Fixture, map: &str, n: usize, ttl_ms: Option<u64>) -> Vec<String> {
+        let keys = keys(n);
+        for key in &keys {
+            fx.store.put(map, key, lww(ttl_ms));
+        }
+        keys
+    }
+
+    fn hlc() -> Arc<parking_lot::Mutex<HLC>> {
+        Arc::new(parking_lot::Mutex::new(HLC::new(
+            "test-node".to_string(),
+            Box::new(SystemClock),
+        )))
+    }
+
+    fn crdt(fx: &Fixture) -> Arc<CrdtService> {
+        Arc::new(CrdtService::new(
+            Arc::clone(&fx.factory),
+            Arc::new(ConnectionRegistry::new()),
+            Arc::new(WriteAdmission::new(
+                Arc::new(SecurityConfig::default()),
+                hlc(),
+            )),
+            Arc::new(QueryRegistry::new()),
+            Arc::new(SchemaService::new()),
+        ))
+    }
+
+    /// A trusted LWW PUT, stored with the stamp and TTL given.
+    async fn put(crdt: &Arc<CrdtService>, map: &str, key: &str, stamp: u64, ttl_ms: Option<u64>) {
+        let mut ctx = OperationContext::new(1, service_names::CRDT, ts(stamp), 5_000);
+        ctx.partition_id = Some(hash_to_partition(key));
+        ctx.caller_origin = CallerOrigin::System;
+        let op = Operation::ClientOp {
+            ctx,
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: None,
+                    map_name: map.to_string(),
+                    key: key.to_string(),
+                    op_type: None,
+                    record: Some(Some(topgun_core::LWWRecord {
+                        value: Some(rmpv::Value::from(stamp)),
+                        timestamp: ts(stamp),
+                        ttl_ms,
+                    })),
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+        Service::call(&mut Arc::clone(crdt), op).await.expect("put");
+    }
+
+    fn series(rendered: &str, series: &str) -> Option<String> {
+        rendered.lines().find_map(|line| {
+            line.strip_prefix(series)
+                .and_then(|rest| rest.strip_prefix(' '))
+                .map(str::to_string)
+        })
+    }
+
+    // --- budget, remainder, cursor, queue ---------------------------------
+
+    #[tokio::test]
+    async fn sweep_budget_limits_rows_and_dispatches_per_tick() {
+        let fx = fixture(1_000);
+        fill(&fx, "live", 25, LIVE);
+        let dispatch = Arc::new(Scripted::default());
+        let mut state = ready(&fx, dispatch.clone(), 40);
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.push(sweep_tick(&mut state).await.rows_scanned);
+        }
+        assert_eq!(seen, vec![10, 10, 5], "ceil(40 / 4) rows per tick");
+
+        let fx = fixture(1_000);
+        fill(&fx, "gone", 300, EXPIRED);
+        let dispatch = Arc::new(Scripted::default());
+        let mut state = ready(&fx, dispatch.clone(), 4_096);
+        let first = sweep_tick(&mut state).await;
+        assert_eq!((first.candidates, first.dispatched), (300, 256));
+        assert_eq!(dispatch.sent.lock().len(), 256);
+        let second = sweep_tick(&mut state).await;
+        assert_eq!(second.dispatched, 44);
+        assert_eq!(
+            SweepConfig {
+                rows_per_sec: 4_097,
+                ..config(0)
+            }
+            .rows_per_tick(),
+            1_025
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_resumes_mid_batch_from_remainder() {
+        let fx = fixture(10);
+        let keys = fill(&fx, "m", 25, EXPIRED);
+        let dispatch = Arc::new(Scripted::default());
+        let mut state = ready(&fx, dispatch.clone(), 12);
+        let mut ticks = Vec::new();
+        loop {
+            let r = sweep_tick(&mut state).await;
+            ticks.push(r.rows_scanned);
+            if r.cycle_completed {
+                break;
+            }
+        }
+        assert!(ticks.iter().all(|&rows| rows <= 3), "{ticks:?}");
+        let expected: Vec<String> = keys.iter().map(|k| format!("m/{k}")).collect();
+        assert_eq!(dispatch.keys(), expected, "every row once, in order");
+        assert_eq!(
+            fx.store.rows.calls(),
+            3,
+            "three fetches of 10, 10 and 5 rows: no row is read twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_resumes_across_ticks_and_maps_in_order() {
+        let fx = fixture(10);
+        let a = fill(&fx, "a", 4, EXPIRED);
+        let b = fill(&fx, "b", 4, EXPIRED);
+        let dispatch = Arc::new(Scripted::default());
+        let mut state = ready(&fx, dispatch.clone(), 12);
+        let report = run_cycle(&mut state).await;
+        assert_eq!(report.rows_scanned, 8);
+        let expected: Vec<String> = a
+            .iter()
+            .map(|k| format!("a/{k}"))
+            .chain(b.iter().map(|k| format!("b/{k}")))
+            .collect();
+        assert_eq!(dispatch.keys(), expected);
+    }
+
+    #[tokio::test]
+    async fn sweep_cursor_holds_while_queue_full() {
+        let fx = fixture(100);
+        fill(&fx, "m", 1_100, EXPIRED);
+        let dispatch = Arc::new(Scripted::default());
+        dispatch.refuse_all.store(true, Ordering::SeqCst);
+        let mut state = ready(&fx, dispatch.clone(), 8_192);
+        let first = sweep_tick(&mut state).await;
+        assert_eq!(first.rows_scanned, 1_024);
+        assert_eq!(state.queue.len(), SWEEP_QUEUE_CAPACITY);
+        let calls = fx.store.rows.calls();
+        let remainder = state
+            .cycle
+            .as_ref()
+            .unwrap()
+            .pass
+            .as_ref()
+            .unwrap()
+            .remainder
+            .len();
+        for _ in 0..3 {
+            let r = sweep_tick(&mut state).await;
+            assert_eq!(r.rows_scanned, 0);
+        }
+        assert_eq!(
+            fx.store.rows.calls(),
+            calls,
+            "no fetch while the queue is full"
+        );
+        assert_eq!(
+            state
+                .cycle
+                .as_ref()
+                .unwrap()
+                .pass
+                .as_ref()
+                .unwrap()
+                .remainder
+                .len(),
+            remainder,
+            "the remainder does not move"
+        );
+    }
+
+    // --- dispatch and back-off --------------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_overloaded_keeps_candidate_and_backs_off() {
+        let fx = fixture(100);
+        fill(&fx, "m", 1, EXPIRED);
+        let dispatch = Arc::new(Scripted::default());
+        dispatch.refuse_next(OperationError::Overloaded);
+        let mut state = ready(&fx, dispatch.clone(), 4_096);
+        assert_eq!(sweep_tick(&mut state).await.dispatched, 1);
+        assert_eq!(state.queue.len(), 1, "the candidate stays at the head");
+        let held = sweep_tick(&mut state).await;
+        assert!(held.backing_off && held.dispatched == 0, "{held:?}");
+        tokio::time::advance(Duration::from_millis(250)).await;
+        assert_eq!(sweep_tick(&mut state).await.dispatched, 1);
+        assert_eq!(dispatch.keys(), vec!["m/k0000", "m/k0000"]);
+        assert!(state.queue.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_failed_dispatch_drops_candidate_and_backs_off() {
+        let fx = fixture(100);
+        fill(&fx, "m", 2, EXPIRED);
+        let dispatch = Arc::new(Scripted::default());
+        dispatch.refuse_next(OperationError::Internal(anyhow::anyhow!("refused")));
+        let mut state = ready(&fx, dispatch.clone(), 4_096);
+        assert_eq!(sweep_tick(&mut state).await.dispatched, 1);
+        assert_eq!(state.queue.len(), 1, "the failed candidate is dropped");
+        assert!(sweep_tick(&mut state).await.backing_off);
+        tokio::time::advance(Duration::from_millis(250)).await;
+        sweep_tick(&mut state).await;
+        assert_eq!(dispatch.keys(), vec!["m/k0000", "m/k0001"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_backoff_doubles_to_cap_and_resets_on_success() {
+        let fx = fixture(100);
+        fill(&fx, "m", 2, EXPIRED);
+        let dispatch = Arc::new(Scripted::default());
+        for _ in 0..7 {
+            dispatch.refuse_next(OperationError::Overloaded);
+        }
+        let mut state = ready(&fx, dispatch.clone(), 4_096);
+        state.config.interval_ms = 1_000_000;
+        assert_eq!(sweep_tick(&mut state).await.dispatched, 1);
+        for delay in [250, 500, 1_000, 2_000, 4_000, 5_000] {
+            tokio::time::advance(Duration::from_millis(delay - 1)).await;
+            assert!(sweep_tick(&mut state).await.backing_off, "{delay} ms");
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert_eq!(sweep_tick(&mut state).await.dispatched, 1, "{delay} ms");
+        }
+        // The seventh refusal waits the cap again; the next attempt succeeds and
+        // the one after it is refused: the back-off starts over at 250 ms.
+        dispatch.accept_next();
+        dispatch.refuse_next(OperationError::Overloaded);
+        tokio::time::advance(Duration::from_millis(4_999)).await;
+        assert!(sweep_tick(&mut state).await.backing_off, "capped at 5 s");
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(sweep_tick(&mut state).await.dispatched, 2);
+        tokio::time::advance(Duration::from_millis(249)).await;
+        assert!(sweep_tick(&mut state).await.backing_off);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(
+            sweep_tick(&mut state).await.dispatched,
+            1,
+            "reset to 250 ms"
+        );
+    }
+
+    // --- cycles -------------------------------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_first_cycle_waits_one_interval_and_cycles_are_spaced_from_start() {
+        let fx = fixture(100);
+        fill(&fx, "m", 3, LIVE);
+        let dispatch = Arc::new(Scripted::default());
+        let start = Instant::now();
+        let mut state = SweepState::new(Arc::clone(&fx.factory), dispatch, config(4));
+        let mut starts = Vec::new();
+        let mut ends = Vec::new();
+        for _ in 0..=12 {
+            let r = sweep_tick(&mut state).await;
+            let at = start.elapsed().as_millis();
+            if r.cycle_started {
+                starts.push(at);
+            }
+            if r.cycle_completed {
+                ends.push(at);
+            }
+            tokio::time::advance(SWEEP_TICK).await;
+        }
+        assert_eq!(starts, vec![1_000, 2_000, 3_000]);
+        assert_eq!(ends[0], 1_500, "the first cycle takes three ticks");
+    }
+
+    #[tokio::test]
+    async fn sweep_forgets_a_map_that_left_the_union() {
+        let fx = fixture(100);
+        let a = fill(&fx, "a", 2, LIVE);
+        fill(&fx, "b", 2, LIVE);
+        let mut state = ready(&fx, Arc::new(Scripted::default()), 4_096);
+        run_cycle(&mut state).await;
+        assert!(state.last_pass.contains_key("a"));
+        assert_eq!(fx.store.rows.scans("a"), 1);
+
+        fx.store.drop_map("a", &a);
+        run_cycle(&mut state).await;
+        assert_eq!(fx.store.rows.scans("a"), 1, "a departed map is not read");
+        assert_eq!(fx.store.rows.scans("b"), 2);
+        assert!(!state.last_pass.contains_key("a"), "it lost its entry");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_dispatches_queued_candidates_of_a_departed_map() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let fx = fixture(100);
+        let keys = fill(&fx, "acme.docs", 5, EXPIRED);
+        let crdt = crdt(&fx);
+        let dispatch = Arc::new(Scripted::forwarding(Arc::new(CrdtServiceDispatch(crdt))));
+        dispatch.refuse_next(OperationError::Overloaded);
+        let mut state = ready(&fx, dispatch.clone(), 4_096);
+        assert_eq!(sweep_tick(&mut state).await.candidates, 5);
+        assert_eq!(state.queue.len(), 5);
+
+        fx.store.drop_map("acme.docs", &keys);
+        tokio::time::advance(Duration::from_millis(250)).await;
+        assert_eq!(sweep_tick(&mut state).await.dispatched, 5);
+        assert!(state.queue.is_empty());
+        assert_eq!(
+            series(
+                &handle.render(),
+                &format!("{METRIC_EXPIRY_SKIPPED_TOTAL}{{reason=\"absent\"}}")
+            )
+            .as_deref(),
+            Some("5"),
+            "{}",
+            handle.render()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_stale_scanned_row_is_skipped_changed() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let fx = fixture(100);
+        fx.store.put("m", "k", lww(EXPIRED));
+        let crdt = crdt(&fx);
+        let dispatch = Arc::new(Scripted::forwarding(Arc::new(CrdtServiceDispatch(
+            Arc::clone(&crdt),
+        ))));
+        dispatch.refuse_next(OperationError::Overloaded);
+        let mut state = ready(&fx, dispatch.clone(), 4_096);
+        assert_eq!(sweep_tick(&mut state).await.candidates, 1);
+
+        put(&crdt, "m", "k", 5_000, None).await;
+        tokio::time::advance(Duration::from_millis(250)).await;
+        assert_eq!(sweep_tick(&mut state).await.dispatched, 1);
+        assert_eq!(
+            series(
+                &handle.render(),
+                &format!("{METRIC_EXPIRY_SKIPPED_TOTAL}{{reason=\"changed\"}}")
+            )
+            .as_deref(),
+            Some("1")
+        );
+        let stored = fx
+            .factory
+            .get_or_create("m", hash_to_partition("k"))
+            .get("k", false)
+            .await
+            .unwrap()
+            .map(|r| r.value);
+        assert!(
+            matches!(stored, Some(RecordValue::Lww { ref timestamp, .. }) if timestamp.millis == 5_000),
+            "the newer value survives: {stored:?}"
+        );
+    }
+
+    /// A map that is not resident costs the handler two `list_maps` calls for
+    /// its first removal only: that removal creates the map's store, and every
+    /// later removal of the map finds it resident. The sweep itself lists the
+    /// maps once per cycle.
+    #[tokio::test]
+    async fn sweep_counts_list_maps_per_expire() {
+        let fx = fixture(1_000);
+        fill(&fx, "cold", 10, EXPIRED);
+        let dispatch: Arc<dyn ExpiryDispatch> = Arc::new(CrdtServiceDispatch(crdt(&fx)));
+        let mut state = SweepState::new(Arc::clone(&fx.factory), dispatch, config(4_096));
+        state.config.operation_timeout_ms = 4321;
+        let report = run_cycle(&mut state).await;
+        assert_eq!(report.dispatched, 10);
+        assert!(fx.store.rows.row("cold", "k0000").is_none(), "removed");
+        assert_eq!(
+            fx.store.list_calls.load(Ordering::SeqCst),
+            1 + 2,
+            "one listing for the cycle, two for the first removal, none for the other nine"
+        );
+    }
+
+    // --- the skip -------------------------------------------------------------
+
+    #[tokio::test]
+    async fn sweep_skips_a_map_without_ttl_rows_on_the_next_cycle() {
+        let fx = fixture(100);
+        fill(&fx, "plain", 3, None);
+        fill(&fx, "ttl", 1, LIVE);
+        let mut state = ready(&fx, Arc::new(Scripted::default()), 4_096);
+        assert_eq!(run_cycle(&mut state).await.maps_skipped, 0);
+        let second = run_cycle(&mut state).await;
+        assert_eq!(second.maps_skipped, 1);
+        assert_eq!(fx.store.rows.scans("plain"), 1);
+        assert_eq!(
+            fx.store.rows.scans("ttl"),
+            2,
+            "a map with a TTL row is read"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_unskips_map_after_ttl_write() {
+        let fx = fixture(100);
+        fill(&fx, "plain", 3, None);
+        let mut state = ready(&fx, Arc::new(Scripted::default()), 4_096);
+        run_cycle(&mut state).await;
+        assert_eq!(run_cycle(&mut state).await.maps_skipped, 1);
+        fx.factory.note_ttl_write("plain");
+        assert_eq!(run_cycle(&mut state).await.maps_skipped, 0);
+        assert_eq!(fx.store.rows.scans("plain"), 2);
+        assert_eq!(run_cycle(&mut state).await.maps_skipped, 1, "skipped again");
+    }
+
+    #[tokio::test]
+    async fn sweep_ttl_write_during_pass_prevents_skip() {
+        let fx = fixture(100);
+        fill(&fx, "plain", 3, None);
+        let mut state = ready(&fx, Arc::new(Scripted::default()), 4);
+        let first = sweep_tick(&mut state).await;
+        assert!(first.cycle_started && !first.cycle_completed);
+        fx.factory.note_ttl_write("plain");
+        while !sweep_tick(&mut state).await.cycle_completed {}
+        assert_eq!(
+            run_cycle(&mut state).await.maps_skipped,
+            0,
+            "a TTL write during the pass"
+        );
+        assert_eq!(run_cycle(&mut state).await.maps_skipped, 1);
+    }
+
+    #[tokio::test]
+    async fn sweep_backstop_cycle_ignores_the_skip() {
+        let fx = fixture(100);
+        fill(&fx, "plain", 3, None);
+        let mut state = ready(&fx, Arc::new(Scripted::default()), 4_096);
+        run_cycle(&mut state).await;
+        state.cycles_started = SWEEP_SKIP_BACKSTOP_CYCLES - 2;
+        assert_eq!(run_cycle(&mut state).await.maps_skipped, 1, "cycle 359");
+        assert_eq!(run_cycle(&mut state).await.maps_skipped, 0, "cycle 360");
+        assert_eq!(run_cycle(&mut state).await.maps_skipped, 1, "cycle 361");
+        assert_eq!(fx.store.rows.scans("plain"), 2);
+    }
+
+    #[tokio::test]
+    async fn sweep_queues_or_slots_with_an_expired_entry() {
+        let entry = |tag: &str, ttl_ms| OrMapEntry {
+            value: Value::Int(1),
+            tag: tag.to_string(),
+            timestamp: ts(1_000),
+            ttl_ms,
+        };
+        let fx = fixture(100);
+        fx.store.put(
+            "or",
+            "mixed",
+            RecordValue::OrMap {
+                records: vec![entry("old", EXPIRED), entry("new", LIVE)],
+                tombstones: vec![],
+            },
+        );
+        fx.store.put(
+            "or",
+            "live",
+            RecordValue::OrMap {
+                records: vec![entry("a", LIVE)],
+                tombstones: vec![],
+            },
+        );
+        let dispatch = Arc::new(Scripted::default());
+        let mut state = ready(&fx, dispatch.clone(), 4_096);
+        run_cycle(&mut state).await;
+        assert_eq!(
+            *dispatch.sent.lock(),
+            vec![("or".to_string(), "mixed".to_string(), ExpiryExpectation::Or)]
+        );
+        assert!(state.last_pass["or"].found_ttl_row);
+    }
+
+    #[tokio::test]
+    async fn sweep_null_store_visits_residents_once_per_cycle_and_caps_candidates() {
+        let fx = fixture_over(TestStore::null());
+        let crdt = crdt(&fx);
+        for i in 0..300 {
+            put(&crdt, "n", &format!("k{i:03}"), 1_000, EXPIRED).await;
+        }
+        let dispatch = Arc::new(Scripted::forwarding(Arc::new(CrdtServiceDispatch(
+            Arc::clone(&crdt),
+        ))));
+        let mut state = ready(&fx, dispatch.clone(), 4);
+        let first = run_cycle(&mut state).await;
+        assert_eq!(
+            (first.rows_scanned, first.candidates, first.dispatched),
+            (300, 256, 256),
+            "every resident row is visited, and at most 256 are queued"
+        );
+        let second = run_cycle(&mut state).await;
+        assert_eq!(
+            (second.rows_scanned, second.candidates, second.dispatched),
+            (44, 44, 44)
+        );
+        assert_eq!(run_cycle(&mut state).await.rows_scanned, 0);
+    }
+
+    // --- the task ----------------------------------------------------------------
+
+    const FAMILIES: [&str; 11] = [
+        METRIC_SWEEP_ROWS_SCANNED_TOTAL,
+        METRIC_SWEEP_CANDIDATES_TOTAL,
+        METRIC_EXPIRY_REMOVED_TOTAL,
+        METRIC_EXPIRY_SKIPPED_TOTAL,
+        METRIC_SWEEP_DISPATCH_OVERLOADED_TOTAL,
+        METRIC_SWEEP_DISPATCH_FAILED_TOTAL,
+        METRIC_SWEEP_CYCLES_TOTAL,
+        METRIC_SWEEP_LAST_CYCLE_SECONDS,
+        METRIC_SWEEP_TASK_ALIVE,
+        METRIC_SWEEP_PASS_PANICS_TOTAL,
+        METRIC_SWEEP_MAPS_SKIPPED_TOTAL,
+    ];
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_metrics_present_at_zero_before_first_tick() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let fx = fixture(100);
+        let (_tx, rx) = watch::channel(false);
+        let task = metrics::with_local_recorder(&recorder, || {
+            spawn_expiry_sweep(
+                Arc::clone(&fx.factory),
+                Arc::new(Scripted::default()),
+                config(4_096),
+                rx,
+            )
+        });
+        // Read before the task has been polled once.
+        let rendered = handle.render();
+        let mut expected: Vec<String> = FAMILIES
+            .iter()
+            .filter(|f| {
+                ![
+                    METRIC_SWEEP_CANDIDATES_TOTAL,
+                    METRIC_EXPIRY_REMOVED_TOTAL,
+                    METRIC_EXPIRY_SKIPPED_TOTAL,
+                ]
+                .contains(f)
+            })
+            .map(|f| (*f).to_string())
+            .collect();
+        for kind in ["lww", "or"] {
+            expected.push(format!(
+                "{METRIC_SWEEP_CANDIDATES_TOTAL}{{kind=\"{kind}\"}}"
+            ));
+        }
+        for kind in ["lww_record", "or_tag"] {
+            expected.push(format!("{METRIC_EXPIRY_REMOVED_TOTAL}{{kind=\"{kind}\"}}"));
+        }
+        for reason in ["absent", "changed", "not_expired"] {
+            expected.push(format!(
+                "{METRIC_EXPIRY_SKIPPED_TOTAL}{{reason=\"{reason}\"}}"
+            ));
+        }
+        assert_eq!(expected.len(), 15);
+        for s in &expected {
+            let want = if s == METRIC_SWEEP_TASK_ALIVE {
+                "1"
+            } else {
+                "0"
+            };
+            assert_eq!(
+                series(&rendered, s).as_deref(),
+                Some(want),
+                "{s}:\n{rendered}"
+            );
+        }
+        task.abort();
+        let _ = task.await;
+        assert_eq!(
+            series(&handle.render(), METRIC_SWEEP_TASK_ALIVE).as_deref(),
+            Some("0"),
+            "the lease clears liveness when the task is dropped"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_pass_panic_is_counted_and_the_task_keeps_running() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let fx = fixture(100);
+        fill(&fx, "m", 2, LIVE);
+        fx.store.rows.panic_scans(true);
+        let (tx, rx) = watch::channel(false);
+        let task = metrics::with_local_recorder(&recorder, || {
+            spawn_expiry_sweep(
+                Arc::clone(&fx.factory),
+                Arc::new(Scripted::default()),
+                config(4_096),
+                rx,
+            )
+        });
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert_eq!(
+            series(&handle.render(), METRIC_SWEEP_PASS_PANICS_TOTAL).as_deref(),
+            Some("1")
+        );
+        fx.store.rows.panic_scans(false);
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        assert!(!task.is_finished());
+        assert_eq!(
+            series(&handle.render(), METRIC_SWEEP_CYCLES_TOTAL).as_deref(),
+            Some("1"),
+            "the next cycle runs after the interval"
+        );
+        tx.send(true).unwrap();
+        task.await.expect("the task ends on shutdown");
+        assert_eq!(
+            series(&handle.render(), METRIC_SWEEP_TASK_ALIVE).as_deref(),
+            Some("0")
+        );
+    }
+
+    /// Holds the first removal until released.
+    struct Held {
+        sent: AtomicU64,
+        entered: Notify,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl ExpiryDispatch for Held {
+        async fn dispatch(&self, _op: Operation) -> Result<OperationResponse, OperationError> {
+            if self.sent.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(OperationResponse::Empty)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_shutdown_ends_task_between_dispatches() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let fx = fixture(100);
+        fill(&fx, "m", 3, EXPIRED);
+        let held = Arc::new(Held {
+            sent: AtomicU64::new(0),
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let (tx, rx) = watch::channel(false);
+        let task = metrics::with_local_recorder(&recorder, || {
+            spawn_expiry_sweep(Arc::clone(&fx.factory), held.clone(), config(4_096), rx)
+        });
+        held.entered.notified().await;
+        tx.send(true).unwrap();
+        held.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("the task ends")
+            .expect("cleanly");
+        assert_eq!(
+            held.sent.load(Ordering::SeqCst),
+            1,
+            "the removal in flight finished, no other was sent"
+        );
+        assert_eq!(
+            series(&handle.render(), METRIC_SWEEP_TASK_ALIVE).as_deref(),
+            Some("0")
+        );
+    }
+
+    // --- configuration ---------------------------------------------------------
+
+    #[test]
+    fn sweep_config_parses_the_knobs() {
+        let parse = |i: Option<&str>, r: Option<&str>| SweepConfig::from_env_values(i, r, 5_000);
+        assert_eq!(
+            parse(None, None),
+            Ok(SweepConfig {
+                interval_ms: 10_000,
+                rows_per_sec: 4_096,
+                operation_timeout_ms: 5_000,
+            })
+        );
+        assert_eq!(parse(Some("1000"), Some("1")).unwrap().interval_ms, 1_000);
+        assert_eq!(parse(Some(" 2500 "), None).unwrap().interval_ms, 2_500);
+        assert_eq!(parse(None, Some("1")).unwrap().rows_per_sec, 1);
+        assert!(parse(Some("999"), None)
+            .unwrap_err()
+            .contains("TOPGUN_EXPIRY_SWEEP_INTERVAL_MS"));
+        assert!(parse(Some("0"), None).is_err());
+        assert!(parse(None, Some("0"))
+            .unwrap_err()
+            .contains("TOPGUN_EXPIRY_SWEEP_ROWS_PER_SEC"));
+        for garbage in ["", "abc", "-5", "1.5", "\u{FFFD}"] {
+            assert_eq!(
+                parse(Some(garbage), Some(garbage)),
+                parse(None, None),
+                "{garbage:?}"
+            );
+        }
+    }
+}
