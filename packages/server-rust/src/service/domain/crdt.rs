@@ -15897,4 +15897,831 @@ mod tests {
             assert_eq!(vec![sent], rig.stored_or_ttls(MAP, &key).await, "{case}");
         }
     }
+
+    // -- Expiry removals (TG-TTL-001) --
+    //
+    // Every test here sets the factory clock far from wall time: 30 days ahead
+    // for a record that must be expired, one day before its stamp for a record
+    // that must be live. A record stamped near wall time with a one-day TTL is
+    // live by the wall clock, and one stamped ten days ago is expired by it, so
+    // an expiry decision that read the wall clock instead of the factory clock
+    // would flip and turn the test red.
+    mod expire_record {
+        use super::*;
+        use crate::service::domain::index::IndexObserverFactory;
+        use crate::service::expiry::expire_record_op;
+        use crate::storage::datastores::RedbDataStore;
+        use crate::storage::expiry::{ExpiryExpectation, ManualClock};
+        use crate::storage::factory::ObserverFactory;
+        use crate::storage::map_data_store::DropOutcome;
+        use crate::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
+        use topgun_core::messages::base::ChangeEventType;
+        use topgun_core::ClockSource;
+
+        const DAY: u64 = 86_400_000;
+
+        fn wall() -> u64 {
+            SystemClock.now()
+        }
+
+        /// The factory clock of an "expired" case.
+        fn expired_now() -> u64 {
+            wall() + 30 * DAY
+        }
+
+        /// The stamp of a record of a "live" case: ten days old, so its
+        /// one-day TTL is over by the wall clock.
+        fn old_stamp() -> u64 {
+            wall() - 10 * DAY
+        }
+
+        fn ts(millis: u64, counter: u32) -> Timestamp {
+            Timestamp {
+                millis,
+                counter,
+                node_id: "writer".to_string(),
+            }
+        }
+
+        fn removed(rendered: &str, kind: &str) -> Option<u64> {
+            rendered_series(
+                rendered,
+                &format!("topgun_expiry_removed_total{{kind=\"{kind}\"}}"),
+            )
+            .map(|v| v.parse().expect("integer counter"))
+        }
+
+        fn skipped(rendered: &str, reason: &str) -> Option<u64> {
+            rendered_series(
+                rendered,
+                &format!("topgun_expiry_skipped_total{{reason=\"{reason}\"}}"),
+            )
+            .map(|v| v.parse().expect("integer counter"))
+        }
+
+        /// Runs `f` on a current-thread runtime with a local metrics recorder,
+        /// so every task it spawns counts into that recorder, and returns the
+        /// render.
+        fn counted<F, Fut, T>(f: F) -> (T, String)
+        where
+            F: FnOnce() -> Fut,
+            Fut: std::future::Future<Output = T>,
+        {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime");
+            let recorder = PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let out = metrics::with_local_recorder(&recorder, || rt.block_on(f()));
+            (out, handle.render())
+        }
+
+        struct Rig {
+            _dir: tempfile::TempDir,
+            svc: Arc<CrdtService>,
+            factory: Arc<RecordStoreFactory>,
+            data_store: Arc<dyn MapDataStore>,
+            clock: Arc<ManualClock>,
+            journal: Arc<JournalStore>,
+            merkle: Arc<MerkleSyncManager>,
+            index: Arc<IndexObserverFactory>,
+            conn_registry: Arc<ConnectionRegistry>,
+            query_registry: Arc<QueryRegistry>,
+        }
+
+        /// A CRDT service over a redb store, with the Merkle and index
+        /// observers of production, a journal, and a factory clock the test
+        /// sets.
+        fn rig() -> Rig {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let data_store: Arc<dyn MapDataStore> =
+                Arc::new(RedbDataStore::new(dir.path().join("expire.redb")).expect("redb open"));
+            let clock = Arc::new(ManualClock::new(0));
+            let merkle = Arc::new(MerkleSyncManager::default());
+            let index = Arc::new(IndexObserverFactory::new());
+            let factory = Arc::new(
+                RecordStoreFactory::new(
+                    StorageConfig::default(),
+                    Arc::clone(&data_store),
+                    Vec::new(),
+                )
+                .with_clock(Arc::clone(&clock) as Arc<dyn ClockSource>)
+                .with_observer_factories(vec![
+                    Arc::new(MerkleObserverFactory::new(Arc::clone(&merkle)))
+                        as Arc<dyn ObserverFactory>,
+                    Arc::clone(&index) as Arc<dyn ObserverFactory>,
+                ]),
+            );
+            let conn_registry = Arc::new(ConnectionRegistry::new());
+            let query_registry = Arc::new(QueryRegistry::new());
+            let journal = Arc::new(JournalStore::new(100));
+            let svc = Arc::new(
+                CrdtService::new(
+                    Arc::clone(&factory),
+                    Arc::clone(&conn_registry),
+                    make_validator(),
+                    Arc::clone(&query_registry),
+                    Arc::new(SchemaService::new()),
+                )
+                .with_journal(Arc::clone(&journal)),
+            );
+            Rig {
+                _dir: dir,
+                svc,
+                factory,
+                data_store,
+                clock,
+                journal,
+                merkle,
+                index,
+                conn_registry,
+                query_registry,
+            }
+        }
+
+        /// What one subscriber connection received.
+        #[derive(Debug, Default)]
+        struct Received {
+            events: Vec<ServerEventPayload>,
+            updates: Vec<(ChangeEventType, String)>,
+        }
+
+        fn drain(
+            rx: &mut tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>,
+        ) -> Received {
+            let mut received = Received::default();
+            while let Ok(msg) = rx.try_recv() {
+                if let crate::network::connection::OutboundMessage::Binary(bytes) = msg {
+                    match rmp_serde::from_slice::<Message>(&bytes) {
+                        Ok(Message::ServerEvent { payload }) => received.events.push(payload),
+                        Ok(Message::QueryUpdate { payload }) => {
+                            received.updates.push((payload.change_type, payload.key));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            received
+        }
+
+        impl Rig {
+            fn listen(
+                &self,
+                map: &str,
+            ) -> tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>
+            {
+                subscribe_listener(&self.conn_registry, &self.query_registry, map)
+            }
+
+            /// An LWW PUT of `value` stamped `stamp`, kept verbatim (trusted
+            /// origin), with `ttl_ms`.
+            async fn put(
+                &self,
+                map: &str,
+                key: &str,
+                value: Option<rmpv::Value>,
+                stamp: &Timestamp,
+                ttl_ms: Option<u64>,
+            ) {
+                let record = topgun_core::LWWRecord {
+                    value,
+                    timestamp: stamp.clone(),
+                    ttl_ms,
+                };
+                self.svc
+                    .clone()
+                    .oneshot(ttl_op(make_ctx_for_key(key), map, key, Some(record), None))
+                    .await
+                    .expect("the PUT is applied");
+            }
+
+            /// An OR_ADD of the entry `tag` stamped `stamp`, kept verbatim.
+            async fn or_add(
+                &self,
+                map: &str,
+                key: &str,
+                tag: &str,
+                stamp: &Timestamp,
+                ttl_ms: Option<u64>,
+            ) {
+                let or_record = topgun_core::ORMapRecord {
+                    value: rmpv::Value::String(format!("v-{tag}").into()),
+                    timestamp: stamp.clone(),
+                    tag: tag.to_string(),
+                    ttl_ms,
+                };
+                self.svc
+                    .clone()
+                    .oneshot(ttl_op(
+                        make_ctx_for_key(key),
+                        map,
+                        key,
+                        None,
+                        Some(or_record),
+                    ))
+                    .await
+                    .expect("the OR_ADD is applied");
+            }
+
+            async fn expire(
+                &self,
+                map: &str,
+                key: &str,
+                expected: ExpiryExpectation,
+            ) -> OperationResponse {
+                self.svc
+                    .clone()
+                    .oneshot(expire_record_op(map, key, expected))
+                    .await
+                    .expect("the expire is handled")
+            }
+
+            async fn stored(&self, map: &str, key: &str) -> Option<RecordValue> {
+                self.factory
+                    .get_or_create(map, hash_to_partition(key))
+                    .get(key, false)
+                    .await
+                    .expect("read")
+                    .map(|r| r.value)
+            }
+
+            async fn or_tags(&self, map: &str, key: &str) -> (Vec<String>, Vec<String>) {
+                match self.stored(map, key).await {
+                    Some(RecordValue::OrMap {
+                        records,
+                        tombstones,
+                    }) => {
+                        let mut tags: Vec<String> = records.into_iter().map(|e| e.tag).collect();
+                        tags.sort();
+                        let mut tombs = tombstones;
+                        tombs.sort();
+                        (tags, tombs)
+                    }
+                    other => panic!("expected an OR slot, got {other:?}"),
+                }
+            }
+
+            fn journal_of(&self, key: &str) -> Vec<JournalEventData> {
+                let (events, _) = self.journal.read(0, 100, None, None);
+                events.into_iter().filter(|e| e.key == key).collect()
+            }
+        }
+
+        fn strings(v: &[&str]) -> Vec<String> {
+            v.iter().map(|s| (*s).to_string()).collect()
+        }
+
+        fn lww(stamp: &Timestamp) -> ExpiryExpectation {
+            ExpiryExpectation::Lww {
+                timestamp: stamp.clone(),
+            }
+        }
+
+        #[test]
+        fn expire_removes_expired_lww_record() {
+            let ((), rendered) = counted(|| async {
+                let rig = rig();
+                let stamp = ts(wall(), 1);
+                rig.put("m", "k", Some("v".into()), &stamp, Some(DAY)).await;
+                rig.clock.set(expired_now());
+
+                let resp = rig.expire("m", "k", lww(&stamp)).await;
+
+                assert!(matches!(resp, OperationResponse::Empty), "{resp:?}");
+                assert_eq!(rig.stored("m", "k").await, None, "the record is removed");
+                assert_eq!(
+                    rig.data_store.load("m", "k").await.expect("load"),
+                    None,
+                    "no redb row is left"
+                );
+            });
+            assert_eq!(removed(&rendered, "lww_record"), Some(1), "{rendered}");
+        }
+
+        /// A PUT that lands while the expire waits between its pre-read and its
+        /// acquire replaces the record the sweep saw. The new record is also
+        /// expired by the factory clock, so only the timestamp check can tell
+        /// the two apart: the expire must skip it as `changed`.
+        #[test]
+        fn expire_parked_before_acquire_skips_after_put() {
+            let ((), rendered) = counted(|| async {
+                let rig = rig();
+                let seen = ts(wall(), 1);
+                rig.put("m", "k", Some("old".into()), &seen, Some(DAY))
+                    .await;
+                rig.clock.set(expired_now());
+
+                let mut park = rig.svc.test_park_before_acquire("m", "k");
+                let svc = rig.svc.clone();
+                let expire = tokio::spawn(svc.oneshot(expire_record_op("m", "k", lww(&seen))));
+                park.wait_parked().await;
+                let rewritten = ts(wall() + 1, 0);
+                rig.put("m", "k", Some("new".into()), &rewritten, Some(DAY))
+                    .await;
+                park.release();
+                expire.await.expect("join").expect("the expire is handled");
+
+                match rig.stored("m", "k").await {
+                    Some(RecordValue::Lww {
+                        value, timestamp, ..
+                    }) => {
+                        assert_eq!(value, Value::String("new".into()), "the PUT survives");
+                        assert_eq!(timestamp, rewritten);
+                    }
+                    other => panic!("the PUT's record must survive, got {other:?}"),
+                }
+            });
+            assert_eq!(skipped(&rendered, "changed"), Some(1), "{rendered}");
+            assert_eq!(removed(&rendered, "lww_record"), None, "{rendered}");
+        }
+
+        #[test]
+        fn expire_skips_live_record() {
+            let ((), rendered) = counted(|| async {
+                let rig = rig();
+                let stamp = ts(old_stamp(), 1);
+                rig.put("m", "lww", Some("v".into()), &stamp, Some(DAY))
+                    .await;
+                rig.or_add("m", "or", "t1", &stamp, Some(DAY)).await;
+                rig.clock.set(stamp.millis - DAY);
+
+                rig.expire("m", "lww", lww(&stamp)).await;
+                rig.expire("m", "or", ExpiryExpectation::Or).await;
+
+                assert!(
+                    matches!(rig.stored("m", "lww").await, Some(RecordValue::Lww { .. })),
+                    "the live LWW record is kept"
+                );
+                assert_eq!(rig.or_tags("m", "or").await, (strings(&["t1"]), vec![]));
+            });
+            assert_eq!(skipped(&rendered, "not_expired"), Some(2), "{rendered}");
+            assert_eq!(removed(&rendered, "lww_record"), None, "{rendered}");
+            assert_eq!(removed(&rendered, "or_tag"), None, "{rendered}");
+        }
+
+        /// A TTL near `u64::MAX` means never: `expires_at` saturates, so the
+        /// record is live 30 days ahead, and a stamp near `u64::MAX` with a
+        /// small TTL is live even at the last millisecond, where an unsaturated
+        /// sum would have wrapped into the past.
+        #[test]
+        fn expire_skips_huge_ttl() {
+            let ((), rendered) = counted(|| async {
+                let rig = rig();
+                let stamp = ts(wall(), 1);
+                rig.put("m", "huge", Some("v".into()), &stamp, Some(u64::MAX))
+                    .await;
+                rig.clock.set(expired_now());
+                rig.expire("m", "huge", lww(&stamp)).await;
+                assert!(rig.stored("m", "huge").await.is_some(), "u64::MAX TTL");
+
+                let late = ts(u64::MAX - 10, 0);
+                rig.put("m", "late", Some("v".into()), &late, Some(1_000))
+                    .await;
+                rig.clock.set(u64::MAX);
+                rig.expire("m", "late", lww(&late)).await;
+                assert!(rig.stored("m", "late").await.is_some(), "saturated stamp");
+            });
+            assert_eq!(skipped(&rendered, "not_expired"), Some(2), "{rendered}");
+            assert_eq!(removed(&rendered, "lww_record"), None, "{rendered}");
+        }
+
+        /// A stored value of another shape than the sweep saw is a record the
+        /// sweep did not see: an LWW record under an OR expectation, and a
+        /// legacy `OrTombstones` blob under either expectation, are skipped as
+        /// `changed` and kept.
+        #[test]
+        fn expire_skips_shape_mismatch_as_changed() {
+            let ((), rendered) = counted(|| async {
+                let rig = rig();
+                let stamp = ts(wall(), 1);
+                rig.put("m", "lww", Some("v".into()), &stamp, Some(DAY))
+                    .await;
+                let legacy = RecordValue::OrTombstones {
+                    tags: strings(&["t-gone"]),
+                };
+                rig.data_store
+                    .add("m", "legacy", &legacy, 0, 0)
+                    .await
+                    .expect("seed a legacy blob");
+                rig.clock.set(expired_now());
+
+                rig.expire("m", "lww", ExpiryExpectation::Or).await;
+                rig.expire("m", "legacy", lww(&stamp)).await;
+                rig.expire("m", "legacy", ExpiryExpectation::Or).await;
+
+                assert!(
+                    matches!(rig.stored("m", "lww").await, Some(RecordValue::Lww { .. })),
+                    "the LWW record is kept"
+                );
+                assert!(
+                    rig.data_store
+                        .load("m", "legacy")
+                        .await
+                        .expect("load")
+                        .is_some(),
+                    "the legacy blob is kept"
+                );
+            });
+            assert_eq!(skipped(&rendered, "changed"), Some(3), "{rendered}");
+            assert_eq!(removed(&rendered, "lww_record"), None, "{rendered}");
+            assert_eq!(removed(&rendered, "or_tag"), None, "{rendered}");
+        }
+
+        #[test]
+        fn expire_removes_only_expired_or_tags() {
+            let ((), rendered) = counted(|| async {
+                let rig = rig();
+                let mut rx = rig.listen("m");
+                let now = ts(wall(), 1);
+                rig.or_add("m", "k", "t-exp-1", &now, Some(DAY)).await;
+                rig.or_add("m", "k", "t-exp-2", &now, Some(1_000)).await;
+                rig.or_add("m", "k", "t-live", &now, Some(60 * DAY)).await;
+                rig.or_add("m", "k", "t-none", &now, None).await;
+                // The sweep may have seen this slot as an LWW record; whatever it
+                // saw, only the entries expired now are removed.
+                rig.or_add("m", "k2", "u-exp", &now, Some(DAY)).await;
+                rig.or_add("m", "k2", "u-live", &now, None).await;
+                rig.clock.set(expired_now());
+                drain(&mut rx);
+
+                rig.expire("m", "k", ExpiryExpectation::Or).await;
+                rig.expire("m", "k2", lww(&now)).await;
+
+                assert_eq!(
+                    rig.or_tags("m", "k").await,
+                    (
+                        strings(&["t-live", "t-none"]),
+                        strings(&["t-exp-1", "t-exp-2"])
+                    )
+                );
+                assert_eq!(
+                    rig.or_tags("m", "k2").await,
+                    (strings(&["u-live"]), strings(&["u-exp"]))
+                );
+                let mut removed_tags: Vec<(String, String)> = drain(&mut rx)
+                    .events
+                    .into_iter()
+                    .map(|e| {
+                        assert_eq!(e.event_type, ServerEventType::OR_REMOVE);
+                        (e.key, e.or_tag.expect("an OR_REMOVE names its tag"))
+                    })
+                    .collect();
+                removed_tags.sort();
+                assert_eq!(
+                    removed_tags,
+                    vec![
+                        ("k".to_string(), "t-exp-1".to_string()),
+                        ("k".to_string(), "t-exp-2".to_string()),
+                        ("k2".to_string(), "u-exp".to_string()),
+                    ]
+                );
+            });
+            assert_eq!(removed(&rendered, "or_tag"), Some(3), "{rendered}");
+        }
+
+        /// An OR_ADD of a live entry that lands while the expire is parked
+        /// before its acquire survives; the entry expired before is removed.
+        #[test]
+        fn expire_parked_before_acquire_keeps_or_add_applied_meanwhile() {
+            let ((), rendered) = counted(|| async {
+                let rig = rig();
+                let now = ts(wall(), 1);
+                rig.or_add("m", "k", "t-exp", &now, Some(DAY)).await;
+                rig.clock.set(expired_now());
+
+                let mut park = rig.svc.test_park_before_acquire("m", "k");
+                let svc = rig.svc.clone();
+                let expire =
+                    tokio::spawn(svc.oneshot(expire_record_op("m", "k", ExpiryExpectation::Or)));
+                park.wait_parked().await;
+                rig.or_add("m", "k", "t-new", &ts(wall(), 2), None).await;
+                park.release();
+                expire.await.expect("join").expect("the expire is handled");
+
+                assert_eq!(
+                    rig.or_tags("m", "k").await,
+                    (strings(&["t-new"]), strings(&["t-exp"]))
+                );
+            });
+            assert_eq!(removed(&rendered, "or_tag"), Some(1), "{rendered}");
+        }
+
+        /// The expired tags are read under the writer: a client OR_REMOVE of
+        /// the expired entry that lands while the expire is parked leaves it
+        /// nothing to remove, so it emits nothing and journals nothing.
+        #[test]
+        fn expire_parked_before_acquire_skips_or_tag_removed_meanwhile() {
+            let ((), rendered) = counted(|| async {
+                let rig = rig();
+                let mut rx = rig.listen("m");
+                let now = ts(wall(), 1);
+                rig.or_add("m", "k", "t-exp", &now, Some(DAY)).await;
+                rig.clock.set(expired_now());
+
+                let mut park = rig.svc.test_park_before_acquire("m", "k");
+                let svc = rig.svc.clone();
+                let expire =
+                    tokio::spawn(svc.oneshot(expire_record_op("m", "k", ExpiryExpectation::Or)));
+                park.wait_parked().await;
+                rig.svc
+                    .clone()
+                    .oneshot(or_remove_op("m", "k", "t-exp"))
+                    .await
+                    .expect("the client OR_REMOVE is applied");
+                drain(&mut rx);
+                let journaled = rig.journal_of("k").len();
+                park.release();
+                expire.await.expect("join").expect("the expire is handled");
+
+                assert!(drain(&mut rx).events.is_empty(), "the expire emits nothing");
+                assert_eq!(rig.journal_of("k").len(), journaled, "nor journals");
+            });
+            assert_eq!(skipped(&rendered, "not_expired"), Some(1), "{rendered}");
+            assert_eq!(removed(&rendered, "or_tag"), None, "{rendered}");
+        }
+
+        /// The expiry of an LWW key reaches a subscriber as a SERVER_EVENT
+        /// REMOVE and, for a live query holding the key, a QUERY_UPDATE LEAVE.
+        #[tokio::test]
+        async fn expire_broadcasts_remove_and_query_leave() {
+            let rig = rig();
+            let mut rx = rig.listen("m");
+            let stamp = ts(wall(), 1);
+            rig.put("m", "k", Some("v".into()), &stamp, Some(DAY)).await;
+            let before = drain(&mut rx);
+            assert_eq!(
+                before.updates,
+                vec![(ChangeEventType::ENTER, "k".to_string())],
+                "precondition: the query holds the key"
+            );
+            rig.clock.set(expired_now());
+
+            rig.expire("m", "k", lww(&stamp)).await;
+
+            let after = drain(&mut rx);
+            assert_eq!(after.events.len(), 1, "{:?}", after.events);
+            assert_eq!(after.events[0].event_type, ServerEventType::REMOVE);
+            assert_eq!(after.events[0].key, "k");
+            assert!(after.events[0].record.is_none());
+            assert_eq!(
+                after.updates,
+                vec![(ChangeEventType::LEAVE, "k".to_string())]
+            );
+        }
+
+        #[tokio::test]
+        async fn expire_journals_delete_with_reason_expired() {
+            let rig = rig();
+            let stamp = ts(wall(), 1);
+            rig.put("m", "k", Some("v".into()), &stamp, Some(DAY)).await;
+            rig.or_add("m", "o", "t-exp", &stamp, Some(DAY)).await;
+            rig.clock.set(expired_now());
+
+            rig.expire("m", "k", lww(&stamp)).await;
+            rig.expire("m", "o", ExpiryExpectation::Or).await;
+
+            let reason = Some(std::collections::HashMap::from([(
+                "reason".to_string(),
+                rmpv::Value::from("expired"),
+            )]));
+            for key in ["k", "o"] {
+                let events = rig.journal_of(key);
+                assert_eq!(events.len(), 2, "{key}: the write and the expiry");
+                assert_eq!(events[0].event_type, JournalEventType::PUT, "{key}");
+                assert_eq!(events[0].metadata, None, "{key}: a client write");
+                assert_eq!(events[1].event_type, JournalEventType::DELETE, "{key}");
+                assert_eq!(events[1].metadata, reason, "{key}");
+            }
+        }
+
+        /// Each journal DELETE of an expiry carries its own stamp from the
+        /// server clock, never the zero stamp.
+        #[tokio::test]
+        async fn expire_journal_stamp_is_server_minted() {
+            let rig = rig();
+            let stamp = ts(wall(), 1);
+            rig.put("m", "k", Some("v".into()), &stamp, Some(DAY)).await;
+            rig.or_add("m", "o", "t1", &stamp, Some(DAY)).await;
+            rig.or_add("m", "o", "t2", &stamp, Some(DAY)).await;
+            rig.clock.set(expired_now());
+
+            rig.expire("m", "k", lww(&stamp)).await;
+            rig.expire("m", "o", ExpiryExpectation::Or).await;
+
+            let deletes: Vec<JournalEventData> = ["k", "o"]
+                .iter()
+                .flat_map(|key| rig.journal_of(key))
+                .filter(|e| e.event_type == JournalEventType::DELETE)
+                .collect();
+            assert_eq!(deletes.len(), 3, "{deletes:?}");
+            for event in &deletes {
+                assert!(event.timestamp.millis > 0, "{event:?}");
+                assert_eq!(event.timestamp.node_id, "test-node", "{event:?}");
+                assert_eq!(event.node_id, "test-node", "{event:?}");
+            }
+            let mut stamps: Vec<&Timestamp> = deletes.iter().map(|e| &e.timestamp).collect();
+            stamps.dedup();
+            assert_eq!(stamps.len(), 3, "one stamp per event: {deletes:?}");
+        }
+
+        /// AC8 in process, LWW: the expiry takes the Merkle leaf, the index
+        /// entry and the redb row away with the record.
+        #[tokio::test]
+        async fn expire_removes_merkle_leaf_index_entry_and_row() {
+            let rig = rig();
+            let registry = rig.index.register_map("m");
+            registry.add_hash_index("name");
+            let stamp = ts(wall(), 1);
+            let value = make_rmpv_map(vec![("name", rmpv::Value::from("alice"))]);
+            rig.put("m", "k", Some(value), &stamp, Some(DAY)).await;
+            let lookup = || {
+                registry
+                    .get_index("name")
+                    .expect("the hash index")
+                    .lookup_eq(&rmpv::Value::from("alice"))
+            };
+            assert!(lookup().contains("k"), "precondition: indexed");
+            assert_ne!(rig.merkle.aggregate_lww_root_hash("m"), 0, "precondition");
+            assert!(rig.data_store.load("m", "k").await.unwrap().is_some());
+            rig.clock.set(expired_now());
+
+            rig.expire("m", "k", lww(&stamp)).await;
+
+            assert!(lookup().is_empty(), "the index entry is removed");
+            assert_eq!(rig.merkle.aggregate_lww_root_hash("m"), 0, "no Merkle leaf");
+            assert_eq!(rig.data_store.load("m", "k").await.unwrap(), None, "no row");
+        }
+
+        /// AC8 in process, OR: the expired tag is a tombstone in the slot, the
+        /// Merkle leaf is the leaf of that slot, and the row holds it too.
+        #[tokio::test]
+        async fn expire_tombstones_or_tag_in_merkle_leaf_and_row() {
+            let rig = rig();
+            let stamp = ts(wall(), 1);
+            rig.or_add("m", "k", "t-exp", &stamp, Some(DAY)).await;
+            rig.or_add("m", "k", "t-live", &stamp, None).await;
+            let before = rig.merkle.aggregate_ormap_root_hash("m");
+            rig.clock.set(expired_now());
+
+            rig.expire("m", "k", ExpiryExpectation::Or).await;
+
+            let slot = rig.stored("m", "k").await.expect("the slot");
+            let expected = MerkleSyncManager::default();
+            let (_, leaf) = crate::storage::map_data_store::merkle_leaf_hash("k", &slot)
+                .expect("the slot has a leaf");
+            expected.update_ormap("m", hash_to_partition("k"), "k", leaf);
+            assert_ne!(rig.merkle.aggregate_ormap_root_hash("m"), before);
+            assert_eq!(
+                rig.merkle.aggregate_ormap_root_hash("m"),
+                expected.aggregate_ormap_root_hash("m"),
+                "the leaf is the tombstoned slot's"
+            );
+            match rig.data_store.load("m", "k").await.unwrap() {
+                Some(RecordValue::OrMap {
+                    records,
+                    tombstones,
+                }) => {
+                    assert_eq!(tombstones, strings(&["t-exp"]));
+                    let tags: Vec<String> = records.into_iter().map(|e| e.tag).collect();
+                    assert_eq!(tags, strings(&["t-live"]));
+                }
+                other => panic!("the row holds the tombstoned slot, got {other:?}"),
+            }
+        }
+
+        /// An LWW tombstone with a TTL (a PUT of no value) is removed like any
+        /// expired LWW record, once: one REMOVE, one journal DELETE, no row and
+        /// no leaf afterwards; a second expire finds nothing and emits nothing.
+        #[test]
+        fn expire_removes_expired_lww_tombstone_once() {
+            let ((), rendered) = counted(|| async {
+                let rig = rig();
+                let mut rx = rig.listen("m");
+                let stamp = ts(wall(), 1);
+                rig.put("m", "k", None, &stamp, Some(DAY)).await;
+                assert!(
+                    matches!(
+                        rig.stored("m", "k").await,
+                        Some(RecordValue::Lww {
+                            value: Value::Null,
+                            ttl_ms: Some(_),
+                            ..
+                        })
+                    ),
+                    "precondition: a tombstone with a TTL"
+                );
+                drain(&mut rx);
+                let journaled = rig.journal_of("k").len();
+                rig.clock.set(expired_now());
+
+                rig.expire("m", "k", lww(&stamp)).await;
+                let first = drain(&mut rx);
+                assert_eq!(first.events.len(), 1, "{:?}", first.events);
+                assert_eq!(first.events[0].event_type, ServerEventType::REMOVE);
+                assert_eq!(rig.journal_of("k").len(), journaled + 1);
+                assert_eq!(rig.data_store.load("m", "k").await.unwrap(), None);
+                assert_eq!(rig.merkle.aggregate_lww_root_hash("m"), 0);
+
+                rig.expire("m", "k", lww(&stamp)).await;
+                assert!(drain(&mut rx).events.is_empty(), "nothing the second time");
+                assert_eq!(rig.journal_of("k").len(), journaled + 1);
+            });
+            assert_eq!(removed(&rendered, "lww_record"), Some(1), "{rendered}");
+            assert_eq!(skipped(&rendered, "absent"), Some(1), "{rendered}");
+        }
+
+        /// A tenant dropped after the sweep collected its record and before the
+        /// expire runs: the map is neither resident nor stored, so the expire
+        /// skips `absent` and creates nothing.
+        #[test]
+        fn expire_after_tenant_drop_does_not_recreate_map() {
+            const MAP: &str = "acme.docs";
+            let ((), rendered) = counted(|| async {
+                let rig = rig();
+                let stamp = ts(wall(), 1);
+                let value = RecordValue::Lww {
+                    value: Value::String("v".into()),
+                    timestamp: stamp.clone(),
+                    ttl_ms: Some(DAY),
+                };
+                rig.data_store
+                    .add(MAP, "k", &value, 0, 0)
+                    .await
+                    .expect("seed the record");
+                assert!(rig
+                    .data_store
+                    .list_maps()
+                    .await
+                    .unwrap()
+                    .contains(&MAP.to_string()));
+                assert!(
+                    matches!(
+                        rig.data_store.drop_tenant("acme").await.expect("drop"),
+                        DropOutcome::Done { ref dropped, .. } if dropped == &strings(&[MAP])
+                    ),
+                    "precondition: the tenant's map is dropped"
+                );
+                rig.clock.set(expired_now());
+
+                let resp = rig.expire(MAP, "k", lww(&stamp)).await;
+
+                assert!(matches!(resp, OperationResponse::Empty), "{resp:?}");
+                assert!(!rig.factory.map_names().contains(&MAP.to_string()));
+                assert!(!rig
+                    .data_store
+                    .list_maps()
+                    .await
+                    .unwrap()
+                    .contains(&MAP.to_string()));
+                assert_eq!(rig.data_store.load(MAP, "k").await.unwrap(), None);
+            });
+            assert_eq!(skipped(&rendered, "absent"), Some(1), "{rendered}");
+        }
+
+        /// A tenant drop that finishes while the expire waits for the key's
+        /// writer: the absence check runs again under the writer, so the
+        /// expire still skips `absent` and creates nothing.
+        #[test]
+        fn expire_parked_before_acquire_skips_absent_after_tenant_drop() {
+            const MAP: &str = "acme.docs";
+            let ((), rendered) = counted(|| async {
+                let rig = rig();
+                let stamp = ts(wall(), 1);
+                let value = RecordValue::Lww {
+                    value: Value::String("v".into()),
+                    timestamp: stamp.clone(),
+                    ttl_ms: Some(DAY),
+                };
+                rig.data_store
+                    .add(MAP, "k", &value, 0, 0)
+                    .await
+                    .expect("seed the record");
+                rig.clock.set(expired_now());
+
+                let mut park = rig.svc.test_park_before_acquire(MAP, "k");
+                let svc = rig.svc.clone();
+                let expire = tokio::spawn(svc.oneshot(expire_record_op(MAP, "k", lww(&stamp))));
+                park.wait_parked().await;
+                assert!(
+                    matches!(
+                        rig.data_store.drop_tenant("acme").await.expect("drop"),
+                        DropOutcome::Done { ref dropped, .. } if dropped == &strings(&[MAP])
+                    ),
+                    "precondition: the tenant's map is dropped"
+                );
+                park.release();
+                expire.await.expect("join").expect("the expire is handled");
+
+                assert!(!rig.factory.map_names().contains(&MAP.to_string()));
+                assert!(!rig
+                    .data_store
+                    .list_maps()
+                    .await
+                    .unwrap()
+                    .contains(&MAP.to_string()));
+            });
+            assert_eq!(skipped(&rendered, "absent"), Some(1), "{rendered}");
+        }
+    }
 }
