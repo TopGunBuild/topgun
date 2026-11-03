@@ -424,7 +424,9 @@ fn tenant_claim_from_env(
 /// configuration, and the effective stalled-watermark bound. Extracted from
 /// `main` so the EMISSION itself — not a getter that happens to agree with it —
 /// can be asserted: a field that never reaches this line is invisible to the
-/// operator regardless of how correctly it parsed.
+/// operator regardless of how correctly it parsed. Every value is a parameter
+/// so the boot-summary test can pass its own, hence the argument count.
+#[allow(clippy::too_many_arguments)]
 fn log_boot_summary(
     eviction_config: &EvictionConfig,
     write_behind_config: &WriteBehindConfig,

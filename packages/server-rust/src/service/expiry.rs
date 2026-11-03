@@ -67,7 +67,7 @@ use crate::service::operation::{
 };
 use crate::storage::expiry::{entry_is_live, lww_is_live, ExpiryExpectation};
 use crate::storage::factory::RecordStoreFactory;
-use crate::storage::map_data_store::ScanCursor;
+use crate::storage::map_data_store::{MapDataStore, ScanCursor};
 use crate::storage::record::RecordValue;
 
 /// Expiry removals applied, by `kind`: `lww_record` per LWW key, `or_tag` per
@@ -474,7 +474,9 @@ impl SweepState {
         self.cycle = Some(Cycle {
             started: now,
             maps: maps.into_iter().collect(),
-            ignore_skip: self.cycles_started % SWEEP_SKIP_BACKSTOP_CYCLES == 0,
+            ignore_skip: self
+                .cycles_started
+                .is_multiple_of(SWEEP_SKIP_BACKSTOP_CYCLES),
             pass: None,
         });
     }
@@ -525,23 +527,7 @@ impl SweepState {
 
             if data_store.is_null() {
                 let room = (SWEEP_QUEUE_CAPACITY - self.queue.len()).min(SWEEP_DISPATCHES_PER_TICK);
-                let mut found = Vec::new();
-                let mut rows = 0_u64;
-                for store in self.factory.get_all_for_map(&pass.map) {
-                    store.for_each_boxed(
-                        &mut |key, record| {
-                            rows += 1;
-                            if let Some(expected) =
-                                candidate(&record.value, now_ms, &mut pass.found_ttl_row)
-                            {
-                                if found.len() < room {
-                                    found.push((key.to_string(), expected));
-                                }
-                            }
-                        },
-                        false,
-                    );
-                }
+                let (rows, found) = visit_residents(&self.factory, pass, room, now_ms);
                 self.metrics.rows_scanned.increment(rows);
                 report.rows_scanned += rows;
                 for (key, expected) in found {
@@ -561,44 +547,8 @@ impl SweepState {
                 if budget == 0 && !matches!(pass.next, Fetch::Done) {
                     return;
                 }
-                let batch = match std::mem::replace(&mut pass.next, Fetch::Done) {
-                    Fetch::Done => {
-                        self.last_pass.insert(
-                            pass.map.clone(),
-                            LastPass {
-                                found_ttl_row: pass.found_ttl_row,
-                                generation_at_start: pass.generation_at_start,
-                            },
-                        );
-                        cycle.pass = None;
-                        continue;
-                    }
-                    Fetch::First => {
-                        data_store
-                            .scan_values(&pass.map, false, SWEEP_BATCH_COST)
-                            .await
-                    }
-                    Fetch::After(cursor) => {
-                        data_store
-                            .scan_values_batched(&pass.map, false, cursor, SWEEP_BATCH_COST)
-                            .await
-                    }
-                };
-                match batch {
-                    Ok(batch) => {
-                        pass.remainder = batch.records.into();
-                        pass.next = batch.next_cursor.map_or(Fetch::Done, Fetch::After);
-                    }
-                    Err(err) => {
-                        // The pass is left unfinished, so no skip is decided
-                        // from it; the next cycle reads the map again.
-                        tracing::warn!(
-                            map = %pass.map,
-                            error = %err,
-                            "expiry sweep: a scan failed; the map is read again next cycle"
-                        );
-                        cycle.pass = None;
-                    }
+                if !refill(pass, &*data_store, &mut self.last_pass).await {
+                    cycle.pass = None;
                 }
                 continue;
             }
@@ -683,6 +633,77 @@ impl SweepState {
         self.backoff = Some(delay);
         self.backoff_until = Some(Instant::now() + delay);
     }
+}
+
+/// Fetches the next batch of `pass` into its remainder, and returns `true`;
+/// or ends the pass, recording it for the skip when it read the map to its
+/// end, and returns `false`.
+async fn refill(
+    pass: &mut MapPass,
+    data_store: &dyn MapDataStore,
+    last_pass: &mut HashMap<String, LastPass>,
+) -> bool {
+    let batch = match std::mem::replace(&mut pass.next, Fetch::Done) {
+        Fetch::Done => {
+            last_pass.insert(
+                pass.map.clone(),
+                LastPass {
+                    found_ttl_row: pass.found_ttl_row,
+                    generation_at_start: pass.generation_at_start,
+                },
+            );
+            return false;
+        }
+        Fetch::First => data_store.scan_values(&pass.map, false, SWEEP_BATCH_COST),
+        Fetch::After(cursor) => {
+            data_store.scan_values_batched(&pass.map, false, cursor, SWEEP_BATCH_COST)
+        }
+    }
+    .await;
+    match batch {
+        Ok(batch) => {
+            pass.remainder = batch.records.into();
+            pass.next = batch.next_cursor.map_or(Fetch::Done, Fetch::After);
+            true
+        }
+        Err(err) => {
+            // The pass is left unfinished, so no skip is decided from it; the
+            // next cycle reads the map again.
+            tracing::warn!(
+                map = %pass.map,
+                error = %err,
+                "expiry sweep: a scan failed; the map is read again next cycle"
+            );
+            false
+        }
+    }
+}
+
+/// Visits every resident record of the map of `pass` once, for a null store,
+/// which has nothing to scan. Returns the rows visited and at most `room`
+/// candidates; the others are found by a later cycle.
+fn visit_residents(
+    factory: &RecordStoreFactory,
+    pass: &mut MapPass,
+    room: usize,
+    now_ms: u64,
+) -> (u64, Vec<(String, ExpiryExpectation)>) {
+    let mut found = Vec::new();
+    let mut rows = 0_u64;
+    for store in factory.get_all_for_map(&pass.map) {
+        store.for_each_boxed(
+            &mut |key, record| {
+                rows += 1;
+                if let Some(expected) = candidate(&record.value, now_ms, &mut pass.found_ttl_row) {
+                    if found.len() < room {
+                        found.push((key.to_string(), expected));
+                    }
+                }
+            },
+            false,
+        );
+    }
+    (rows, found)
 }
 
 fn queue_candidate(
