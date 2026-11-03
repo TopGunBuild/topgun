@@ -12,12 +12,11 @@ use topgun_core::messages::base::PredicateNode;
 use topgun_core::messages::search::SearchOptions;
 
 use crate::service::domain::embedding::{EmbeddingError, EmbeddingProvider};
-use topgun_core::hash_to_partition;
 
 use crate::service::domain::index::registry::IndexRegistry;
 use crate::service::domain::predicate::{evaluate_predicate, value_to_rmpv, EvalContext};
 use crate::service::domain::search::rrf::{self, FusedEntry, RankedEntry};
-use crate::service::domain::search::SearchService;
+use crate::service::domain::search::{read_visible, SearchService};
 use crate::storage::record::RecordValue;
 use crate::storage::RecordStoreFactory;
 
@@ -147,6 +146,13 @@ impl HybridSearchEngine {
     /// map's full-text index first when it needs population. No lock guard is
     /// held across an await.
     ///
+    /// Every fused key is checked by one point read and left out unless its
+    /// record is visible at `now`, read once per search (TG-TTL-001); with
+    /// `include_value` the value comes from that read. Stated limits: fusion
+    /// truncates to `k` before this check, so the page may hold fewer than `k`
+    /// results until the expiry sweep removes an expired key from the indexes,
+    /// and a key whose point read fails is left out of that page.
+    ///
     /// # Errors
     ///
     /// Returns `HybridSearchError::Store` when the `exact` scan or the
@@ -238,13 +244,21 @@ impl HybridSearchEngine {
         let fused: Vec<FusedEntry> = rrf::fuse(&ranked_lists, self.rrf_k, params.k);
 
         // --- Map FusedEntry to HybridSearchResult ---
+        // One point read per fused key, at most `k` of them, whether or not the
+        // value is wanted: a key not visible at `now` is left out (TG-TTL-001).
+        let now = self.record_store_factory.now_ms();
         let mut results = Vec::with_capacity(fused.len());
         for fe in fused {
-            // Point reads of the fused keys only, at most `k` of them.
-            let value = if params.include_value {
-                self.load_value(params.map_name, &fe.key).await
-            } else {
-                None
+            let Some(record) =
+                read_visible(&self.record_store_factory, params.map_name, &fe.key, now).await
+            else {
+                continue;
+            };
+            let value = match record {
+                RecordValue::Lww { value, .. } if params.include_value => {
+                    Some(value_to_rmpv(&value))
+                }
+                _ => None,
             };
 
             // Translate list indices back to SearchMethod keys for transparency.
@@ -394,26 +408,6 @@ impl HybridSearchEngine {
             .collect();
 
         Ok(ranked)
-    }
-
-    /// The LWW value of one result key, by the ordinary point read: it loads
-    /// the key into its store, cost-accounted and evictable (`TG-EVI-001`). A
-    /// read error leaves the value out.
-    async fn load_value(&self, map_name: &str, key: &str) -> Option<rmpv::Value> {
-        let store = self
-            .record_store_factory
-            .get_or_create(map_name, hash_to_partition(key));
-        match store.get(key, false).await {
-            Ok(Some(record)) => match record.value {
-                RecordValue::Lww { value, .. } => Some(value_to_rmpv(&value)),
-                _ => None,
-            },
-            Ok(None) => None,
-            Err(error) => {
-                tracing::warn!(map = %map_name, key, error = %error, "hybrid search: value read failed");
-                None
-            }
-        }
     }
 }
 

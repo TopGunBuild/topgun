@@ -49,6 +49,7 @@ use crate::service::operation::{
     service_names, Operation, OperationContext, OperationError, OperationResponse,
 };
 use crate::service::registry::{ManagedService, ServiceContext};
+use crate::storage::expiry::is_visible;
 use crate::storage::mutation_observer::MutationObserver;
 use crate::storage::record::{Record, RecordValue};
 use crate::storage::RecordStoreFactory;
@@ -1535,6 +1536,29 @@ fn search_failed(request_id: String) -> SearchRespPayload {
     }
 }
 
+/// The record of `key` in `map_name` when a reader may see it at `now`
+/// (TG-TTL-001), by the ordinary point read: it loads the key into its store,
+/// cost-accounted and evictable (`TG-EVI-001`). `None` when the key is absent,
+/// not visible, or its read failed: a hit whose liveness cannot be decided is
+/// never served, and one unreadable key does not fail the whole search.
+pub(crate) async fn read_visible(
+    factory: &RecordStoreFactory,
+    map_name: &str,
+    key: &str,
+    now: u64,
+) -> Option<RecordValue> {
+    let store = factory.get_or_create(map_name, topgun_core::hash_to_partition(key));
+    match store.get(key, false).await {
+        Ok(record) => record
+            .map(|record| record.value)
+            .filter(|value| is_visible(value, now)),
+        Err(error) => {
+            tracing::warn!(map = %map_name, key, error = %error, "search: point read of a hit failed; the hit is left out");
+            None
+        }
+    }
+}
+
 /// Convert an `Instant` elapsed duration to milliseconds, saturating at `u64::MAX`.
 fn elapsed_ms(start: std::time::Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -1630,6 +1654,12 @@ impl SearchService {
     }
 
     /// Executes a search against the index for a map and builds `SearchResultEntry` list.
+    ///
+    /// Each hit is checked by a point read and kept only when its record is
+    /// visible at `now`, read once per request (TG-TTL-001). Stated limits: the
+    /// page may hold fewer than `limit` hits until the expiry sweep removes an
+    /// expired key from the index, and a hit whose point read fails is left out
+    /// of that page.
     async fn execute_search(
         &self,
         map_name: &str,
@@ -1639,17 +1669,24 @@ impl SearchService {
         let scored_docs = self
             .search_map(map_name, query_str, options, FullTextMode::Populate)
             .await?;
-        Ok(scored_docs
-            .into_iter()
-            .map(|doc| {
-                SearchResultEntry {
-                    key: doc.key,
-                    value: rmpv::Value::Nil, // client fetches full value if needed
-                    score: doc.score,
-                    matched_terms: doc.matched_terms,
-                }
-            })
-            .collect())
+        let factory = &self.populations.factory;
+        let now = factory.now_ms();
+        let mut results = Vec::with_capacity(scored_docs.len());
+        for doc in scored_docs {
+            if read_visible(factory, map_name, &doc.key, now)
+                .await
+                .is_none()
+            {
+                continue;
+            }
+            results.push(SearchResultEntry {
+                key: doc.key,
+                value: rmpv::Value::Nil, // client fetches full value if needed
+                score: doc.score,
+                matched_terms: doc.matched_terms,
+            });
+        }
+        Ok(results)
     }
 
     /// Executes a BM25 full-text search against the tantivy index for `map_name`.
