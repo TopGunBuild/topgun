@@ -12,6 +12,7 @@ pub mod classify;
 pub mod config;
 pub mod dispatch;
 pub mod domain;
+pub mod expiry;
 pub mod middleware;
 pub mod operation;
 pub mod policy;

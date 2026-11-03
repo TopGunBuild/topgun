@@ -324,6 +324,7 @@ fn tenant_violation(
         Operation::Ping { .. }
         | Operation::PartitionMapRequest { .. }
         | Operation::GarbageCollect { .. }
+        | Operation::ExpireRecord { .. }
         | Operation::TopicUnsubscribe { .. }
         | Operation::QueryUnsubscribe { .. }
         | Operation::SearchUnsubscribe { .. }
@@ -421,7 +422,9 @@ fn inadmissible_map_name(op: &Operation) -> Option<(&str, MapNameViolation)> {
         // `QuerySyncInit` and `SqlQuery` name no map; `RegisterResolver` and
         // `JournalSubscribe` carry one but make no durable store write under
         // it, so a refused shape there cannot become an acknowledged write the
-        // store then drops. The rest name no map.
+        // store then drops. `ExpireRecord` names a map that already holds the
+        // record it removes, so its name was admitted when that record was
+        // written. The rest name no map.
         Operation::TopicPublish { .. }
         | Operation::CounterSync { .. }
         | Operation::QuerySyncInit { .. }
@@ -429,6 +432,7 @@ fn inadmissible_map_name(op: &Operation) -> Option<(&str, MapNameViolation)> {
         | Operation::Ping { .. }
         | Operation::PartitionMapRequest { .. }
         | Operation::GarbageCollect { .. }
+        | Operation::ExpireRecord { .. }
         | Operation::LockRequest { .. }
         | Operation::LockRelease { .. }
         | Operation::TopicSubscribe { .. }
@@ -643,6 +647,7 @@ fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
         Operation::Ping { .. }
         | Operation::PartitionMapRequest { .. }
         | Operation::GarbageCollect { .. }
+        | Operation::ExpireRecord { .. }
         | Operation::LockRequest { .. }
         | Operation::LockRelease { .. }
         | Operation::TopicUnsubscribe { .. }

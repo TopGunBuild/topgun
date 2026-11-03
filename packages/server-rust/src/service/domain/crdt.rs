@@ -993,7 +993,7 @@ impl CrdtService {
             old_rmpv_value.as_ref(),
             exclude_connection_id,
         );
-        self.record_journal(&event_payload, sanitized_ts.as_ref());
+        self.record_journal(&event_payload, sanitized_ts.as_ref(), None);
 
         drop(key_guard);
         Ok(())
@@ -1017,8 +1017,14 @@ impl CrdtService {
     /// populated (reserved — capturing it requires a dedicated pre-read on the
     /// hot path, tracked as a follow-up). Event type collapses the CRDT op kind
     /// to the journal's coarser vocabulary: `PUT`/`OR_ADD` → `PUT`,
-    /// `REMOVE`/`OR_REMOVE` → `DELETE`.
-    fn record_journal(&self, event_payload: &ServerEventPayload, sanitized_ts: Option<&Timestamp>) {
+    /// `REMOVE`/`OR_REMOVE` → `DELETE`. `metadata` is written into the event
+    /// as given: an expiry passes `{"reason": "expired"}`, a client write `None`.
+    fn record_journal(
+        &self,
+        event_payload: &ServerEventPayload,
+        sanitized_ts: Option<&Timestamp>,
+        metadata: Option<std::collections::HashMap<String, rmpv::Value>>,
+    ) {
         let Some(journal) = self.journal.as_ref() else {
             return;
         };
@@ -1065,7 +1071,7 @@ impl CrdtService {
             previous_value: None,
             timestamp,
             node_id,
-            metadata: None,
+            metadata,
         };
 
         let seq = journal.append(entry.clone());

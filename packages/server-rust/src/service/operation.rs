@@ -142,7 +142,7 @@ impl OperationContext {
 /// - **Search** (3): `Search`, `SearchSubscribe`, `SearchUnsubscribe`
 /// - **Persistence** (10): `CounterRequest`, `CounterSync`, `EntryProcess`, `EntryProcessBatch`,
 ///   `RegisterResolver`, `UnregisterResolver`, `ListResolvers`, `JournalSubscribe`, `JournalUnsubscribe`, `JournalRead`
-/// - **System** (1): `GarbageCollect` (internal, not from `classify()`)
+/// - **System** (2): `GarbageCollect`, `ExpireRecord` (internal, not from `classify()`)
 #[derive(Debug)]
 pub enum Operation {
     // --- CRDT domain (service_name = "crdt") ---
@@ -343,6 +343,16 @@ pub enum Operation {
     /// System-internal garbage collection operation.
     /// Triggered by `BackgroundWorker`, not by message classification.
     GarbageCollect { ctx: OperationContext },
+    /// Server-built removal of one expired record or of the expired entries of
+    /// one OR slot (TG-TTL-001). Built only by the expiry sweep, never from a
+    /// client message, so it bypasses authorization; the CRDT service re-checks
+    /// `expected` under the key's writer before it removes anything.
+    ExpireRecord {
+        ctx: OperationContext,
+        map_name: String,
+        key: String,
+        expected: crate::storage::expiry::ExpiryExpectation,
+    },
 }
 
 impl Operation {
@@ -394,7 +404,8 @@ impl Operation {
             | Self::JournalUnsubscribe { ctx, .. }
             | Self::JournalRead { ctx, .. }
             // System
-            | Self::GarbageCollect { ctx } => ctx,
+            | Self::GarbageCollect { ctx }
+            | Self::ExpireRecord { ctx, .. } => ctx,
         }
     }
 
@@ -451,7 +462,8 @@ impl Operation {
             | Self::JournalUnsubscribe { ctx, .. }
             | Self::JournalRead { ctx, .. }
             // System
-            | Self::GarbageCollect { ctx } => {
+            | Self::GarbageCollect { ctx }
+            | Self::ExpireRecord { ctx, .. } => {
                 ctx.connection_id = Some(id);
             }
         }
@@ -508,7 +520,8 @@ impl Operation {
             | Self::JournalUnsubscribe { ctx, .. }
             | Self::JournalRead { ctx, .. }
             // System
-            | Self::GarbageCollect { ctx } => {
+            | Self::GarbageCollect { ctx }
+            | Self::ExpireRecord { ctx, .. } => {
                 ctx.principal = Some(principal);
             }
         }
@@ -1139,7 +1152,8 @@ mod tests {
             | Operation::JournalSubscribe { .. }
             | Operation::JournalUnsubscribe { .. }
             | Operation::JournalRead { .. }
-            | Operation::GarbageCollect { .. } => {}
+            | Operation::GarbageCollect { .. }
+            | Operation::ExpireRecord { .. } => {}
         }
     }
 }
