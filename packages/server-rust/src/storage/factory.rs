@@ -16,6 +16,7 @@ use dashmap::DashMap;
 use topgun_core::hlc::{ClockSource, SystemClock, Timestamp};
 
 use crate::storage::engines::HashMapStorage;
+use crate::storage::expiry::retain_live;
 use crate::storage::impls::{DefaultRecordStore, StorageConfig};
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
@@ -268,8 +269,17 @@ impl RecordStoreFactory {
     ///   The `<=` rule assumes a key's timestamps rise in write order, which
     ///   holds for writes the server stamps.
     /// - **Each key at most once**, and exactly once if it is resident or
-    ///   emitted by the data-store scan. A key whose last write is a delete is
-    ///   neither resident nor emitted by the write-behind scan (`TG-WB-008`).
+    ///   emitted by the data-store scan, unless it has expired. A key whose last
+    ///   write is a delete is neither resident nor emitted by the write-behind
+    ///   scan (`TG-WB-008`).
+    /// - **Live rows only** (`TG-TTL-001`): the merge decides on the unfiltered
+    ///   values, then each row about to be emitted goes through
+    ///   [`retain_live`] against `now`, read once per scan from
+    ///   [`now_ms`](Self::now_ms). An expired LWW row is not emitted, and an
+    ///   expired resident still shadows an older stored row of its key, so the
+    ///   stored copy is never served in its place. An OR slot is emitted without
+    ///   its expired entries, as `OrMap { records: [], tombstones }` when none
+    ///   is left.
     /// - **No engine writes**: no store is created, hydrated or read through
     ///   `get`; every store's `size()` is unchanged.
     /// - **Null store**: with `data_store().is_null()` only the resident
@@ -292,6 +302,7 @@ impl RecordStoreFactory {
         F: FnMut(Vec<(String, RecordValue)>) -> Fut + Send,
         Fut: Future<Output = anyhow::Result<()>> + Send,
     {
+        let now = self.now_ms();
         // The resident snapshot is taken before the data store is called, so a
         // write that lands between the two is either in the snapshot or newer
         // than the stored row it races, and the merge below keeps the newer one.
@@ -331,7 +342,9 @@ impl RecordStoreFactory {
                         continue;
                     }
                     resident.remove(&key);
-                    emitted.push((key, scanned));
+                    if let Some(live) = retain_live(scanned, now) {
+                        emitted.push((key, live));
+                    }
                 }
                 if !emitted.is_empty() {
                     on_batch(emitted).await?;
@@ -347,7 +360,7 @@ impl RecordStoreFactory {
 
         let survivors: Vec<(String, RecordValue)> = resident
             .into_iter()
-            .map(|(key, (value, _))| (key, value))
+            .filter_map(|(key, (value, _))| retain_live(value, now).map(|live| (key, live)))
             .collect();
         if !survivors.is_empty() {
             on_batch(survivors).await?;
