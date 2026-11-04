@@ -34,11 +34,15 @@ use crate::service::domain::{
     CoordinationService, CrdtService, MessagingService, PersistenceService, QueryService,
     SchemaService, SearchService, SyncService,
 };
+use crate::service::expiry::{
+    sweep_tick, CrdtServiceDispatch, SweepConfig, SweepState, SweepTickReport,
+};
 use crate::service::operation::{service_names, CallerOrigin, Operation, OperationContext};
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::service::router::OperationRouter;
 use crate::service::security::{SecurityConfig, WriteAdmission};
 use crate::storage::datastores::NullDataStore;
+use crate::storage::expiry::ManualClock;
 use crate::storage::factory::{ObserverFactory, RecordStoreFactory};
 use crate::storage::impls::StorageConfig;
 use crate::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
@@ -151,6 +155,9 @@ pub struct SimNode {
     /// services. Exposed so sim tests can hold a key's writer and observe
     /// that a write of that key waits on it.
     pub key_writer: Arc<KeyWriterRegistry>,
+    /// The node's expiry sweep, driven by [`SimNode::sweep_tick`] rather than
+    /// by a task.
+    expiry_sweep: tokio::sync::Mutex<SweepState>,
     /// Handle for the dispatch loop background task. Aborted on `kill()`.
     dispatch_handle: tokio::task::JoinHandle<()>,
     /// Whether this node is currently alive.
@@ -168,11 +175,28 @@ impl SimNode {
     ///
     /// Returns an error if service wiring fails (should not happen with
     /// in-memory storage).
-    #[allow(clippy::too_many_lines)]
     pub fn build(
+        node_id: impl Into<String>,
+        seed: u64,
+        transport: SimTransport,
+    ) -> anyhow::Result<Self> {
+        Self::build_with_clock(node_id, seed, transport, None)
+    }
+
+    /// [`build`](Self::build), with `clock` deciding expiry for the node's
+    /// record stores instead of the wall clock. The node's HLC stays on the
+    /// wall clock, so stored stamps are wall time: seed `clock` with the wall
+    /// time before advancing it, or nothing ever expires (TG-TTL-001).
+    ///
+    /// # Errors
+    ///
+    /// As [`build`](Self::build).
+    #[allow(clippy::too_many_lines)]
+    pub fn build_with_clock(
         node_id: impl Into<String>,
         _seed: u64,
         transport: SimTransport,
+        clock: Option<Arc<ManualClock>>,
     ) -> anyhow::Result<Self> {
         let node_id = node_id.into();
 
@@ -200,14 +224,16 @@ impl SimNode {
         let merkle_observer_factory: Arc<dyn ObserverFactory> =
             Arc::new(MerkleObserverFactory::new(Arc::clone(&merkle_manager)));
 
-        let record_store_factory = Arc::new(
-            RecordStoreFactory::new(
-                StorageConfig::default(),
-                Arc::new(NullDataStore),
-                Vec::new(),
-            )
-            .with_observer_factories(vec![merkle_observer_factory]),
-        );
+        let mut record_store_factory = RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        )
+        .with_observer_factories(vec![merkle_observer_factory]);
+        if let Some(clock) = clock {
+            record_store_factory = record_store_factory.with_clock(clock);
+        }
+        let record_store_factory = Arc::new(record_store_factory);
 
         let query_registry = Arc::new(QueryRegistry::new());
 
@@ -333,8 +359,21 @@ impl SimNode {
             Arc::clone(&completion_registry),
         ));
 
+        // An interval of 0, so each call of `sweep_tick` starts a cycle when
+        // none runs: a test decides when the sweep runs, not a timer.
+        let expiry_sweep = tokio::sync::Mutex::new(SweepState::new(
+            Arc::clone(&record_store_factory),
+            Arc::new(CrdtServiceDispatch(Arc::clone(&crdt_service))),
+            SweepConfig {
+                interval_ms: 0,
+                rows_per_sec: crate::service::expiry::DEFAULT_SWEEP_ROWS_PER_SEC,
+                operation_timeout_ms: 5000,
+            },
+        ));
+
         Ok(SimNode {
             node_id,
+            expiry_sweep,
             crdt_service,
             record_store_factory,
             operation_router: router,
@@ -355,6 +394,13 @@ impl SimNode {
     #[must_use]
     pub fn is_alive(&self) -> bool {
         self.alive
+    }
+
+    /// Runs one tick of this node's expiry sweep, which sends its removals
+    /// straight to the node's CRDT service (no dispatcher, so this is no
+    /// coverage of the dispatcher path).
+    pub async fn sweep_tick(&self) -> SweepTickReport {
+        sweep_tick(&mut *self.expiry_sweep.lock().await).await
     }
 
     /// Marks this node as dead and aborts the dispatch loop (simulates crash).
@@ -460,6 +506,8 @@ pub struct SimCluster {
     pub seed: u64,
     /// Whether the cluster has been started.
     started: bool,
+    /// The expiry clock every node of this cluster is built with.
+    clock: Option<Arc<ManualClock>>,
 }
 
 impl SimCluster {
@@ -474,7 +522,16 @@ impl SimCluster {
             node_count,
             seed,
             started: false,
+            clock: None,
         }
+    }
+
+    /// Builds every node, also those started or added later, with `clock`
+    /// deciding expiry (see [`SimNode::build_with_clock`]).
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<ManualClock>) -> Self {
+        self.clock = Some(clock);
+        self
     }
 
     /// Builds all `SimNode` instances, registers them with the shared transport,
@@ -486,7 +543,12 @@ impl SimCluster {
     pub fn start(&mut self) -> anyhow::Result<()> {
         for i in 0..self.node_count {
             let node_id = format!("sim-node-{i}");
-            let node = SimNode::build(&node_id, self.seed, self.transport.clone())?;
+            let node = SimNode::build_with_clock(
+                &node_id,
+                self.seed,
+                self.transport.clone(),
+                self.clock.clone(),
+            )?;
             self.transport
                 .register(&node_id, Arc::clone(&node.crdt_service));
             self.nodes.push(node);
@@ -511,7 +573,12 @@ impl SimCluster {
     /// Returns an error if `SimNode::build()` fails.
     pub fn restart_node(&mut self, idx: usize) -> anyhow::Result<()> {
         let node_id = format!("sim-node-{idx}");
-        let node = SimNode::build(&node_id, self.seed, self.transport.clone())?;
+        let node = SimNode::build_with_clock(
+            &node_id,
+            self.seed,
+            self.transport.clone(),
+            self.clock.clone(),
+        )?;
         self.transport
             .register(&node_id, Arc::clone(&node.crdt_service));
         if idx < self.nodes.len() {
@@ -917,7 +984,12 @@ impl SimCluster {
     /// Returns an error if `SimNode::build()` fails.
     pub fn add_node(&mut self) -> anyhow::Result<usize> {
         let node_id = format!("sim-node-{}", self.nodes.len());
-        let node = SimNode::build(&node_id, self.seed, self.transport.clone())?;
+        let node = SimNode::build_with_clock(
+            &node_id,
+            self.seed,
+            self.transport.clone(),
+            self.clock.clone(),
+        )?;
         self.transport
             .register(&node_id, Arc::clone(&node.crdt_service));
         self.nodes.push(node);

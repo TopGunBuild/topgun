@@ -73,6 +73,7 @@ use topgun_server::service::domain::search::{
 };
 use topgun_server::service::domain::sync::SyncService;
 use topgun_server::service::domain::LockRegistry;
+use topgun_server::service::expiry::{spawn_expiry_sweep, ExpiryDispatch, SweepConfig};
 use topgun_server::service::middleware::build_operation_pipeline;
 use topgun_server::service::operation::service_names;
 use topgun_server::service::policy::{
@@ -145,6 +146,10 @@ fn choose_backend(
 }
 
 const ENCRYPTION_ENV: &str = "TOPGUN_ENCRYPTION_AT_REST";
+
+/// Timeout of every operation the server runs, the expiry sweep's removals
+/// included.
+const OPERATION_TIMEOUT_MS: u64 = 5000;
 const PROVIDER_ENV: &str = "TOPGUN_MASTER_KEY_PROVIDER";
 const KEY_FILE_ENV: &str = "TOPGUN_MASTER_KEY_FILE";
 const PREVIOUS_KEY_FILE_ENV: &str = "TOPGUN_MASTER_KEY_PREVIOUS_FILE";
@@ -419,7 +424,9 @@ fn tenant_claim_from_env(
 /// configuration, and the effective stalled-watermark bound. Extracted from
 /// `main` so the EMISSION itself — not a getter that happens to agree with it —
 /// can be asserted: a field that never reaches this line is invisible to the
-/// operator regardless of how correctly it parsed.
+/// operator regardless of how correctly it parsed. Every value is a parameter
+/// so the boot-summary test can pass its own, hence the argument count.
+#[allow(clippy::too_many_arguments)]
 fn log_boot_summary(
     eviction_config: &EvictionConfig,
     write_behind_config: &WriteBehindConfig,
@@ -428,6 +435,7 @@ fn log_boot_summary(
     policies_loaded: usize,
     rbac_configured: bool,
     tenant_claim: Option<&str>,
+    expiry_sweep: &SweepConfig,
 ) {
     tracing::info!(
         max_ram_mb = eviction_config.max_ram_bytes / (1024 * 1024),
@@ -448,6 +456,8 @@ fn log_boot_summary(
         // Quoted when on, so a claim that is itself named `off` cannot read as
         // tenancy off.
         tenant_claim = %tenant_claim.map_or_else(|| "off".to_string(), |c| format!("{c:?}")),
+        expiry_sweep_interval_ms = expiry_sweep.interval_ms,
+        expiry_sweep_rows_per_sec = expiry_sweep.rows_per_sec,
         "eviction + write-behind + WAL initialized"
     );
 }
@@ -823,6 +833,7 @@ async fn main() -> anyhow::Result<()> {
     // spawn (below) consumes `shutdown_rx` by value; without an early clone the
     // orchestrator spawn would fail to compile with use-of-moved-value.
     let orchestrator_shutdown = shutdown_rx.clone();
+    let sweep_shutdown = shutdown_rx.clone();
 
     // Resolve eviction + write-behind tunables from the operator's environment as
     // early as possible so the bootstrap can branch on backend variant when wrapping
@@ -830,6 +841,16 @@ async fn main() -> anyhow::Result<()> {
     // env-var reads later in the function.
     let eviction_config = EvictionConfig::from_env();
     let write_behind_config = WriteBehindConfig::from_env();
+    let lossy_env = |name: &str| std::env::var_os(name).map(|v| v.to_string_lossy().into_owned());
+    let sweep_config = SweepConfig::from_env_values(
+        lossy_env("TOPGUN_EXPIRY_SWEEP_INTERVAL_MS").as_deref(),
+        lossy_env("TOPGUN_EXPIRY_SWEEP_ROWS_PER_SEC").as_deref(),
+        OPERATION_TIMEOUT_MS,
+    )
+    .unwrap_or_else(|reason| {
+        eprintln!("FATAL: {reason}");
+        std::process::exit(1);
+    });
 
     // Resolve the persistence backend once per process. The default branch
     // creates ./topgun.redb in the working directory; STORAGE_BACKEND=null
@@ -1288,6 +1309,16 @@ async fn main() -> anyhow::Result<()> {
     );
     tokio::spawn(orchestrator.run());
 
+    // Through the dispatcher, so each removal is routed, ordered and
+    // back-pressured like any other operation (TG-TTL-001).
+    let dispatcher = Arc::new(dispatcher);
+    let mut expiry_sweep = spawn_expiry_sweep(
+        Arc::clone(&record_store_factory),
+        Arc::clone(&dispatcher) as Arc<dyn ExpiryDispatch>,
+        sweep_config,
+        sweep_shutdown,
+    );
+
     log_boot_summary(
         &eviction_config,
         &write_behind_config,
@@ -1296,6 +1327,7 @@ async fn main() -> anyhow::Result<()> {
         policies_loaded,
         rbac_configured,
         tenant_claim.as_deref(),
+        &sweep_config,
     );
 
     // Make each policy's crash-durability caveat impossible to miss at boot on a
@@ -1391,7 +1423,7 @@ async fn main() -> anyhow::Result<()> {
         start_time: Instant::now(),
         observability: Some(observability),
         operation_service: Some(classify_svc),
-        dispatcher: Some(Arc::new(dispatcher)),
+        dispatcher: Some(dispatcher),
         jwt_secret,
         cluster_state: cluster_state_for_app,
         store_factory: Some(Arc::clone(&record_store_factory)),
@@ -1595,6 +1627,20 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(
             "shutdown drain timed out after 30s — exiting with in-flight \
              requests still running. Investigate stuck handlers if persistent."
+        );
+    }
+
+    // The sweep's removals are writes: it ends before the drain, so none is
+    // made after the buffer was drained. It stops between two dispatches.
+    let sweep_bound = std::time::Duration::from_millis(write_behind_config.shutdown_timeout_ms);
+    if tokio::time::timeout(sweep_bound, &mut expiry_sweep)
+        .await
+        .is_err()
+    {
+        expiry_sweep.abort();
+        tracing::warn!(
+            timeout_ms = write_behind_config.shutdown_timeout_ms,
+            "expiry sweep did not stop in time and was aborted"
         );
     }
 
@@ -2014,7 +2060,7 @@ fn build_services(
 ) -> BuildServicesResult {
     let config = ServerConfig {
         node_id: node_id.clone(),
-        default_operation_timeout_ms: 5000,
+        default_operation_timeout_ms: OPERATION_TIMEOUT_MS,
         max_concurrent_operations: 100,
         gc_interval_ms: 60_000,
         ..ServerConfig::default()
@@ -2854,7 +2900,9 @@ mod tests {
         );
     }
 
-    use super::{admin_bind_posture, log_boot_summary, tenant_claim_from_env, BindPosture};
+    use super::{
+        admin_bind_posture, log_boot_summary, tenant_claim_from_env, BindPosture, SweepConfig,
+    };
     use super::{EvictionConfig, WriteBehindConfig};
     use std::io;
     use std::sync::{Arc, Mutex};
@@ -2945,6 +2993,8 @@ mod tests {
         // binary builds `NetworkConfig.tenant_claim` from.
         let tenant_on = tenant_claim_from_env(Some("org_id".into()), false).unwrap();
         let tenant_off = tenant_claim_from_env(None, false).unwrap();
+        // Parsed as the binary parses them, to values neither default has.
+        let sweep = SweepConfig::from_env_values(Some("12345"), Some("777"), 5000).unwrap();
         tracing::subscriber::with_default(subscriber, || {
             for tenant_claim in [&tenant_on, &tenant_off] {
                 log_boot_summary(
@@ -2955,6 +3005,7 @@ mod tests {
                     0,
                     false,
                     tenant_claim.as_deref(),
+                    &sweep,
                 );
             }
         });
@@ -2990,6 +3041,12 @@ mod tests {
         assert!(
             rendered.contains("tenant_claim=\"org_id\"") && rendered.contains("tenant_claim=off"),
             "the operator-facing boot line must name the EFFECTIVE tenant claim, or off; \
+             captured: {rendered}"
+        );
+        assert!(
+            rendered.contains("expiry_sweep_interval_ms=12345")
+                && rendered.contains("expiry_sweep_rows_per_sec=777"),
+            "the operator-facing boot line must carry the EFFECTIVE expiry sweep knobs; \
              captured: {rendered}"
         );
         assert!(
