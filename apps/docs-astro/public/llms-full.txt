@@ -2793,7 +2793,7 @@ new LWWMap<K, V>(hlc: HLC)
 
 **`set(key, value, ttlMs?)`** — `LWWRecord<V>`
 
-Write a value. Stamps the record with `hlc.now()`. Optional `ttlMs` for time-bounded entries.
+Write a value. Stamps the record with `hlc.now()`. Pass `ttlMs` to make the record expire on its own: see [Expiring records](#expiring-records).
 
 ```typescript
 const record = map.set('u1', { name: 'Alice', email: 'alice@example.com' });
@@ -2853,6 +2853,10 @@ Count of entries including tombstones.
 
 Drop tombstones older than the given `Timestamp`. Returns the removed keys.
 
+**`pruneExpired(skip?)`** — `K[]`
+
+Drop every live record whose TTL has run out (`timestamp.millis + ttlMs` is before now) from the map and its Merkle tree, and return the removed keys. Keys for which `skip(key)` returns `true` are kept (still hidden by `get`). Like `prune`, it is local housekeeping: it writes no tombstone and sends nothing. `TopGunClient` runs it for you (see [Expiring records](#expiring-records)); call it yourself only when you use `LWWMap` without the client.
+
 **`clear()`** — `void`
 
 Reset to empty state.
@@ -2893,7 +2897,7 @@ new ORMap<K, V>(hlc: HLC)
 
 **`add(key, value, ttlMs?)`** — `ORMapRecord<V>`
 
-Add a value under a key. Generates a unique tag. Returns the record.
+Add a value under a key. Generates a unique tag. Returns the record. Pass `ttlMs` to make this value expire on its own: see [Expiring records](#expiring-records).
 
 ```typescript
 const tags = new ORMap<string, string>(hlc);
@@ -2996,6 +3000,18 @@ interface ORMapRecord<V> {
   ttlMs?: number;
 }
 ```
+
+## Expiring records
+
+A record written with `ttlMs` disappears by itself: for sessions, invitations, one-time codes, presence and anything else that should not outlive a deadline. `map.set(key, value, ttlMs)` and `orMap.add(key, value, ttlMs)` both take it.
+
+- **When it expires.** The TTL counts from the moment the server stores the write, not from when the client made it. Once that moment plus `ttlMs` has passed, the server and every client hide the record: it is left out of query snapshots, HTTP `/sync`, search and `get`. A live query that already shows it drops it when the server deletes it (next point).
+- **Then it is deleted.** The server deletes the expired record the ordinary way, so live-query subscribers see it leave, the event journal records a delete with `reason: "expired"`, and every client drops it from its local map (an `LWWMap` by itself, an `ORMap` when it receives the server's delete). The delete can come up to the server's sweep interval (`TOPGUN_EXPIRY_SWEEP_INTERVAL_MS`, 10 s by default) plus one sweep cycle after the record expired; until then it is already hidden.
+- **Clocks.** Each reader compares the deadline with its own clock, so readers whose clocks differ can disagree about an expiring record for as long as their clocks differ.
+- **Offline writes.** A client hides its own entries that the server has not stored yet (unsynced, or written offline) by its local write time, which is earlier than the moment the server stores them. So such an entry can disappear on that client earlier than on the server and on other clients, by up to the time the client was offline. This affects only that client's own view, and it ends when the client takes the server's record (`LWWMap`) or receives the server's delete (`ORMap`).
+- **Older records.** Records written before servers kept the TTL do not expire.
+
+`TopGunClient` drops expired `LWWMap` records from memory and from local storage once a second while at least one `LWWMap` is open, also while offline, and before it compares a map with the server, so its sync state matches the server's after the server deleted them. A record that still has an unsynced local write is kept until the server has it.
 
 ## HLC (Hybrid Logical Clock)
 
