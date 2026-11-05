@@ -752,6 +752,7 @@ mod tests {
 
     #[test]
     fn legacy_corpus_decodes_and_re_encodes_byte_identically() {
+        const EXPIRY_KEY: &str = "expiration_time";
         // Half 1: a WAL written before the variant existed still decodes cleanly
         // — no UnknownVersion, no Corruption, and no TruncatedTail either, since
         // a tolerated tail would silently shrink the corpus and hide half 2.
@@ -767,17 +768,45 @@ mod tests {
         // Store/Remove encoding at all — a move off to_vec_named, an
         // internally-tagged representation, a field reorder — the bytes would
         // differ here. A corpus this binary generated could detect none of that.
+        //
+        // The one exception is the expiry key that `Store` frames of that era
+        // carry: decoding ignores it and the current encoder no longer
+        // writes it, so such a frame must re-encode to its original payload with
+        // only that key taken out of the `store` map.
         let mut offset = 0usize;
+        let mut without_key = 0;
         for (i, entry) in entries.iter().enumerate() {
-            let frame = encode(entry).expect("re-encode should succeed");
-            let end = offset + frame.len();
-            assert!(
-                end <= LEGACY_CORPUS.len(),
-                "frame {i} re-encoded longer than the remaining corpus"
-            );
+            let length = u32::from_be_bytes(
+                LEGACY_CORPUS[offset + 5..offset + 9]
+                    .try_into()
+                    .expect("a 4-byte length"),
+            ) as usize;
+            let end = offset + FRAME_HEADER_LEN + length;
+            assert!(end <= LEGACY_CORPUS.len(), "frame {i} overruns the corpus");
+            let original = &LEGACY_CORPUS[offset..end];
+            let mut payload =
+                rmpv::decode::read_value(&mut &original[FRAME_HEADER_LEN..]).expect("msgpack");
+            let expected = match store_map(&mut payload) {
+                Some(store) if store.iter().any(|(k, _)| k.as_str() == Some(EXPIRY_KEY)) => {
+                    let (_, value) = store
+                        .iter()
+                        .find(|(k, _)| k.as_str() == Some(EXPIRY_KEY))
+                        .expect("the key is present");
+                    assert!(
+                        value.as_u64().is_some_and(|v| v != 0),
+                        "frame {i} carries a non-zero {EXPIRY_KEY}"
+                    );
+                    store.retain(|(k, _)| k.as_str() != Some(EXPIRY_KEY));
+                    without_key += 1;
+                    let mut bytes = Vec::new();
+                    rmpv::encode::write_value(&mut bytes, &payload).expect("msgpack");
+                    frame_payload(&bytes, FRAME_VERSION, None).expect("frame")
+                }
+                _ => original.to_vec(),
+            };
             assert_eq!(
-                &LEGACY_CORPUS[offset..end],
-                frame.as_slice(),
+                encode(entry).expect("re-encode should succeed"),
+                expected,
                 "frame {i} does not re-encode to its original bytes"
             );
             offset = end;
@@ -785,8 +814,26 @@ mod tests {
         assert_eq!(
             offset,
             LEGACY_CORPUS.len(),
-            "the re-encoded frames must account for every byte of the corpus"
+            "the frames must account for every byte of the corpus"
         );
+        assert_eq!(without_key, 2, "the corpus holds two frames with the key");
+    }
+
+    /// The `store` map of a `Store` frame's payload, if it is one.
+    fn store_map(payload: &mut rmpv::Value) -> Option<&mut Vec<(rmpv::Value, rmpv::Value)>> {
+        fn field<'a>(value: &'a mut rmpv::Value, name: &str) -> Option<&'a mut rmpv::Value> {
+            match value {
+                rmpv::Value::Map(entries) => entries
+                    .iter_mut()
+                    .find(|(k, _)| k.as_str() == Some(name))
+                    .map(|(_, v)| v),
+                _ => None,
+            }
+        }
+        match field(field(payload, "op")?, "store")? {
+            rmpv::Value::Map(entries) => Some(entries),
+            _ => None,
+        }
     }
 
     // -----------------------------------------------------------------------

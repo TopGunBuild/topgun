@@ -58,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `evict_expired` and `is_expirable` are gone. Nothing in the server set them: every value was
   `0` or `ExpiryPolicy::NONE`, so no behaviour changes. A record expires by its own `ttlMs`
   (`TG-TTL-001`). The internal `expiration_time` parameter of the store's write methods and the
-  `expirationTime` field of the write-ahead log's store frame are gone too; nothing set them
+  `expiration_time` field of the write-ahead log's store frame are gone too; nothing set them
   either. Frames written by earlier versions that carry the field are still read, and the field is
   ignored.
 - **Note (rollback):** the store format is unchanged. A server built before this release starts

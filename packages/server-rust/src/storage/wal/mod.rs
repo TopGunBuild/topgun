@@ -6464,12 +6464,8 @@ mod tests {
     // Store frame shape across binaries
     // -----------------------------------------------------------------------
 
-    /// A `Store` frame as an earlier binary encoded it (`rmp_serde::to_vec_named`
-    /// of the entry): the entry of [`lww_store_entry`] plus an
-    /// `expirationTime` key of `1_700_000_000_000` inside `store`.
-    const STORE_FRAME_WITH_EXPIRATION_TIME: &str = "85a36d6170a16da36b6579a16ba26f7081a573746f726582a576616c756581a36c777782a576616c756581a6537472696e67a176a974696d657374616d7083a66d696c6c6973cf0000018bcfe56800a7636f756e74657207a66e6f64654964a66e6f64652d61ae65787069726174696f6e54696d65cf0000018bcfe56800a974696d657374616d7083a66d696c6c6973cf0000018bcfe56800a7636f756e74657207a66e6f64654964a66e6f64652d61a873657175656e636509";
-
-    /// The same frame without that key, which is what this binary writes.
+    /// A `Store` frame as this binary encodes it (`rmp_serde::to_vec_named` of
+    /// [`lww_store_entry`]).
     const STORE_FRAME: &str = "85a36d6170a16da36b6579a16ba26f7081a573746f726581a576616c756581a36c777782a576616c756581a6537472696e67a176a974696d657374616d7083a66d696c6c6973cf0000018bcfe56800a7636f756e74657207a66e6f64654964a66e6f64652d61a974696d657374616d7083a66d696c6c6973cf0000018bcfe56800a7636f756e74657207a66e6f64654964a66e6f64652d61a873657175656e636509";
 
     fn unhex(hex: &str) -> Vec<u8> {
@@ -6500,23 +6496,9 @@ mod tests {
         }
     }
 
-    /// Frames an earlier binary left in the WAL are replayed by this one, so a
-    /// `Store` frame that carries `expirationTime` must still decode, with the
-    /// key ignored.
-    #[test]
-    fn a_store_frame_with_expiration_time_decodes_and_the_key_is_ignored() {
-        let decoded: WalEntry =
-            rmp_serde::from_slice(&unhex(STORE_FRAME_WITH_EXPIRATION_TIME)).unwrap();
-        assert_eq!(decoded, lww_store_entry());
-        assert_eq!(
-            rmp_serde::to_vec_named(&decoded).unwrap(),
-            unhex(STORE_FRAME)
-        );
-    }
-
-    /// An earlier binary decodes the key as absent when it is missing, so a
-    /// frame this binary writes stays readable there; the frame has only its
-    /// `value` under `store`.
+    /// A `Store` frame carries only its `value`: the expiry key that earlier
+    /// binaries wrote is gone, and they decode a frame without it as one with no
+    /// expiry, so a frame this binary writes stays readable there.
     #[test]
     fn a_store_frame_carries_only_its_value() {
         let bytes = rmp_serde::to_vec_named(&lww_store_entry()).unwrap();
