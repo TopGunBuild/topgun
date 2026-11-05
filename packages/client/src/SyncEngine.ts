@@ -284,6 +284,21 @@ export class SyncEngine {
    */
   private connectionGeneration = 0;
 
+  /**
+   * The 1 s expiry prune over every open LWW map (TG-TTL-002). Started when the
+   * first LWW map is registered, so an engine with nothing to prune keeps no
+   * timer; it runs with or without a connection, because pruning sends nothing.
+   */
+  private pruneTimer: ReturnType<typeof setInterval> | null = null;
+  private closed = false;
+  /**
+   * Expiry prunes run one after another: a prune awaited before a root is read
+   * must not overtake a timer run whose storage removals are still pending, or
+   * the root would count a key as gone that a reload would bring back.
+   */
+  private pruneQueue: Promise<void> = Promise.resolve();
+  private pruneRunsQueued = 0;
+
   // MessageRouter handles type-based message routing
   private readonly messageRouter: IMessageRouter;
 
@@ -573,6 +588,7 @@ export class SyncEngine {
         await this.saveOpLog();
       },
       resetMap: (name) => this.resetMap(name),
+      pruneExpired: (name) => this.enqueueExpiryPrune(name),
     });
 
     // Initialize ORMapSyncHandler for ORMap sync protocol
@@ -1000,6 +1016,9 @@ export class SyncEngine {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- map value type is erased in the registry; callers get typed instances via TopGunClient.getMap/getORMap overloads
   public registerMap(mapName: string, map: LWWMap<any, any> | ORMap<any, any>): void {
     this.maps.set(mapName, map);
+    if (map instanceof LWWMap) {
+      this.startPruneTimer();
+    }
     if (map instanceof ORMap && this.heldOrMapNames && !this.heldOrMapNames.has(mapName)) {
       // A map opened AFTER this connection's held-set snapshot joins the barrier
       // with coverage 0 — it blocks further ACK advance until it syncs, but any
@@ -2544,6 +2563,81 @@ export class SyncEngine {
     }
   }
 
+  private startPruneTimer(): void {
+    if (this.pruneTimer || this.closed) return;
+    this.pruneTimer = unrefTimer(
+      setInterval(() => {
+        // A tick is skipped while an earlier run is still waiting on storage.
+        // A map listener that throws from notify() fails the run; the tick has
+        // no caller to report it to, so it is logged rather than left unhandled.
+        if (this.pruneRunsQueued === 0) {
+          this.enqueueExpiryPrune().catch((err) => {
+            logger.warn({ err }, 'Expiry prune run failed');
+          });
+        }
+      }, 1000),
+    );
+  }
+
+  /**
+   * Queues an expiry prune of one map, or of every open LWW map, behind any
+   * prune already queued, and resolves once its storage removals have settled.
+   */
+  private enqueueExpiryPrune(mapName?: string): Promise<void> {
+    this.pruneRunsQueued++;
+    const run = this.pruneQueue
+      .then(() => this.pruneExpiredMaps(mapName))
+      .finally(() => {
+        this.pruneRunsQueued--;
+      });
+    this.pruneQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * Drops expired LWW records from memory and from storage (TG-TTL-002).
+   *
+   * A key with an unsynced PUT is kept: dropping it would let a walk pull the
+   * server's older value back and show it until the PUT lands. It stays hidden
+   * by `get` and goes on the first run after its acknowledgement.
+   *
+   * A leaf response may `put` a key while this run `remove`s it, and the two may
+   * settle in either order. Memory is right either way; a record storage keeps
+   * is expired, hidden on reload and dropped by the first run, and one storage
+   * lost comes back with the next walk.
+   */
+  private async pruneExpiredMaps(only?: string): Promise<void> {
+    const names = only !== undefined ? [only] : [...this.maps.keys()];
+    for (const name of names) {
+      const map = this.maps.get(name);
+      if (!(map instanceof LWWMap)) continue;
+
+      const pendingPuts = new Set<string>();
+      for (const op of this.opLog) {
+        if (op.mapName === name && op.opType === 'PUT' && !op.synced && op.rejected !== true) {
+          pendingPuts.add(op.key);
+        }
+      }
+
+      const removedKeys = map.pruneExpired((key) => pendingPuts.has(String(key)));
+      for (const key of removedKeys) {
+        // Removals are awaited one by one, and meanwhile a local write or a
+        // leaf merge may have stored the key anew; that record is not ours to
+        // erase.
+        if (map.getRecord(key) !== undefined) continue;
+        try {
+          await this.storageAdapter.remove(`${name}:${key}`);
+        } catch (err) {
+          // The record reloads expired, hidden by `get`, and the first run drops it.
+          logger.warn(
+            { err, mapName: name, key },
+            'Failed to remove an expired record from storage',
+          );
+        }
+      }
+    }
+  }
+
   /**
    * Tags of this client's local removes in `mapName` that the server has
    * neither acknowledged nor refused, grouped by the key they were removed from.
@@ -2702,6 +2796,12 @@ export class SyncEngine {
    * Closes the WebSocket connection and cleans up resources.
    */
   public close(): void {
+    this.closed = true;
+    if (this.pruneTimer) {
+      clearInterval(this.pruneTimer);
+      this.pruneTimer = null;
+    }
+
     // Cancel any pending grace timer before tearing down — prevents stale
     // timer callbacks from firing after the engine is closed or recreated.
     if (this.authRequiredGraceTimer) {
@@ -2756,6 +2856,11 @@ export class SyncEngine {
    */
   public resetConnection(): void {
     this.close();
+    // The engine stays in use after a reset, and so do its open maps.
+    this.closed = false;
+    if ([...this.maps.values()].some((map) => map instanceof LWWMap)) {
+      this.startPruneTimer();
+    }
     this.stateMachine.reset();
     this.webSocketManager.reset();
     this.webSocketManager.connect();
