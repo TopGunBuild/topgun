@@ -47,6 +47,15 @@ function valuesEqual(a: unknown, b: unknown, depth = 0): boolean {
 }
 
 /**
+ * A record has expired once its TTL, counted from its stored timestamp, lies
+ * before `now`. A TTL of 0 or none never expires. The server applies the same
+ * test (TG-TTL-001), so both sides drop exactly the same records.
+ */
+function isExpired(record: LWWRecord<unknown>, now: number): boolean {
+  return !!record.ttlMs && record.timestamp.millis + record.ttlMs < now;
+}
+
+/**
  * Last-Write-Wins Map Implementation.
  * This structure guarantees convergence by always keeping the entry with the highest timestamp.
  */
@@ -120,12 +129,8 @@ export class LWWMap<K, V> {
       return undefined;
     }
 
-    // Check for expiration using HLC's clock source
-    if (record.ttlMs) {
-      const now = this.hlc.getClockSource().now();
-      if (record.timestamp.millis + record.ttlMs < now) {
-        return undefined;
-      }
+    if (isExpired(record, this.hlc.getClockSource().now())) {
+      return undefined;
     }
 
     return record.value;
@@ -254,6 +259,38 @@ export class LWWMap<K, V> {
   }
 
   /**
+   * Drops every live record whose TTL has run out, by the same predicate the
+   * server's expiry sweep uses (TG-TTL-002): the sweep deletes such a key with
+   * an ordinary REMOVE and the server then forgets its leaf, and LWW sync only
+   * pulls, so a client that merely hid the record would keep the leaf and its
+   * root would never match the server's again.
+   *
+   * Like {@link prune}, this is local housekeeping: no tombstone is written and
+   * nothing is meant to be sent. Tombstones are left alone.
+   *
+   * @param skip Keys for which it returns true are kept (still hidden by `get`).
+   * @returns The keys removed.
+   */
+  public pruneExpired(skip?: (key: K) => boolean): K[] {
+    const now = this.hlc.getClockSource().now();
+    const removedKeys: K[] = [];
+
+    for (const [key, record] of this.data.entries()) {
+      if (record.value !== null && isExpired(record, now) && !skip?.(key)) {
+        this.data.delete(key);
+        this.merkleTree.remove(String(key));
+        removedKeys.push(key);
+      }
+    }
+
+    if (removedKeys.length > 0) {
+      this.notify();
+    }
+
+    return removedKeys;
+  }
+
+  /**
    * Clears all data and tombstones.
    * Resets the MerkleTree.
    */
@@ -279,8 +316,7 @@ export class LWWMap<K, V> {
         while (!result.done) {
           const [key, record] = result.value;
           if (record.value !== null) {
-            // Check TTL using clock source
-            if (record.ttlMs && record.timestamp.millis + record.ttlMs < clockSource.now()) {
+            if (isExpired(record, clockSource.now())) {
               result = iterator.next();
               continue;
             }
