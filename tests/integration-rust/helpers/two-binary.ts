@@ -534,6 +534,72 @@ export async function orMapValues(
   }
 }
 
+/**
+ * Walks a map's whole Merkle tree from an empty client tree, over a connection
+ * of its own, and returns what the leaves hold by key: the LWW record, or the
+ * OR-Map key's records and tombstones. Leaf responses are not filtered by
+ * expiry (the client compares them with its own tree and hides expired records
+ * itself), so they show what the server still stores.
+ */
+let leafReaders = 0;
+export async function merkleLeaves(
+  port: number,
+  mapName: string,
+  or: boolean,
+  timeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- leaf payloads are untyped msgpack
+): Promise<Map<string, any>> {
+  const p = or ? 'ORMAP_' : '';
+  const client = await connectWithin(port, `leaf-reader-${leafReaders++}`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- leaf payloads are untyped msgpack
+  const found = new Map<string, any>();
+  try {
+    client.messages.length = 0;
+    client.send(
+      or
+        ? { type: 'ORMAP_SYNC_INIT', mapName, rootHash: 0, bucketHashes: {}, lastSyncTimestamp: 0 }
+        : { type: 'SYNC_INIT', mapName },
+    );
+    const root = await firstFrame(client, [`${p}SYNC_RESP_ROOT`], timeoutMs);
+    if (!root) throw new Error(`no ${p}SYNC_RESP_ROOT for ${mapName}`);
+    if (Number(root.payload.rootHash) === 0) return found;
+    // A path the server holds nothing under gets no answer, so only children
+    // reported with a non-zero hash are followed.
+    const pending = [''];
+    while (pending.length > 0) {
+      const at = pending.shift() as string;
+      const seenBefore = client.messages.length;
+      client.send({ type: `${p}MERKLE_REQ_BUCKET`, payload: { mapName, path: at } });
+      let answer;
+      const deadline = Date.now() + timeoutMs;
+      while (!answer && Date.now() < deadline) {
+        answer = client.messages
+          .slice(seenBefore)
+          .find(
+            (m) =>
+              [`${p}SYNC_RESP_BUCKETS`, `${p}SYNC_RESP_LEAF`].includes(m.type) &&
+              m.payload?.mapName === mapName &&
+              m.payload?.path === at,
+          );
+        if (!answer) await sleep(20);
+      }
+      if (!answer) throw new Error(`no answer for ${mapName} Merkle path "${at}"`);
+      if (answer.type.endsWith('BUCKETS')) {
+        for (const [child, hash] of Object.entries(answer.payload.buckets as object)) {
+          if (Number(hash) !== 0) pending.push(at + child);
+        }
+      } else if (or) {
+        for (const entry of answer.payload.entries) found.set(entry.key, entry);
+      } else {
+        for (const entry of answer.payload.records) found.set(entry.key, entry.record);
+      }
+    }
+    return found;
+  } finally {
+    client.close();
+  }
+}
+
 /** Runs a probe and returns its result, or the reason it failed as a string that no real value equals. */
 export async function observe<T>(probe: () => Promise<T>): Promise<T | string> {
   try {
