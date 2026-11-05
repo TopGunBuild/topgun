@@ -2621,6 +2621,10 @@ export class SyncEngine {
 
       const removedKeys = map.pruneExpired((key) => pendingPuts.has(String(key)));
       for (const key of removedKeys) {
+        // Removals are awaited one by one, and meanwhile a local write or a
+        // leaf merge may have stored the key anew; that record is not ours to
+        // erase.
+        if (map.getRecord(key) !== undefined) continue;
         try {
           await this.storageAdapter.remove(`${name}:${key}`);
         } catch (err) {

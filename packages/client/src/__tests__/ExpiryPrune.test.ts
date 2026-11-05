@@ -239,6 +239,34 @@ describe('client-side LWW expiry prune', () => {
     expect(storage.kv.has(`${MAP}:b`)).toBe(false);
   });
 
+  it('does not erase a key written anew while an earlier removal of the run is pending', async () => {
+    const e = build(false);
+    const map = openMap(e);
+    seed(map, storage, 'a', serverRecord(T0 - 5_000, 1_000));
+    seed(map, storage, 'b', serverRecord(T0 - 5_000, 1_000));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    storage.remove.mockImplementationOnce(async (key: string) => {
+      await gate;
+      storage.kv.delete(key);
+    });
+
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(storage.remove).toHaveBeenCalledTimes(1);
+    const [held] = storage.remove.mock.calls[0];
+    const other = held === `${MAP}:a` ? 'b' : 'a';
+
+    // A local write of the other key, persisted as the client's write path does.
+    const fresh = map.set(other, 'fresh');
+    await storage.put(`${MAP}:${other}`, fresh);
+
+    release();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(storage.kv.has(held)).toBe(false);
+    expect(storage.kv.get(`${MAP}:${other}`)).toEqual(fresh);
+    expect(map.get(other)).toBe('fresh');
+  });
+
   it('lww_prune_expired_skips_key_with_pending_put and prunes it once the PUT is acknowledged', async () => {
     const e = build(true);
     const ws = await connected();
