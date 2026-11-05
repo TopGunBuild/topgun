@@ -631,7 +631,7 @@ mod tests {
         use crate::storage::datastores::NullDataStore;
         use crate::storage::factory::ObserverFactory;
         use crate::storage::impls::StorageConfig;
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
 
         const ITERATIONS: usize = 50;
         const KEYS: u32 = 8;
@@ -697,7 +697,6 @@ mod tests {
                             &token,
                             key,
                             status_record(&format!("{key}-initial")),
-                            ExpiryPolicy::NONE,
                             CallerProvenance::Client,
                         )
                         .await
@@ -724,7 +723,6 @@ mod tests {
                                         &token,
                                         key,
                                         status_record(&format!("{key}-w{writer}-r{round}")),
-                                        ExpiryPolicy::NONE,
                                         CallerProvenance::Client,
                                     )
                                     .await

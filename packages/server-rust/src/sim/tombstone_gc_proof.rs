@@ -49,9 +49,7 @@ mod tests {
     };
     use crate::storage::merkle_sync::MerkleSyncManager;
     use crate::storage::record::{OrMapEntry, RecordValue};
-    use crate::storage::{
-        CallerProvenance, ExpiryPolicy, NullDataStore, RecordStoreFactory, StorageConfig,
-    };
+    use crate::storage::{CallerProvenance, NullDataStore, RecordStoreFactory, StorageConfig};
     use crate::tombstone_frontier::{ClientId, Epoch};
     use crate::tombstone_frontier_impl::{TombstoneFrontier, TombstoneRef};
 
@@ -186,7 +184,6 @@ mod tests {
                         .collect(),
                     tombstones: tombstones.iter().copied().map(String::from).collect(),
                 },
-                ExpiryPolicy::NONE,
                 CallerProvenance::CrdtMerge,
             )
             .await
@@ -2409,7 +2406,6 @@ mod tests {
                     &KeyWriteToken::for_test(MAP, key),
                     key,
                     None,
-                    ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
                     &mut apply,
                 )

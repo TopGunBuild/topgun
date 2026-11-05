@@ -69,7 +69,7 @@ use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::map_data_store::{DurableMerkleIndex, MapDataStore, MerkleSession};
 use crate::storage::merkle_sync::MerkleSyncManager;
 use crate::storage::record::RecordValue;
-use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
+use crate::storage::{CallerProvenance, RecordStoreFactory};
 use crate::tombstone_frontier::{ClientId, GateToken};
 use crate::tombstone_frontier_impl::TombstoneFrontier;
 
@@ -1840,7 +1840,6 @@ impl SyncService {
                         records: Vec::new(),
                         tombstones: Vec::new(),
                     }),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
                     &mut merge,
                 )
@@ -2137,7 +2136,6 @@ mod tests {
                     }],
                     tombstones: vec![tomb.to_string()],
                 },
-                ExpiryPolicy::NONE,
                 CallerProvenance::CrdtMerge,
             )
             .await
@@ -5377,7 +5375,6 @@ mod tests {
                     }],
                     tombstones: vec!["T1".to_string()],
                 },
-                ExpiryPolicy::NONE,
                 CallerProvenance::CrdtMerge,
             )
             .await
@@ -5996,7 +5993,6 @@ mod tests {
                     }],
                     tombstones: Vec::new(),
                 },
-                ExpiryPolicy::NONE,
                 CallerProvenance::CrdtMerge,
             )
             .await
@@ -6709,7 +6705,6 @@ mod tests {
                                 &KeyWriteToken::for_test(store.name(), &key),
                                 &key,
                                 value.clone(),
-                                ExpiryPolicy::NONE,
                                 CallerProvenance::CrdtMerge,
                             )
                             .await
@@ -7135,7 +7130,6 @@ mod tests {
                             records: Vec::new(),
                             tombstones: Vec::new(),
                         }),
-                        ExpiryPolicy::NONE,
                         CallerProvenance::CrdtMerge,
                         &mut merge,
                     )
@@ -7322,7 +7316,6 @@ mod tests {
                         .collect(),
                     tombstones: Vec::new(),
                 },
-                ExpiryPolicy::NONE,
                 CallerProvenance::CrdtMerge,
             )
             .await
@@ -7356,7 +7349,6 @@ mod tests {
                 &KeyWriteToken::for_test(map, key),
                 key,
                 None,
-                ExpiryPolicy::NONE,
                 CallerProvenance::CrdtMerge,
                 &mut apply,
             )
@@ -8020,7 +8012,6 @@ mod tests {
                     &KeyWriteToken::for_test(MAP, A),
                     A,
                     or_value("a-tag"),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
                 )
                 .await
@@ -8272,7 +8263,6 @@ mod tests {
                 &KeyWriteToken::for_test(TTL_MAP, TTL_KEY),
                 TTL_KEY,
                 value.clone(),
-                ExpiryPolicy::NONE,
                 CallerProvenance::CrdtMerge,
             )
             .await

@@ -780,7 +780,7 @@ mod tests {
         use crate::storage::impls::StorageConfig;
         use crate::storage::key_writer::KeyWriteToken;
         use crate::storage::record::RecordValue;
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
         use crate::storage::RecordStoreFactory;
 
         const MAP: &str = "m";
@@ -810,7 +810,6 @@ mod tests {
                     &KeyWriteToken::for_test(MAP, "gone_resident"),
                     "gone_resident",
                     lww(w, Some(TTL_MS)),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Replication,
                 )
                 .await

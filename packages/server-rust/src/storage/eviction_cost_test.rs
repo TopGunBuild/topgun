@@ -24,7 +24,7 @@ mod eviction_cost_tests {
     use crate::storage::map_data_store::MapDataStore;
     use crate::storage::mutation_observer::CompositeMutationObserver;
     use crate::storage::record::{estimated_cost, RecordMetadata, RecordValue};
-    use crate::storage::record_store::{CallerProvenance, ExpiryPolicy, RecordStore};
+    use crate::storage::record_store::{CallerProvenance, RecordStore};
     use static_assertions::assert_not_impl_any;
 
     // Compile-time proof of the non-leakage invariant (AC4): RecordMetadata —
@@ -80,7 +80,6 @@ mod eviction_cost_tests {
                     &KeyWriteToken::for_test(store.name(), &key),
                     &key,
                     lww_value("payload-for-eviction-test"),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await
@@ -283,7 +282,6 @@ mod eviction_cost_tests {
                 &KeyWriteToken::for_test(store.name(), "k"),
                 "k",
                 lww_value("v"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -339,7 +337,6 @@ mod eviction_cost_tests {
                     &KeyWriteToken::for_test(store.name(), "key-real"),
                     "key-real",
                     lww_value("value-real"),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await
@@ -379,7 +376,6 @@ mod eviction_cost_tests {
                     &KeyWriteToken::for_test(store.name(), "key-null"),
                     "key-null",
                     lww_value("value-null"),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await

@@ -31,7 +31,7 @@ use crate::storage::factory::ObserverFactory;
 use crate::storage::factory::RecordStoreFactory;
 use crate::storage::mutation_observer::MutationObserver;
 use crate::storage::record::{Record, RecordValue};
-use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+use crate::storage::record_store::CallerProvenance;
 
 // ---------------------------------------------------------------------------
 // EmbeddingConfig
@@ -796,7 +796,6 @@ async fn write_back_one_embedding(
             &key_guard,
             &evt.key,
             record_value,
-            ExpiryPolicy::NONE,
             CallerProvenance::CrdtMerge,
         )
         .await
@@ -1035,7 +1034,7 @@ mod tests {
     use crate::storage::impls::StorageConfig;
     use crate::storage::mutation_observer::MutationObserver;
     use crate::storage::record::{Record, RecordMetadata, RecordValue};
-    use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+    use crate::storage::record_store::CallerProvenance;
 
     use super::{EmbeddingConfig, EmbeddingObserverFactory};
 
@@ -1255,7 +1254,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "doc1"),
                 "doc1",
                 record_value,
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1354,7 +1352,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "doc2"),
                 "doc2",
                 record_value,
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1448,7 +1445,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "doc1"),
                 "doc1",
                 record_value,
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1555,7 +1551,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "doc1"),
                 "doc1",
                 record_value,
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -2297,7 +2292,6 @@ mod tests {
                             timestamp: timestamp.clone(),
                             ttl_ms,
                         },
-                        ExpiryPolicy::NONE,
                         CallerProvenance::CrdtMerge,
                     )
                     .await

@@ -63,9 +63,7 @@ use topgun_server::storage::map_data_store::MapDataStore;
 use topgun_server::storage::merkle_sync::{MerkleMutationObserver, MerkleSyncManager};
 use topgun_server::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
 use topgun_server::storage::record::{OrMapEntry, Record, RecordValue};
-use topgun_server::storage::record_store::{
-    CallerProvenance, ExpiryPolicy, MutateOutcome, RecordStore,
-};
+use topgun_server::storage::record_store::{CallerProvenance, MutateOutcome, RecordStore};
 use topgun_server::storage::wal::{OrDelta, Wal, WalFsyncPolicy, WalWriter};
 
 #[global_allocator]
@@ -286,7 +284,6 @@ async fn or_add(
                 records: Vec::new(),
                 tombstones: Vec::new(),
             }),
-            ExpiryPolicy::NONE,
             CallerProvenance::CrdtMerge,
             &mut merge_add,
         )
@@ -455,13 +452,7 @@ async fn lww_readings() -> (Reading, Reading) {
         i: u64,
     ) -> Option<RecordValue> {
         store
-            .put(
-                writer,
-                key,
-                lww(i),
-                ExpiryPolicy::NONE,
-                CallerProvenance::Client,
-            )
+            .put(writer, key, lww(i), CallerProvenance::Client)
             .await
             .expect("put")
     }
