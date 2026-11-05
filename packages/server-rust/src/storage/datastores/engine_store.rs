@@ -1571,7 +1571,6 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         map: &str,
         key: &str,
         value: &RecordValue,
-        _expiration_time: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
         // The one msgpack encoding of a stored record, so `add` and
@@ -1594,7 +1593,6 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         map: &str,
         key: &str,
         bytes: &[u8],
-        _expiration_time: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
         self.write_one(RecordOp::Put {
@@ -1616,7 +1614,6 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         map: &str,
         key: &str,
         value: &RecordValue,
-        _expiration_time: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
         let bytes = rmp_serde::to_vec_named(value)?;

@@ -832,7 +832,7 @@ mod tombstone_bytes_gauge_tests {
         value: &RecordValue,
     ) {
         store
-            .add(map, key, value, 0, 0)
+            .add(map, key, value, 0)
             .await
             .expect("seed a primary record");
     }
@@ -878,7 +878,7 @@ mod tombstone_bytes_gauge_tests {
         seed_primary(&store, "reconcile_a", "legacy", &legacy).await;
         let backup = or_map_with_tombstones(vec!["e".repeat(9)]);
         store
-            .add_backup("reconcile_a", "backup-key", &backup, 0, 0)
+            .add_backup("reconcile_a", "backup-key", &backup, 0)
             .await
             .expect("seed a backup OrMap row");
 
@@ -983,7 +983,6 @@ mod tombstone_bytes_gauge_tests {
                 "backup-key",
                 &or_map_with_entries(&["f".repeat(9)]),
                 0,
-                0,
             )
             .await
             .expect("seed a backup OrMap row");
@@ -1020,14 +1019,7 @@ mod tombstone_bytes_gauge_tests {
 
     #[async_trait::async_trait]
     impl MapDataStore for RefusingScan {
-        async fn add(
-            &self,
-            _: &str,
-            _: &str,
-            _: &RecordValue,
-            _: i64,
-            _: i64,
-        ) -> anyhow::Result<()> {
+        async fn add(&self, _: &str, _: &str, _: &RecordValue, _: i64) -> anyhow::Result<()> {
             unreachable!("the boot walk only lists and scans")
         }
         async fn add_backup(
@@ -1035,7 +1027,6 @@ mod tombstone_bytes_gauge_tests {
             _: &str,
             _: &str,
             _: &RecordValue,
-            _: i64,
             _: i64,
         ) -> anyhow::Result<()> {
             unreachable!("the boot walk only lists and scans")

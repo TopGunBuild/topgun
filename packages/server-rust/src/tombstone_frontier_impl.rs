@@ -2668,7 +2668,6 @@ async fn persist_cursor(
             CURSOR_MAP,
             client,
             &record,
-            0,
             i64::try_from(now).unwrap_or(i64::MAX),
         )
         .await
@@ -3699,22 +3698,18 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner.add(map, key, value, expiration_time, now).await
+            self.inner.add(map, key, value, now).await
         }
         async fn add_backup(
             &self,
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            self.inner.add_backup(map, key, value, now).await
         }
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
             self.inner.remove(map, key, now).await
@@ -7993,7 +7988,7 @@ mod persistence_tests {
             ttl_ms: None,
         };
         store
-            .add(PRE_BUMP_CURSOR_MAP, &c, &record, 0, 1)
+            .add(PRE_BUMP_CURSOR_MAP, &c, &record, 1)
             .await
             .expect("write pre-bump row");
 
@@ -8024,11 +8019,11 @@ mod persistence_tests {
 
         // Durable live tombstones (survive the crash in redb): 3 tags over 2 keys.
         store
-            .add("mymap", "k1", &ormap_with_tombstones(&["T1", "T2"]), 0, 1)
+            .add("mymap", "k1", &ormap_with_tombstones(&["T1", "T2"]), 1)
             .await
             .unwrap();
         store
-            .add("mymap", "k2", &ormap_with_tombstones(&["T3"]), 0, 1)
+            .add("mymap", "k2", &ormap_with_tombstones(&["T3"]), 1)
             .await
             .unwrap();
 
@@ -8139,12 +8134,12 @@ mod persistence_tests {
 
         // Mirror the crdt OR_REMOVE path: write the tombstone bytes, then stamp.
         store_dyn
-            .add("m", "k1", &ormap_with_tombstones(&["T1"]), 0, 1)
+            .add("m", "k1", &ormap_with_tombstones(&["T1"]), 1)
             .await
             .unwrap();
         let e1 = f.stamp_tombstone("m", "k1", "T1");
         store_dyn
-            .add("m", "k2", &ormap_with_tombstones(&["T2"]), 0, 1)
+            .add("m", "k2", &ormap_with_tombstones(&["T2"]), 1)
             .await
             .unwrap();
         let e2 = f.stamp_tombstone("m", "k2", "T2");
@@ -8207,10 +8202,10 @@ mod persistence_tests {
             tags: vec!["LEG".to_string()],
         };
         store
-            .add("m", "modern", &ormap_with_tombstones(&["MOD"]), 0, 1)
+            .add("m", "modern", &ormap_with_tombstones(&["MOD"]), 1)
             .await
             .unwrap();
-        store.add("m", "legacy", &legacy, 0, 1).await.unwrap();
+        store.add("m", "legacy", &legacy, 1).await.unwrap();
 
         // (i) Pre-prune: the epoch scan admits only the modern tag. The legacy blob
         // never enters the live set, so it can never be stamped into any epoch.
@@ -8601,7 +8596,6 @@ mod persistence_tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
             // Gate only the first add so the barrier/quiesce path is not blocked.
@@ -8613,19 +8607,16 @@ mod persistence_tests {
                 self.gate.entered.notify_one();
                 self.gate.release.notified().await;
             }
-            self.inner.add(map, key, value, expiration_time, now).await
+            self.inner.add(map, key, value, now).await
         }
         async fn add_backup(
             &self,
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            self.inner.add_backup(map, key, value, now).await
         }
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
             self.remove_calls

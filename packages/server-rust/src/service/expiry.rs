@@ -1139,22 +1139,18 @@ mod sweep_tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.rows.add(map, key, value, expiration_time, now).await
+            self.rows.add(map, key, value, now).await
         }
         async fn add_backup(
             &self,
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.rows
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            self.rows.add_backup(map, key, value, now).await
         }
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
             self.rows.remove(map, key, now).await

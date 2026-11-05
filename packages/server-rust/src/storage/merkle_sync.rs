@@ -1282,22 +1282,18 @@ mod rebuild_tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner.add(map, key, value, expiration_time, now).await
+            self.inner.add(map, key, value, now).await
         }
         async fn add_backup(
             &self,
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            self.inner.add_backup(map, key, value, now).await
         }
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
             self.inner.remove(map, key, now).await
@@ -1385,11 +1381,11 @@ mod rebuild_tests {
         // Persist records WITHOUT ever touching an in-memory engine / observer,
         // i.e. exactly the post-restart state: data on disk, nothing resident.
         store
-            .add("users", "alice", &lww_value("alice", 111, 0, "n1"), 0, 1)
+            .add("users", "alice", &lww_value("alice", 111, 0, "n1"), 1)
             .await
             .unwrap();
         store
-            .add("users", "bob", &lww_value("bob", 222, 1, "n2"), 0, 2)
+            .add("users", "bob", &lww_value("bob", 222, 1, "n2"), 2)
             .await
             .unwrap();
 
@@ -1434,7 +1430,7 @@ mod rebuild_tests {
         for (key, rec) in &records {
             write_path_put(&resident, "users", key, rec);
             // Persist the same record so the durable index matches.
-            store.add("users", key, &rec.value, 0, 1).await.unwrap();
+            store.add("users", key, &rec.value, 1).await.unwrap();
         }
         let resident_root = resident.aggregate_lww_root_hash("users");
         assert_ne!(resident_root, 0, "resident root must be non-zero with data");
@@ -1469,7 +1465,7 @@ mod rebuild_tests {
         ];
         for (key, rec) in &records {
             write_path_put(&resident, "tags", key, rec);
-            store.add("tags", key, &rec.value, 0, 1).await.unwrap();
+            store.add("tags", key, &rec.value, 1).await.unwrap();
         }
         let resident_root = resident.aggregate_ormap_root_hash("tags");
         assert_ne!(resident_root, 0, "resident OR-Map root must be non-zero");
@@ -1525,7 +1521,7 @@ mod rebuild_tests {
             ("t2", ormap_record("t2", "tagB", 200)),
         ] {
             write_path_put(&resident, "tags", key, &rec);
-            store.add("tags", key, &rec.value, 0, 1).await.unwrap();
+            store.add("tags", key, &rec.value, 1).await.unwrap();
         }
         let correct_root = resident.aggregate_ormap_root_hash("tags");
 
@@ -1570,11 +1566,11 @@ mod rebuild_tests {
 
         // Both records are durable in redb.
         store
-            .add("m", "resident", &resident_rec.value, 0, 1)
+            .add("m", "resident", &resident_rec.value, 1)
             .await
             .unwrap();
         store
-            .add("m", "evicted", &evicted_rec.value, 0, 2)
+            .add("m", "evicted", &evicted_rec.value, 2)
             .await
             .unwrap();
 
@@ -1635,7 +1631,6 @@ mod rebuild_tests {
                 "big",
                 &format!("k{i:04}"),
                 &lww_value("v", u64::from(i), i, "n"),
-                0,
                 1,
             )
             .await

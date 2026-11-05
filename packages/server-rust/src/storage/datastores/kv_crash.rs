@@ -1434,10 +1434,10 @@ impl RegistryWorkload {
 fn call_store<E: KvEngine>(store: &EngineMapDataStore<E>, op: &StoreOp) -> bool {
     match op {
         StoreOp::Add { map, key, stamp } => {
-            ready(store.add(map, key, &lww_value(*stamp), 0, 0)).is_ok()
+            ready(store.add(map, key, &lww_value(*stamp), 0)).is_ok()
         }
         StoreOp::AddBackup { map, key, stamp } => {
-            ready(store.add_backup(map, key, &lww_value(*stamp), 0, 0)).is_ok()
+            ready(store.add_backup(map, key, &lww_value(*stamp), 0)).is_ok()
         }
         StoreOp::Remove { map, key } => ready(store.remove(map, key, 0)).is_ok(),
         StoreOp::RemoveAll { map, keys } => ready(store.remove_all(map, keys)).is_ok(),

@@ -144,7 +144,7 @@ async fn tiebreak_equal_sort_field_produces_deterministic_key_order() {
             ttl_ms: None,
         };
         data_store
-            .add(map_name, key, &value, 0, 1_704_067_200)
+            .add(map_name, key, &value, 1_704_067_200)
             .await
             .expect("durable write");
     }
@@ -255,7 +255,7 @@ async fn tiebreak_equal_sort_field_key_ascending_regardless_of_desc_sort() {
             ttl_ms: None,
         };
         data_store
-            .add(map_name, key, &value, 0, 1_704_067_200)
+            .add(map_name, key, &value, 1_704_067_200)
             .await
             .expect("durable write");
     }

@@ -3625,7 +3625,6 @@ mod tests {
                     timestamp: ts_a,
                     ttl_ms: None,
                 },
-                0,
                 1,
             )
             .await
@@ -3639,7 +3638,6 @@ mod tests {
                     timestamp: ts_b,
                     ttl_ms: None,
                 },
-                0,
                 2,
             )
             .await
@@ -3733,7 +3731,6 @@ mod tests {
                         },
                         ttl_ms: None,
                     },
-                    0,
                     1,
                 )
                 .await
@@ -3844,7 +3841,6 @@ mod tests {
                         },
                         ttl_ms: None,
                     },
-                    0,
                     1,
                 )
                 .await
@@ -4059,7 +4055,6 @@ mod tests {
                         },
                         ttl_ms: None,
                     },
-                    0,
                     1,
                 )
                 .await
@@ -4128,7 +4123,6 @@ mod tests {
                     },
                     ttl_ms: None,
                 },
-                0,
                 1,
             )
             .await
@@ -4277,7 +4271,6 @@ mod tests {
                         },
                         ttl_ms: None,
                     },
-                    0,
                     1,
                 )
                 .await
@@ -4383,7 +4376,6 @@ mod tests {
                     timestamp: new_timestamp.clone(),
                     ttl_ms: None,
                 },
-                0,
                 1,
             )
             .await
@@ -4652,7 +4644,6 @@ mod tests {
                         }],
                         tombstones: Vec::new(),
                     },
-                    0,
                     1,
                 )
                 .await
@@ -4756,7 +4747,6 @@ mod tests {
                     ],
                     tombstones: Vec::new(),
                 },
-                0,
                 1,
             )
             .await
@@ -4773,7 +4763,6 @@ mod tests {
                     records: Vec::new(),
                     tombstones: vec![remove_orig_tag.clone()],
                 },
-                0,
                 1,
             )
             .await
@@ -5105,7 +5094,6 @@ mod tests {
                         },
                         ttl_ms: None,
                     },
-                    0,
                     1,
                 )
                 .await
@@ -6394,10 +6382,9 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner.add(map, key, value, expiration_time, now).await
+            self.inner.add(map, key, value, now).await
         }
 
         async fn add_backup(
@@ -6405,12 +6392,9 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            self.inner.add_backup(map, key, value, now).await
         }
 
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -8059,11 +8043,11 @@ mod tests {
             let durable: Arc<dyn MapDataStore> =
                 Arc::new(RedbDataStore::new(dir.path().join("leaf.redb")).expect("redb open"));
             durable
-                .add(MAP, A, &or_value("a-tag"), 0, 1)
+                .add(MAP, A, &or_value("a-tag"), 1)
                 .await
                 .expect("durable A");
             durable
-                .add(MAP, b, &or_value("b-tag"), 0, 1)
+                .add(MAP, b, &or_value("b-tag"), 1)
                 .await
                 .expect("durable B");
             let (probe, factory) = stores_holding_a().await;
@@ -8282,7 +8266,7 @@ mod tests {
             let durable: Arc<dyn MapDataStore> =
                 Arc::new(RedbDataStore::new(dir.path().join("ttl.redb")).expect("redb open"));
             durable
-                .add(TTL_MAP, TTL_KEY, value, 0, 1)
+                .add(TTL_MAP, TTL_KEY, value, 1)
                 .await
                 .expect("durable seed");
             let index: Arc<dyn DurableMerkleIndex + Send + Sync> = Arc::new(DurableMerkle);

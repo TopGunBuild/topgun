@@ -2467,7 +2467,7 @@ mod tests {
                 ttl_ms: None,
             };
             data_store
-                .add(map_name, &format!("k{i:04}"), &value, 0, 1000)
+                .add(map_name, &format!("k{i:04}"), &value, 1000)
                 .await
                 .expect("durable write");
         }
@@ -2560,7 +2560,7 @@ mod tests {
                 ttl_ms: None,
             };
             data_store
-                .add(map_name, &format!("k{i:04}"), &value, 0, 1000)
+                .add(map_name, &format!("k{i:04}"), &value, 1000)
                 .await
                 .expect("durable write");
         }

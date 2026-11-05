@@ -357,15 +357,8 @@ impl CommitSpy {
 
 #[async_trait]
 impl MapDataStore for CommitSpy {
-    async fn add(
-        &self,
-        map: &str,
-        key: &str,
-        value: &RecordValue,
-        expiration_time: i64,
-        now: i64,
-    ) -> anyhow::Result<()> {
-        self.inner.add(map, key, value, expiration_time, now).await
+    async fn add(&self, map: &str, key: &str, value: &RecordValue, now: i64) -> anyhow::Result<()> {
+        self.inner.add(map, key, value, now).await
     }
 
     fn accepts_encoded(&self) -> bool {
@@ -377,12 +370,9 @@ impl MapDataStore for CommitSpy {
         map: &str,
         key: &str,
         bytes: &[u8],
-        expiration_time: i64,
         now: i64,
     ) -> anyhow::Result<()> {
-        self.inner
-            .add_encoded(map, key, bytes, expiration_time, now)
-            .await
+        self.inner.add_encoded(map, key, bytes, now).await
     }
 
     fn scan_order(&self) -> Option<ScanOrder> {
@@ -394,12 +384,9 @@ impl MapDataStore for CommitSpy {
         map: &str,
         key: &str,
         value: &RecordValue,
-        expiration_time: i64,
         now: i64,
     ) -> anyhow::Result<()> {
-        self.inner
-            .add_backup(map, key, value, expiration_time, now)
-            .await
+        self.inner.add_backup(map, key, value, now).await
     }
 
     async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -684,9 +671,7 @@ async fn fill(
 ) {
     for (i, key) in keys.iter().enumerate() {
         let store_time = first + i64::try_from(i).expect("small index");
-        wb.add(MAP, key, &value(i), 0, store_time)
-            .await
-            .expect("add");
+        wb.add(MAP, key, &value(i), store_time).await.expect("add");
     }
 }
 
@@ -1167,9 +1152,7 @@ async fn b07_record_level_refusals_are_handled_per_entry_without_halving() {
     // committed again in one engine write.
     let named = keys("h", 5);
     fill(&wb, &named[..2], 1, |i| lww(&format!("v{i}"), 1)).await;
-    wb.add(BAD_MAP, "r", &lww("bad", 1), 0, 3)
-        .await
-        .expect("add");
+    wb.add(BAD_MAP, "r", &lww("bad", 1), 3).await.expect("add");
     fill(&wb, &named[2..], 4, |i| lww(&format!("v{i}"), 1)).await;
     let (engine_mark, spy_mark) = (node.engine.mark(), node.spy.mark());
     one_pass(&wb).await;
@@ -1220,29 +1203,15 @@ async fn b07_record_level_refusals_are_handled_per_entry_without_halving() {
         let store_time = 200 + i64::try_from(i).expect("small index");
         match i {
             2 => wb
-                .add_with_witness(
-                    MAP,
-                    key,
-                    WriteSource::Cell(&refused_cell),
-                    0,
-                    store_time,
-                    None,
-                )
+                .add_with_witness(MAP, key, WriteSource::Cell(&refused_cell), store_time, None)
                 .await
                 .expect("add"),
             3 => wb
-                .add_with_witness(
-                    MAP,
-                    key,
-                    WriteSource::Cell(&encoded_cell),
-                    0,
-                    store_time,
-                    None,
-                )
+                .add_with_witness(MAP, key, WriteSource::Cell(&encoded_cell), store_time, None)
                 .await
                 .expect("add"),
             _ => wb
-                .add(MAP, key, &lww("v", 1), 0, store_time)
+                .add(MAP, key, &lww("v", 1), store_time)
                 .await
                 .expect("add"),
         }
@@ -1577,7 +1546,7 @@ fn durable_row(node: &Node, partition: u32) -> u64 {
 /// Writes `key` of `MAP` with `store_time`; a far-future time keeps the entry
 /// out of every pass while the drain still takes it.
 async fn add_at(wb: &WriteBehindDataStore, key: &str, store_time: i64) {
-    wb.add(MAP, key, &lww(key, 1), 0, store_time)
+    wb.add(MAP, key, &lww(key, 1), store_time)
         .await
         .expect("add");
 }
@@ -2130,7 +2099,7 @@ async fn b16_a_recommit_never_marks_a_refused_entry_applied() {
     let ours = keys_in_partition(MAP, "a", partition, 4);
     let (key_a, key_b, key_y, key_c) = (&ours[0], &ours[1], &ours[2], &ours[3]);
     add_at(&wb, key_a, 1).await;
-    wb.add(BAD_MAP, BAD_KEY, &lww("bad", 1), 0, 2)
+    wb.add(BAD_MAP, BAD_KEY, &lww("bad", 1), 2)
         .await
         .expect("add");
     add_at(&wb, key_b, 3).await;

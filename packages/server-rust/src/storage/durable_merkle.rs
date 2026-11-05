@@ -312,22 +312,18 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner.add(map, key, value, expiration_time, now).await
+            self.inner.add(map, key, value, now).await
         }
         async fn add_backup(
             &self,
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            self.inner.add_backup(map, key, value, now).await
         }
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
             self.inner.remove(map, key, now).await
@@ -412,11 +408,11 @@ mod tests {
     async fn ac4_two_sessions_from_same_store_state_have_equal_root() {
         let (store, _dir) = fresh_redb();
         store
-            .add("m", "key-a", &lww_value("key-a", 100, 0, "n1"), 0, 1)
+            .add("m", "key-a", &lww_value("key-a", 100, 0, "n1"), 1)
             .await
             .unwrap();
         store
-            .add("m", "key-b", &lww_value("key-b", 200, 0, "n2"), 0, 2)
+            .add("m", "key-b", &lww_value("key-b", 200, 0, "n2"), 2)
             .await
             .unwrap();
 
@@ -452,7 +448,7 @@ mod tests {
         for (key, millis) in [("key-a", 100u64), ("key-b", 200u64)] {
             let rec = lww_record(key, millis);
             write_path_put(&resident, "m", key, &rec);
-            store.add("m", key, &rec.value, 0, 1).await.unwrap();
+            store.add("m", key, &rec.value, 1).await.unwrap();
         }
         let write_path_root = resident.aggregate_lww_root_hash("m");
 
@@ -484,13 +480,13 @@ mod tests {
         for (key, millis) in [("alice", 111u64), ("bob", 222u64), ("carol", 333u64)] {
             let rec = lww_record(key, millis);
             write_path_put(&resident, "users", key, &rec);
-            store.add("users", key, &rec.value, 0, 1).await.unwrap();
+            store.add("users", key, &rec.value, 1).await.unwrap();
         }
         // OR-Map records
         for (key, tag, millis) in [("t1", "tagA", 100u64), ("t2", "tagB", 200u64)] {
             let rec = ormap_record(key, tag, millis);
             write_path_put(&resident, "users", key, &rec);
-            store.add("users", key, &rec.value, 0, 1).await.unwrap();
+            store.add("users", key, &rec.value, 1).await.unwrap();
         }
 
         let idx = DurableMerkle;
@@ -528,7 +524,7 @@ mod tests {
 
         // Write an OR-Map key then replace it with a tombstone.
         store
-            .add("m", "gone", &ormap_value("gone", "tag1", 100), 0, 1)
+            .add("m", "gone", &ormap_value("gone", "tag1", 100), 1)
             .await
             .unwrap();
         // Overwrite with tombstone (the redb backend persists whatever we put).
@@ -539,7 +535,6 @@ mod tests {
                 &RecordValue::OrTombstones {
                     tags: vec!["tag1".to_string()],
                 },
-                0,
                 2,
             )
             .await
@@ -582,7 +577,7 @@ mod tests {
         let ctrl_dir = tempfile::tempdir().expect("tempdir");
         let ctrl_store = RedbDataStore::new(ctrl_dir.path().join("ctrl.redb")).expect("redb open");
         for (k, v) in &records {
-            ctrl_store.add("big", k, v, 0, 1).await.unwrap();
+            ctrl_store.add("big", k, v, 1).await.unwrap();
         }
         let ctrl_session = DurableMerkle
             .build_session("big", &ctrl_store as &dyn MapDataStore)
@@ -594,7 +589,7 @@ mod tests {
         let spy_dir = tempfile::tempdir().expect("tempdir");
         let spy_inner = RedbDataStore::new(spy_dir.path().join("spy.redb")).expect("redb open");
         for (k, v) in &records {
-            spy_inner.add("big", k, v, 0, 1).await.unwrap();
+            spy_inner.add("big", k, v, 1).await.unwrap();
         }
         let enumerate_calls = Arc::new(AtomicUsize::new(0));
         let spy: Arc<dyn MapDataStore> = Arc::new(SpyStore {
@@ -636,7 +631,7 @@ mod tests {
         let key = "alice";
         let millis = 111u64;
         store
-            .add("m", key, &lww_value(key, millis, 0, "n1"), 0, 1)
+            .add("m", key, &lww_value(key, millis, 0, "n1"), 1)
             .await
             .unwrap();
 
@@ -672,7 +667,7 @@ mod tests {
     async fn ac_snapshot_isolation_session_is_point_in_time() {
         let (store, _dir) = fresh_redb();
         store
-            .add("m", "key-t0", &lww_value("key-t0", 100, 0, "n1"), 0, 1)
+            .add("m", "key-t0", &lww_value("key-t0", 100, 0, "n1"), 1)
             .await
             .unwrap();
 
@@ -690,7 +685,7 @@ mod tests {
 
         // Inject a write to the underlying store AFTER the session was built.
         store
-            .add("m", "new-key", &lww_value("new-key", 999, 0, "n2"), 0, 2)
+            .add("m", "new-key", &lww_value("new-key", 999, 0, "n2"), 2)
             .await
             .unwrap();
 
@@ -732,7 +727,6 @@ mod tests {
                     "m",
                     &format!("k{i}"),
                     &lww_value("v", u64::from(i), i, "n"),
-                    0,
                     1,
                 )
                 .await

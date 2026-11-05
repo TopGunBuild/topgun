@@ -716,7 +716,6 @@ mod tests {
                     },
                     ttl_ms: None,
                 },
-                0,
                 1_000,
             )
             .await

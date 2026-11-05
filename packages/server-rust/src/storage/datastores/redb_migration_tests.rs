@@ -1521,7 +1521,6 @@ async fn m15_wal_frames_left_by_an_older_binary_replay_into_the_migrated_store()
         key: key.to_string(),
         op: WalOp::Store {
             value: WalStorePayload::Record(value.clone()),
-            expiration_time: None,
         },
         timestamp: match value {
             RecordValue::Lww { timestamp, .. } => Some(timestamp.clone()),
@@ -2143,7 +2142,6 @@ async fn m90_storage_gate_measurement() {
                     &format!("w{rep}_{}", i % 10),
                     &format!("k{i:05}"),
                     &value(pass * 100_000 + i),
-                    0,
                     1_000,
                 )
                 .await
@@ -2177,13 +2175,13 @@ async fn m90_storage_gate_measurement() {
     let populated = Instant::now();
     for i in 0..100_000u64 {
         store
-            .add("big", &format!("b{i:06}"), &value(i), 0, 1_000)
+            .add("big", &format!("b{i:06}"), &value(i), 1_000)
             .await
             .expect("populate");
     }
     for i in 0..10u64 {
         store
-            .add("small", &format!("s{i:02}"), &value(i), 0, 1_000)
+            .add("small", &format!("s{i:02}"), &value(i), 1_000)
             .await
             .expect("populate");
     }
@@ -2219,7 +2217,7 @@ async fn m90_storage_gate_measurement() {
     let r5_store = RedbDataStore::new(r5_dir.path().join("gate-store")).expect("store");
     for i in 0..1_000u64 {
         r5_store
-            .add(&format!("one{i:04}"), "k", &value(i), 0, 1_000)
+            .add(&format!("one{i:04}"), "k", &value(i), 1_000)
             .await
             .expect("populate");
     }
@@ -2249,7 +2247,7 @@ async fn m90_storage_gate_measurement() {
         let map = format!("w3_{rep}");
         for i in 0..10_000u64 {
             w3_store
-                .add(&map, &format!("k{i:05}"), &value(i), 0, 1_000)
+                .add(&map, &format!("k{i:05}"), &value(i), 1_000)
                 .await
                 .expect("durable key");
         }
@@ -2263,12 +2261,12 @@ async fn m90_storage_gate_measurement() {
             },
         );
         for i in 0..5_000u64 {
-            wb.add(&map, &format!("k{i:05}"), &value(500_000 + i), 0, 2_000)
+            wb.add(&map, &format!("k{i:05}"), &value(500_000 + i), 2_000)
                 .await
                 .expect("buffered overwrite");
         }
         for i in 10_000..15_000u64 {
-            wb.add(&map, &format!("k{i:05}"), &value(i), 0, 2_000)
+            wb.add(&map, &format!("k{i:05}"), &value(i), 2_000)
                 .await
                 .expect("buffered new key");
         }

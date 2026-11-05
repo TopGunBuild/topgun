@@ -5873,7 +5873,6 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            _exp: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             if self.reject_keys.lock().contains(key) {
@@ -5890,7 +5889,6 @@ mod tests {
             _: &str,
             _: &str,
             _: &RecordValue,
-            _: i64,
             _: i64,
         ) -> anyhow::Result<()> {
             Ok(())
@@ -6073,11 +6071,10 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
             if let Some(inner) = &self.inner {
-                return inner.add(map, key, value, expiration_time, now).await;
+                return inner.add(map, key, value, now).await;
             }
             self.data
                 .lock()
@@ -6095,7 +6092,6 @@ mod tests {
             map: &str,
             key: &str,
             src: WriteSource<'_>,
-            expiration_time: i64,
             now: i64,
             witness: Option<&OrDelta>,
         ) -> anyhow::Result<()> {
@@ -6107,11 +6103,9 @@ mod tests {
                 witness: witness.cloned(),
             });
             if let Some(inner) = &self.inner {
-                return inner
-                    .add_with_witness(map, key, src, expiration_time, now, witness)
-                    .await;
+                return inner.add_with_witness(map, key, src, now, witness).await;
             }
-            self.add(map, key, &value, expiration_time, now).await
+            self.add(map, key, &value, now).await
         }
 
         fn wants_or_witness(&self) -> bool {
@@ -6123,7 +6117,6 @@ mod tests {
             _: &str,
             _: &str,
             _: &RecordValue,
-            _: i64,
             _: i64,
         ) -> anyhow::Result<()> {
             Ok(())
@@ -6682,7 +6675,6 @@ mod tests {
                 tags: vec!["OLD".to_string()],
             },
             0,
-            0,
         )
         .await
         .unwrap();
@@ -7218,11 +7210,10 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
             self.panic_if_armed(key);
-            self.inner.add(map, key, value, expiration_time, now).await
+            self.inner.add(map, key, value, now).await
         }
 
         async fn add_backup(
@@ -7230,12 +7221,9 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            self.inner.add_backup(map, key, value, now).await
         }
 
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -11359,7 +11347,7 @@ mod tests {
                 records: vec![entry("t-old-1"), entry("t-old-2"), entry("t-old-3")],
                 tombstones: vec!["t-gone".to_string()],
             };
-            ds.add(MAP, KEY, &seeded, 0, 0)
+            ds.add(MAP, KEY, &seeded, 0)
                 .await
                 .expect("seed durable row");
         }
@@ -11638,11 +11626,10 @@ mod tests {
                 map: &str,
                 key: &str,
                 value: &RecordValue,
-                expiration_time: i64,
                 now: i64,
             ) -> anyhow::Result<()> {
                 Self::pass(&self.before_add).await;
-                self.inner.add(map, key, value, expiration_time, now).await
+                self.inner.add(map, key, value, now).await
             }
 
             async fn add_backup(
@@ -11650,12 +11637,9 @@ mod tests {
                 map: &str,
                 key: &str,
                 value: &RecordValue,
-                expiration_time: i64,
                 now: i64,
             ) -> anyhow::Result<()> {
-                self.inner
-                    .add_backup(map, key, value, expiration_time, now)
-                    .await
+                self.inner.add_backup(map, key, value, now).await
             }
 
             async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -13152,7 +13136,6 @@ mod tests {
                 map: &str,
                 key: &str,
                 value: &RecordValue,
-                _expiration_time: i64,
                 _now: i64,
             ) -> anyhow::Result<()> {
                 if self.verdict_for(map, key, lww_stamp(Some(value))).await == Verdict::Refuse {
@@ -13170,7 +13153,6 @@ mod tests {
                 _map: &str,
                 _key: &str,
                 _value: &RecordValue,
-                _expiration_time: i64,
                 _now: i64,
             ) -> anyhow::Result<()> {
                 Ok(())
@@ -14411,10 +14393,9 @@ mod tests {
                 map: &str,
                 key: &str,
                 value: &RecordValue,
-                expiration_time: i64,
                 now: i64,
             ) -> anyhow::Result<()> {
-                self.inner.add(map, key, value, expiration_time, now).await
+                self.inner.add(map, key, value, now).await
             }
 
             async fn add_backup(
@@ -14422,12 +14403,9 @@ mod tests {
                 map: &str,
                 key: &str,
                 value: &RecordValue,
-                expiration_time: i64,
                 now: i64,
             ) -> anyhow::Result<()> {
-                self.inner
-                    .add_backup(map, key, value, expiration_time, now)
-                    .await
+                self.inner.add_backup(map, key, value, now).await
             }
 
             async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -14783,10 +14761,9 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner.add(map, key, value, expiration_time, now).await
+            self.inner.add(map, key, value, now).await
         }
 
         async fn add_backup(
@@ -14794,12 +14771,9 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            self.inner.add_backup(map, key, value, now).await
         }
 
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -16288,7 +16262,7 @@ mod tests {
                     tags: strings(&["t-gone"]),
                 };
                 rig.data_store
-                    .add("m", "legacy", &legacy, 0, 0)
+                    .add("m", "legacy", &legacy, 0)
                     .await
                     .expect("seed a legacy blob");
                 rig.clock.set(expired_now());
@@ -16633,7 +16607,7 @@ mod tests {
                     ttl_ms: Some(DAY),
                 };
                 rig.data_store
-                    .add(MAP, "k", &value, 0, 0)
+                    .add(MAP, "k", &value, 0)
                     .await
                     .expect("seed the record");
                 assert!(rig
@@ -16681,7 +16655,7 @@ mod tests {
                     ttl_ms: Some(DAY),
                 };
                 rig.data_store
-                    .add(MAP, "k", &value, 0, 0)
+                    .add(MAP, "k", &value, 0)
                     .await
                     .expect("seed the record");
                 rig.clock.set(expired_now());

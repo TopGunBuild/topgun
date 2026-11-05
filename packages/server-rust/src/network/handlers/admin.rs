@@ -2908,10 +2908,10 @@ mod tenant_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac12_delete_drops_the_owned_maps_and_a_rerun_finishes() {
         let (inner, store) = stores(300);
-        inner.add("b.x", "k", &lww("x"), 0, 1).await.unwrap();
-        inner.add_backup("b.y", "k", &lww("y"), 0, 1).await.unwrap();
-        inner.add("bb.z", "k", &lww("bbz"), 0, 1).await.unwrap();
-        store.add("b.z", "k", &lww("z"), 0, 1).await.unwrap();
+        inner.add("b.x", "k", &lww("x"), 1).await.unwrap();
+        inner.add_backup("b.y", "k", &lww("y"), 1).await.unwrap();
+        inner.add("bb.z", "k", &lww("bbz"), 1).await.unwrap();
+        store.add("b.z", "k", &lww("z"), 1).await.unwrap();
         assert!(!inner
             .list_maps()
             .await
@@ -2934,7 +2934,7 @@ mod tenant_tests {
             assert!(store.load(map, "k").await.unwrap().is_none(), "{map}");
         }
         // A client of `b` replaying its op on `b.x` is refused; `b.x` stays absent.
-        assert!(store.add("b.x", "k", &lww("again"), 0, 2).await.is_err());
+        assert!(store.add("b.x", "k", &lww("again"), 2).await.is_err());
         assert!(store.load("b.x", "k").await.unwrap().is_none());
         assert_eq!(inner.list_maps().await.unwrap(), names(&["bb.z"]));
 
@@ -2955,7 +2955,7 @@ mod tenant_tests {
         let files = Files::new();
         files.index(&["b.x"]);
         let (inner, store) = stores(0);
-        inner.add("b.x", "k", &lww("x"), 0, 1).await.unwrap();
+        inner.add("b.x", "k", &lww("x"), 1).await.unwrap();
 
         // Tenancy off.
         let policies = configured_policies().await;
@@ -2984,7 +2984,7 @@ mod tenant_tests {
         }
 
         assert!(store.load("b.x", "k").await.unwrap().is_some());
-        store.add("b.x", "k2", &lww("x2"), 0, 2).await.unwrap();
+        store.add("b.x", "k2", &lww("x2"), 2).await.unwrap();
         assert_eq!(files.indexed(), (names(&["b.x"]), names(&["b.x"])));
     }
 
@@ -3007,12 +3007,12 @@ mod tenant_tests {
         assert_denied(&*policies, TENANT).await;
 
         let (inner, store) = stores(0);
-        inner.add("b.x", "k0", &lww("x"), 0, 1).await.unwrap();
+        inner.add("b.x", "k0", &lww("x"), 1).await.unwrap();
         let state = state(store.clone(), Some(policies.clone()), true, &files);
         let mut park = store.test_park_before_queue_insert("b.x", "k1");
         let write = {
             let store = Arc::clone(&store);
-            tokio::spawn(async move { store.add("b.x", "k1", &lww("x1"), 0, 2).await })
+            tokio::spawn(async move { store.add("b.x", "k1", &lww("x1"), 2).await })
         };
         park.wait_parked().await;
         let first = {
@@ -3063,12 +3063,12 @@ mod tenant_tests {
         let files = Files::new();
         files.index(&["b.x"]);
         let (inner, store) = stores(0);
-        inner.add("b.x", "k", &lww("x"), 0, 1).await.unwrap();
+        inner.add("b.x", "k", &lww("x"), 1).await.unwrap();
         let state = state(store.clone(), Some(Arc::new(FailingUpsert)), true, &files);
         let (status, body) = delete(&state, TENANT, &files).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         assert!(body.contains("nothing was closed"), "{body}");
-        store.add("b.x", "k2", &lww("x2"), 0, 2).await.unwrap();
+        store.add("b.x", "k2", &lww("x2"), 2).await.unwrap();
         assert_eq!(inner.list_maps().await.unwrap(), names(&["b.x"]));
         assert_eq!(files.indexed(), (names(&["b.x"]), names(&["b.x"])));
     }
@@ -3081,7 +3081,7 @@ mod tenant_tests {
         let files = Files::new();
         files.index(&["b.x", "b.never"]);
         let (inner, store) = stores(0);
-        inner.add("b.x", "k", &lww("x"), 0, 1).await.unwrap();
+        inner.add("b.x", "k", &lww("x"), 1).await.unwrap();
         store.hard_flush().await.unwrap();
         let policies = configured_policies().await;
         let state = state(store.clone(), Some(policies.clone()), true, &files);
@@ -3160,8 +3160,8 @@ mod tenant_tests {
             fail_in: Mutex::new(None),
         });
         let store = Arc::new(EngineMapDataStore::open(Arc::clone(&engine)).unwrap());
-        store.add("b.x", "k", &lww("x"), 0, 1).await.unwrap();
-        store.add("b.y", "k", &lww("y"), 0, 1).await.unwrap();
+        store.add("b.x", "k", &lww("x"), 1).await.unwrap();
+        store.add("b.y", "k", &lww("y"), 1).await.unwrap();
         let files = Files::new();
         files.index(&["b.x", "b.y"]);
         let policies = configured_policies().await;
@@ -3202,7 +3202,7 @@ mod tenant_tests {
             return;
         }
         let store = Arc::new(EngineMapDataStore::open(Arc::new(MemKvEngine::new())).unwrap());
-        store.add("b.x", "k", &lww("x"), 0, 1).await.unwrap();
+        store.add("b.x", "k", &lww("x"), 1).await.unwrap();
         let policies = configured_policies().await;
         let state = state(store.clone(), Some(policies.clone()), true, &files);
         let (status, body) = delete(&state, TENANT, &files).await;
@@ -3250,13 +3250,13 @@ mod tenant_tests {
         let files = Files::new();
         files.index(&["b.x"]);
         let (inner, store) = stores(0);
-        inner.add("b.x", "k0", &lww("x"), 0, 1).await.unwrap();
+        inner.add("b.x", "k0", &lww("x"), 1).await.unwrap();
         let policies = configured_policies().await;
         let state = state(store.clone(), Some(policies.clone()), true, &files);
         let mut park = store.test_park_before_queue_insert("b.x", "k1");
         let write = {
             let store = Arc::clone(&store);
-            tokio::spawn(async move { store.add("b.x", "k1", &lww("x1"), 0, 2).await })
+            tokio::spawn(async move { store.add("b.x", "k1", &lww("x1"), 2).await })
         };
         park.wait_parked().await;
 
@@ -3277,7 +3277,7 @@ mod tenant_tests {
         .await;
         assert!(inner.list_maps().await.unwrap().is_empty());
         assert!(store.load("b.x", "k0").await.unwrap().is_none());
-        assert!(store.add("b.x", "k2", &lww("x2"), 0, 3).await.is_err());
+        assert!(store.add("b.x", "k2", &lww("x2"), 3).await.is_err());
         assert_eq!(files.indexed(), (Vec::new(), Vec::new()));
         assert_denied(&*policies, TENANT).await;
         let line = String::from_utf8_lossy(&log.0.lock().unwrap()).into_owned();
@@ -3300,7 +3300,7 @@ mod tenant_tests {
             "__TopGun_y",
             "$sys/z",
         ] {
-            store.add(map, "k", &lww("v"), 0, 1).await.unwrap();
+            store.add(map, "k", &lww("v"), 1).await.unwrap();
         }
         let files = Files::new();
         let state = state(store, None, false, &files);

@@ -141,7 +141,6 @@ impl MapDataStore for HarnessInnerStore {
         map: &str,
         key: &str,
         value: &RecordValue,
-        _exp: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
         if !self.is_healthy() {
@@ -165,11 +164,10 @@ impl MapDataStore for HarnessInnerStore {
         map: &str,
         key: &str,
         bytes: &[u8],
-        exp: i64,
         now: i64,
     ) -> anyhow::Result<()> {
         let value: RecordValue = rmp_serde::from_slice(bytes)?;
-        self.add(map, key, &value, exp, now).await
+        self.add(map, key, &value, now).await
     }
 
     async fn add_backup(
@@ -177,7 +175,6 @@ impl MapDataStore for HarnessInnerStore {
         _map: &str,
         _key: &str,
         _value: &RecordValue,
-        _exp: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
         Ok(())
@@ -1181,7 +1178,7 @@ impl Driver {
     ) {
         let value = lww(millis);
         let now = self.clock;
-        let res = store.add(TEST_MAP, self.key_str(key), &value, 0, now).await;
+        let res = store.add(TEST_MAP, self.key_str(key), &value, now).await;
         let observed = Self::drain_observed();
         if res.is_err() {
             return;
@@ -1246,13 +1243,12 @@ impl Driver {
                         TEST_MAP,
                         self.key_str(key),
                         WriteSource::Cell(cell),
-                        0,
                         now,
                         None,
                     )
                     .await
             }
-            None => store.add(TEST_MAP, self.key_str(key), &value, 0, now).await,
+            None => store.add(TEST_MAP, self.key_str(key), &value, now).await,
         };
         let observed = Self::drain_observed();
         if res.is_err() {

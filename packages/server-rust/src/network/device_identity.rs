@@ -172,7 +172,6 @@ impl DeviceIdentityStore {
                 CREDENTIAL_MAP,
                 &key,
                 &record,
-                0,
                 i64::try_from(issued_at_ms).unwrap_or(i64::MAX),
             )
             .await?;

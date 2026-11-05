@@ -339,7 +339,7 @@ impl RecordStore for DefaultRecordStore {
             CallerProvenance::Client | CallerProvenance::CrdtMerge
         ) {
             self.data_store
-                .add(&self.name, key, &record.value, 0, now)
+                .add(&self.name, key, &record.value, now)
                 .await?;
 
             // Mark the record clean only if the value was written to a real
@@ -531,7 +531,6 @@ impl RecordStore for DefaultRecordStore {
                     &self.name,
                     key,
                     WriteSource::Cell(&cell),
-                    0,
                     now,
                     witness.as_ref(),
                 )
@@ -628,7 +627,7 @@ impl RecordStore for DefaultRecordStore {
         ) {
             let now = now_millis();
             self.data_store
-                .add_backup(&self.name, key, &record.value, 0, now)
+                .add_backup(&self.name, key, &record.value, now)
                 .await?;
         }
 
@@ -1935,10 +1934,9 @@ mod tests {
                 map: &str,
                 key: &str,
                 value: &RecordValue,
-                expiration_time: i64,
                 now: i64,
             ) -> anyhow::Result<()> {
-                self.inner.add(map, key, value, expiration_time, now).await
+                self.inner.add(map, key, value, now).await
             }
 
             async fn add_backup(
@@ -1946,12 +1944,9 @@ mod tests {
                 map: &str,
                 key: &str,
                 value: &RecordValue,
-                expiration_time: i64,
                 now: i64,
             ) -> anyhow::Result<()> {
-                self.inner
-                    .add_backup(map, key, value, expiration_time, now)
-                    .await
+                self.inner.add_backup(map, key, value, now).await
             }
 
             async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -2234,7 +2229,7 @@ mod tests {
         async fn materialize_fires_on_load_then_on_update() {
             let dir = tempfile::tempdir().expect("tempdir");
             let ds = redb(&dir);
-            ds.add(MAP, KEY, &or_value(&["a", "b"], &["x"]), 0, 0)
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &["x"]), 0)
                 .await
                 .expect("seed");
             let order = Arc::new(OrderObserver::default());
@@ -2265,7 +2260,7 @@ mod tests {
         async fn materialize_merkle_leaf_is_the_leaf_of_old_union_op() {
             let dir = tempfile::tempdir().expect("tempdir");
             let ds = redb(&dir);
-            ds.add(MAP, KEY, &or_value(&["a", "b"], &["x"]), 0, 0)
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &["x"]), 0)
                 .await
                 .expect("seed");
             let manager = Arc::new(MerkleSyncManager::new(3));
@@ -2309,7 +2304,7 @@ mod tests {
         async fn reader_does_not_cache_a_load_that_an_eviction_superseded() {
             let dir = tempfile::tempdir().expect("tempdir");
             let ds = redb(&dir);
-            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0, 0)
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0)
                 .await
                 .expect("seed");
             let parking = Arc::new(ParkingStore::new(Arc::clone(&ds)));
@@ -2353,7 +2348,7 @@ mod tests {
         async fn reader_does_not_cache_a_load_that_a_remove_superseded() {
             let dir = tempfile::tempdir().expect("tempdir");
             let ds = redb(&dir);
-            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0, 0)
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0)
                 .await
                 .expect("seed");
             let parking = Arc::new(ParkingStore::new(Arc::clone(&ds)));
@@ -2400,7 +2395,7 @@ mod tests {
         async fn reader_between_the_steps_of_a_remove_does_not_resurrect_it() {
             let dir = tempfile::tempdir().expect("tempdir");
             let ds = redb(&dir);
-            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0, 0)
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0)
                 .await
                 .expect("seed");
             let parking = Arc::new(ParkingStore::new(Arc::clone(&ds)));
@@ -2566,7 +2561,7 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             let ds = redb(&dir);
             let durable = or_value(&["a", "b"], &[]);
-            ds.add(MAP, KEY, &durable, 0, 0).await.expect("seed");
+            ds.add(MAP, KEY, &durable, 0).await.expect("seed");
             let other = or_value(&["z"], &[]);
             let leaf = |key: &str, value: &RecordValue| {
                 merkle_leaf_hash(key, value).expect("OrMap yields a leaf").1
@@ -2625,7 +2620,7 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             let inner = redb(&dir);
             inner
-                .add(MAP, KEY, &or_value(&["old"], &[]), 0, 0)
+                .add(MAP, KEY, &or_value(&["old"], &[]), 0)
                 .await
                 .expect("seed");
             // The flush loop never fires on its own: the test drives the only
@@ -2717,7 +2712,7 @@ mod tests {
             write_behind: &WriteBehindDataStore,
             store: &DefaultRecordStore,
         ) -> Arc<SlotCell> {
-            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0, 0)
+            ds.add(MAP, KEY, &or_value(&["a", "b"], &[]), 0)
                 .await
                 .expect("seed");
             assert!(or_add(store, "c").await.expect("or_add c"));
@@ -2817,7 +2812,7 @@ mod tests {
         async fn two_in_place_writes_with_a_flush_between_persist_both() {
             let dir = tempfile::tempdir().expect("tempdir");
             let ds = redb(&dir);
-            ds.add(MAP, KEY, &or_value(&["old"], &[]), 0, 0)
+            ds.add(MAP, KEY, &or_value(&["old"], &[]), 0)
                 .await
                 .expect("seed");
             // Entries are due at once, but only a requested flush drains them.
@@ -3160,14 +3155,7 @@ mod tests {
 
         #[async_trait]
         impl MapDataStore for RecordingStore {
-            async fn add(
-                &self,
-                _: &str,
-                _: &str,
-                _: &RecordValue,
-                _: i64,
-                _: i64,
-            ) -> anyhow::Result<()> {
+            async fn add(&self, _: &str, _: &str, _: &RecordValue, _: i64) -> anyhow::Result<()> {
                 self.called();
                 Ok(())
             }
@@ -3177,7 +3165,6 @@ mod tests {
                 _: &str,
                 _: &str,
                 _: &RecordValue,
-                _: i64,
                 _: i64,
             ) -> anyhow::Result<()> {
                 self.called();

@@ -554,7 +554,6 @@ pub(crate) mod test_store {
             map: &str,
             key: &str,
             value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             self.count();
@@ -569,7 +568,6 @@ pub(crate) mod test_store {
             _map: &str,
             _key: &str,
             _value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             self.count();
@@ -1010,7 +1008,7 @@ mod tests {
     async fn pre_fix_in_memory_only_scan_drops_non_resident_key() {
         let (factory, data_store, _dir) = redb_factory();
         data_store
-            .add("m", "stable", &make_value("v"), 0, 1000)
+            .add("m", "stable", &make_value("v"), 1000)
             .await
             .unwrap();
 
@@ -1032,7 +1030,7 @@ mod tests {
         // Seed keys k000..k019. "k010" is the stably-present key under observation.
         for i in 0..20 {
             data_store
-                .add("m", &format!("k{i:03}"), &make_value("v"), 0, 1000)
+                .add("m", &format!("k{i:03}"), &make_value("v"), 1000)
                 .await
                 .unwrap();
         }
@@ -1051,7 +1049,7 @@ mod tests {
                 // this disturb the still-pending stable key k010.
                 if k == "k005" && !inserted_mid_scan {
                     data_store
-                        .add("m", "k000z", &make_value("late"), 0, 2000)
+                        .add("m", "k000z", &make_value("late"), 2000)
                         .await
                         .unwrap();
                     inserted_mid_scan = true;

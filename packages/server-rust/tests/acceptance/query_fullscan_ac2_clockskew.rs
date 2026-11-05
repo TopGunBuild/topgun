@@ -100,7 +100,7 @@ async fn full_scan_returns_all_records_regardless_of_hlc_skew() {
             ttl_ms: None,
         };
         data_store
-            .add(map_name, &key, &value, 0, 1_704_067_200)
+            .add(map_name, &key, &value, 1_704_067_200)
             .await
             .expect("durable write");
         written_timestamps.insert(key, ts);

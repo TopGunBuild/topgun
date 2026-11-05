@@ -435,7 +435,6 @@ impl MapDataStore for FaultStore {
         map: &str,
         key: &str,
         value: &RecordValue,
-        _exp: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
         if self.pass_gate(key).await == Verdict::Refuse {
@@ -462,7 +461,6 @@ impl MapDataStore for FaultStore {
         _map: &str,
         _key: &str,
         _value: &RecordValue,
-        _exp: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
         Ok(())
@@ -843,21 +841,18 @@ async fn stranded_entry_scenario(mode: WatermarkMode, low_key_count: usize) -> V
     let (high, lows) = keys.split_first().expect("at least one key");
 
     // Lowest sequence in the partition, owned by the entry that will flush first.
-    store.add(TEST_MAP, high, &lww(1), 0, 1000).await.unwrap();
+    store.add(TEST_MAP, high, &lww(1), 1000).await.unwrap();
     for (i, key) in lows.iter().enumerate() {
         let millis = 2 + i as u64;
         store
-            .add(TEST_MAP, key, &lww(millis), 0, not_yet_due())
+            .add(TEST_MAP, key, &lww(millis), not_yet_due())
             .await
             .unwrap();
     }
     // Coalesces onto the entry above, inheriting its store_time while taking a
     // sequence ABOVE every buffered low key.
     let high_value = lww(1000);
-    store
-        .add(TEST_MAP, high, &high_value, 0, 1000)
-        .await
-        .unwrap();
+    store.add(TEST_MAP, high, &high_value, 1000).await.unwrap();
 
     run_requested_pass(&store, "the pass that flushes the coalesced entry").await;
     assert!(
@@ -1027,10 +1022,7 @@ async fn a_frame_written_after_the_partition_drains_is_still_replayed() {
 
     // Drain the partition completely, so the empty-and-seeded branch is the one
     // that computes the watermark.
-    store
-        .add(TEST_MAP, &keys[0], &lww(1), 0, 1000)
-        .await
-        .unwrap();
+    store.add(TEST_MAP, &keys[0], &lww(1), 1000).await.unwrap();
     run_requested_pass(&store, "the pass that drains the partition").await;
     assert!(
         store.test_pending_wal_sequences(partition).is_empty(),
@@ -1040,10 +1032,7 @@ async fn a_frame_written_after_the_partition_drains_is_still_replayed() {
     // The ordinary path: one more frame, then a crash before it flushes. Had the
     // empty branch used the counter's load, this frame was marked applied before
     // it existed and replay would filter it out.
-    store
-        .add(TEST_MAP, &keys[1], &lww(2), 0, 1000)
-        .await
-        .unwrap();
+    store.add(TEST_MAP, &keys[1], &lww(2), 1000).await.unwrap();
     crash(store, wal).await;
     assert!(
         !inner.contains(&keys[1]).await,
@@ -1108,7 +1097,7 @@ async fn heavy_coalescing_across_add_remove_and_remove_all_advances_the_full_pre
     for round in 0..4u64 {
         for key in &keys {
             store
-                .add(TEST_MAP, key, &lww(round + 1), 0, 1000)
+                .add(TEST_MAP, key, &lww(round + 1), 1000)
                 .await
                 .unwrap();
         }
@@ -1166,10 +1155,7 @@ async fn a_refused_entry_holds_the_watermark_and_its_frame_is_replayed() {
     // The inner store rejects the key for as long as the store runs, so the
     // write is durable nowhere but the WAL.
     inner.reject_key(&keys[0]);
-    store
-        .add(TEST_MAP, &keys[0], &lww(1), 0, 1000)
-        .await
-        .unwrap();
+    store.add(TEST_MAP, &keys[0], &lww(1), 1000).await.unwrap();
     let refused_seq = store
         .test_pending_wal_sequences(partition)
         .first()
@@ -1186,10 +1172,7 @@ async fn a_refused_entry_holds_the_watermark_and_its_frame_is_replayed() {
 
     // A later, healthy write of the same partition reaches the store, and must
     // not drag the watermark over the refused one.
-    store
-        .add(TEST_MAP, &keys[1], &lww(2), 0, 1000)
-        .await
-        .unwrap();
+    store.add(TEST_MAP, &keys[1], &lww(2), 1000).await.unwrap();
     wait_until("the later key's sequence to be resolved", || {
         store
             .test_pending_wal_sequences(partition)
@@ -1278,17 +1261,11 @@ async fn a_pre_frame_append_failure_removes_only_the_frameless_sequence_from_add
     let partition = test_partition();
     let keys = keys_in_partition(partition, 2);
 
-    store
-        .add(TEST_MAP, &keys[0], &lww(1), 0, 1000)
-        .await
-        .unwrap();
+    store.add(TEST_MAP, &keys[0], &lww(1), 1000).await.unwrap();
     let framed = store.test_max_assigned_wal_sequence(partition);
 
     fault.fail_on(2, FaultClass::PreFrame);
-    assert!(store
-        .add(TEST_MAP, &keys[1], &lww(2), 0, 1000)
-        .await
-        .is_err());
+    assert!(store.add(TEST_MAP, &keys[1], &lww(2), 1000).await.is_err());
 
     assert_eq!(
         store.test_pending_wal_sequences(partition),
@@ -1310,10 +1287,7 @@ async fn a_pre_frame_append_failure_removes_only_the_frameless_sequence_from_rem
     let partition = test_partition();
     let keys = keys_in_partition(partition, 2);
 
-    store
-        .add(TEST_MAP, &keys[0], &lww(1), 0, 1000)
-        .await
-        .unwrap();
+    store.add(TEST_MAP, &keys[0], &lww(1), 1000).await.unwrap();
     let framed = store.test_max_assigned_wal_sequence(partition);
 
     fault.fail_on(2, FaultClass::PreFrame);
@@ -1384,10 +1358,7 @@ async fn a_mid_loop_remove_all_failure_still_replays_the_earlier_tombstones() {
             !recovered.contains(key).await && !recovered.is_tombstone(key).await,
             "before the replay the store holds nothing of {key}"
         );
-        recovered
-            .add(TEST_MAP, key, &lww(1), 0, 1000)
-            .await
-            .unwrap();
+        recovered.add(TEST_MAP, key, &lww(1), 1000).await.unwrap();
     }
     let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &recovered);
     WalRecovery::new(Arc::clone(&wal), Vec::new())
@@ -1423,10 +1394,7 @@ async fn a_post_frame_append_failure_fail_stops_at_tier_b_without_rolling_back()
     let partition = test_partition();
     let keys = keys_in_partition(partition, 2);
 
-    store
-        .add(TEST_MAP, &keys[0], &lww(1), 0, 1000)
-        .await
-        .unwrap();
+    store.add(TEST_MAP, &keys[0], &lww(1), 1000).await.unwrap();
     let framed = store.test_max_assigned_wal_sequence(partition);
 
     let before = WalWriter::test_fail_stop_observations().len();
@@ -1437,10 +1405,9 @@ async fn a_post_frame_append_failure_fail_stops_at_tier_b_without_rolling_back()
     // the JoinHandle is what catches it.
     let store_clone = Arc::clone(&store);
     let key = keys[1].clone();
-    let outcome =
-        tokio::spawn(async move { store_clone.add(TEST_MAP, &key, &lww(2), 0, 1000).await })
-            .await
-            .err();
+    let outcome = tokio::spawn(async move { store_clone.add(TEST_MAP, &key, &lww(2), 1000).await })
+        .await
+        .err();
     assert!(
         outcome.is_some_and(|e| e.is_panic()),
         "a failure at or after the frame write must fail-stop, not return an Err \
@@ -1499,10 +1466,7 @@ async fn boot_seeding_scenario(mode: WatermarkMode) -> BootSeedingOutcome {
         100,
         requested_flush_config(),
     );
-    store
-        .add(TEST_MAP, &keys[0], &lww(1), 0, 1000)
-        .await
-        .unwrap();
+    store.add(TEST_MAP, &keys[0], &lww(1), 1000).await.unwrap();
     // Drained by a requested pass rather than with `hard_flush`, which marks
     // the store shut down and would reject the two writes this incarnation
     // must still ack.
@@ -1512,14 +1476,8 @@ async fn boot_seeding_scenario(mode: WatermarkMode) -> BootSeedingOutcome {
         100,
         "the first frame is durably applied, so the row sits at 100"
     );
-    store
-        .add(TEST_MAP, &keys[1], &lww(2), 0, 1000)
-        .await
-        .unwrap();
-    store
-        .add(TEST_MAP, &keys[2], &lww(3), 0, 1000)
-        .await
-        .unwrap();
+    store.add(TEST_MAP, &keys[1], &lww(2), 1000).await.unwrap();
+    store.add(TEST_MAP, &keys[2], &lww(3), 1000).await.unwrap();
     // kill -9: frames 101 and 102 are on disk and un-applied.
     crash(store, wal).await;
     let wal = open_wal(dir.path(), WalFsyncPolicy::PerOp, &inner);
@@ -1564,10 +1522,7 @@ async fn boot_seeding_scenario(mode: WatermarkMode) -> BootSeedingOutcome {
     );
 
     // A live write to p seeds the partition and then flushes Ok.
-    store
-        .add(TEST_MAP, &keys[3], &lww(4), 0, 1000)
-        .await
-        .unwrap();
+    store.add(TEST_MAP, &keys[3], &lww(4), 1000).await.unwrap();
     let seeded = store.test_pending_wal_sequences(partition);
     run_requested_pass(&store, "the pass that flushes the live write").await;
     assert!(inner.contains(&keys[3]).await, "the live write flushed");
@@ -1702,10 +1657,7 @@ async fn a_partition_without_a_live_write_never_marks_anything_applied() {
 
     {
         let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
-        store
-            .add(TEST_MAP, &keys[0], &lww(1), 0, 1000)
-            .await
-            .unwrap();
+        store.add(TEST_MAP, &keys[0], &lww(1), 1000).await.unwrap();
         crash(store, wal).await;
     }
 
@@ -1715,7 +1667,7 @@ async fn a_partition_without_a_live_write_never_marks_anything_applied() {
     let other = (0..PARTITION_COUNT).find(|p| *p != partition).unwrap();
     let other_key = keys_in_partition(other, 1);
     store
-        .add(TEST_MAP, &other_key[0], &lww(2), 0, 1000)
+        .add(TEST_MAP, &other_key[0], &lww(2), 1000)
         .await
         .unwrap();
     store.hard_flush().await.unwrap();
@@ -1902,7 +1854,7 @@ async fn a_hung_inner_store_is_an_abandoned_write_not_a_leak() {
     );
 
     inner.hang_key(&key);
-    store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
+    store.add(TEST_MAP, &key, &lww(1), 0).await.unwrap();
 
     // The flush worker has taken the entry out of the queue and registered it,
     // and its `inner.add` will never return: in-flight, no `Err`, no terminal.
@@ -1947,7 +1899,7 @@ async fn a_boot_unreplayed_sequence_is_an_abandoned_write_not_a_leak() {
     // A prior incarnation acked a write whose frame never reached the store.
     {
         let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
-        store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
+        store.add(TEST_MAP, &key, &lww(1), 0).await.unwrap();
         crash(store, wal).await;
     }
 
@@ -1987,7 +1939,7 @@ async fn a_queued_then_dequeued_sequence_missing_from_the_registry_is_a_leak() {
     let (_dir, wal) = real_wal(&inner);
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
 
-    store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
+    store.add(TEST_MAP, &key, &lww(1), 0).await.unwrap();
     assert_eq!(
         store.test_pending_wal_sequences(partition),
         vec![(1, PendingOrigin::Live)],
@@ -2045,7 +1997,7 @@ async fn a_refused_entry_under_retry_is_an_abandoned_write_not_a_leak() {
     );
 
     inner.reject_key(&key);
-    store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
+    store.add(TEST_MAP, &key, &lww(1), 0).await.unwrap();
 
     let refusals = refusals_up_to(&inner, &store, &key, 10).await;
     // Read with no await in between, so the flush loop cannot move the entry
@@ -2094,10 +2046,7 @@ async fn a_sequence_queued_behind_a_blocked_worker_is_an_abandoned_write_not_a_l
     // The flush loop is sequential across partitions, so one hung `inner` call
     // holds up every entry drained after it.
     inner.hang_key(&blocked_key);
-    store
-        .add(TEST_MAP, &blocked_key, &lww(1), 0, 0)
-        .await
-        .unwrap();
+    store.add(TEST_MAP, &blocked_key, &lww(1), 0).await.unwrap();
     wait_until("the worker to block on the hung entry", || {
         !store
             .test_in_flight_wal_sequences(blocked_partition)
@@ -2105,10 +2054,7 @@ async fn a_sequence_queued_behind_a_blocked_worker_is_an_abandoned_write_not_a_l
     })
     .await;
 
-    store
-        .add(TEST_MAP, &queued_key, &lww(2), 0, 0)
-        .await
-        .unwrap();
+    store.add(TEST_MAP, &queued_key, &lww(2), 0).await.unwrap();
     assert!(
         store
             .test_in_flight_wal_sequences(queued_partition)
@@ -2148,7 +2094,7 @@ async fn a_hung_wal_append_is_an_appending_abandoned_write_not_a_leak() {
     let writer = {
         let store = Arc::clone(&store);
         let key = key.clone();
-        tokio::spawn(async move { store.add(TEST_MAP, &key, &lww(1), 0, 0).await })
+        tokio::spawn(async move { store.add(TEST_MAP, &key, &lww(1), 0).await })
     };
 
     wait_until("the sequence to be assigned mid-append", || {
@@ -2191,7 +2137,7 @@ async fn a_transient_ownerless_window_never_fires_an_alarm() {
     let (_dir, wal) = real_wal(&inner);
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
 
-    store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
+    store.add(TEST_MAP, &key, &lww(1), 0).await.unwrap();
 
     // Drain INSIDE the classifier's own sample, between the registry probe and
     // the queue scan: the first sample then reads absent-from-both on a write
@@ -2282,8 +2228,8 @@ async fn a_re_replayed_window_lands_on_the_newest_frame_and_moves_no_tombstone_b
             }),
         );
         // Two framed writes for one key, both inside the widened window.
-        store.add(TEST_MAP, &key, &lww(10), 0, 0).await.unwrap();
-        store.add(TEST_MAP, &key, &lww(20), 0, 0).await.unwrap();
+        store.add(TEST_MAP, &key, &lww(10), 0).await.unwrap();
+        store.add(TEST_MAP, &key, &lww(20), 0).await.unwrap();
         crash(store, wal).await;
     }
     assert_eq!(
@@ -2355,7 +2301,7 @@ async fn recovery_stops_at_the_contiguous_success_frontier() {
         let store = build_store(&recovered, Arc::clone(&wal) as Arc<dyn Wal>, 1);
         for (i, key) in keys.iter().enumerate() {
             store
-                .add(TEST_MAP, key, &lww(i as u64 + 1), 0, 0)
+                .add(TEST_MAP, key, &lww(i as u64 + 1), 0)
                 .await
                 .unwrap();
         }
@@ -2421,7 +2367,6 @@ async fn a_legacy_shaped_wal_still_boots_and_replays() {
             key: key.clone(),
             op: WalOp::Store {
                 value: WalStorePayload::Legacy(Value::Int(7)),
-                expiration_time: None,
             },
             timestamp: None,
             sequence: 1,
@@ -2454,7 +2399,7 @@ async fn a_committed_redb_write_survives_a_drop_and_reopen() {
     // which is why every resolve-on-flush-success in this spec depends on it.
     {
         let store = redb_store(&path);
-        store.add(TEST_MAP, "durable", &lww(1), 0, 0).await.unwrap();
+        store.add(TEST_MAP, "durable", &lww(1), 0).await.unwrap();
     }
 
     let reopened = redb_store(&path);
@@ -2478,8 +2423,8 @@ async fn a_coalesce_leaves_the_keys_due_time_stable() {
     let (_wal_dir, wal) = real_wal(&inner);
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
 
-    store.add(TEST_MAP, &key, &lww(1), 0, 1_000).await.unwrap();
-    store.add(TEST_MAP, &key, &lww(2), 0, 9_000).await.unwrap();
+    store.add(TEST_MAP, &key, &lww(1), 1_000).await.unwrap();
+    store.add(TEST_MAP, &key, &lww(2), 9_000).await.unwrap();
 
     let drained = store
         .queues
@@ -2512,8 +2457,8 @@ async fn a_subsuming_survivor_early_resolves_the_retired_sequence() {
     let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
 
     // Store-onto-Store: a full snapshot subsumes its predecessor.
-    store.add(TEST_MAP, &keys[0], &lww(1), 0, 0).await.unwrap();
-    store.add(TEST_MAP, &keys[0], &lww(2), 0, 0).await.unwrap();
+    store.add(TEST_MAP, &keys[0], &lww(1), 0).await.unwrap();
+    store.add(TEST_MAP, &keys[0], &lww(2), 0).await.unwrap();
     let pending: Vec<u64> = store
         .test_pending_wal_sequences(partition)
         .iter()
@@ -2555,8 +2500,8 @@ async fn a_non_subsuming_survivor_carries_the_retired_sequence_forward() {
     store.test_force_non_subsuming_survivor(true);
     inner.reject_key(&key);
 
-    store.add(TEST_MAP, &key, &lww(1), 0, 0).await.unwrap();
-    store.add(TEST_MAP, &key, &lww(2), 0, 0).await.unwrap();
+    store.add(TEST_MAP, &key, &lww(1), 0).await.unwrap();
+    store.add(TEST_MAP, &key, &lww(2), 0).await.unwrap();
 
     assert_eq!(
         store
@@ -2654,7 +2599,7 @@ async fn an_unseeded_partition_never_advances_even_with_pending_sequences() {
     {
         let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
         for key in &keys {
-            store.add(TEST_MAP, key, &lww(1), 0, 0).await.unwrap();
+            store.add(TEST_MAP, key, &lww(1), 0).await.unwrap();
         }
         crash(store, wal).await;
     }
@@ -2669,9 +2614,9 @@ async fn an_unseeded_partition_never_advances_even_with_pending_sequences() {
         3,
         requested_flush_config(),
     );
-    store.add(TEST_MAP, &keys[0], &lww(2), 0, 0).await.unwrap();
+    store.add(TEST_MAP, &keys[0], &lww(2), 0).await.unwrap();
     store
-        .add(TEST_MAP, &keys[1], &lww(2), 0, not_yet_due())
+        .add(TEST_MAP, &keys[1], &lww(2), not_yet_due())
         .await
         .unwrap();
     assert!(!store.test_wal_partition_seeded(partition));
@@ -2760,7 +2705,7 @@ async fn an_advance_refuses_while_unseeded_and_retries_the_seed_once_the_wal_rea
     {
         let store = build_store(&inner, Arc::clone(&wal) as Arc<dyn Wal>, 1);
         for key in &keys {
-            store.add(TEST_MAP, key, &lww(1), 0, 0).await.unwrap();
+            store.add(TEST_MAP, key, &lww(1), 0).await.unwrap();
         }
         crash(store, wal).await;
     }
@@ -2781,9 +2726,9 @@ async fn an_advance_refuses_while_unseeded_and_retries_the_seed_once_the_wal_rea
     // Two writes, so the pending map is NON-EMPTY at the advance — the case a
     // seeded-only-on-empty guard lets straight through. Only the first is due
     // for the pass of phase B; the second stays buffered.
-    store.add(TEST_MAP, &keys[0], &lww(2), 0, 0).await.unwrap();
+    store.add(TEST_MAP, &keys[0], &lww(2), 0).await.unwrap();
     store
-        .add(TEST_MAP, &keys[1], &lww(2), 0, not_yet_due())
+        .add(TEST_MAP, &keys[1], &lww(2), not_yet_due())
         .await
         .unwrap();
     assert!(
@@ -2842,10 +2787,7 @@ async fn an_advance_refuses_while_unseeded_and_retries_the_seed_once_the_wal_rea
     // partition, carries this partition's row.
     store.resolve_wal_sequences(partition, &BTreeSet::from([1, 2]));
     let other_key = keys_in_partition(partition + 1, 1).remove(0);
-    store
-        .add(TEST_MAP, &other_key, &lww(3), 0, 0)
-        .await
-        .unwrap();
+    store.add(TEST_MAP, &other_key, &lww(3), 0).await.unwrap();
     run_requested_pass(&store, "the pass that flushes the other partition's key").await;
     assert!(
         inner.contains(&other_key).await,
@@ -3040,13 +2982,7 @@ impl CellFixture {
         let partition = test_partition();
         let keys = keys_in_partition(partition, 2);
         inner
-            .add(
-                TEST_MAP,
-                &keys[0],
-                &or_value(&["old-1", "old-2"], &[]),
-                0,
-                0,
-            )
+            .add(TEST_MAP, &keys[0], &or_value(&["old-1", "old-2"], &[]), 0)
             .await
             .expect("seed");
         let store = record_store_over(Arc::clone(&write_behind) as Arc<dyn MapDataStore>);
@@ -3476,14 +3412,14 @@ enum EntryKind {
 async fn write_entry(store: &WriteBehindDataStore, key: &str, kind: EntryKind, tag: &str) {
     let value = or_value(&[tag], &[]);
     match kind {
-        EntryKind::Value => store.add(TEST_MAP, key, &value, 0, 1).await,
+        EntryKind::Value => store.add(TEST_MAP, key, &value, 1).await,
         EntryKind::Cell => {
             let cell = crate::storage::engine::new_slot_cell(Record {
                 value,
                 metadata: RecordMetadata::new(0, 0),
             });
             store
-                .add_with_witness(TEST_MAP, key, WriteSource::Cell(&cell), 0, 1, None)
+                .add_with_witness(TEST_MAP, key, WriteSource::Cell(&cell), 1, None)
                 .await
         }
     }
@@ -3828,7 +3764,7 @@ impl Script {
                 self.next_value += 1;
                 stepped
                     .store
-                    .add(TEST_MAP, stepped.key(), &lww(self.next_value), 0, 0)
+                    .add(TEST_MAP, stepped.key(), &lww(self.next_value), 0)
                     .await
                     .map_err(|err| format!("a write was not accepted: {err}"))?;
                 self.last = Some(LastOp::Value(self.next_value));
@@ -4092,7 +4028,6 @@ async fn a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable
             key,
             WriteSource::Value(&or_value(&["a"], &[])),
             0,
-            0,
             Some(&add_tag("a")),
         )
         .await
@@ -4104,7 +4039,6 @@ async fn a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable
             TEST_MAP,
             key,
             WriteSource::Value(&or_value(&["a", "b"], &[])),
-            0,
             0,
             Some(&add_tag("b")),
         )
@@ -4121,7 +4055,7 @@ async fn a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable
     // is accepted whenever its call comes up between the survivor's refusals.
     stepped
         .store
-        .add(TEST_MAP, other_key, &lww(1), 0, 0)
+        .add(TEST_MAP, other_key, &lww(1), 0)
         .await
         .unwrap();
     let (refusals, _) = stepped.refuse_first_key(10).await;
@@ -4172,17 +4106,9 @@ async fn a_subsuming_write_over_a_survivor_resolves_the_carried_sequences() {
     let stepped = Stepped::new(268, config);
     let key = stepped.key().to_string();
 
-    stepped
-        .store
-        .add(TEST_MAP, &key, &lww(1), 0, 0)
-        .await
-        .unwrap();
+    stepped.store.add(TEST_MAP, &key, &lww(1), 0).await.unwrap();
     assert_eq!(stepped.settle("the first write").await, parked_on(&key));
-    stepped
-        .store
-        .add(TEST_MAP, &key, &lww(2), 0, 0)
-        .await
-        .unwrap();
+    stepped.store.add(TEST_MAP, &key, &lww(2), 0).await.unwrap();
 
     let calls_at_refusal = stepped.inner.gate_calls();
     stepped.inner.grant(Verdict::Refuse);
@@ -4214,11 +4140,7 @@ async fn a_subsuming_write_over_a_survivor_resolves_the_carried_sequences() {
          at 0), no longer held at the retired one"
     );
 
-    stepped
-        .store
-        .add(TEST_MAP, &key, &lww(3), 0, 0)
-        .await
-        .unwrap();
+    stepped.store.add(TEST_MAP, &key, &lww(3), 0).await.unwrap();
     assert_eq!(
         stepped.pending(),
         vec![(3, PendingOrigin::Live)],
@@ -4244,17 +4166,9 @@ async fn a_refused_entry_with_a_queued_newer_write_is_retired_into_it() {
     let partition = stepped.partition;
     let key = stepped.key().to_string();
 
-    stepped
-        .store
-        .add(TEST_MAP, &key, &lww(1), 0, 0)
-        .await
-        .unwrap();
+    stepped.store.add(TEST_MAP, &key, &lww(1), 0).await.unwrap();
     assert_eq!(stepped.settle("the first write").await, parked_on(&key));
-    stepped
-        .store
-        .add(TEST_MAP, &key, &lww(2), 0, 0)
-        .await
-        .unwrap();
+    stepped.store.add(TEST_MAP, &key, &lww(2), 0).await.unwrap();
 
     stepped.inner.grant(Verdict::Refuse);
     assert_eq!(
@@ -4322,7 +4236,6 @@ async fn a_retired_delta_entry_stays_replayable_until_its_survivor_is_durable() 
             key,
             WriteSource::Value(&or_value(&["a"], &[])),
             0,
-            0,
             Some(&add_tag("a")),
         )
         .await
@@ -4334,7 +4247,6 @@ async fn a_retired_delta_entry_stays_replayable_until_its_survivor_is_durable() 
             TEST_MAP,
             key,
             WriteSource::Value(&or_value(&["a", "b"], &[])),
-            0,
             0,
             Some(&add_tag("b")),
         )
@@ -4362,7 +4274,7 @@ async fn a_retired_delta_entry_stays_replayable_until_its_survivor_is_durable() 
     // partition's watermark past a sequence that was resolved too early.
     stepped
         .store
-        .add(TEST_MAP, other_key, &lww(1), 0, 0)
+        .add(TEST_MAP, other_key, &lww(1), 0)
         .await
         .unwrap();
     stepped.flush_the_other_key().await;
@@ -4409,7 +4321,6 @@ fn queued_entry(store_time: i64, sequence: u64) -> DelayedEntry {
         key: "k".to_string(),
         operation: DelayedOp::Store {
             value: lww(sequence),
-            expiration_time: 0,
         },
         store_time,
         sequence,
@@ -4490,7 +4401,7 @@ async fn distinct_new_key_writers_past_the_check_exceed_capacity_by_at_most_thei
     let store = capacity_store(&inner, Arc::clone(&fault) as Arc<dyn Wal>, CAPACITY);
     for i in 0..CAPACITY - 1 {
         store
-            .add(TEST_MAP, &format!("filled-{i}"), &lww(1), 0, 1000)
+            .add(TEST_MAP, &format!("filled-{i}"), &lww(1), 1000)
             .await
             .expect("below capacity");
     }
@@ -4502,7 +4413,7 @@ async fn distinct_new_key_writers_past_the_check_exceed_capacity_by_at_most_thei
             let store = Arc::clone(&store);
             tokio::spawn(async move {
                 store
-                    .add(TEST_MAP, &format!("new-{i}"), &lww(2), 0, 1000)
+                    .add(TEST_MAP, &format!("new-{i}"), &lww(2), 1000)
                     .await
             })
         })
@@ -4533,7 +4444,7 @@ async fn distinct_new_key_writers_past_the_check_exceed_capacity_by_at_most_thei
         "every writer that was past the check is counted, and nothing else"
     );
     let refused = store
-        .add(TEST_MAP, "one-more", &lww(3), 0, 1000)
+        .add(TEST_MAP, "one-more", &lww(3), 1000)
         .await
         .expect_err("a new key is refused over capacity");
     assert_eq!(refused.to_string(), "Write-behind capacity exceeded");
@@ -4546,17 +4457,17 @@ async fn distinct_new_key_writers_past_the_check_exceed_capacity_by_at_most_thei
     let boundary = capacity_store(&boundary_inner, boundary_wal as Arc<dyn Wal>, CAPACITY);
     for i in 0..CAPACITY - 1 {
         boundary
-            .add(TEST_MAP, &format!("filled-{i}"), &lww(1), 0, 1000)
+            .add(TEST_MAP, &format!("filled-{i}"), &lww(1), 1000)
             .await
             .expect("below capacity");
     }
     boundary
-        .add(TEST_MAP, "at-one-below", &lww(2), 0, 1000)
+        .add(TEST_MAP, "at-one-below", &lww(2), 1000)
         .await
         .expect("a new key checked one below capacity is accepted");
     assert_eq!(boundary.pending_operation_count(), CAPACITY);
     let refused = boundary
-        .add(TEST_MAP, "at-capacity", &lww(3), 0, 1000)
+        .add(TEST_MAP, "at-capacity", &lww(3), 1000)
         .await
         .expect_err("a new key checked at exactly capacity is refused");
     assert_eq!(refused.to_string(), "Write-behind capacity exceeded");
@@ -4590,7 +4501,7 @@ async fn the_shutdown_drain_registers_its_batch_in_flight() {
     let key = keys_in_partition(partition, 1).remove(0);
 
     inner.arm_gate();
-    store.add(TEST_MAP, &key, &lww(1), 0, 1000).await.unwrap();
+    store.add(TEST_MAP, &key, &lww(1), 1000).await.unwrap();
     let wal_seq = store.test_max_assigned_wal_sequence(partition);
     assert!(
         store.test_in_flight_wal_sequences(partition).is_empty(),
