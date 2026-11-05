@@ -413,7 +413,6 @@ pub(super) fn store_frame(key: &str, value: &RecordValue, sequence: u64) -> WalE
         key: key.to_string(),
         op: WalOp::Store {
             value: WalStorePayload::Record(value.clone()),
-            expiration_time: None,
         },
         timestamp,
         sequence,
@@ -489,7 +488,7 @@ pub(super) async fn write_pre_marker_data_dir(dir: &Path) {
     let engine = Arc::new(RedbKvEngine::open(&dir.join("engine.redb")).expect("engine"));
     let store = EngineMapDataStore::open(Arc::clone(&engine)).expect("store");
     store
-        .add(MAP, "old", &lww("old", 1), 0, 0)
+        .add(MAP, "old", &lww("old", 1), 0)
         .await
         .expect("a record");
     drop(store);
@@ -703,7 +702,6 @@ impl Node {
                 map: MAP,
                 key,
                 value: PutValue::Value(value),
-                expiration_time: 0,
                 store_time: 0,
             })
             .collect();
@@ -994,7 +992,7 @@ async fn a01_a_commit_is_one_engine_write_holding_its_records_and_its_watermark_
     // The map's first record also writes its registry rows; it is stored
     // first, so every later commit holds a record and rows only.
     let warm = keys_in(P, 1).remove(0);
-    wb.add(MAP, &warm, &lww("warm", 1), 0, 0).await.unwrap();
+    wb.add(MAP, &warm, &lww("warm", 1), 0).await.unwrap();
     flush_idle(&wb).await;
 
     let mark = node.engine.mark();
@@ -1003,7 +1001,7 @@ async fn a01_a_commit_is_one_engine_write_holding_its_records_and_its_watermark_
     // its own to make each pass the commit of exactly one entry.
     for partition in [Q, R, U] {
         let key = keys_in(partition, 1).remove(0);
-        wb.add(MAP, &key, &lww(&key, 2), 0, 0).await.unwrap();
+        wb.add(MAP, &key, &lww(&key, 2), 0).await.unwrap();
         let seq = wb.test_max_assigned_wal_sequence(partition);
         entries.push((partition, key, seq));
         flush_idle(&wb).await;
@@ -1050,13 +1048,13 @@ async fn a02_a_refused_commit_changes_no_watermark_and_no_pending_sequence() {
     let wb = node.write_behind(wb_config()).await;
 
     let keys = keys_in(Q, 2);
-    wb.add(MAP, &keys[0], &lww("warm", 1), 0, 0).await.unwrap();
+    wb.add(MAP, &keys[0], &lww("warm", 1), 0).await.unwrap();
     flush_idle(&wb).await;
     let warm_seq = wb.test_max_assigned_wal_sequence(Q);
     assert_eq!(node.wal.durable_applied(Q), Some(warm_seq));
 
     let value = lww("refused", 2);
-    wb.add(MAP, &keys[1], &value, 0, 0).await.unwrap();
+    wb.add(MAP, &keys[1], &value, 0).await.unwrap();
     let seq = wb.test_max_assigned_wal_sequence(Q);
     let pending_before = pending(&wb, Q);
     let count_before = wb.pending_operation_count();
@@ -1131,16 +1129,16 @@ async fn a03_a_partition_whose_watermark_moved_by_coalescing_gets_its_row() {
     let r_keys = keys_in(R, 2);
     let q_keys = keys_in(Q, 2);
     // Both partitions stored once, so both are seeded and hold a row.
-    wb.add(MAP, &r_keys[0], &lww("r0", 1), 0, 0).await.unwrap();
-    wb.add(MAP, &q_keys[0], &lww("q0", 1), 0, 0).await.unwrap();
+    wb.add(MAP, &r_keys[0], &lww("r0", 1), 0).await.unwrap();
+    wb.add(MAP, &q_keys[0], &lww("q0", 1), 0).await.unwrap();
     flush_idle(&wb).await;
     let r_row = node.engine.row(R).expect("r's row");
 
     // Two writes of one key in R: the second retires the first, whose
     // sequence resolves at once, so R's watermark moves without R storing.
-    wb.add(MAP, &r_keys[1], &lww("r1", 2), 0, 0).await.unwrap();
+    wb.add(MAP, &r_keys[1], &lww("r1", 2), 0).await.unwrap();
     let retired = wb.test_max_assigned_wal_sequence(R);
-    wb.add(MAP, &r_keys[1], &lww("r1-again", 3), 0, 0)
+    wb.add(MAP, &r_keys[1], &lww("r1-again", 3), 0)
         .await
         .unwrap();
     let survivor = wb.test_max_assigned_wal_sequence(R);
@@ -1151,7 +1149,7 @@ async fn a03_a_partition_whose_watermark_moved_by_coalescing_gets_its_row() {
     );
     assert!(survivor > retired && retired > r_row);
 
-    wb.add(MAP, &q_keys[1], &lww("q1", 4), 0, 0).await.unwrap();
+    wb.add(MAP, &q_keys[1], &lww("q1", 4), 0).await.unwrap();
     let q_seq = wb.test_max_assigned_wal_sequence(Q);
 
     // R's survivor is refused, so the only commit that can carry R's row is
@@ -1205,17 +1203,17 @@ async fn a04_an_unseeded_partition_gets_no_row() {
         .await;
 
     let warm = keys_in(Q, 2);
-    wb.add(MAP, &warm[0], &lww("warm", 1), 0, 0).await.unwrap();
+    wb.add(MAP, &warm[0], &lww("warm", 1), 0).await.unwrap();
     flush_idle(&wb).await;
 
     let u_key = keys_in(U, 1).remove(0);
-    wb.add(MAP, &u_key, &lww("u", 2), 0, 0).await.unwrap();
+    wb.add(MAP, &u_key, &lww("u", 2), 0).await.unwrap();
     assert!(
         !wb.test_wal_partition_seeded(U),
         "U is tracked but cannot be seeded"
     );
     assert!(!pending(&wb, U).is_empty(), "U has a pending sequence");
-    wb.add(MAP, &warm[1], &lww("q", 3), 0, 0).await.unwrap();
+    wb.add(MAP, &warm[1], &lww("q", 3), 0).await.unwrap();
     let q_seq = wb.test_max_assigned_wal_sequence(Q);
 
     let mark = node.engine.mark();
@@ -1265,9 +1263,7 @@ async fn a05_the_engine_watermark_never_decreases_across_commits_and_restarts() 
     let wb = node.write_behind(wb_config()).await;
     let mark = node.engine.mark();
     for (i, key) in p_keys[..3].iter().enumerate() {
-        wb.add(MAP, key, &lww(key, i as u64 + 1), 0, 0)
-            .await
-            .unwrap();
+        wb.add(MAP, key, &lww(key, i as u64 + 1), 0).await.unwrap();
         flush_idle(&wb).await;
     }
     let first_run = node.engine.committed_since(mark);
@@ -1291,14 +1287,14 @@ async fn a05_the_engine_watermark_never_decreases_across_commits_and_restarts() 
     let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode reopen");
     node.recover().await.expect("recovery");
     let wb = node.write_behind(wb_config()).await;
-    wb.add(MAP, &p_keys[3], &lww("p-again", 10), 0, 0)
+    wb.add(MAP, &p_keys[3], &lww("p-again", 10), 0)
         .await
         .unwrap();
     assert!(wb.test_max_assigned_wal_sequence(P) > p_stored);
     // The registry row exists since the first run, so the record key is known.
     node.engine
         .fail_writes_holding(Some(record_key(&node.engine, &p_keys[3])));
-    wb.add(MAP, &q_key, &lww("q", 11), 0, 0).await.unwrap();
+    wb.add(MAP, &q_key, &lww("q", 11), 0).await.unwrap();
     let q_seq = wb.test_max_assigned_wal_sequence(Q);
     let q_record = record_key(&node.engine, &q_key);
     let mark = node.engine.mark();
@@ -1424,9 +1420,7 @@ async fn a07_segments_are_sealed_by_size_or_age_not_per_commit() {
     let keys = keys_in(P, 211);
 
     for (i, key) in keys[..200].iter().enumerate() {
-        wb.add(MAP, key, &lww(key, i as u64 + 1), 0, 0)
-            .await
-            .unwrap();
+        wb.add(MAP, key, &lww(key, i as u64 + 1), 0).await.unwrap();
         flush_idle(&wb).await;
     }
     assert_eq!(
@@ -1442,7 +1436,7 @@ async fn a07_segments_are_sealed_by_size_or_age_not_per_commit() {
 
     let big = "x".repeat(1 << 20);
     for (i, key) in keys[200..209].iter().enumerate() {
-        wb.add(MAP, key, &lww(&big, 1_000 + i as u64), 0, 0)
+        wb.add(MAP, key, &lww(&big, 1_000 + i as u64), 0)
             .await
             .unwrap();
         flush_idle(&wb).await;
@@ -1454,7 +1448,7 @@ async fn a07_segments_are_sealed_by_size_or_age_not_per_commit() {
         "8 MiB appended: sealed at the next tick, a new segment started"
     );
 
-    wb.add(MAP, &keys[209], &lww("small", 2_000), 0, 0)
+    wb.add(MAP, &keys[209], &lww("small", 2_000), 0)
         .await
         .unwrap();
     flush_idle(&wb).await;
@@ -1715,7 +1709,7 @@ async fn a09_a_data_directory_older_than_the_wal_directory_is_refused_and_nothin
         let wb = node.write_behind(wb_config()).await;
         for partition in [P, Q] {
             let key = keys_in(partition, 1).remove(0);
-            wb.add(MAP, &key, &lww(&key, 1), 0, 0).await.unwrap();
+            wb.add(MAP, &key, &lww(&key, 1), 0).await.unwrap();
         }
         flush_idle(&wb).await;
         stop_write_behind(wb).await;
@@ -2547,12 +2541,12 @@ async fn a18_a_kill_inside_or_right_after_a_commit_loses_no_acked_write() {
         };
         let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
         let wb = node.write_behind(wb_config()).await;
-        wb.add(MAP, &keys[0], &value(0), 0, 0).await.unwrap();
+        wb.add(MAP, &keys[0], &value(0), 0).await.unwrap();
         flush_idle(&wb).await;
         // Acknowledged: under per_op each frame is fsynced before `add`
         // returns.
         for (i, key) in keys.iter().enumerate().skip(1) {
-            wb.add(MAP, key, &value(i), 0, 0).await.unwrap();
+            wb.add(MAP, key, &value(i), 0).await.unwrap();
         }
         node.engine.abort_in(n, side);
         flush_idle(&wb).await;
@@ -2622,7 +2616,7 @@ async fn a19_a_wal_directory_older_than_the_data_directory_replays_nothing_at_or
     let wb = node.write_behind(wb_config()).await;
     for (key, millis) in [(&p_keys[0], 1), (&q_key, 2)] {
         let value = lww(&format!("{key}-1"), millis);
-        wb.add(MAP, key, &value, 0, 0).await.unwrap();
+        wb.add(MAP, key, &value, 0).await.unwrap();
         acked.insert(key.clone(), value);
     }
     flush_idle(&wb).await;
@@ -2637,7 +2631,7 @@ async fn a19_a_wal_directory_older_than_the_data_directory_replays_nothing_at_or
     let wb = node.write_behind(wb_config()).await;
     for (key, millis) in [(&p_keys[0], 10), (&p_keys[1], 11), (&p_keys[2], 12)] {
         let value = lww(&format!("{key}-2"), millis);
-        wb.add(MAP, key, &value, 0, 0).await.unwrap();
+        wb.add(MAP, key, &value, 0).await.unwrap();
         acked.insert(key.clone(), value);
     }
     flush_idle(&wb).await;
@@ -2714,7 +2708,6 @@ async fn a20_a_commit_carrying_a_watermark_below_the_held_row_is_refused_and_wri
                         map: MAP,
                         key: &key,
                         value: PutValue::Value(&value),
-                        expiration_time: 0,
                         store_time: 0,
                     }],
                     applied: vec![(P, sequence)],
@@ -2862,7 +2855,7 @@ async fn a22_after_finish_no_tick_unlinks_and_the_tick_task_ends() {
 async fn a23_write(wb: &WriteBehindDataStore) {
     for partition in [P, Q, R] {
         let key = keys_in(partition, 1).remove(0);
-        wb.add(MAP, &key, &lww(&key, 1), 0, 0).await.unwrap();
+        wb.add(MAP, &key, &lww(&key, 1), 0).await.unwrap();
     }
     flush_idle(wb).await;
 }
@@ -2938,7 +2931,7 @@ fn a23_a_clean_stop_writes_one_rollback_hint_per_partition_equal_to_the_engine_r
             panic!("injected stall watchdog panic");
         }));
         let key = keys_in(P, 1).remove(0);
-        wb.add(MAP, &key, &lww(&key, 1), 0, 0).await.unwrap();
+        wb.add(MAP, &key, &lww(&key, 1), 0).await.unwrap();
         let failure = wb.background_failure();
         wait_for("the stall watchdog to panic", || failure.borrow().is_some()).await;
         let shutdown = wb.hard_flush().await;
@@ -3115,20 +3108,14 @@ fn a25_a_stop_whose_drain_timed_out_writes_hints_at_the_durable_watermark_and_lo
         let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
         let wb = node.write_behind(config.clone()).await;
         let keys = keys_in(P, 4);
-        wb.add(MAP, &keys[0], &lww("warm", 1), 0, 0).await.unwrap();
+        wb.add(MAP, &keys[0], &lww("warm", 1), 0).await.unwrap();
         flush_idle(&wb).await;
         let filler = "x".repeat(5 << 20);
         let mut sequences = Vec::new();
         for (i, key) in keys[1..].iter().enumerate() {
-            wb.add(
-                MAP,
-                key,
-                &lww(&format!("{key}-{filler}"), i as u64 + 2),
-                0,
-                0,
-            )
-            .await
-            .unwrap();
+            wb.add(MAP, key, &lww(&format!("{key}-{filler}"), i as u64 + 2), 0)
+                .await
+                .unwrap();
             sequences.push((key.clone(), wb.test_max_assigned_wal_sequence(P)));
         }
         node.engine.set_write_delay(Duration::from_millis(500));
@@ -3175,7 +3162,7 @@ fn a25_a_stop_whose_drain_timed_out_writes_hints_at_the_durable_watermark_and_lo
         let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
         let wb = node.write_behind(config.clone()).await;
         let key = keys_in(P, 1).remove(0);
-        wb.add(MAP, &key, &lww(&key, 1), 0, 0).await.unwrap();
+        wb.add(MAP, &key, &lww(&key, 1), 0).await.unwrap();
         flush_idle(&wb).await;
         stop_write_behind(wb).await;
         node.close().await;
@@ -3225,7 +3212,7 @@ async fn a90_one_entry_commits_cost_no_more_than_base() {
             },
             ttl_ms: None,
         };
-        wb.add("m", &key, &value, 0, 0).await.expect("add");
+        wb.add("m", &key, &value, 0).await.expect("add");
     }
     let started = Instant::now();
     wb.soft_flush().await.expect("soft_flush");
@@ -3712,7 +3699,7 @@ async fn c07_v1_segments_are_replayed_and_collected_and_only_v2_segments_are_cre
     let wb = node.write_behind(wb_config()).await;
     for partition in [P, Q] {
         let key = keys_in(partition, 4).pop().unwrap();
-        wb.add(MAP, &key, &lww("new", 2), 0, 0).await.unwrap();
+        wb.add(MAP, &key, &lww("new", 2), 0).await.unwrap();
     }
     flush_idle(&wb).await;
     for _ in 0..2 {
@@ -3884,7 +3871,7 @@ async fn c10_an_append_after_finish_is_refused_and_touches_no_file() {
     let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
     let wb = node.write_behind(wb_config()).await;
     let keys = keys_in(P, 2);
-    wb.add(MAP, &keys[0], &lww("first", 1), 0, 0).await.unwrap();
+    wb.add(MAP, &keys[0], &lww("first", 1), 0).await.unwrap();
     flush_idle(&wb).await;
 
     let reached = Arc::new(tokio::sync::Notify::new());
@@ -3894,7 +3881,7 @@ async fn c10_an_append_after_finish_is_refused_and_touches_no_file() {
     let parked = {
         let wb = Arc::clone(&wb);
         let key = keys[1].clone();
-        tokio::spawn(async move { wb.add(MAP, &key, &lww("second", 2), 0, 0).await })
+        tokio::spawn(async move { wb.add(MAP, &key, &lww("second", 2), 0).await })
     };
     reached.notified().await;
     wb.hard_flush().await.expect("hard_flush");

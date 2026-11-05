@@ -3230,7 +3230,6 @@ mod tests {
             _map: &str,
             _key: &str,
             _value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             panic!("injected inner-store panic");
@@ -3241,12 +3240,9 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.0
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            self.0.add_backup(map, key, value, now).await
         }
 
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -3353,7 +3349,7 @@ mod tests {
             ttl_ms: None,
         };
         store
-            .add("bin-cause", "in-the-dead-batch", &value, 0, 0)
+            .add("bin-cause", "in-the-dead-batch", &value, 0)
             .await
             .expect("a healthy store accepts the write");
         let mut recorded = store.background_failure();
@@ -3562,7 +3558,6 @@ mod tests {
             _map: &str,
             _key: &str,
             _value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             Err(anyhow::anyhow!("injected broken store"))
@@ -3577,12 +3572,9 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.0
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            self.0.add_backup(map, key, value, now).await
         }
 
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -3817,7 +3809,7 @@ mod tests {
         let declared = inner.scan_order().is_some();
         for key in ["k1", "k2"] {
             inner
-                .add("m", key, &lww("v", 1), 0, 1000)
+                .add("m", key, &lww("v", 1), 1000)
                 .await
                 .expect("durable row");
         }
@@ -3832,7 +3824,7 @@ mod tests {
             None,
         );
         store
-            .add("m", "k2", &lww("w", 9), 0, 2000)
+            .add("m", "k2", &lww("w", 9), 2000)
             .await
             .expect("staged write");
 

@@ -514,17 +514,11 @@ impl WriteBehindConfig {
 /// A buffered operation waiting to be flushed to the inner store.
 #[derive(Debug, Clone)]
 pub(crate) enum DelayedOp {
-    /// Buffered add/update with the value and expiration time.
-    Store {
-        value: RecordValue,
-        expiration_time: i64,
-    },
+    /// Buffered add/update with the value.
+    Store { value: RecordValue },
     /// Buffered in-place write: the flush persists the cell's value as it is
     /// at flush time.
-    StoreCell {
-        cell: Arc<SlotCell>,
-        expiration_time: i64,
-    },
+    StoreCell { cell: Arc<SlotCell> },
     /// Buffered remove (tombstone).
     Remove,
 }
@@ -1308,19 +1302,17 @@ impl StagedValue {
 /// and staged as two copies; an in-place write's cell is shared by the queued
 /// entry, its staging slot and the engine, so the flush persists whatever the
 /// cell holds at flush time and a re-adoption finds the same cell (TG-WB-003).
-fn queued_and_staged(src: WriteSource<'_>, expiration_time: i64) -> (DelayedOp, StagedValue) {
+fn queued_and_staged(src: WriteSource<'_>) -> (DelayedOp, StagedValue) {
     match src {
         WriteSource::Value(value) => (
             DelayedOp::Store {
                 value: value.clone(),
-                expiration_time,
             },
             StagedValue::Value(value.clone()),
         ),
         WriteSource::Cell(cell) => (
             DelayedOp::StoreCell {
                 cell: Arc::clone(cell),
-                expiration_time,
             },
             StagedValue::Cell(Arc::clone(cell)),
         ),
@@ -4270,7 +4262,7 @@ impl WriteBehindDataStore {
                 let entry = &prepared.entry;
                 let (map, key, store_time) =
                     (entry.map.as_str(), entry.key.as_str(), entry.store_time);
-                let expiration_time = match &entry.operation {
+                let borrowed = match &entry.operation {
                     DelayedOp::Remove => {
                         return StoreWrite::Remove {
                             map,
@@ -4278,16 +4270,8 @@ impl WriteBehindDataStore {
                             store_time,
                         }
                     }
-                    DelayedOp::Store {
-                        expiration_time, ..
-                    }
-                    | DelayedOp::StoreCell {
-                        expiration_time, ..
-                    } => *expiration_time,
-                };
-                let borrowed = match &entry.operation {
-                    DelayedOp::Store { value, .. } => Some(value),
-                    _ => cloned.as_ref(),
+                    DelayedOp::Store { value } => Some(value),
+                    DelayedOp::StoreCell { .. } => cloned.as_ref(),
                 };
                 // A cell's value is cloned above exactly when it is not
                 // carried as bytes, so the bytes arm is never left without
@@ -4300,7 +4284,6 @@ impl WriteBehindDataStore {
                     map,
                     key,
                     value,
-                    expiration_time,
                     store_time,
                 }
             })
@@ -5085,27 +5068,13 @@ impl WriteBehindDataStore {
 
 #[async_trait]
 impl MapDataStore for WriteBehindDataStore {
-    async fn add(
-        &self,
-        map: &str,
-        key: &str,
-        value: &RecordValue,
-        expiration_time: i64,
-        now: i64,
-    ) -> anyhow::Result<()> {
+    async fn add(&self, map: &str, key: &str, value: &RecordValue, now: i64) -> anyhow::Result<()> {
         // One write path, not two. Every caller without a per-op delta — every
         // LWW write, bulk and SYNC ingestion, cross-node merge, rehydration —
         // arrives here, and it is the same code the witness-bearing callers run
         // with the witness set. A second body would let the two drift.
-        self.add_with_witness(
-            map,
-            key,
-            WriteSource::Value(value),
-            expiration_time,
-            now,
-            None,
-        )
-        .await
+        self.add_with_witness(map, key, WriteSource::Value(value), now, None)
+            .await
     }
 
     /// Whether the mutation point should build an OR witness for this store.
@@ -5147,7 +5116,6 @@ impl MapDataStore for WriteBehindDataStore {
         map: &str,
         key: &str,
         src: WriteSource<'_>,
-        expiration_time: i64,
         now: i64,
         witness: Option<&OrDelta>,
     ) -> anyhow::Result<()> {
@@ -5251,11 +5219,6 @@ impl MapDataStore for WriteBehindDataStore {
             },
             _ => WalOp::Store {
                 value: WalStorePayload::Record(src.to_value()),
-                expiration_time: if expiration_time == 0 {
-                    None
-                } else {
-                    Some(expiration_time)
-                },
             },
         };
         let wal_entry = WalEntry {
@@ -5285,7 +5248,7 @@ impl MapDataStore for WriteBehindDataStore {
         if let Some(gate) = TestParks::take_keyed(&self.test_parks.before_queue_insert, map, key) {
             gate.pass().await;
         }
-        let (operation, staged) = queued_and_staged(src, expiration_time);
+        let (operation, staged) = queued_and_staged(src);
         let entry = DelayedEntry::fresh(map, key, operation, now, entry_seq, wal_seq);
 
         let staging_key = (map.to_string(), key.to_string());
@@ -5348,7 +5311,6 @@ impl MapDataStore for WriteBehindDataStore {
         map: &str,
         key: &str,
         value: &RecordValue,
-        expiration_time: i64,
         now: i64,
     ) -> anyhow::Result<()> {
         // Backups pass through directly -- backup replication has its own
@@ -5357,9 +5319,7 @@ impl MapDataStore for WriteBehindDataStore {
         let _in_flight = self.tenant_closes.enter(map)?;
         #[cfg(test)]
         TestParks::pass_keyed(&self.test_parks.before_backup_write, map, key).await;
-        self.inner
-            .add_backup(map, key, value, expiration_time, now)
-            .await
+        self.inner.add_backup(map, key, value, now).await
     }
 
     async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -6452,7 +6412,6 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             self.calls.lock().unwrap().push(SpyCall::Add {
@@ -6490,7 +6449,6 @@ mod tests {
             _map: &str,
             _key: &str,
             _value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             Ok(())
@@ -6610,7 +6568,7 @@ mod tests {
         let store = WriteBehindDataStore::new(inner, config);
 
         let val = dummy_value();
-        store.add("map1", "key1", &val, 0, 1000).await.unwrap();
+        store.add("map1", "key1", &val, 1000).await.unwrap();
 
         // load() should return the staged value immediately
         let loaded = store.load("map1", "key1").await.unwrap();
@@ -6638,9 +6596,9 @@ mod tests {
         let val2 = dummy_value_with(2);
 
         // First write at store_time=1000
-        store.add("map1", "key1", &val1, 0, 1000).await.unwrap();
+        store.add("map1", "key1", &val1, 1000).await.unwrap();
         // Second write at store_time=2000 (coalesces)
-        store.add("map1", "key1", &val2, 0, 2000).await.unwrap();
+        store.add("map1", "key1", &val2, 2000).await.unwrap();
 
         // Only one pending entry (coalesced)
         assert_eq!(
@@ -6675,7 +6633,7 @@ mod tests {
         let store = WriteBehindDataStore::new(inner, config);
 
         let val = dummy_value();
-        store.add("map1", "key1", &val, 0, 1000).await.unwrap();
+        store.add("map1", "key1", &val, 1000).await.unwrap();
 
         // Wait for the flush loop to process the entry
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -6700,9 +6658,9 @@ mod tests {
         let store = WriteBehindDataStore::new(inner, config);
 
         let val = dummy_value();
-        store.add("map1", "a", &val, 0, 1000).await.unwrap();
-        store.add("map1", "b", &val, 0, 1000).await.unwrap();
-        store.add("map1", "c", &val, 0, 1000).await.unwrap();
+        store.add("map1", "a", &val, 1000).await.unwrap();
+        store.add("map1", "b", &val, 1000).await.unwrap();
+        store.add("map1", "c", &val, 1000).await.unwrap();
 
         assert_eq!(store.pending_operation_count(), 3);
 
@@ -6728,11 +6686,11 @@ mod tests {
         let store = WriteBehindDataStore::new(inner, config);
 
         let val = dummy_value();
-        store.add("map1", "a", &val, 0, 1000).await.unwrap();
-        store.add("map1", "b", &val, 0, 1000).await.unwrap();
+        store.add("map1", "a", &val, 1000).await.unwrap();
+        store.add("map1", "b", &val, 1000).await.unwrap();
 
         // Third key should be rejected
-        let result = store.add("map1", "c", &val, 0, 1000).await;
+        let result = store.add("map1", "c", &val, 1000).await;
         assert!(result.is_err(), "Should reject writes exceeding capacity");
 
         // Queue still contains exactly 2 entries
@@ -6752,7 +6710,7 @@ mod tests {
         let val = dummy_value();
         for i in 0..5 {
             store
-                .add("map1", &format!("key{i}"), &val, 0, 1000)
+                .add("map1", &format!("key{i}"), &val, 1000)
                 .await
                 .unwrap();
         }
@@ -6780,7 +6738,7 @@ mod tests {
         let store = WriteBehindDataStore::new(inner, config);
 
         let val = dummy_value();
-        store.add("map1", "key1", &val, 0, 1000).await.unwrap();
+        store.add("map1", "key1", &val, 1000).await.unwrap();
         store.remove("map1", "key1", 2000).await.unwrap();
 
         // load() should return None because staging has a pending delete marker,
@@ -6866,8 +6824,8 @@ mod tests {
         let store = WriteBehindDataStore::new(inner, config);
 
         let val = dummy_value();
-        store.add("m", "k1", &val, 0, 1).await.unwrap();
-        store.add("m", "k2", &val, 0, 1).await.unwrap();
+        store.add("m", "k1", &val, 1).await.unwrap();
+        store.add("m", "k2", &val, 1).await.unwrap();
 
         // Both writes are buffered (write_delay is 60s), so the watermark sits at
         // the lowest pending sequence — no byte durability yet.
@@ -6913,7 +6871,7 @@ mod tests {
         };
         let store = WriteBehindDataStore::new(inner, config);
 
-        store.add("m", "k", &dummy_value(), 0, 1).await.unwrap();
+        store.add("m", "k", &dummy_value(), 1).await.unwrap();
         let buffered_seq = store.flushed_watermark();
         let assigned = store.assigned_write_sequence();
         assert!(
@@ -6960,10 +6918,7 @@ mod tests {
         let spy = Arc::new(SpyDataStore::retaining());
         spy.refuse_everything(true);
         let store = schedule_store(&spy, schedule_config());
-        store
-            .add(SCHEDULE_MAP, "k", &lww("v", 1), 0, 1)
-            .await
-            .unwrap();
+        store.add(SCHEDULE_MAP, "k", &lww("v", 1), 1).await.unwrap();
         advance(60_000).await;
         let while_refused = (
             store.pending_operation_count(),
@@ -7006,7 +6961,7 @@ mod tests {
 
         // A buffered add for k1: its sequence is the lowest pending, so the
         // watermark sits at it (nothing below it is durable yet).
-        store.add("m", "k1", &dummy_value(), 0, 1).await.unwrap();
+        store.add("m", "k1", &dummy_value(), 1).await.unwrap();
         let add_seq = store.flushed_watermark();
 
         // A batch remove of the SAME key coalesces the buffered add. The retired
@@ -7044,8 +6999,8 @@ mod tests {
         let store = WriteBehindDataStore::new(inner, config);
 
         let val = dummy_value();
-        store.add("map1", "a", &val, 0, 1000).await.unwrap();
-        store.add("map1", "b", &val, 0, 1000).await.unwrap();
+        store.add("map1", "a", &val, 1000).await.unwrap();
+        store.add("map1", "b", &val, 1000).await.unwrap();
 
         let seq = store.soft_flush().await.unwrap();
         assert!(seq > 0, "Sequence should be > 0 after enqueuing entries");
@@ -7078,7 +7033,7 @@ mod tests {
         let val = dummy_value();
         let keys = ["alpha", "beta", "gamma", "delta"];
         for key in &keys {
-            store.add("drain_map", key, &val, 0, 1000).await.unwrap();
+            store.add("drain_map", key, &val, 1000).await.unwrap();
         }
 
         // All writes are acked (add returned Ok) but not yet in the inner store.
@@ -7110,7 +7065,7 @@ mod tests {
         } // recorded guard dropped here
 
         // Writes after shutdown must be rejected.
-        let result = store.add("drain_map", "late_write", &val, 0, 1000).await;
+        let result = store.add("drain_map", "late_write", &val, 1000).await;
         assert!(
             result.is_err(),
             "Writes after hard_flush (shutdown) must be rejected"
@@ -7148,7 +7103,6 @@ mod tests {
             map: &str,
             key: &str,
             _value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             // Simulate a slow inner store that takes longer than the drain timeout.
@@ -7165,7 +7119,6 @@ mod tests {
             _map: &str,
             _key: &str,
             _value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             Ok(())
@@ -7261,8 +7214,8 @@ mod tests {
         let store = WriteBehindDataStore::new(slow_inner, config);
 
         let val = dummy_value();
-        store.add("slow_map", "key1", &val, 0, 1000).await.unwrap();
-        store.add("slow_map", "key2", &val, 0, 1000).await.unwrap();
+        store.add("slow_map", "key1", &val, 1000).await.unwrap();
+        store.add("slow_map", "key2", &val, 1000).await.unwrap();
 
         assert_eq!(store.pending_operation_count(), 2);
 
@@ -7375,7 +7328,7 @@ mod tests {
         );
 
         let val = dummy_value();
-        store.add("m", "k1", &val, 0, 1000).await.unwrap();
+        store.add("m", "k1", &val, 1000).await.unwrap();
 
         // WAL must contain the entry immediately after add() returns
         let count = wal.append_count.load(TestOrdering::Relaxed);
@@ -7551,7 +7504,7 @@ mod tests {
         );
 
         let val = dummy_value();
-        store.add("m", "k1", &val, 0, 1000).await.unwrap();
+        store.add("m", "k1", &val, 1000).await.unwrap();
 
         // Wait for flush loop to process the entry
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
@@ -7902,7 +7855,7 @@ mod tests {
         let (store, _dir) = redb_backed_store();
 
         // Buffered-only key: only in staging, never flushed.
-        store.add("m", "k", &lww("v1", 1), 0, 1000).await.unwrap();
+        store.add("m", "k", &lww("v1", 1), 1000).await.unwrap();
         let rows = drain_scan(&store, "m").await;
         assert_eq!(rows.len(), 1, "buffered-only key must be surfaced by scan");
         assert_eq!(rows[0].0, "k");
@@ -7923,7 +7876,7 @@ mod tests {
         assert_lww(&rows[0].1, "v1", 1);
 
         // A newer buffered write over the flushed redb value wins, exactly once.
-        store.add("m", "k", &lww("v2", 5), 0, 2000).await.unwrap();
+        store.add("m", "k", &lww("v2", 5), 2000).await.unwrap();
         let rows = drain_scan(&store, "m").await;
         assert_eq!(rows.len(), 1, "override must not double-count");
         assert_lww(&rows[0].1, "v2", 5);
@@ -7935,7 +7888,7 @@ mod tests {
     async fn ac3_pending_delete_suppression() {
         let (store, _dir) = redb_backed_store();
 
-        store.add("m", "k", &lww("v1", 1), 0, 1000).await.unwrap();
+        store.add("m", "k", &lww("v1", 1), 1000).await.unwrap();
         store.soft_flush().await.unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !store.test_is_idle() {
@@ -7967,7 +7920,7 @@ mod tests {
         let (store, _dir) = redb_backed_store();
 
         // Buffered-only Lww leaf.
-        store.add("m", "k", &lww("v1", 7), 0, 1000).await.unwrap();
+        store.add("m", "k", &lww("v1", 7), 1000).await.unwrap();
         let buffered_leaves = collect_leaves(&store, "m").await;
         assert_eq!(buffered_leaves.len(), 1, "buffered-only leaf must surface");
 
@@ -8004,12 +7957,12 @@ mod tests {
             }],
             tombstones: Vec::new(),
         };
-        store.add("o", "ok", &or_value, 0, 1000).await.unwrap();
+        store.add("o", "ok", &or_value, 1000).await.unwrap();
         let none_value = RecordValue::OrTombstones {
             tags: vec!["gone".to_string()],
         };
         store
-            .add("o", "tombstoned", &none_value, 0, 1000)
+            .add("o", "tombstoned", &none_value, 1000)
             .await
             .unwrap();
 
@@ -8030,10 +7983,7 @@ mod tests {
         let (store, _dir) = redb_backed_store();
 
         // Non-backup buffered write on map "m".
-        store
-            .add("m", "k", &lww("primary", 1), 0, 1000)
-            .await
-            .unwrap();
+        store.add("m", "k", &lww("primary", 1), 1000).await.unwrap();
 
         // Backup scan must not see the non-backup staging write.
         let backup_batch = store.scan_values("m", true, 0).await.unwrap();
@@ -8058,7 +8008,7 @@ mod tests {
 
         // Map whose only write is buffered, never flushed.
         store
-            .add("buffered_map", "k", &lww("v", 1), 0, 1000)
+            .add("buffered_map", "k", &lww("v", 1), 1000)
             .await
             .unwrap();
         // Map present in staging only via a pending delete.
@@ -8085,7 +8035,7 @@ mod tests {
         for i in 0..6u32 {
             let k = format!("flushed_{i:02}");
             let v = lww(&format!("v{i}"), 1);
-            store.add("m", &k, &v, 0, 1000).await.unwrap();
+            store.add("m", &k, &v, 1000).await.unwrap();
         }
         store.soft_flush().await.unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -8099,7 +8049,7 @@ mod tests {
         // Add staging-only keys (buffered, never flushed) interleaved by name.
         for i in 0..4u32 {
             let k = format!("buffered_{i:02}");
-            store.add("m", &k, &lww("b", 2), 0, 2000).await.unwrap();
+            store.add("m", &k, &lww("b", 2), 2000).await.unwrap();
         }
 
         // Force a tiny batch budget so the redb scan pages across many batches.
@@ -8143,7 +8093,7 @@ mod tests {
         let (store, _dir) = redb_backed_store();
 
         // E1: write v1. Staging now holds (seq1, v1); queue holds E1.
-        store.add("m", "k", &lww("v1", 1), 0, 1000).await.unwrap();
+        store.add("m", "k", &lww("v1", 1), 1000).await.unwrap();
         let pid = partition_for("m", "k");
         // Drain E1 out of the queue (the flush loop's first step). The queue lock
         // is now released, opening the race window.
@@ -8153,7 +8103,7 @@ mod tests {
 
         // E2: a newer write coalesces in. Queue is empty (E1 already drained), so
         // E2 enters as a new entry; staging is overwritten to (seq2, v2).
-        store.add("m", "k", &lww("v2", 5), 0, 2000).await.unwrap();
+        store.add("m", "k", &lww("v2", 5), 2000).await.unwrap();
 
         // E1's flush completes and tries to clear its staging slot. With the seq
         // guard it must NOT remove the newer E2 slot.
@@ -8304,7 +8254,7 @@ mod tests {
         let store = wal_seam_store(&wal);
         let partition = partition_for("m", "k1");
 
-        store.add("m", "k1", &dummy_value(), 0, 1000).await.unwrap();
+        store.add("m", "k1", &dummy_value(), 1000).await.unwrap();
 
         assert_eq!(
             store.test_pending_wal_sequences(partition),
@@ -8479,7 +8429,7 @@ mod tests {
              prior incarnation left behind, so it must not answer the watermark"
         );
 
-        store.add("m", "k1", &dummy_value(), 0, 1000).await.unwrap();
+        store.add("m", "k1", &dummy_value(), 1000).await.unwrap();
 
         assert!(store.test_wal_partition_seeded(partition));
         assert_eq!(
@@ -8666,7 +8616,6 @@ mod tests {
                     },
                     ttl_ms: None,
                 }),
-                expiration_time: None,
             },
             timestamp: None,
             sequence: 11,
@@ -8732,7 +8681,6 @@ mod tests {
                 "rooms",
                 "lobby",
                 WriteSource::Value(&pinned_or_snapshot()),
-                0,
                 1_700_000_000_000,
                 Some(&delta),
             )
@@ -8805,7 +8753,6 @@ mod tests {
                 "rooms",
                 "lobby",
                 WriteSource::Value(&snapshot),
-                0,
                 1_700_000_000_000,
                 Some(&OrDelta::Add {
                     entry: pinned_or_entry(),
@@ -8859,7 +8806,6 @@ mod tests {
                     "rooms",
                     "lobby",
                     WriteSource::Value(&pinned_or_snapshot()),
-                    0,
                     1_700_000_000_000,
                     witness,
                 )
@@ -8972,7 +8918,6 @@ mod tests {
                 "rooms",
                 "lobby",
                 WriteSource::Value(&pinned_or_snapshot()),
-                0,
                 1_700_000_000_000,
                 Some(&OrDelta::Add {
                     entry: pinned_or_entry(),
@@ -8996,7 +8941,6 @@ mod tests {
                         },
                         ttl_ms: None,
                     },
-                    0,
                     1_700_000_000_001,
                 )
                 .await
@@ -9046,7 +8990,6 @@ mod tests {
                 &golden.map,
                 &golden.key,
                 WriteSource::Value(&pinned_or_snapshot()),
-                0,
                 1_700_000_000_000,
                 Some(&golden_delta),
             )
@@ -9090,7 +9033,7 @@ mod tests {
 
     async fn add_cell(store: &WriteBehindDataStore, key: &str, cell: &Arc<SlotCell>) {
         store
-            .add_with_witness("m", key, WriteSource::Cell(cell), 0, 1, None)
+            .add_with_witness("m", key, WriteSource::Cell(cell), 1, None)
             .await
             .expect("add_with_witness");
     }
@@ -9160,7 +9103,7 @@ mod tests {
         let (store, _dir) = redb_backed_store();
         let cell = lww_cell("a", 1);
         add_cell(&store, "k", &cell).await;
-        store.add("m", "k", &lww("c", 3), 0, 2).await.expect("add");
+        store.add("m", "k", &lww("c", 3), 2).await.expect("add");
 
         assert!(store.test_pending_cell("m", "k").is_none());
         assert!(store.test_staged_cell("m", "k").is_none());
@@ -9322,7 +9265,6 @@ mod tests {
             _map: &str,
             _key: &str,
             value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             self.adds.fetch_add(1, Ordering::Relaxed);
@@ -9336,7 +9278,6 @@ mod tests {
             _map: &str,
             _key: &str,
             _value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             Ok(())
@@ -9442,7 +9383,6 @@ mod tests {
             key: "k".to_string(),
             operation: DelayedOp::StoreCell {
                 cell: Arc::clone(&cell),
-                expiration_time: 0,
             },
             store_time: 0,
             sequence: 1,
@@ -9598,7 +9538,7 @@ mod tests {
         };
 
         store
-            .add("m", "k", &dummy_value(), 0, now_millis())
+            .add("m", "k", &dummy_value(), now_millis())
             .await
             .expect("the refused entry is accepted into the buffer");
 
@@ -9631,7 +9571,7 @@ mod tests {
             let store = Arc::clone(&store);
             tokio::spawn(async move {
                 store
-                    .add("m", &probe_key, &dummy_value(), 0, now_millis())
+                    .add("m", &probe_key, &dummy_value(), now_millis())
                     .await
             })
         };
@@ -9733,11 +9673,11 @@ mod tests {
         let (entered, proceed) = spy.install_add_gate();
         let t = now_millis();
         store
-            .add("m", "a", &dummy_value_with(1), 0, t - 10)
+            .add("m", "a", &dummy_value_with(1), t - 10)
             .await
             .expect("a is accepted into the buffer");
         store
-            .add("m", "b", &dummy_value_with(2), 0, t - 5)
+            .add("m", "b", &dummy_value_with(2), t - 5)
             .await
             .expect("b is accepted into the buffer");
 
@@ -9756,7 +9696,7 @@ mod tests {
         // The newer write, acked while the older `b` entry is in the batch.
         let newer = dummy_value_with(3);
         store
-            .add("m", "b", &newer, 0, now_millis())
+            .add("m", "b", &newer, now_millis())
             .await
             .expect("the newer b is accepted into the buffer");
         proceed.notify_one();
@@ -9868,7 +9808,7 @@ mod tests {
             let store = Arc::clone(&store);
             tokio::spawn(async move {
                 store
-                    .add("m", "k", &dummy_value_with(1), 0, now_millis())
+                    .add("m", "k", &dummy_value_with(1), now_millis())
                     .await
             })
         };
@@ -9876,7 +9816,7 @@ mod tests {
 
         // Y runs to completion while X is parked: higher sequence, queued first.
         store
-            .add("m", "k", &dummy_value_with(2), 0, now_millis())
+            .add("m", "k", &dummy_value_with(2), now_millis())
             .await
             .expect("y is accepted into the buffer");
         assert_eq!(
@@ -9988,7 +9928,7 @@ mod tests {
             .enumerate()
         {
             let value = lww(&format!("v{}", index + 1), 1);
-            store.add("m", key, &value, 0, 1000).await.unwrap();
+            store.add("m", key, &value, 1000).await.unwrap();
         }
         flush_to_idle(store).await;
     }
@@ -10033,7 +9973,6 @@ mod tests {
             _map: &str,
             _key: &str,
             _value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             Ok(())
@@ -10044,7 +9983,6 @@ mod tests {
             _map: &str,
             _key: &str,
             _value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             Ok(())
@@ -10224,7 +10162,6 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             self.put(map, false, key, value)
@@ -10235,7 +10172,6 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             self.put(map, true, key, value)
@@ -10407,11 +10343,10 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
             Self::park(&self.park_add).await;
-            self.inner.add(map, key, value, expiration_time, now).await
+            self.inner.add(map, key, value, now).await
         }
 
         async fn add_backup(
@@ -10419,12 +10354,9 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            self.inner.add_backup(map, key, value, now).await
         }
 
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -10522,10 +10454,9 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.0.add(map, key, value, expiration_time, now).await
+            self.0.add(map, key, value, now).await
         }
 
         async fn add_backup(
@@ -10533,12 +10464,9 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.0
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            self.0.add_backup(map, key, value, now).await
         }
 
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -10640,13 +10568,13 @@ mod tests {
         for i in 0..6u32 {
             let key = format!("flushed_{i:02}");
             store
-                .add("m", &key, &lww(&format!("v{i}"), 1), 0, 1000)
+                .add("m", &key, &lww(&format!("v{i}"), 1), 1000)
                 .await
                 .unwrap();
         }
         flush_to_idle(&store).await;
         store
-            .add("m", "flushed_04", &lww("NEW", 9), 0, 2000)
+            .add("m", "flushed_04", &lww("NEW", 9), 2000)
             .await
             .unwrap();
 
@@ -10671,10 +10599,10 @@ mod tests {
         let store = key_ordered_backed_store();
         write_six(&store).await;
         for key in ["a00", "d15", "d25", "d45", "z99"] {
-            store.add("m", key, &lww("st", 2), 0, 2000).await.unwrap();
+            store.add("m", key, &lww("st", 2), 2000).await.unwrap();
         }
         for key in ["d40", "d50"] {
-            store.add("m", key, &lww("NW", 9), 0, 2000).await.unwrap();
+            store.add("m", key, &lww("NW", 9), 2000).await.unwrap();
         }
 
         let observed = scan_transcript(store.as_ref(), two_row_budget()).await;
@@ -10694,7 +10622,7 @@ mod tests {
     async fn a_key_flushed_between_two_batches_is_emitted_once() {
         let store = key_ordered_backed_store();
         write_six(&store).await;
-        store.add("m", "d45", &lww("st", 2), 0, 2000).await.unwrap();
+        store.add("m", "d45", &lww("st", 2), 2000).await.unwrap();
         let budget = two_row_budget();
 
         let first = store.scan_values("m", false, budget).await.unwrap();
@@ -10722,7 +10650,7 @@ mod tests {
 
         let first = store.scan_values("m", false, budget).await.unwrap();
         for key in ["d15", "d45"] {
-            store.add("m", key, &lww("st", 2), 0, 2000).await.unwrap();
+            store.add("m", key, &lww("st", 2), 2000).await.unwrap();
         }
         let first_scan = scan_rest(store.as_ref(), first, budget).await;
         let second_scan = scan_transcript(store.as_ref(), budget).await;
@@ -10763,7 +10691,7 @@ mod tests {
         ]));
         let store = WriteBehindDataStore::new(scripted.clone(), scan_config());
         for key in ["d05", "d20", "d30", "d40", "d60"] {
-            store.add("m", key, &lww("st", 2), 0, 2000).await.unwrap();
+            store.add("m", key, &lww("st", 2), 2000).await.unwrap();
         }
 
         let transcript = scan_transcript(store.as_ref(), 0).await;
@@ -10790,7 +10718,7 @@ mod tests {
             next_cursor: Some(ScanCursor(vec![0xFF])),
         }]));
         let store = WriteBehindDataStore::new(scripted, scan_config());
-        store.add("m", "d05", &lww("st", 2), 0, 2000).await.unwrap();
+        store.add("m", "d05", &lww("st", 2), 2000).await.unwrap();
 
         let outcome = store.scan_values("m", false, 0).await;
         let message = outcome
@@ -10813,7 +10741,7 @@ mod tests {
     async fn a_staged_key_whose_durable_row_is_in_the_first_batch_is_emitted_once() {
         let store = key_ordered_backed_store();
         write_six(&store).await;
-        store.add("m", "d10", &lww("NW", 9), 0, 2000).await.unwrap();
+        store.add("m", "d10", &lww("NW", 9), 2000).await.unwrap();
 
         let observed = scan_transcript(store.as_ref(), two_row_budget()).await;
 
@@ -10832,7 +10760,7 @@ mod tests {
     async fn staging_only_keys_over_an_empty_durable_map_are_emitted_once() {
         let (store, _dir) = redb_backed_store();
         for key in ["k1", "k2"] {
-            store.add("m", key, &lww("st", 2), 0, 2000).await.unwrap();
+            store.add("m", key, &lww("st", 2), 2000).await.unwrap();
         }
         store.remove("m", "k3", 2000).await.unwrap();
 
@@ -10874,7 +10802,7 @@ mod tests {
     async fn a_key_flushed_while_its_batch_is_being_read_is_still_emitted() {
         let (store, parking) = parking_backed_store();
         write_six(&store).await;
-        store.add("m", "d45", &lww("st", 2), 0, 2000).await.unwrap();
+        store.add("m", "d45", &lww("st", 2), 2000).await.unwrap();
 
         let (parked, release) = ParkingScanStore::arm(&parking.park_scan);
         let scan = {
@@ -10903,7 +10831,7 @@ mod tests {
     async fn a_key_being_flushed_is_emitted_once_before_and_after_its_row_is_durable() {
         let (store, parking) = parking_backed_store();
         write_six(&store).await;
-        store.add("m", "d45", &lww("st", 2), 0, 2000).await.unwrap();
+        store.add("m", "d45", &lww("st", 2), 2000).await.unwrap();
 
         let (parked, release) = ParkingScanStore::arm(&parking.park_add);
         store.soft_flush().await.unwrap();
@@ -10936,7 +10864,7 @@ mod tests {
     async fn a_key_flushed_while_a_resumed_batch_is_being_read_is_still_emitted() {
         let (store, parking) = parking_backed_store();
         write_six(&store).await;
-        store.add("m", "d35", &lww("st", 2), 0, 2000).await.unwrap();
+        store.add("m", "d35", &lww("st", 2), 2000).await.unwrap();
         let budget = two_row_budget();
 
         let mut first = store.scan_values("m", false, budget).await.unwrap();
@@ -10974,7 +10902,7 @@ mod tests {
             next_cursor: Some(ScanCursor(b"d30".to_vec())),
         }]));
         let store = WriteBehindDataStore::new(scripted, scan_config());
-        store.add("m", "d05", &lww("st", 2), 0, 2000).await.unwrap();
+        store.add("m", "d05", &lww("st", 2), 2000).await.unwrap();
 
         let outcome = store.scan_values("m", false, 0).await;
         let message = outcome
@@ -11000,7 +10928,7 @@ mod tests {
             next_cursor: Some(ScanCursor(b"d50".to_vec())),
         }]));
         let store = WriteBehindDataStore::new(scripted, scan_config());
-        store.add("m", "d05", &lww("st", 2), 0, 2000).await.unwrap();
+        store.add("m", "d05", &lww("st", 2), 2000).await.unwrap();
 
         let outcome = store
             .scan_values_batched("m", false, ScanCursor(b"d10".to_vec()), 0)
@@ -11028,7 +10956,7 @@ mod tests {
             next_cursor: None,
         }]));
         let store = WriteBehindDataStore::new(scripted, scan_config());
-        store.add("m", "d05", &lww("st", 2), 0, 2000).await.unwrap();
+        store.add("m", "d05", &lww("st", 2), 2000).await.unwrap();
 
         let outcome = store
             .scan_values_batched("m", false, ScanCursor(vec![0xFF]), 0)
@@ -11062,7 +10990,7 @@ mod tests {
             },
         ]));
         let store = WriteBehindDataStore::new(scripted, scan_config());
-        store.add("m", "d05", &lww("st", 2), 0, 2000).await.unwrap();
+        store.add("m", "d05", &lww("st", 2), 2000).await.unwrap();
 
         let first = store.scan_values("m", false, 0).await;
         let second = store
@@ -11092,7 +11020,7 @@ mod tests {
             next_cursor: Some(ScanCursor(b"d10".to_vec())),
         }]));
         let store = WriteBehindDataStore::new(scripted, scan_config());
-        store.add("m", "d20", &lww("st", 2), 0, 2000).await.unwrap();
+        store.add("m", "d20", &lww("st", 2), 2000).await.unwrap();
 
         // In a task of its own, so that a panic is an observation and not the
         // end of the test.
@@ -11137,10 +11065,10 @@ mod tests {
         let store = WriteBehindDataStore::new(undeclared, scan_config());
         write_six(&store).await;
         for key in ["a00", "d15", "d25", "d45", "z99"] {
-            store.add("m", key, &lww("st", 2), 0, 2000).await.unwrap();
+            store.add("m", key, &lww("st", 2), 2000).await.unwrap();
         }
         for key in ["d40", "d50"] {
-            store.add("m", key, &lww("NW", 9), 0, 2000).await.unwrap();
+            store.add("m", key, &lww("NW", 9), 2000).await.unwrap();
         }
 
         let observed = scan_transcript(store.as_ref(), two_row_budget()).await;
@@ -11174,7 +11102,7 @@ mod tests {
         let store = WriteBehindDataStore::new(scripted, scan_config());
         // Buffered, but for another map: nothing is staged for `m`.
         store
-            .add("other", "d05", &lww("st", 2), 0, 2000)
+            .add("other", "d05", &lww("st", 2), 2000)
             .await
             .unwrap();
 
@@ -11278,7 +11206,6 @@ mod tests {
             _map: &str,
             _key: &str,
             _value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             unreachable!("the partition-ordered store is only read")
@@ -11289,7 +11216,6 @@ mod tests {
             _map: &str,
             _key: &str,
             _value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             unreachable!("the partition-ordered store is only read")
@@ -11385,9 +11311,9 @@ mod tests {
                 ("k2", lww("d2", 1)),
             ]));
             let store = WriteBehindDataStore::new(inner, scan_config());
-            store.add("m", "k2", &lww("NW", 9), 0, 2000).await.unwrap();
+            store.add("m", "k2", &lww("NW", 9), 2000).await.unwrap();
             for key in ["s0", "s6", "s8"] {
-                store.add("m", key, &lww("st", 2), 0, 2000).await.unwrap();
+                store.add("m", key, &lww("st", 2), 2000).await.unwrap();
             }
             if delete_k1 {
                 store.remove("m", "k1", 2000).await.unwrap();
@@ -11501,10 +11427,7 @@ mod tests {
         ));
         spy.refuse_everything(true);
         let store = schedule_store_with_wal(&spy, schedule_config());
-        store
-            .add(SCHEDULE_MAP, "k", &lww("v", 1), 0, 1)
-            .await
-            .unwrap();
+        store.add(SCHEDULE_MAP, "k", &lww("v", 1), 1).await.unwrap();
         let partition = partition_for(SCHEDULE_MAP, "k");
         advance(60_000).await;
         spy.refuse_everything(false);
@@ -11532,10 +11455,7 @@ mod tests {
         spy.seed(SCHEDULE_MAP, "seeded", lww("old", 1));
         spy.refuse_everything(true);
         let store = schedule_store(&spy, schedule_config());
-        store
-            .add(SCHEDULE_MAP, "k", &lww("v", 2), 0, 1)
-            .await
-            .unwrap();
+        store.add(SCHEDULE_MAP, "k", &lww("v", 2), 1).await.unwrap();
         store.remove(SCHEDULE_MAP, "seeded", 1).await.unwrap();
         advance(60_000).await;
         assert_eq!(
@@ -11600,12 +11520,12 @@ mod tests {
             let key = format!("r{i}");
             spy.refuse_key(&key);
             store
-                .add(SCHEDULE_MAP, &key, &lww("v", 1), 0, 1)
+                .add(SCHEDULE_MAP, &key, &lww("v", 1), 1)
                 .await
                 .unwrap();
         }
         store
-            .add(SCHEDULE_MAP, "healthy", &lww("h", 1), 0, 1)
+            .add(SCHEDULE_MAP, "healthy", &lww("h", 1), 1)
             .await
             .unwrap();
         let closed_before = store.test_passes_closed();
@@ -11633,10 +11553,7 @@ mod tests {
         let spy = Arc::new(SpyDataStore::retaining());
         spy.refuse_key("A");
         let store = schedule_store(&spy, schedule_config());
-        store
-            .add(SCHEDULE_MAP, "A", &lww("a", 1), 0, 1)
-            .await
-            .unwrap();
+        store.add(SCHEDULE_MAP, "A", &lww("a", 1), 1).await.unwrap();
         let mut slowest = 0u64;
         let mut all_stored = true;
         let mut hold_seen = false;
@@ -11644,7 +11561,7 @@ mod tests {
             let round = tokio::time::Instant::now();
             let key = format!("h{i}");
             store
-                .add(SCHEDULE_MAP, &key, &lww("h", 1), 0, 1)
+                .add(SCHEDULE_MAP, &key, &lww("h", 1), 1)
                 .await
                 .unwrap();
             match poll_until(1_000, || spy.held(SCHEDULE_MAP, &key).is_some()).await {
@@ -11679,11 +11596,11 @@ mod tests {
         spy.refuse_key("A");
         let store = schedule_store(&spy, schedule_config());
         let mut last = lww("a0", 1);
-        store.add(SCHEDULE_MAP, "A", &last, 0, 1).await.unwrap();
+        store.add(SCHEDULE_MAP, "A", &last, 1).await.unwrap();
         for i in 1..=100u64 {
             advance(100).await;
             last = lww(&format!("a{i}"), i + 1);
-            store.add(SCHEDULE_MAP, "A", &last, 0, 1).await.unwrap();
+            store.add(SCHEDULE_MAP, "A", &last, 1).await.unwrap();
         }
         let calls = spy.calls_for("A");
         assert_eq!(
@@ -11705,7 +11622,7 @@ mod tests {
         spy.refuse_key("A");
         let store = schedule_store(&spy, schedule_config());
         store
-            .add(SCHEDULE_MAP, "A", &lww("a1", 1), 0, 1)
+            .add(SCHEDULE_MAP, "A", &lww("a1", 1), 1)
             .await
             .unwrap();
         let refused_once = poll_until(1_000, || answered(&spy) == 1).await.is_some();
@@ -11718,7 +11635,7 @@ mod tests {
                 .await
                 .is_ok();
         store
-            .add(SCHEDULE_MAP, "A", &lww("a2", 2), 0, 1)
+            .add(SCHEDULE_MAP, "A", &lww("a2", 2), 1)
             .await
             .unwrap();
         let queued_before = store.test_retry_state(SCHEDULE_MAP, "A");
@@ -11744,7 +11661,7 @@ mod tests {
         let store = schedule_store(&spy, schedule_config());
         for i in 0..keys {
             store
-                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 0, 1)
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 1)
                 .await
                 .unwrap();
         }
@@ -11770,7 +11687,7 @@ mod tests {
         let store = schedule_store(&spy, schedule_config());
         for i in 0..10 {
             store
-                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 0, 1)
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 1)
                 .await
                 .unwrap();
         }
@@ -11803,7 +11720,7 @@ mod tests {
         );
         for i in 0..100 {
             store
-                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 0, 1)
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 1)
                 .await
                 .unwrap();
         }
@@ -11831,7 +11748,7 @@ mod tests {
         let keys = keys_of_partition(partition, 2);
         spy.refuse_key(&keys[0]);
         store
-            .add(SCHEDULE_MAP, &keys[0], &lww("first", 1), 0, 1)
+            .add(SCHEDULE_MAP, &keys[0], &lww("first", 1), 1)
             .await
             .unwrap();
         let first_wal_seq = store.test_pending_wal_sequences(partition)[0].0;
@@ -11839,7 +11756,7 @@ mod tests {
         // its entry sequence.
         let first_entry_seq = store.flushed_watermark();
         store
-            .add(SCHEDULE_MAP, &keys[1], &lww("second", 1), 0, 1)
+            .add(SCHEDULE_MAP, &keys[1], &lww("second", 1), 1)
             .await
             .unwrap();
         advance(60_000).await;
@@ -11881,7 +11798,6 @@ mod tests {
                 SCHEDULE_MAP,
                 "set",
                 WriteSource::Cell(&cell),
-                0,
                 1,
                 Some(&add_t2),
             )
@@ -11897,7 +11813,6 @@ mod tests {
                 SCHEDULE_MAP,
                 "set",
                 WriteSource::Cell(&cell),
-                0,
                 1,
                 Some(&add_t3),
             )
@@ -11939,7 +11854,7 @@ mod tests {
             let key = format!("r{i}");
             spy.refuse_key(&key);
             store
-                .add(SCHEDULE_MAP, &key, &lww("v", 1), 0, 1)
+                .add(SCHEDULE_MAP, &key, &lww("v", 1), 1)
                 .await
                 .unwrap();
         }
@@ -11950,7 +11865,7 @@ mod tests {
             let round = tokio::time::Instant::now();
             let key = format!("h{i}");
             store
-                .add(SCHEDULE_MAP, &key, &lww("h", 1), 0, 1)
+                .add(SCHEDULE_MAP, &key, &lww("h", 1), 1)
                 .await
                 .unwrap();
             let waited = poll_until(60_000, || {
@@ -11993,10 +11908,7 @@ mod tests {
         let spy = Arc::new(SpyDataStore::retaining());
         let store = schedule_store(&spy, schedule_config());
         spy.refuse_everything(true);
-        store
-            .add(SCHEDULE_MAP, "H", &lww("h", 1), 0, 1)
-            .await
-            .unwrap();
+        store.add(SCHEDULE_MAP, "H", &lww("h", 1), 1).await.unwrap();
         poll_until(60_000, || spy.calls_for("H") == 5).await;
         let refusals_in_outage = spy.calls_for("H");
         spy.refuse_everything(false);
@@ -12004,7 +11916,7 @@ mod tests {
             let key = format!("rejected{i}");
             spy.refuse_key(&key);
             store
-                .add(SCHEDULE_MAP, &key, &lww("v", 1), 0, 2)
+                .add(SCHEDULE_MAP, &key, &lww("v", 1), 2)
                 .await
                 .unwrap();
         }
@@ -12070,7 +11982,7 @@ mod tests {
         let store = schedule_store(&spy, schedule_config());
         for i in 0..100 {
             store
-                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 0, 1)
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 1)
                 .await
                 .unwrap();
         }
@@ -12111,7 +12023,7 @@ mod tests {
             let key = format!("r{i}");
             spy.refuse_key(&key);
             store
-                .add(SCHEDULE_MAP, &key, &lww("v", 1), 0, 1)
+                .add(SCHEDULE_MAP, &key, &lww("v", 1), 1)
                 .await
                 .unwrap();
         }
@@ -12126,7 +12038,7 @@ mod tests {
         }
         for i in 0..5 {
             store
-                .add(SCHEDULE_MAP, &format!("h{i}"), &lww("h", 1), 0, 2)
+                .add(SCHEDULE_MAP, &format!("h{i}"), &lww("h", 1), 2)
                 .await
                 .unwrap();
         }
@@ -12144,18 +12056,9 @@ mod tests {
         let store = schedule_store(&spy, schedule_config());
         // So that an instant two seconds in the past exists on this clock.
         advance(3_000).await;
-        store
-            .add(SCHEDULE_MAP, "X", &lww("x", 1), 0, 1)
-            .await
-            .unwrap();
-        store
-            .add(SCHEDULE_MAP, "Y", &lww("y", 1), 0, 1)
-            .await
-            .unwrap();
-        store
-            .add(SCHEDULE_MAP, "Z", &lww("z", 1), 0, 2)
-            .await
-            .unwrap();
+        store.add(SCHEDULE_MAP, "X", &lww("x", 1), 1).await.unwrap();
+        store.add(SCHEDULE_MAP, "Y", &lww("y", 1), 1).await.unwrap();
+        store.add(SCHEDULE_MAP, "Z", &lww("z", 1), 2).await.unwrap();
         let now = tokio::time::Instant::now();
         for mut queue in store.queues.iter_mut() {
             for entry in queue.value_mut().entries.values_mut() {
@@ -12213,7 +12116,7 @@ mod tests {
         let (entered, proceed) = spy.install_add_gate();
         for (store_time, key) in (1i64..).zip(KEYS) {
             store
-                .add(SCHEDULE_MAP, key, &lww("v", 1), 0, store_time)
+                .add(SCHEDULE_MAP, key, &lww("v", 1), store_time)
                 .await
                 .unwrap();
         }
@@ -12222,7 +12125,7 @@ mod tests {
                 .await
                 .is_ok();
         store
-            .add(SCHEDULE_MAP, "E", &lww("v2", 2), 0, 9)
+            .add(SCHEDULE_MAP, "E", &lww("v2", 2), 9)
             .await
             .unwrap();
         let count_while_held = store.pending_operation_count();
@@ -12300,7 +12203,7 @@ mod tests {
         let store = schedule_store(&spy, schedule_config());
         for i in 0..4 {
             store
-                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 0, 1)
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 1)
                 .await
                 .unwrap();
         }
@@ -12320,7 +12223,7 @@ mod tests {
         spy.refuse_everything(true);
         for i in 0..4 {
             store
-                .add(SCHEDULE_MAP, &format!("n{i}"), &lww("v", 1), 0, 1)
+                .add(SCHEDULE_MAP, &format!("n{i}"), &lww("v", 1), 1)
                 .await
                 .unwrap();
         }
@@ -12374,7 +12277,7 @@ mod tests {
         let store = schedule_store(&spy, schedule_config());
         for (store_time, key) in (1i64..).zip(KEYS) {
             store
-                .add(SCHEDULE_MAP, key, &lww("v", 1), 0, store_time)
+                .add(SCHEDULE_MAP, key, &lww("v", 1), store_time)
                 .await
                 .unwrap();
         }
@@ -12415,7 +12318,7 @@ mod tests {
         let store = schedule_store(&spy, schedule_config());
         for i in 0..3 {
             store
-                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 0, 1)
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 1)
                 .await
                 .unwrap();
         }
@@ -12467,16 +12370,13 @@ mod tests {
         }
         let store = schedule_store(&spy, schedule_config());
         for key in ["a", "b", "c"] {
-            store
-                .add(SCHEDULE_MAP, key, &lww("v", 1), 0, 1)
-                .await
-                .unwrap();
+            store.add(SCHEDULE_MAP, key, &lww("v", 1), 1).await.unwrap();
         }
         let _ = poll_until(1_000, || store.test_store_hold_active()).await;
         let mut park = store.test_park_between_probe_choice_and_removal();
         // Never refused and the newest: the next probe.
         store
-            .add(SCHEDULE_MAP, "D", &lww("d1", 1), 0, 1)
+            .add(SCHEDULE_MAP, "D", &lww("d1", 1), 1)
             .await
             .unwrap();
         let parked = park.parked.take().expect("armed");
@@ -12486,7 +12386,7 @@ mod tests {
         // The chosen key gets a new entry, with a new entry sequence, while
         // the flush task stands between its choice and the removal.
         store
-            .add(SCHEDULE_MAP, "D", &lww("d2", 2), 0, 1)
+            .add(SCHEDULE_MAP, "D", &lww("d2", 2), 1)
             .await
             .unwrap();
         let closed_before = store.test_passes_closed();
@@ -12539,10 +12439,7 @@ mod tests {
         }
         let store = schedule_store(&spy, schedule_config());
         for key in ["a", "b", "c"] {
-            store
-                .add(SCHEDULE_MAP, key, &lww("v", 1), 0, 1)
-                .await
-                .unwrap();
+            store.add(SCHEDULE_MAP, key, &lww("v", 1), 1).await.unwrap();
         }
         let hold_at_the_writes = poll_until(1_000, || store.test_store_hold_active())
             .await
@@ -12550,10 +12447,7 @@ mod tests {
         // Both never refused and due, with one `store_time`: E, the newer, is
         // the probe and D is what the rest of that pass has to store.
         for key in ["D", "E"] {
-            store
-                .add(SCHEDULE_MAP, key, &lww("v", 1), 0, 1)
-                .await
-                .unwrap();
+            store.add(SCHEDULE_MAP, key, &lww("v", 1), 1).await.unwrap();
         }
         let _ = poll_until(1_000, || calls_answered(&spy) >= 4).await;
         let fourth = spy.timeline().get(3).cloned();
@@ -12583,27 +12477,21 @@ mod tests {
         }
         let store = schedule_store(&spy, schedule_config());
         for key in ["r0", "r1", "r2"] {
-            store
-                .add(SCHEDULE_MAP, key, &lww("v", 1), 0, 1)
-                .await
-                .unwrap();
+            store.add(SCHEDULE_MAP, key, &lww("v", 1), 1).await.unwrap();
         }
         let hold_at_the_writes = poll_until(1_000, || store.test_store_hold_active())
             .await
             .is_some();
         store
-            .add(SCHEDULE_MAP, "A", &lww("a1", 1), 0, 1)
+            .add(SCHEDULE_MAP, "A", &lww("a1", 1), 1)
             .await
             .unwrap();
-        store
-            .add(SCHEDULE_MAP, "B", &lww("b", 1), 0, 2)
-            .await
-            .unwrap();
+        store.add(SCHEDULE_MAP, "B", &lww("b", 1), 2).await.unwrap();
         // A rewrite of a queued entry takes a new entry sequence and keeps the
         // `store_time` of the entry it replaces: A is now the newer by
         // sequence and still the older by `store_time`.
         store
-            .add(SCHEDULE_MAP, "A", &lww("a2", 2), 0, 3)
+            .add(SCHEDULE_MAP, "A", &lww("a2", 2), 3)
             .await
             .unwrap();
         let a_is_newer_by_sequence = queued_sequence(&store, "A")
@@ -12631,19 +12519,19 @@ mod tests {
         );
         for i in 0..5 {
             store
-                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 0, 1)
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 1)
                 .await
                 .unwrap();
         }
         advance(60_000).await;
         let count_refused = store.pending_operation_count();
         let sixth = store
-            .add(SCHEDULE_MAP, "k5", &lww("v", 1), 0, 1)
+            .add(SCHEDULE_MAP, "k5", &lww("v", 1), 1)
             .await
             .err()
             .map(|err| err.to_string().contains("Write-behind capacity exceeded"));
         let rewrite = store
-            .add(SCHEDULE_MAP, "k0", &lww("rewritten", 2), 0, 1)
+            .add(SCHEDULE_MAP, "k0", &lww("rewritten", 2), 1)
             .await
             .is_ok();
         let after_rewrite = (
@@ -12655,10 +12543,7 @@ mod tests {
         let stored = (0..5)
             .filter(|i| spy.held(SCHEDULE_MAP, &format!("k{i}")).is_some())
             .count();
-        let sixth_after = store
-            .add(SCHEDULE_MAP, "k5", &lww("v", 1), 0, 1)
-            .await
-            .is_ok();
+        let sixth_after = store.add(SCHEDULE_MAP, "k5", &lww("v", 1), 1).await.is_ok();
         assert_eq!(
             (
                 count_refused,
@@ -12720,10 +12605,7 @@ mod tests {
         let partition = 11;
         let keys = keys_of_partition(partition, 3);
         for key in &keys {
-            store
-                .add(SCHEDULE_MAP, key, &lww(key, 1), 0, 1)
-                .await
-                .unwrap();
+            store.add(SCHEDULE_MAP, key, &lww(key, 1), 1).await.unwrap();
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         let started = std::time::Instant::now();
@@ -12782,10 +12664,7 @@ mod tests {
         let spy = Arc::new(SpyDataStore::retaining());
         spy.refuse_everything(true);
         let store = schedule_store(&spy, schedule_config());
-        store
-            .add(SCHEDULE_MAP, "k", &lww("v", 1), 0, 1)
-            .await
-            .unwrap();
+        store.add(SCHEDULE_MAP, "k", &lww("v", 1), 1).await.unwrap();
         // A hundred refusals take hours of backoff to reach through passes, so
         // the count is written onto the queued entry.
         for mut queue in store.queues.iter_mut() {
@@ -12820,10 +12699,7 @@ mod tests {
         let spy = Arc::new(SpyDataStore::retaining());
         spy.refuse_everything(true);
         let store = schedule_store(&spy, schedule_config());
-        store
-            .add(SCHEDULE_MAP, "k", &lww("v", 1), 0, 1)
-            .await
-            .unwrap();
+        store.add(SCHEDULE_MAP, "k", &lww("v", 1), 1).await.unwrap();
         for mut queue in store.queues.iter_mut() {
             for entry in queue.value_mut().entries.values_mut() {
                 entry.retry_count = u32::MAX;
@@ -12854,7 +12730,7 @@ mod tests {
         spy.refuse_key("A");
         let store = schedule_store(&spy, schedule_config());
         store
-            .add(SCHEDULE_MAP, "A", &lww("a1", 1), 0, 1)
+            .add(SCHEDULE_MAP, "A", &lww("a1", 1), 1)
             .await
             .unwrap();
         poll_until(30_000, || calls_answered(&spy) >= 1)
@@ -12868,7 +12744,7 @@ mod tests {
 
         // Rewritten while its entry is queued.
         store
-            .add(SCHEDULE_MAP, "A", &lww("a2", 2), 0, 1)
+            .add(SCHEDULE_MAP, "A", &lww("a2", 2), 1)
             .await
             .unwrap();
         let after_the_rewrite = kept(&store);
@@ -12880,7 +12756,7 @@ mod tests {
             .await
             .expect("the second attempt never began");
         store
-            .add(SCHEDULE_MAP, "A", &lww("a3", 3), 0, 1)
+            .add(SCHEDULE_MAP, "A", &lww("a3", 3), 1)
             .await
             .unwrap();
         proceed.notify_one();
@@ -12931,21 +12807,15 @@ mod tests {
                 let store = schedule_store(&spy, schedule_config());
                 // A `store_time` of 0 is what a caller with no clock of its own
                 // passes: the age of a refusal must not be read from it.
-                store
-                    .add(SCHEDULE_MAP, "A", &lww("a", 1), 0, 0)
-                    .await
-                    .unwrap();
+                store.add(SCHEDULE_MAP, "A", &lww("a", 1), 0).await.unwrap();
                 advance(8_000).await;
                 let at_8s = handle.render();
                 store
-                    .add(SCHEDULE_MAP, "A", &lww("a2", 2), 0, 0)
+                    .add(SCHEDULE_MAP, "A", &lww("a2", 2), 0)
                     .await
                     .unwrap();
                 for key in ["B", "C", "D"] {
-                    store
-                        .add(SCHEDULE_MAP, key, &lww("v", 1), 0, 1)
-                        .await
-                        .unwrap();
+                    store.add(SCHEDULE_MAP, key, &lww("v", 1), 1).await.unwrap();
                 }
                 advance(1_000).await;
                 let at_9s = handle.render();
@@ -13058,10 +12928,7 @@ mod tests {
             let spy = Arc::new(SpyDataStore::retaining());
             spy.refuse_everything(true);
             let store = schedule_store(&spy, schedule_config());
-            store
-                .add(SCHEDULE_MAP, "k", &lww("v", 1), 0, 1)
-                .await
-                .unwrap();
+            store.add(SCHEDULE_MAP, "k", &lww("v", 1), 1).await.unwrap();
             advance(95_000).await;
             spy.refuse_everything(false);
             let _ = poll_until(60_000, || store.test_is_idle()).await;
@@ -13112,10 +12979,7 @@ mod tests {
             let spy = Arc::new(SpyDataStore::retaining());
             spy.refuse_key("k");
             let store = schedule_store(&spy, schedule_config());
-            store
-                .add(SCHEDULE_MAP, "k", &lww("v", 1), 0, 1)
-                .await
-                .unwrap();
+            store.add(SCHEDULE_MAP, "k", &lww("v", 1), 1).await.unwrap();
             let _ = poll_until(30_000, || calls_answered(&spy) >= 1).await;
             spy.accept_every_key();
             let _ = poll_until(60_000, || store.test_is_idle()).await;
@@ -13236,7 +13100,7 @@ mod durability_tests {
         );
 
         store
-            .add("m", "k1", &ormap_tombstone("T1"), 0, 1)
+            .add("m", "k1", &ormap_tombstone("T1"), 1)
             .await
             .unwrap();
         let partition = partition_for("m", "k1");
@@ -13299,7 +13163,6 @@ mod durability_tests {
                 key: "k1".to_string(),
                 op: WalOp::Store {
                     value: WalStorePayload::Record(ormap_tombstone("T1")),
-                    expiration_time: None,
                 },
                 timestamp: None,
                 sequence: 1,
@@ -13330,11 +13193,9 @@ mod durability_tests {
             for entry in &unapplied {
                 if let WalOp::Store {
                     value: WalStorePayload::Record(rv),
-                    expiration_time,
                 } = &entry.op
                 {
-                    let exp = expiration_time.unwrap_or(0);
-                    inner.add(&entry.map, &entry.key, rv, exp, 1).await.unwrap();
+                    inner.add(&entry.map, &entry.key, rv, 1).await.unwrap();
                 }
             }
             // Process "crashes" HERE — no mark_applied.
@@ -13482,7 +13343,6 @@ mod hard_flush_order_tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
             if key == KEY {
@@ -13492,7 +13352,7 @@ mod hard_flush_order_tests {
                     let _ = release.await;
                 }
             }
-            let result = self.inner.add(map, key, value, expiration_time, now).await;
+            let result = self.inner.add(map, key, value, now).await;
             if key == KEY && result.is_ok() {
                 self.applied.lock().unwrap().push("add");
             }
@@ -13504,12 +13364,9 @@ mod hard_flush_order_tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            self.inner.add_backup(map, key, value, now).await
         }
 
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -13617,9 +13474,7 @@ mod hard_flush_order_tests {
             tombstones: vec!["t".to_string()],
         };
 
-        wb.add(MAP, KEY, &value, 0, now_millis())
-            .await
-            .expect("add");
+        wb.add(MAP, KEY, &value, now_millis()).await.expect("add");
         tokio::time::timeout(PARK_BOUND, parked)
             .await
             .expect("the flush loop never reached the inner add")
@@ -13737,7 +13592,6 @@ mod background_task_panic_tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
             let gate = self
@@ -13752,7 +13606,7 @@ mod background_task_panic_tests {
                 let _ = self.about_to_panic.send(());
                 panic!("injected inner-store panic");
             }
-            self.inner.add(map, key, value, expiration_time, now).await
+            self.inner.add(map, key, value, now).await
         }
 
         async fn add_backup(
@@ -13760,12 +13614,9 @@ mod background_task_panic_tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            self.inner.add_backup(map, key, value, now).await
         }
 
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -13989,7 +13840,6 @@ mod background_task_panic_tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             if self.refuse_adds.load(Ordering::SeqCst) {
@@ -14005,12 +13855,9 @@ mod background_task_panic_tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            expiration_time: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            NullDataStore
-                .add_backup(map, key, value, expiration_time, now)
-                .await
+            NullDataStore.add_backup(map, key, value, now).await
         }
 
         async fn remove(&self, map: &str, key: &str, _now: i64) -> anyhow::Result<()> {
@@ -14234,7 +14081,7 @@ mod background_task_panic_tests {
         let store =
             WriteBehindDataStore::new_with_wal(inner, manual_flush_config(), wal.map(bootstrap));
         store
-            .add(MAP, DEAD_BATCH_KEY, &lww_value(), 0, now_millis())
+            .add(MAP, DEAD_BATCH_KEY, &lww_value(), now_millis())
             .await
             .expect("a healthy store accepts the write");
         store.soft_flush().await.expect("soft_flush");
@@ -14267,7 +14114,7 @@ mod background_task_panic_tests {
         let value = lww_value();
 
         store
-            .add(MAP, "in-the-dead-batch", &value, 0, now_millis())
+            .add(MAP, "in-the-dead-batch", &value, now_millis())
             .await
             .expect("a healthy store accepts the write");
         tokio::time::timeout(HANG_LIMIT, about_to_panic.recv())
@@ -14278,7 +14125,7 @@ mod background_task_panic_tests {
         // Nothing is awaited between the receipt and this call: it is the first
         // write after the poll of the panicked flush task returned.
         let after_panic = store
-            .add(MAP, "after-the-panic", &value, 0, now_millis())
+            .add(MAP, "after-the-panic", &value, now_millis())
             .await;
         let shutdown = store.hard_flush().await;
 
@@ -14325,7 +14172,7 @@ mod background_task_panic_tests {
         // The watchdog samples only partitions that have tracking state, and a
         // partition gets its state with its first write.
         store
-            .add(MAP, "tracked", &value, 0, now_millis())
+            .add(MAP, "tracked", &value, now_millis())
             .await
             .expect("a healthy store accepts the write");
         tokio::time::timeout(HANG_LIMIT, announced.recv())
@@ -14334,7 +14181,7 @@ mod background_task_panic_tests {
             .expect("the classifier hook was dropped before it ran");
 
         let after_panic = store
-            .add(MAP, "after-the-panic", &value, 0, now_millis())
+            .add(MAP, "after-the-panic", &value, now_millis())
             .await;
 
         assert!(
@@ -14406,7 +14253,7 @@ mod background_task_panic_tests {
                     let at_construction = handle.render();
 
                     store
-                        .add(MAP, DEAD_BATCH_KEY, &lww_value(), 0, now_millis())
+                        .add(MAP, DEAD_BATCH_KEY, &lww_value(), now_millis())
                         .await
                         .expect("a healthy store accepts the write");
                     store.soft_flush().await.expect("soft_flush");
@@ -14455,7 +14302,7 @@ mod background_task_panic_tests {
         let (store, wal, appends, pending) = failed_store_over_a_recording_wal().await;
 
         let refused = store
-            .add(MAP, "after-the-panic", &lww_value(), 0, now_millis())
+            .add(MAP, "after-the-panic", &lww_value(), now_millis())
             .await
             .expect_err("a failed store must refuse `add`");
 
@@ -14557,12 +14404,12 @@ mod background_task_panic_tests {
         let parked_write = {
             let store = Arc::clone(&store);
             let value = parked_value.clone();
-            tokio::spawn(async move { store.add(MAP, PARKED_KEY, &value, 0, now_millis()).await })
+            tokio::spawn(async move { store.add(MAP, PARKED_KEY, &value, now_millis()).await })
         };
         park.wait_parked().await;
 
         store
-            .add(MAP, DEAD_BATCH_KEY, &lww_value(), 0, now_millis())
+            .add(MAP, DEAD_BATCH_KEY, &lww_value(), now_millis())
             .await
             .expect("a healthy store accepts the write");
         store.soft_flush().await.expect("soft_flush");
@@ -14751,11 +14598,11 @@ mod background_task_panic_tests {
         let now = now_millis();
 
         store
-            .add(MAP, &keys.batch_only, &batch_only_value(), 0, now)
+            .add(MAP, &keys.batch_only, &batch_only_value(), now)
             .await
             .expect("batch-only write");
         store
-            .add(MAP, &keys.in_both, &older_value(), 0, now)
+            .add(MAP, &keys.in_both, &older_value(), now)
             .await
             .expect("older write of the key in both");
         if with_or_map {
@@ -14764,7 +14611,6 @@ mod background_task_panic_tests {
                     MAP,
                     &keys.or_map,
                     WriteSource::Value(&or_snapshot(&["tag-a"])),
-                    0,
                     now,
                     Some(&OrDelta::Add {
                         entry: or_entry("tag-a"),
@@ -14777,11 +14623,11 @@ mod background_task_panic_tests {
         pass_parked.wait_parked().await;
 
         store
-            .add(MAP, &keys.in_both, &newer_value(), 0, now)
+            .add(MAP, &keys.in_both, &newer_value(), now)
             .await
             .expect("newer write of the key in both");
         store
-            .add(MAP, &keys.drained_only, &drained_only_value(), 0, now)
+            .add(MAP, &keys.drained_only, &drained_only_value(), now)
             .await
             .expect("drained-only write");
         if with_or_map {
@@ -14790,7 +14636,6 @@ mod background_task_panic_tests {
                     MAP,
                     &keys.or_map,
                     WriteSource::Value(&or_snapshot(&["tag-a", "tag-b"])),
-                    0,
                     now,
                     Some(&OrDelta::Add {
                         entry: or_entry("tag-b"),
@@ -15023,7 +14868,7 @@ mod background_task_panic_tests {
                 Some(bootstrap(Arc::clone(&wal) as Arc<dyn Wal>)),
             );
             store
-                .add(MAP, "drained", &lww_value(), 0, now_millis())
+                .add(MAP, "drained", &lww_value(), now_millis())
                 .await
                 .expect("write");
             store.hard_flush().await.expect("a healthy shutdown");
@@ -15049,7 +14894,7 @@ mod background_task_panic_tests {
                 Some(bootstrap(Arc::clone(&wal) as Arc<dyn Wal>)),
             );
             store
-                .add(MAP, "given-up-on", &lww_value(), 0, now_millis())
+                .add(MAP, "given-up-on", &lww_value(), now_millis())
                 .await
                 .expect("write");
             memory.refuse_adds.store(true, Ordering::SeqCst);
@@ -15112,7 +14957,7 @@ mod background_task_panic_tests {
 
             for key in QUEUED {
                 store
-                    .add(MAP, key, &lww_text(key, 1), 0, now_millis())
+                    .add(MAP, key, &lww_text(key, 1), now_millis())
                     .await
                     .expect("a healthy store accepts the write");
             }
@@ -15221,7 +15066,7 @@ mod background_task_panic_tests {
             );
 
             store
-                .add(MAP, PARKED_KEY, &parked_value, 0, now_millis())
+                .add(MAP, PARKED_KEY, &parked_value, now_millis())
                 .await
                 .expect("a healthy store accepts the write");
             store.soft_flush().await.expect("soft_flush");
@@ -15265,7 +15110,7 @@ mod background_task_panic_tests {
             let failure = store.background_failure().borrow().clone();
             let unapplied = super::replayable(&wal, &*kept, partition_for(MAP, PARKED_KEY)).await;
             let write_after = store
-                .add(MAP, "after-the-shutdown", &lww_value(), 0, now_millis())
+                .add(MAP, "after-the-shutdown", &lww_value(), now_millis())
                 .await;
 
             Observed {
@@ -15346,7 +15191,7 @@ mod background_task_panic_tests {
                 Some(bootstrap(Arc::new(AcceptingWal::default()))),
             );
             store
-                .add(MAP, "queued", &lww_value(), 0, now_millis())
+                .add(MAP, "queued", &lww_value(), now_millis())
                 .await
                 .expect("write");
             store.hard_flush().await.expect("a healthy shutdown");
@@ -15361,7 +15206,7 @@ mod background_task_panic_tests {
             let store =
                 WriteBehindDataStore::new(Arc::new(MemoryStore::default()), manual_flush_config());
             store
-                .add(MAP, "queued", &lww_value(), 0, now_millis())
+                .add(MAP, "queued", &lww_value(), now_millis())
                 .await
                 .expect("write");
             store.hard_flush().await.expect("a healthy shutdown");
@@ -15382,7 +15227,7 @@ mod background_task_panic_tests {
                 },
             );
             store
-                .add(MAP, "in-the-aborted-batch", &lww_value(), 0, now_millis())
+                .add(MAP, "in-the-aborted-batch", &lww_value(), now_millis())
                 .await
                 .expect("write");
             store.soft_flush().await.expect("soft_flush");
@@ -15442,7 +15287,7 @@ mod background_task_panic_tests {
             },
         );
         store
-            .add(MAP, "queued", &lww_value(), 0, now_millis())
+            .add(MAP, "queued", &lww_value(), now_millis())
             .await
             .expect("write");
 
@@ -15471,7 +15316,7 @@ mod background_task_panic_tests {
             },
         );
         store
-            .add(MAP, "queued", &lww_value(), 0, now_millis())
+            .add(MAP, "queued", &lww_value(), now_millis())
             .await
             .expect("write");
 
@@ -15512,7 +15357,7 @@ mod background_task_panic_tests {
             Some(bootstrap(Arc::clone(&wal) as Arc<dyn Wal>)),
         );
         store
-            .add(MAP, "queued", &lww_value(), 0, now_millis())
+            .add(MAP, "queued", &lww_value(), now_millis())
             .await
             .expect("write");
 
@@ -15554,7 +15399,7 @@ mod background_task_panic_tests {
         async fn assert_a_new_key_is_rejected(store: &WriteBehindDataStore, when: &str) {
             let pending = store.pending_operation_count();
             let rejected = store
-                .add(MAP, "in-neither", &lww_value(), 0, now_millis())
+                .add(MAP, "in-neither", &lww_value(), now_millis())
                 .await
                 .expect_err("a key in neither staging nor a flush pass must be rejected");
             assert_eq!(
@@ -15583,13 +15428,13 @@ mod background_task_panic_tests {
 
         for key in HELD {
             store
-                .add(MAP, key, &lww_value(), 0, now)
+                .add(MAP, key, &lww_value(), now)
                 .await
                 .expect("below capacity");
         }
         // Stored an hour from now, so no pass finds it old enough to take.
         store
-            .add(MAP, QUEUED, &lww_value(), 0, now + 3_600_000)
+            .add(MAP, QUEUED, &lww_value(), now + 3_600_000)
             .await
             .expect("below capacity");
         assert_eq!(store.pending_operation_count(), CAPACITY);
@@ -15609,7 +15454,7 @@ mod background_task_panic_tests {
         let mut rewritten = 0;
         for key in HELD {
             store
-                .add(MAP, key, &lww_value(), 0, now)
+                .add(MAP, key, &lww_value(), now)
                 .await
                 .expect("a re-write of a key the flush pass holds is accepted over capacity");
             rewritten += 1;
@@ -15622,7 +15467,7 @@ mod background_task_panic_tests {
         // not grow past the number of entries the pass holds.
         for key in HELD.into_iter().chain([QUEUED]) {
             store
-                .add(MAP, key, &lww_value(), 0, now)
+                .add(MAP, key, &lww_value(), now)
                 .await
                 .expect("a re-write of a queued key coalesces");
         }
@@ -15690,10 +15535,7 @@ mod background_task_panic_tests {
         );
         let now = now_millis();
         for key in &keys {
-            store
-                .add(MAP, key, &lww_value(), 0, now)
-                .await
-                .expect("write");
+            store.add(MAP, key, &lww_value(), now).await.expect("write");
         }
         assert_eq!(store.pending_operation_count(), due);
 
@@ -15740,7 +15582,7 @@ mod background_task_panic_tests {
 
         for i in 0..CAPACITY - 1 {
             store
-                .add(MAP, &format!("filled-{i}"), &lww_value(), 0, now)
+                .add(MAP, &format!("filled-{i}"), &lww_value(), now)
                 .await
                 .expect("below capacity");
         }
@@ -15782,7 +15624,7 @@ mod background_task_panic_tests {
 
         for i in 0..CAPACITY - 1 {
             store
-                .add(MAP, &format!("filled-{i}"), &lww_value(), 0, now)
+                .add(MAP, &format!("filled-{i}"), &lww_value(), now)
                 .await
                 .expect("below capacity");
         }
@@ -15910,7 +15752,7 @@ mod background_task_panic_tests {
         let write = {
             let store = Arc::clone(&store);
             let value = written.clone();
-            tokio::spawn(async move { store.add(MAP, RACED_KEY, &value, 0, now).await })
+            tokio::spawn(async move { store.add(MAP, RACED_KEY, &value, now).await })
         };
         park.wait_parked().await;
 
@@ -15927,12 +15769,12 @@ mod background_task_panic_tests {
         let persisted = memory.get(MAP, RACED_KEY);
 
         store
-            .add(MAP, "filler", &lww_value(), 0, now + NOT_DUE_FOR_MS)
+            .add(MAP, "filler", &lww_value(), now + NOT_DUE_FOR_MS)
             .await
             .expect("the filler is accepted below capacity");
         let answer = answer_of(
             store
-                .add(MAP, RACED_KEY, &written, 0, now + NOT_DUE_FOR_MS)
+                .add(MAP, RACED_KEY, &written, now + NOT_DUE_FOR_MS)
                 .await,
         );
         let pending = store.pending_operation_count();
@@ -15963,7 +15805,7 @@ mod background_task_panic_tests {
         let second = lww_text("second", 2);
 
         store
-            .add(MAP, RACED_KEY, &first, 0, now)
+            .add(MAP, RACED_KEY, &first, now)
             .await
             .expect("the first write is accepted");
 
@@ -15975,7 +15817,7 @@ mod background_task_panic_tests {
             let value = second.clone();
             tokio::spawn(async move {
                 store
-                    .add(MAP, RACED_KEY, &value, 0, now + NOT_DUE_FOR_MS)
+                    .add(MAP, RACED_KEY, &value, now + NOT_DUE_FOR_MS)
                     .await
             })
         };
@@ -16043,7 +15885,7 @@ mod background_task_panic_tests {
         let persisted = memory.get(MAP, RACED_KEY);
 
         store
-            .add(MAP, "filler", &lww_value(), 0, now + NOT_DUE_FOR_MS)
+            .add(MAP, "filler", &lww_value(), now + NOT_DUE_FOR_MS)
             .await
             .expect("the filler is accepted below capacity");
         let answer = answer_of(store.remove(MAP, RACED_KEY, now + NOT_DUE_FOR_MS).await);
@@ -16102,7 +15944,7 @@ mod background_task_panic_tests {
 
         for filler in ["filler-1", "filler-2"] {
             store
-                .add(MAP, filler, &lww_value(), 0, now + NOT_DUE_FOR_MS)
+                .add(MAP, filler, &lww_value(), now + NOT_DUE_FOR_MS)
                 .await
                 .expect("the filler is accepted below capacity");
         }
@@ -16145,7 +15987,7 @@ mod background_task_panic_tests {
         let second = lww_text("second", 2);
 
         store
-            .add(MAP, RACED_KEY, &first, 0, later)
+            .add(MAP, RACED_KEY, &first, later)
             .await
             .expect("the first write is accepted");
 
@@ -16155,7 +15997,7 @@ mod background_task_panic_tests {
         let write = {
             let store = Arc::clone(&store);
             let value = second.clone();
-            tokio::spawn(async move { store.add(MAP, RACED_KEY, &value, 0, later).await })
+            tokio::spawn(async move { store.add(MAP, RACED_KEY, &value, later).await })
         };
         park.wait_parked().await;
 
@@ -16188,7 +16030,7 @@ mod background_task_panic_tests {
         let second = lww_text("second", 2);
 
         store
-            .add(MAP, RACED_KEY, &first, 0, later)
+            .add(MAP, RACED_KEY, &first, later)
             .await
             .expect("the first write is accepted");
 
@@ -16197,7 +16039,7 @@ mod background_task_panic_tests {
         let write = {
             let store = Arc::clone(&store);
             let value = second.clone();
-            tokio::spawn(async move { store.add(MAP, RACED_KEY, &value, 0, later).await })
+            tokio::spawn(async move { store.add(MAP, RACED_KEY, &value, later).await })
         };
         write_park.wait_parked().await;
 
@@ -16324,7 +16166,6 @@ mod store_broken_tests {
             _map: &str,
             _key: &str,
             _value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             self.refuse()
@@ -16335,7 +16176,6 @@ mod store_broken_tests {
             _map: &str,
             _key: &str,
             _value: &RecordValue,
-            _expiration_time: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             self.refuse()
@@ -16554,7 +16394,7 @@ mod store_broken_tests {
     async fn add_keys(store: &WriteBehindDataStore) {
         for key in KEYS {
             store
-                .add(MAP, key, &value(key), 0, now_millis())
+                .add(MAP, key, &value(key), now_millis())
                 .await
                 .expect("a healthy store accepts the write");
         }
@@ -16832,7 +16672,7 @@ mod store_broken_tests {
             assert_eq!(inner.calls(), 3, "no call while the hold is in force");
 
             store
-                .add(MAP, "k4", &value("k4"), 0, now_millis())
+                .add(MAP, "k4", &value("k4"), now_millis())
                 .await
                 .expect("an unknown refusal leaves the store accepting writes");
             bounded_hard_flush(&store)
@@ -16946,7 +16786,7 @@ mod store_broken_tests {
             let pending = store.pending_operation_count();
 
             let add = store
-                .add(MAP, "after", &value("after"), 0, now_millis())
+                .add(MAP, "after", &value("after"), now_millis())
                 .await
                 .expect_err("a store failed on a broken store refuses `add`");
             let remove = store
@@ -17272,7 +17112,7 @@ mod tenant_drop_tests {
         fn spawn_add(&self, map: &str, key: &str) -> tokio::task::JoinHandle<anyhow::Result<()>> {
             let store = Arc::clone(&self.store);
             let (map, key) = (map.to_string(), key.to_string());
-            tokio::spawn(async move { store.add(&map, &key, &lww("v"), 0, 2).await })
+            tokio::spawn(async move { store.add(&map, &key, &lww("v"), 2).await })
         }
 
         fn spawn_add_backup(
@@ -17282,7 +17122,7 @@ mod tenant_drop_tests {
         ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
             let store = Arc::clone(&self.store);
             let (map, key) = (map.to_string(), key.to_string());
-            tokio::spawn(async move { store.add_backup(&map, &key, &lww("v"), 0, 2).await })
+            tokio::spawn(async move { store.add_backup(&map, &key, &lww("v"), 2).await })
         }
 
         /// Waits until the write of `(map, key)` left the buffer: stored.
@@ -17300,7 +17140,7 @@ mod tenant_drop_tests {
         }
 
         async fn assert_refused(&self, map: &str) {
-            let err = self.store.add(map, "x", &lww("x"), 0, 3).await.unwrap_err();
+            let err = self.store.add(map, "x", &lww("x"), 3).await.unwrap_err();
             assert!(err.to_string().contains("dropped"), "{err:#}");
         }
     }
@@ -17314,7 +17154,7 @@ mod tenant_drop_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac10a_a_drop_waits_for_a_write_parked_in_its_wal_append() {
         let node = Node::fresh(config(10_000)).await;
-        node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+        node.store.add(OWNED, "k0", &lww("v0"), 1).await.unwrap();
         let mut park = node.wal.park_append(OWNED);
         let write = node.spawn_add(OWNED, "k1");
         park.wait_parked().await;
@@ -17340,7 +17180,7 @@ mod tenant_drop_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac10a_a_drop_waits_for_a_write_parked_before_its_queue_insert() {
         let node = Node::fresh(config(10_000)).await;
-        node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+        node.store.add(OWNED, "k0", &lww("v0"), 1).await.unwrap();
         let mut park = node.store.test_park_before_queue_insert(OWNED, "k1");
         let write = node.spawn_add(OWNED, "k1");
         park.wait_parked().await;
@@ -17363,7 +17203,7 @@ mod tenant_drop_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac10b_a_write_after_the_close_is_refused_and_nothing_reappears() {
         let node = Node::fresh(config(10_000)).await;
-        node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+        node.store.add(OWNED, "k0", &lww("v0"), 1).await.unwrap();
         assert_eq!(
             node.store.drop_tenant(TENANT).await.unwrap(),
             done(&[OWNED])
@@ -17379,12 +17219,12 @@ mod tenant_drop_tests {
             .is_err());
         assert!(node
             .store
-            .add_backup(OWNED, "k0", &lww("x"), 0, 3)
+            .add_backup(OWNED, "k0", &lww("x"), 3)
             .await
             .is_err());
         assert!(node.store.remove_backup(OWNED, "k0", 3).await.is_err());
         for map in ["bb.z", "b.", "b", OTHER] {
-            node.store.add(map, "k", &lww("v"), 0, 3).await.unwrap();
+            node.store.add(map, "k", &lww("v"), 3).await.unwrap();
         }
         eventually("the other maps are stored", || node.store.test_is_idle()).await;
         node.assert_owned_map_gone(&["k0", "x"]).await;
@@ -17405,11 +17245,8 @@ mod tenant_drop_tests {
         let partition = partition_for(OWNED, "k1");
         let refused = key_in(OTHER, partition);
         node.store.test_refuse_encoding(OTHER, &refused);
-        node.store
-            .add(OTHER, &refused, &lww("r"), 0, 1)
-            .await
-            .unwrap();
-        node.store.add(OWNED, "k1", &lww("v1"), 0, 1).await.unwrap();
+        node.store.add(OTHER, &refused, &lww("r"), 1).await.unwrap();
+        node.store.add(OWNED, "k1", &lww("v1"), 1).await.unwrap();
         node.wait_stored(OWNED, "k1").await;
 
         let drop_call = node.spawn_drop(TENANT);
@@ -17435,11 +17272,8 @@ mod tenant_drop_tests {
         let partition = partition_for(OWNED, "k1");
         let refused = key_in(OTHER, partition);
         node.store.test_refuse_encoding(OTHER, &refused);
-        node.store
-            .add(OTHER, &refused, &lww("r"), 0, 1)
-            .await
-            .unwrap();
-        node.store.add(OWNED, "k1", &lww("v1"), 0, 1).await.unwrap();
+        node.store.add(OTHER, &refused, &lww("r"), 1).await.unwrap();
+        node.store.add(OWNED, "k1", &lww("v1"), 1).await.unwrap();
         node.wait_stored(OWNED, "k1").await;
 
         let err = node.store.drop_tenant(TENANT).await.unwrap_err();
@@ -17452,7 +17286,7 @@ mod tenant_drop_tests {
             .unwrap()
             .contains(&OWNED.to_string()));
         assert!(node.closed().is_empty());
-        node.store.add(OWNED, "k2", &lww("v2"), 0, 2).await.unwrap();
+        node.store.add(OWNED, "k2", &lww("v2"), 2).await.unwrap();
     }
 
     /// `AC10d`: no entry of an OR slot written before the drop reappears, in
@@ -17470,7 +17304,7 @@ mod tenant_drop_tests {
             records: vec![or_entry("t1"), or_entry("t2")],
             tombstones: Vec::new(),
         };
-        node.store.add(SLOT_MAP, "s", &two, 0, 1).await.unwrap();
+        node.store.add(SLOT_MAP, "s", &two, 1).await.unwrap();
         let three = RecordValue::OrMap {
             records: vec![or_entry("t1"), or_entry("t2"), or_entry("t3")],
             tombstones: Vec::new(),
@@ -17480,7 +17314,6 @@ mod tenant_drop_tests {
                 SLOT_MAP,
                 "s",
                 WriteSource::Value(&three),
-                0,
                 2,
                 Some(&OrDelta::Add {
                     entry: or_entry("t3"),
@@ -17510,7 +17343,7 @@ mod tenant_drop_tests {
     async fn ac10e_a_drop_waits_for_a_backup_write_parked_before_its_inner_call() {
         let node = Node::fresh(config(10_000)).await;
         node.store
-            .add_backup(OWNED, "k0", &lww("v0"), 0, 1)
+            .add_backup(OWNED, "k0", &lww("v0"), 1)
             .await
             .unwrap();
         let mut park = node.store.test_park_before_backup_write(OWNED, "k1");
@@ -17550,13 +17383,13 @@ mod tenant_drop_tests {
                 .unwrap()
                 .block_on(async {
                     let node = Node::fresh(config(10_000)).await;
-                    node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+                    node.store.add(OWNED, "k0", &lww("v0"), 1).await.unwrap();
                     assert_eq!(
                         node.store.drop_tenant(TENANT).await.unwrap(),
                         done(&[OWNED])
                     );
                     for key in ["k0", "k1", "k2"] {
-                        assert!(node.store.add(OWNED, key, &lww("v"), 0, 2).await.is_err());
+                        assert!(node.store.add(OWNED, key, &lww("v"), 2).await.is_err());
                         assert!(node.store.remove(OWNED, key, 2).await.is_err());
                     }
                     // Several flush passes.
@@ -17587,7 +17420,7 @@ mod tenant_drop_tests {
     async fn ac10g_a_frame_left_unapplied_at_boot_holds_the_drop() {
         let partition = partition_for(OWNED, "k1");
         let node = Node::fresh(config(10_000)).await;
-        node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+        node.store.add(OWNED, "k0", &lww("v0"), 1).await.unwrap();
         let node = node.stop_and_restart(config(10_000)).await;
         let Node {
             engine,
@@ -17610,7 +17443,6 @@ mod tenant_drop_tests {
                 key: key.to_string(),
                 op: WalOp::Store {
                     value: WalStorePayload::Record(lww("v1")),
-                    expiration_time: None,
                 },
                 timestamp: Some(ts(1)),
                 sequence,
@@ -17635,7 +17467,7 @@ mod tenant_drop_tests {
         assert!(node.inner.load(OWNED, "k0").await.unwrap().is_some());
         assert_eq!(node.registry_rows_of(OWNED), 1);
         assert!(node.closed().is_empty());
-        node.store.add(OWNED, "k2", &lww("v2"), 0, 2).await.unwrap();
+        node.store.add(OWNED, "k2", &lww("v2"), 2).await.unwrap();
     }
 
     /// `AC10h`: an invalid tenant is refused before anything is closed.
@@ -17646,9 +17478,9 @@ mod tenant_drop_tests {
             assert!(node.store.drop_tenant(tenant).await.is_err(), "{tenant:?}");
             assert!(node.closed().is_empty(), "{tenant:?}");
         }
-        node.store.add(".x", "k", &lww("v"), 0, 1).await.unwrap();
+        node.store.add(".x", "k", &lww("v"), 1).await.unwrap();
         node.store
-            .add("_topgun_x.m", "k", &lww("v"), 0, 1)
+            .add("_topgun_x.m", "k", &lww("v"), 1)
             .await
             .unwrap();
     }
@@ -17705,7 +17537,7 @@ mod tenant_drop_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac10h_a_failed_rerun_keeps_the_close_of_an_earlier_drop() {
         let node = Node::fresh(config(300)).await;
-        node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+        node.store.add(OWNED, "k0", &lww("v0"), 1).await.unwrap();
         assert_eq!(
             node.store.drop_tenant(TENANT).await.unwrap(),
             done(&[OWNED])
@@ -17733,7 +17565,7 @@ mod tenant_drop_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac10h_a_cancelled_drop_lifts_its_close_and_frees_the_slot() {
         let node = Node::fresh(config(10_000)).await;
-        node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+        node.store.add(OWNED, "k0", &lww("v0"), 1).await.unwrap();
         let mut park = node.store.test_park_before_backup_write(OTHER, "k");
         let write = node.spawn_add_backup(OTHER, "k");
         park.wait_parked().await;
@@ -17744,7 +17576,7 @@ mod tenant_drop_tests {
         assert!(drop_call.await.unwrap_err().is_cancelled());
 
         assert!(node.closed().is_empty());
-        node.store.add(OWNED, "k1", &lww("v1"), 0, 2).await.unwrap();
+        node.store.add(OWNED, "k1", &lww("v1"), 2).await.unwrap();
         park.release();
         write.await.unwrap().unwrap();
         assert_eq!(
@@ -17793,7 +17625,7 @@ mod tenant_drop_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn continuous_writes_of_another_map_do_not_hold_the_drop() {
         let node = Node::fresh(config(3_000)).await;
-        node.store.add(OWNED, "k0", &lww("v0"), 0, 1).await.unwrap();
+        node.store.add(OWNED, "k0", &lww("v0"), 1).await.unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let writers: Vec<_> = (0..4)
             .map(|w| {
@@ -17803,7 +17635,7 @@ mod tenant_drop_tests {
                     let mut i = 0u64;
                     while !stop.load(Ordering::SeqCst) {
                         let key = format!("w{w}-{}", i % 64);
-                        store.add(OTHER, &key, &lww("v"), 0, 1).await.unwrap();
+                        store.add(OTHER, &key, &lww("v"), 1).await.unwrap();
                         i += 1;
                     }
                     i
@@ -17829,7 +17661,7 @@ mod tenant_drop_tests {
         *node.store.tenant_closes.after_register.lock().unwrap() = Some(Box::new(move || {
             store.tenant_closes.epoch.fetch_add(1, Ordering::SeqCst);
         }));
-        node.store.add(OTHER, "k", &lww("v"), 0, 1).await.unwrap();
+        node.store.add(OTHER, "k", &lww("v"), 1).await.unwrap();
         assert_eq!(node.store.drop_tenant(TENANT).await.unwrap(), done(&[]));
         assert_eq!(node.store.drop_tenant(TENANT).await.unwrap(), done(&[]));
         assert_eq!(node.store.drop_tenant("c").await.unwrap(), done(&[]));
@@ -17956,7 +17788,7 @@ mod write_path_measure {
                                     store.remove(&map, &key, 1).await.unwrap();
                                 } else {
                                     let key = format!("w{w}-{i}");
-                                    store.add(&map, &key, &value, 0, 1).await.unwrap();
+                                    store.add(&map, &key, &value, 1).await.unwrap();
                                 }
                                 latencies.push(started.elapsed().as_nanos() as u64);
                                 i += 1;

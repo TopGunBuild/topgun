@@ -1968,7 +1968,6 @@ fn tg_or_003_ac7b_an_or_delta_survivor_carries_the_retired_sequences_forward() {
                 records: Vec::new(),
                 tombstones: Vec::new(),
             },
-            expiration_time: 0,
         },
         store_time: 0,
         sequence: 1,

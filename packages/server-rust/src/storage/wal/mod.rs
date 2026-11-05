@@ -121,17 +121,13 @@ impl FromStr for WalFsyncPolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WalOp {
-    /// Upsert: the full CRDT record value and its TTL expiration timestamp in
-    /// milliseconds.
+    /// Upsert: the full CRDT record value. A frame written by an earlier
+    /// binary may also carry an `expirationTime` key, which decoding ignores.
     Store {
         /// The CRDT value to persist. Carries the full [`RecordValue`] so OR-Map
         /// adds and tombstones survive `kill -9` recovery losslessly, while still
         /// decoding the bare-`Value` shape written by older servers.
         value: WalStorePayload,
-        /// Wall-clock expiration time in milliseconds since epoch.
-        /// Negative or zero means no expiration.
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        expiration_time: Option<i64>,
     },
     /// Tombstone: remove the record from the store.
     Remove,
@@ -2566,8 +2562,6 @@ enum ReplayWrite {
     Put {
         /// The record.
         value: RecordValue,
-        /// Absolute millis since epoch (0 = no expiry).
-        expiration_time: i64,
     },
     /// Removes the frame's key.
     Remove,
@@ -2585,11 +2579,7 @@ enum Prepared {
     /// The frame writes nothing: an LWW frame the gate discards.
     Nothing,
     /// A put, as the msgpack encoding `add` stores.
-    Put {
-        encoded: Vec<u8>,
-        /// Absolute millis since epoch (0 = no expiry).
-        expiration_time: i64,
-    },
+    Put { encoded: Vec<u8> },
     /// A remove.
     Remove,
     /// Preparing the frame failed, or the store refused its write: it blocks
@@ -2742,13 +2732,8 @@ impl WalRecovery {
         let overlay = ReplayOverlay::default();
         match Self::prepare_entry(inner_store, &overlay, entry, merge_gate).await? {
             None => Ok(()),
-            Some(ReplayWrite::Put {
-                value,
-                expiration_time,
-            }) => {
-                inner_store
-                    .add(&entry.map, &entry.key, &value, expiration_time, now)
-                    .await
+            Some(ReplayWrite::Put { value }) => {
+                inner_store.add(&entry.map, &entry.key, &value, now).await
             }
             Some(ReplayWrite::Remove) => inner_store.remove(&entry.map, &entry.key, now).await,
         }
@@ -3040,17 +3025,6 @@ impl WalRecovery {
     /// or dropped: a dropped remove resurrects an entry, and unlike a full-snapshot
     /// frame a delta is never repaired by a later frame.
     ///
-    /// KNOWN BOUND on that arm, deferred rather than closed (TODO-627): the fold
-    /// writes the key back with NO expiry, and "no expiry is what the live OR path
-    /// produces" is a property of the CONFIGURATION, not of the OR policy —
-    /// `ExpiryPolicy::NONE` resolves through `compute_expiration_time`, which falls
-    /// back to `StorageConfig::default_ttl_millis`, a real evictable field that is
-    /// `0` in every production wiring but is not required to be. Wire a map-level
-    /// default TTL and the snapshot arm carries the expiry across recovery while the
-    /// delta arm discards it, silently, with nothing detecting the divergence. Stated
-    /// here because a doc-contract that asserted TTL-equivalence between the two arms
-    /// would be asserting a property this code does not have.
-    ///
     /// A `WalOp::Store` frame carrying an OR value stays a SUPPORTED input and is
     /// applied in its sequence position as an ABSOLUTE SET, never as a fold-base
     /// skip hint and never as a union — see the arm for why the snapshot's
@@ -3063,10 +3037,7 @@ impl WalRecovery {
         merge_gate: bool,
     ) -> anyhow::Result<Option<ReplayWrite>> {
         match &entry.op {
-            WalOp::Store {
-                value,
-                expiration_time,
-            } => {
+            WalOp::Store { value } => {
                 // Reconstruct the exact RecordValue. Current frames carry the full
                 // value (LWW or OR), so OR-Map adds/tombstones replay losslessly.
                 // Legacy frames carried a bare Value and are replayed as LWW; an
@@ -3149,7 +3120,6 @@ impl WalRecovery {
                 // ascending in it (TG-WAL-011).
                 Ok(Some(ReplayWrite::Put {
                     value: record_value,
-                    expiration_time: expiration_time.unwrap_or(0),
                 }))
             }
             WalOp::Remove => {
@@ -3178,22 +3148,7 @@ impl WalRecovery {
                 // what this frame's write will have made the store hold.
                 let base = overlay.load(inner_store, &entry.map, &entry.key).await?;
                 let folded = <Self as OrDeltaFold>::fold(base, delta);
-
-                // Expiration `0` ("no expiry"): `load` returns no TTL and `add`
-                // requires one, and a delta frame carries no expiration field —
-                // it records a mutation, not a whole slot. `0` matches what the
-                // live OR write path produces today, so the fold introduces no
-                // TTL drift. An OR path that starts writing TTLs would need the
-                // frame to carry one; it is not a value this arm may invent.
-                //
-                // "Produces `0` today" is a property of the CONFIGURATION, not of
-                // the OR policy, and nothing detects the divergence if that
-                // default ever moves — the KNOWN BOUND clause in `prepare_entry`'s
-                // doc-contract states it in full, with its owner.
-                Ok(Some(ReplayWrite::Put {
-                    value: folded,
-                    expiration_time: 0,
-                }))
+                Ok(Some(ReplayWrite::Put { value: folded }))
             }
             // An explicit arm rather than a `_` catch-all: the exhaustiveness is
             // what forces a future framing to declare its replay semantics here
@@ -3234,19 +3189,8 @@ impl WalRecovery {
         let prepared =
             Self::prepare_entry(inner_store, overlay, entry, self.replay_merge_gate).await;
         let encoded = match prepared {
-            Ok(Some(ReplayWrite::Put {
-                value,
-                expiration_time,
-            })) => rmp_serde::to_vec_named(&value)
-                .map(|encoded| {
-                    (
-                        Prepared::Put {
-                            encoded,
-                            expiration_time,
-                        },
-                        Some(Some(value)),
-                    )
-                })
+            Ok(Some(ReplayWrite::Put { value })) => rmp_serde::to_vec_named(&value)
+                .map(|encoded| (Prepared::Put { encoded }, Some(Some(value))))
                 .map_err(anyhow::Error::from),
             Ok(Some(ReplayWrite::Remove)) => Ok((Prepared::Remove, Some(None))),
             Ok(None) => Ok((Prepared::Nothing, None)),
@@ -3527,14 +3471,10 @@ fn batch_writes<'a>(
     let mut origin = Vec::new();
     for (i, (frame, entry)) in prepared.iter().zip(frames).enumerate() {
         let write = match frame {
-            Prepared::Put {
-                encoded,
-                expiration_time,
-            } => StoreWrite::Put {
+            Prepared::Put { encoded } => StoreWrite::Put {
                 map: &entry.map,
                 key: &entry.key,
                 value: PutValue::Encoded(encoded.clone()),
-                expiration_time: *expiration_time,
                 store_time: now,
             },
             Prepared::Remove => StoreWrite::Remove {
@@ -4565,7 +4505,6 @@ mod tests {
             map: &str,
             key: &str,
             value: &crate::storage::record::RecordValue,
-            _exp: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             self.adds
@@ -4580,7 +4519,6 @@ mod tests {
             _map: &str,
             _key: &str,
             _value: &crate::storage::record::RecordValue,
-            _exp: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             Ok(())
@@ -4739,7 +4677,6 @@ mod tests {
                     timestamp: timestamp.clone(),
                     ttl_ms: None,
                 }),
-                expiration_time: None,
             },
             timestamp: Some(timestamp),
             sequence: seq,
@@ -4770,7 +4707,6 @@ mod tests {
             map: &str,
             key: &str,
             value: &crate::storage::record::RecordValue,
-            _exp: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             self.replay_order.lock().await.push(key.to_string());
@@ -4785,7 +4721,6 @@ mod tests {
             _map: &str,
             _key: &str,
             _value: &crate::storage::record::RecordValue,
-            _exp: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             Ok(())
@@ -4886,7 +4821,6 @@ mod tests {
                     timestamp: ts(millis),
                     ttl_ms: None,
                 }),
-                expiration_time: None,
             },
             timestamp: None,
             sequence: 1,
@@ -4899,7 +4833,6 @@ mod tests {
             key: key.to_string(),
             op: WalOp::Store {
                 value: WalStorePayload::Record(value),
-                expiration_time: None,
             },
             timestamp: None,
             sequence: 1,
@@ -4927,7 +4860,7 @@ mod tests {
         };
 
         // Gate ON: an older (ts=10) frame over a newer (ts=20) durable value is discarded.
-        store.add("m", "k", &newer, 0, 0).await.unwrap();
+        store.add("m", "k", &newer, 0).await.unwrap();
         WalRecovery::replay_entry(&store, &lww_frame("k", 10), 0, true)
             .await
             .unwrap();
@@ -4982,7 +4915,7 @@ mod tests {
             records: vec![],
             tombstones: vec!["B".to_string()],
         };
-        store.add("m", "o", &durable_or, 0, 0).await.unwrap();
+        store.add("m", "o", &durable_or, 0).await.unwrap();
         let or_frame = RecordValue::OrMap {
             records: vec![],
             tombstones: vec!["A".to_string()],
@@ -5020,7 +4953,6 @@ mod tests {
                     ttl_ms: None,
                 },
                 0,
-                0,
             )
             .await
             .unwrap();
@@ -5029,7 +4961,6 @@ mod tests {
             key: "k".to_string(),
             op: WalOp::Store {
                 value: WalStorePayload::Legacy(TgValue::Int(1)),
-                expiration_time: None,
             },
             timestamp: None,
             sequence: 1,
@@ -5172,7 +5103,7 @@ mod tests {
         let legacy_base = RecordValue::OrTombstones {
             tags: vec!["gone".to_string()],
         };
-        store.add("m", "legacy", &legacy_base, 0, 0).await.unwrap();
+        store.add("m", "legacy", &legacy_base, 0).await.unwrap();
         WalRecovery::replay_entry(
             &store,
             &or_delta_frame(
@@ -5212,7 +5143,6 @@ mod tests {
                     records: vec![or_entry("a", 3)],
                     tombstones: vec![],
                 },
-                0,
                 0,
             )
             .await
@@ -5296,7 +5226,7 @@ mod tests {
         // `merge_gate` values — the Remove arm ignores the flag entirely.
         for merge_gate in [true, false] {
             let store: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
-            store.add("m", "k", &newer, 0, 0).await.unwrap();
+            store.add("m", "k", &newer, 0).await.unwrap();
             WalRecovery::replay_entry(&store, &remove_frame("k", 10), 0, merge_gate)
                 .await
                 .unwrap();
@@ -5323,7 +5253,7 @@ mod tests {
             },
         ] {
             let store: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
-            store.add("m", "k", &newer, 0, 0).await.unwrap();
+            store.add("m", "k", &newer, 0).await.unwrap();
             WalRecovery::replay_entry(&store, &frame, 0, true)
                 .await
                 .unwrap();
@@ -6230,12 +6160,10 @@ mod tests {
                 },
                 ttl_ms: None,
             }),
-            expiration_time: None,
         }
         .subsumes_on_coalesce());
         assert!(WalOp::Store {
             value: WalStorePayload::Legacy(TgValue::Int(1)),
-            expiration_time: None,
         }
         .subsumes_on_coalesce());
     }
@@ -6264,7 +6192,6 @@ mod tests {
                 },
                 ttl_ms: None,
             }),
-            expiration_time: None,
         };
         assert!(
             retired.subsumes_on_coalesce() && !WalOp::TestNonSubsuming.subsumes_on_coalesce(),
@@ -6372,7 +6299,7 @@ mod tests {
             },
             ttl_ms: None,
         };
-        store.add("m", "k", &value, 0, 0).await.unwrap();
+        store.add("m", "k", &value, 0).await.unwrap();
 
         assert!(
             advanced_partitions(kept.as_ref()).is_empty(),
@@ -6531,6 +6458,87 @@ mod tests {
             (0, 0),
             "`sync` must fsync the active segment of every partition that held a frame"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Store frame shape across binaries
+    // -----------------------------------------------------------------------
+
+    /// A `Store` frame as an earlier binary encoded it (`rmp_serde::to_vec_named`
+    /// of the entry): the entry of [`lww_store_entry`] plus an
+    /// `expirationTime` key of 1_700_000_000_000 inside `store`.
+    const STORE_FRAME_WITH_EXPIRATION_TIME: &str = "85a36d6170a16da36b6579a16ba26f7081a573746f726582a576616c756581a36c777782a576616c756581a6537472696e67a176a974696d657374616d7083a66d696c6c6973cf0000018bcfe56800a7636f756e74657207a66e6f64654964a66e6f64652d61ae65787069726174696f6e54696d65cf0000018bcfe56800a974696d657374616d7083a66d696c6c6973cf0000018bcfe56800a7636f756e74657207a66e6f64654964a66e6f64652d61a873657175656e636509";
+
+    /// The same frame without that key, which is what this binary writes.
+    const STORE_FRAME: &str = "85a36d6170a16da36b6579a16ba26f7081a573746f726581a576616c756581a36c777782a576616c756581a6537472696e67a176a974696d657374616d7083a66d696c6c6973cf0000018bcfe56800a7636f756e74657207a66e6f64654964a66e6f64652d61a974696d657374616d7083a66d696c6c6973cf0000018bcfe56800a7636f756e74657207a66e6f64654964a66e6f64652d61a873657175656e636509";
+
+    fn unhex(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn lww_store_entry() -> WalEntry {
+        let timestamp = Timestamp {
+            millis: 1_700_000_000_000,
+            counter: 7,
+            node_id: "node-a".to_string(),
+        };
+        WalEntry {
+            map: "m".to_string(),
+            key: "k".to_string(),
+            op: WalOp::Store {
+                value: WalStorePayload::Record(RecordValue::Lww {
+                    value: TgValue::String("v".to_string()),
+                    timestamp: timestamp.clone(),
+                    ttl_ms: None,
+                }),
+            },
+            timestamp: Some(timestamp),
+            sequence: 9,
+        }
+    }
+
+    /// Frames an earlier binary left in the WAL are replayed by this one, so a
+    /// `Store` frame that carries `expirationTime` must still decode, with the
+    /// key ignored.
+    #[test]
+    fn a_store_frame_with_expiration_time_decodes_and_the_key_is_ignored() {
+        let decoded: WalEntry =
+            rmp_serde::from_slice(&unhex(STORE_FRAME_WITH_EXPIRATION_TIME)).unwrap();
+        assert_eq!(decoded, lww_store_entry());
+        assert_eq!(
+            rmp_serde::to_vec_named(&decoded).unwrap(),
+            unhex(STORE_FRAME)
+        );
+    }
+
+    /// An earlier binary decodes the key as absent when it is missing, so a
+    /// frame this binary writes stays readable there; the frame has only its
+    /// `value` under `store`.
+    #[test]
+    fn a_store_frame_carries_only_its_value() {
+        let bytes = rmp_serde::to_vec_named(&lww_store_entry()).unwrap();
+        assert_eq!(bytes, unhex(STORE_FRAME));
+        let frame = rmpv::decode::read_value(&mut bytes.as_slice()).unwrap();
+        let field = |value: &rmpv::Value, name: &str| -> rmpv::Value {
+            value
+                .as_map()
+                .unwrap()
+                .iter()
+                .find(|(key, _)| key.as_str() == Some(name))
+                .map(|(_, value)| value.clone())
+                .unwrap()
+        };
+        let store = field(&field(&frame, "op"), "store");
+        let keys: Vec<_> = store
+            .as_map()
+            .unwrap()
+            .iter()
+            .map(|(key, _)| key.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(keys, ["value"]);
     }
 }
 

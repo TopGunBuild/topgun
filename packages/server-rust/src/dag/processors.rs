@@ -2412,7 +2412,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let redb = Arc::new(RedbDataStore::new(dir.path().join("big.redb")).expect("redb open"));
         for key in ["d0", "d1", "d2", "d3", "d4"] {
-            redb.add("m", key, &lww("x".repeat(3 * 1024 * 1024), 1), 0, 1000)
+            redb.add("m", key, &lww("x".repeat(3 * 1024 * 1024), 1), 1000)
                 .await
                 .expect("durable row");
         }
@@ -2426,7 +2426,7 @@ mod tests {
             },
         );
         store
-            .add("m", "d3", &lww("NW".to_string(), 9), 0, 2000)
+            .add("m", "d3", &lww("NW".to_string(), 9), 2000)
             .await
             .expect("staged write");
         let factory = RecordStoreFactory::new(StorageConfig::default(), store, Vec::new());

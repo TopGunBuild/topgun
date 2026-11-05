@@ -152,7 +152,7 @@ fn or_slot(n: usize) -> RecordValue {
 /// Seeds `key` with N entries in redb and loads it, so the slot is resident.
 async fn seed_resident(node: &Node, key: &str, n: usize) {
     node.inner
-        .add(MAP, key, &or_slot(n), 0, 0)
+        .add(MAP, key, &or_slot(n), 0)
         .await
         .expect("seed redb");
     let store = node.factory.get_or_create(MAP, hash_to_partition(key));

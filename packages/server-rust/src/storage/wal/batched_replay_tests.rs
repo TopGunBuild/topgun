@@ -166,19 +166,12 @@ fn write_value(write: &StoreWrite<'_>) -> Option<RecordValue> {
 
 #[async_trait]
 impl MapDataStore for FaultStore {
-    async fn add(
-        &self,
-        map: &str,
-        key: &str,
-        value: &RecordValue,
-        expiration_time: i64,
-        now: i64,
-    ) -> anyhow::Result<()> {
+    async fn add(&self, map: &str, key: &str, value: &RecordValue, now: i64) -> anyhow::Result<()> {
         self.single_writes.fetch_add(1, Ordering::SeqCst);
         if self.refuses(value) {
             anyhow::bail!("injected: the store refuses the poisoned record {map}/{key}");
         }
-        self.inner.add(map, key, value, expiration_time, now).await
+        self.inner.add(map, key, value, now).await
     }
 
     fn accepts_encoded(&self) -> bool {
@@ -190,7 +183,6 @@ impl MapDataStore for FaultStore {
         map: &str,
         key: &str,
         bytes: &[u8],
-        expiration_time: i64,
         now: i64,
     ) -> anyhow::Result<()> {
         self.single_writes.fetch_add(1, Ordering::SeqCst);
@@ -198,9 +190,7 @@ impl MapDataStore for FaultStore {
         if self.refuses(&value) {
             anyhow::bail!("injected: the store refuses the poisoned record {map}/{key}");
         }
-        self.inner
-            .add_encoded(map, key, bytes, expiration_time, now)
-            .await
+        self.inner.add_encoded(map, key, bytes, now).await
     }
 
     async fn add_backup(
@@ -208,12 +198,9 @@ impl MapDataStore for FaultStore {
         map: &str,
         key: &str,
         value: &RecordValue,
-        expiration_time: i64,
         now: i64,
     ) -> anyhow::Result<()> {
-        self.inner
-            .add_backup(map, key, value, expiration_time, now)
-            .await
+        self.inner.add_backup(map, key, value, now).await
     }
 
     async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -405,7 +392,6 @@ impl FaultNode {
                 map: MAP,
                 key,
                 value: PutValue::Value(value),
-                expiration_time: 0,
                 store_time: 0,
             })
             .collect();
@@ -798,7 +784,6 @@ async fn per_frame_outcome(window: &Window, entries: &[WalEntry]) -> Outcome {
             map: MAP,
             key,
             value: PutValue::Value(value),
-            expiration_time: 0,
             store_time: 0,
         })
         .collect();
@@ -1610,7 +1595,7 @@ async fn crash_loop_writer(
                     },
                     ttl_ms: None,
                 };
-                wb.add(map, &key, &value, 0, now).await.expect("put");
+                wb.add(map, &key, &value, now).await.expect("put");
             }
             "del" => wb.remove(map, &key, now).await.expect("remove"),
             _ => {
@@ -1640,7 +1625,6 @@ async fn crash_loop_writer(
                     map,
                     &key,
                     crate::storage::map_data_store::WriteSource::Value(&value),
-                    0,
                     now,
                     Some(&delta),
                 )

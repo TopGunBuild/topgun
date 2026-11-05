@@ -156,7 +156,6 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            _exp: i64,
             _now: i64,
         ) -> anyhow::Result<()> {
             if self.fail_adds.load(Ordering::Relaxed) > 0 {
@@ -176,7 +175,6 @@ mod tests {
             _: &str,
             _: &str,
             _: &RecordValue,
-            _: i64,
             _: i64,
         ) -> anyhow::Result<()> {
             Ok(())
@@ -1216,10 +1214,9 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            exp: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner.add(map, key, value, exp, now).await
+            self.inner.add(map, key, value, now).await
         }
 
         async fn add_backup(
@@ -1227,10 +1224,9 @@ mod tests {
             map: &str,
             key: &str,
             value: &RecordValue,
-            exp: i64,
             now: i64,
         ) -> anyhow::Result<()> {
-            self.inner.add_backup(map, key, value, exp, now).await
+            self.inner.add_backup(map, key, value, now).await
         }
 
         async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -1347,7 +1343,7 @@ mod tests {
         block_on_async(async {
             let inner = Arc::new(RetainingCountingStore::default());
             inner
-                .add(MAP, KEY, &one_entry("t-durable"), 0, 0)
+                .add(MAP, KEY, &one_entry("t-durable"), 0)
                 .await
                 .unwrap();
             let datastore = Arc::new(LoadHookStore::new(Arc::clone(&inner)));
@@ -1410,7 +1406,7 @@ mod tests {
         block_on_async(async {
             let inner = Arc::new(RetainingCountingStore::default());
             inner
-                .add(MAP, KEY, &one_entry("t-durable"), 0, 0)
+                .add(MAP, KEY, &one_entry("t-durable"), 0)
                 .await
                 .unwrap();
             let datastore = Arc::new(LoadHookStore::new(Arc::clone(&inner)));

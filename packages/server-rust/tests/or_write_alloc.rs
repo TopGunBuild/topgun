@@ -233,7 +233,7 @@ fn fixture() -> Fixture {
 /// Seeds `key` with N entries in redb and loads it, so the slot is resident.
 async fn seed_resident(fx: &Fixture, key: &str, n: usize) {
     fx.inner
-        .add(MAP, key, &or_slot(n), 0, 0)
+        .add(MAP, key, &or_slot(n), 0)
         .await
         .expect("seed redb");
     let loaded = fx.store.get(key, false).await.expect("load");

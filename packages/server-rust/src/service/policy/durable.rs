@@ -123,7 +123,7 @@ impl DurablePolicyStore {
         let bytes = rmp_serde::to_vec_named(&ids)
             .map_err(|e| PolicyError::Internal(format!("encode policy index: {e}")))?;
         self.backend
-            .add(POLICY_MAP, INDEX_KEY, &wrap_bytes(bytes), 0, 0)
+            .add(POLICY_MAP, INDEX_KEY, &wrap_bytes(bytes), 0)
             .await
             .map_err(|e| PolicyError::Internal(format!("persist policy index: {e}")))
     }
@@ -135,7 +135,7 @@ impl DurablePolicyStore {
         let bytes = rmp_serde::to_vec_named(&true)
             .map_err(|e| PolicyError::Internal(format!("encode marker: {e}")))?;
         self.backend
-            .add(POLICY_MAP, CONFIGURED_KEY, &wrap_bytes(bytes), 0, 0)
+            .add(POLICY_MAP, CONFIGURED_KEY, &wrap_bytes(bytes), 0)
             .await
             .map_err(|e| PolicyError::Internal(format!("persist configured marker: {e}")))
     }
@@ -241,7 +241,7 @@ impl PolicyStore for DurablePolicyStore {
         let bytes = rmp_serde::to_vec_named(&policy)
             .map_err(|e| PolicyError::Internal(format!("encode policy: {e}")))?;
         self.backend
-            .add(POLICY_MAP, &policy.id, &wrap_bytes(bytes), 0, 0)
+            .add(POLICY_MAP, &policy.id, &wrap_bytes(bytes), 0)
             .await
             .map_err(|e| PolicyError::Internal(format!("persist policy: {e}")))?;
 
@@ -396,14 +396,7 @@ mod tests {
 
     #[async_trait]
     impl MapDataStore for FailingLoadStore {
-        async fn add(
-            &self,
-            _m: &str,
-            _k: &str,
-            _v: &RecordValue,
-            _e: i64,
-            _n: i64,
-        ) -> anyhow::Result<()> {
+        async fn add(&self, _m: &str, _k: &str, _v: &RecordValue, _n: i64) -> anyhow::Result<()> {
             Ok(())
         }
         async fn add_backup(
@@ -411,7 +404,6 @@ mod tests {
             _m: &str,
             _k: &str,
             _v: &RecordValue,
-            _e: i64,
             _n: i64,
         ) -> anyhow::Result<()> {
             Ok(())

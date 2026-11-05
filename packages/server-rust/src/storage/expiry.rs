@@ -447,7 +447,6 @@ mod durability {
                     key: "lww".to_string(),
                     op: WalOp::Store {
                         value: WalStorePayload::Record(lww.clone()),
-                        expiration_time: None,
                     },
                     timestamp: Some(ts(1_700_000_000_000)),
                     sequence: 1,
@@ -457,7 +456,6 @@ mod durability {
                     key: "or".to_string(),
                     op: WalOp::Store {
                         value: WalStorePayload::Record(slot.clone()),
-                        expiration_time: None,
                     },
                     timestamp: None,
                     sequence: 2,
@@ -528,7 +526,6 @@ mod durability {
                     MAP,
                     "or",
                     WriteSource::Value(&slot),
-                    0,
                     1_700_000_000_000,
                     Some(&OrDelta::Add {
                         entry: added.clone(),

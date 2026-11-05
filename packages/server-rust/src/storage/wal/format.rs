@@ -638,7 +638,6 @@ mod tests {
                     timestamp: timestamp.clone(),
                     ttl_ms: None,
                 }),
-                expiration_time: Some(1_700_000_000_000),
             },
             timestamp: Some(timestamp),
             sequence: seq,

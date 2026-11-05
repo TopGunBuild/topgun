@@ -99,7 +99,6 @@ impl MapDataStore for RetainingStore {
         map: &str,
         key: &str,
         value: &RecordValue,
-        _exp: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
         self.data
@@ -114,7 +113,6 @@ impl MapDataStore for RetainingStore {
         _map: &str,
         _key: &str,
         _value: &RecordValue,
-        _exp: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
         Ok(())
@@ -421,7 +419,7 @@ async fn run_crash_scenario(
                         let value = lww_value(*value_tag, hlc_millis);
                         hlc_millis += 1;
                         store
-                            .add(TEST_MAP, key, &value, 0, 1000)
+                            .add(TEST_MAP, key, &value, 1000)
                             .await
                             .expect("add must ack");
                         acked.insert(key.clone(), Some(*value_tag));
@@ -694,11 +692,11 @@ async fn ac2b_truncated_tail_tolerated() {
             let wal = open_wal(&wal_dir, WalFsyncPolicy::Batched, &durable);
             let store = write_behind(&durable, &wal, 1);
             store
-                .add(TEST_MAP, key, &lww_value(1, 1), 0, 1000)
+                .add(TEST_MAP, key, &lww_value(1, 1), 1000)
                 .await
                 .unwrap();
             store
-                .add(TEST_MAP, key, &lww_value(2, 2), 0, 1000)
+                .add(TEST_MAP, key, &lww_value(2, 2), 1000)
                 .await
                 .unwrap();
             (wal, ())
@@ -765,11 +763,11 @@ async fn ac2c_mid_file_corruption_is_fatal() {
             let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &durable);
             let store = write_behind(&durable, &wal, 1);
             store
-                .add(TEST_MAP, key, &lww_value(1, 1), 0, 1000)
+                .add(TEST_MAP, key, &lww_value(1, 1), 1000)
                 .await
                 .unwrap();
             store
-                .add(TEST_MAP, key, &lww_value(2, 2), 0, 1000)
+                .add(TEST_MAP, key, &lww_value(2, 2), 1000)
                 .await
                 .unwrap();
             (wal, ())
@@ -866,7 +864,7 @@ async fn ac4_acked_writes_survive_multiple_restart_cycles() {
             // Fresh node: seed 1 (no WAL observed yet).
             let store = write_behind(&durable, &wal, 1);
             store
-                .add(TEST_MAP, &k0, &lww_value(1, 1), 0, 1000)
+                .add(TEST_MAP, &k0, &lww_value(1, 1), 1000)
                 .await
                 .expect("k0 add must ack");
             (wal, ())
@@ -917,7 +915,7 @@ async fn ac4_acked_writes_survive_multiple_restart_cycles() {
                 + 1;
             let store = write_behind(&durable, &wal, sequence_start);
             store
-                .add(TEST_MAP, &k1, &lww_value(2, 2), 0, 1000)
+                .add(TEST_MAP, &k1, &lww_value(2, 2), 1000)
                 .await
                 .expect("k1 add must ack");
             (wal, ())
@@ -980,7 +978,6 @@ async fn max_observed_sequence_reads_watermark_of_compacted_empty_partition() {
         key: "k".to_string(),
         op: WalOp::Store {
             value: WalStorePayload::Record(value.clone()),
-            expiration_time: None,
         },
         timestamp: Some(Timestamp {
             millis: 1,
@@ -1000,7 +997,6 @@ async fn max_observed_sequence_reads_watermark_of_compacted_empty_partition() {
                 map: "m",
                 key: "k",
                 value: PutValue::Value(&value),
-                expiration_time: 0,
                 store_time: 0,
             }],
             applied: vec![(3, watermark)],
@@ -1107,7 +1103,7 @@ async fn concurrent_compaction_loses_no_acked_write_across_crash() {
                     for (i, key) in keys.iter().enumerate() {
                         let tag = u64::try_from(i).unwrap() + 1;
                         store
-                            .add(TEST_MAP, key, &lww_value(tag, tag), 0, 1000)
+                            .add(TEST_MAP, key, &lww_value(tag, tag), 1000)
                             .await
                             .expect("add must ack");
                     }
@@ -1224,7 +1220,7 @@ async fn crash_on_partial_active_segment_recovers_intact_prefix() {
                     for (i, key) in keys.iter().enumerate() {
                         let tag = u64::try_from(i).unwrap() + 1;
                         store
-                            .add(TEST_MAP, key, &lww_value(tag, tag), 0, 1000)
+                            .add(TEST_MAP, key, &lww_value(tag, tag), 1000)
                             .await
                             .expect("add must ack");
                     }
@@ -1269,7 +1265,7 @@ async fn crash_on_partial_active_segment_recovers_intact_prefix() {
             for (i, key) in tail_keys.iter().enumerate() {
                 let tag = u64::try_from(total + i).unwrap() + 1;
                 store
-                    .add(TEST_MAP, key, &lww_value(tag, tag), 0, 1000)
+                    .add(TEST_MAP, key, &lww_value(tag, tag), 1000)
                     .await
                     .expect("tail add must ack");
             }
@@ -1417,7 +1413,7 @@ async fn ac2_wal_only_recovery_preserves_ormap_adds() {
             let wal = open_wal(&wal_dir, WalFsyncPolicy::PerOp, &durable);
             let store = write_behind(&durable, &wal, 1);
             store
-                .add(TEST_MAP, "ork-1", &or_value, 0, 1000)
+                .add(TEST_MAP, "ork-1", &or_value, 1000)
                 .await
                 .expect("OR add must ack");
             (wal, ())
@@ -1470,7 +1466,6 @@ async fn ac4_legacy_bare_value_wal_frame_replays_as_lww() {
         key: "legacy-k".to_string(),
         op: WalOp::Store {
             value: WalStorePayload::Legacy(Value::String("legacy-val".to_string())),
-            expiration_time: None,
         },
         timestamp: Some(or_ts(5)),
         sequence: 1,
@@ -1520,7 +1515,6 @@ async fn ac4_legacy_null_value_wal_frame_replays_as_zero_epoch_lww() {
         key: "legacy-null-k".to_string(),
         op: WalOp::Store {
             value: WalStorePayload::Legacy(Value::Null),
-            expiration_time: None,
         },
         timestamp: None,
         sequence: 1,
@@ -1576,7 +1570,6 @@ async fn ac2_wal_only_recovery_preserves_ortombstones() {
         key: "ortomb-1".to_string(),
         op: WalOp::Store {
             value: WalStorePayload::Record(tomb.clone()),
-            expiration_time: None,
         },
         timestamp: None,
         sequence: 1,
@@ -1621,7 +1614,6 @@ async fn ac4_mixed_legacy_and_record_frames_both_replay() {
         key: "mixed-legacy".to_string(),
         op: WalOp::Store {
             value: WalStorePayload::Legacy(Value::Null),
-            expiration_time: None,
         },
         timestamp: None,
         sequence: 1,
@@ -1631,7 +1623,6 @@ async fn ac4_mixed_legacy_and_record_frames_both_replay() {
         key: "mixed-modern".to_string(),
         op: WalOp::Store {
             value: WalStorePayload::Record(or_value.clone()),
-            expiration_time: None,
         },
         timestamp: None,
         sequence: 2,
@@ -1681,7 +1672,7 @@ async fn ac3_drained_redb_path_preserves_ormap_adds() {
         let redb: Arc<dyn MapDataStore> = Arc::new(RedbDataStore::new(&db_path).expect("redb new"));
         let store = WriteBehindDataStore::new(redb, never_flush_config());
         store
-            .add(TEST_MAP, "ork-persist-1", &or_value, 0, 1000)
+            .add(TEST_MAP, "ork-persist-1", &or_value, 1000)
             .await
             .expect("OR add must ack");
         // Drain the buffer into redb, then drop all in-memory write-behind state.

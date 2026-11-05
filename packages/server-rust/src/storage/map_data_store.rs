@@ -472,8 +472,6 @@ pub enum StoreWrite<'a> {
         key: &'a str,
         /// The record.
         value: PutValue<'a>,
-        /// Absolute millis since epoch (0 = no expiry).
-        expiration_time: i64,
         /// The `now` the per-entry call would be given.
         store_time: i64,
     },
@@ -535,20 +533,10 @@ impl std::error::Error for RecordRefused {}
 #[async_trait]
 pub trait MapDataStore: Send + Sync {
     /// Persist a record (or queue it for async persistence).
-    ///
-    /// `expiration_time` is absolute millis since epoch (0 = no expiry).
-    async fn add(
-        &self,
-        map: &str,
-        key: &str,
-        value: &RecordValue,
-        expiration_time: i64,
-        now: i64,
-    ) -> anyhow::Result<()>;
+    async fn add(&self, map: &str, key: &str, value: &RecordValue, now: i64) -> anyhow::Result<()>;
 
     /// Persist a record together with the delta that produced it.
     ///
-    /// `expiration_time` is absolute millis since epoch (0 = no expiry).
     /// `witness` is the OR delta that was just applied to `value`, so the two
     /// always describe the same op: a store that records deltas durably gets
     /// the one the mutation point already built and never has to re-derive or
@@ -570,7 +558,6 @@ pub trait MapDataStore: Send + Sync {
         map: &str,
         key: &str,
         src: WriteSource<'_>,
-        expiration_time: i64,
         now: i64,
         witness: Option<&OrDelta>,
     ) -> anyhow::Result<()> {
@@ -579,10 +566,10 @@ pub trait MapDataStore: Send + Sync {
         // complete record of the mutation on its own.
         let _ = witness;
         match src {
-            WriteSource::Value(value) => self.add(map, key, value, expiration_time, now).await,
+            WriteSource::Value(value) => self.add(map, key, value, now).await,
             WriteSource::Cell(cell) => {
                 let value = cell.lock().value.clone();
-                self.add(map, key, &value, expiration_time, now).await
+                self.add(map, key, &value, now).await
             }
         }
     }
@@ -605,10 +592,9 @@ pub trait MapDataStore: Send + Sync {
         map: &str,
         key: &str,
         bytes: &[u8],
-        expiration_time: i64,
         now: i64,
     ) -> anyhow::Result<()> {
-        let _ = (bytes, expiration_time, now);
+        let _ = (bytes, now);
         anyhow::bail!("this store does not accept encoded records (map={map} key={key})")
     }
 
@@ -655,7 +641,6 @@ pub trait MapDataStore: Send + Sync {
         map: &str,
         key: &str,
         value: &RecordValue,
-        expiration_time: i64,
         now: i64,
     ) -> anyhow::Result<()>;
 
@@ -877,21 +862,17 @@ pub trait MapDataStore: Send + Sync {
                     map,
                     key,
                     value: PutValue::Encoded(bytes),
-                    expiration_time,
                     store_time,
                 } => {
-                    self.add_encoded(map, key, bytes, *expiration_time, *store_time)
-                        .await?;
+                    self.add_encoded(map, key, bytes, *store_time).await?;
                 }
                 StoreWrite::Put {
                     map,
                     key,
                     value: PutValue::Value(value),
-                    expiration_time,
                     store_time,
                 } => {
-                    self.add(map, key, value, *expiration_time, *store_time)
-                        .await?;
+                    self.add(map, key, value, *store_time).await?;
                 }
                 StoreWrite::Remove {
                     map,
@@ -987,15 +968,8 @@ impl<S> std::ops::Deref for WatermarkKeeping<S> {
 #[cfg(test)]
 #[async_trait]
 impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
-    async fn add(
-        &self,
-        map: &str,
-        key: &str,
-        value: &RecordValue,
-        expiration_time: i64,
-        now: i64,
-    ) -> anyhow::Result<()> {
-        self.inner.add(map, key, value, expiration_time, now).await
+    async fn add(&self, map: &str, key: &str, value: &RecordValue, now: i64) -> anyhow::Result<()> {
+        self.inner.add(map, key, value, now).await
     }
 
     fn accepts_encoded(&self) -> bool {
@@ -1007,12 +981,9 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
         map: &str,
         key: &str,
         bytes: &[u8],
-        expiration_time: i64,
         now: i64,
     ) -> anyhow::Result<()> {
-        self.inner
-            .add_encoded(map, key, bytes, expiration_time, now)
-            .await
+        self.inner.add_encoded(map, key, bytes, now).await
     }
 
     fn scan_order(&self) -> Option<ScanOrder> {
@@ -1024,12 +995,9 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
         map: &str,
         key: &str,
         value: &RecordValue,
-        expiration_time: i64,
         now: i64,
     ) -> anyhow::Result<()> {
-        self.inner
-            .add_backup(map, key, value, expiration_time, now)
-            .await
+        self.inner.add_backup(map, key, value, now).await
     }
 
     async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -1166,7 +1134,6 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
                     StoreWrite::Put {
                         map,
                         key,
-                        expiration_time,
                         store_time,
                         ..
                     },
@@ -1175,7 +1142,6 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
                     map,
                     key,
                     value: PutValue::Value(value),
-                    expiration_time: *expiration_time,
                     store_time: *store_time,
                 },
                 _ => write.clone(),
@@ -2310,15 +2276,9 @@ pub(crate) mod ttl_bytes {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub(crate) enum EarlierFrameOp {
-        Store {
-            value: BaseWalStorePayload,
-            #[serde(skip_serializing_if = "Option::is_none", default)]
-            expiration_time: Option<i64>,
-        },
+        Store { value: BaseWalStorePayload },
         Remove,
-        OrDelta {
-            delta: BaseOrDelta,
-        },
+        OrDelta { delta: BaseOrDelta },
     }
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2475,7 +2435,6 @@ pub(crate) mod ttl_bytes {
             key: "k".to_string(),
             op: WalOp::Store {
                 value: WalStorePayload::Record(lww(Some(5_000))),
-                expiration_time: None,
             },
             timestamp: Some(ts()),
             sequence: 9,
@@ -2489,7 +2448,6 @@ pub(crate) mod ttl_bytes {
                 key: "k".to_string(),
                 op: EarlierFrameOp::Store {
                     value: BaseWalStorePayload::Record(base_lww()),
-                    expiration_time: None,
                 },
                 timestamp: Some(ts()),
                 sequence: 9,

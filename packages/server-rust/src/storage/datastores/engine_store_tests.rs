@@ -632,7 +632,7 @@ pub(super) mod cases {
         let fresh = K::fresh();
         let store = open(&fresh.engine);
         for map in ["a", "b", "c"] {
-            store.add(map, "k", &lww("v", 1), 0, 0).await.expect("add");
+            store.add(map, "k", &lww("v", 1), 0).await.expect("add");
         }
         let ids: Vec<Option<u32>> = ["a", "b", "c"]
             .iter()
@@ -641,10 +641,7 @@ pub(super) mod cases {
         assert_eq!(ids, vec![Some(1), Some(2), Some(3)]);
         drop(store);
         let reopened = open(&fresh.engine);
-        reopened
-            .add("d", "k", &lww("v", 1), 0, 0)
-            .await
-            .expect("add");
+        reopened.add("d", "k", &lww("v", 1), 0).await.expect("add");
         assert_eq!(id_of(&*fresh.engine, "d"), Some(4));
         assert_eq!(next_map_id(&*fresh.engine), 5);
     }
@@ -661,7 +658,7 @@ pub(super) mod cases {
             let failing = Arc::new(FailingWrites::new(Arc::clone(&fresh.engine)));
             let store = open(&failing);
             failing.arm(n);
-            let outcome = store.add("users", "k", &lww("v", 1), 0, 0).await;
+            let outcome = store.add("users", "k", &lww("v", 1), 0).await;
             if n == 1 {
                 assert!(outcome.is_err(), "the failure path must be exercised");
             }
@@ -672,7 +669,7 @@ pub(super) mod cases {
                     assert_eq!(next_map_id(&*fresh.engine), 1, "n={n}");
                     failing.disarm();
                     store
-                        .add("users", "k", &lww("v", 1), 0, 0)
+                        .add("users", "k", &lww("v", 1), 0)
                         .await
                         .expect("un-armed add");
                     assert_eq!(id_of(&*fresh.engine, "users"), Some(1), "n={n}");
@@ -769,7 +766,7 @@ pub(super) mod cases {
         let fresh = K::fresh();
         let store = open(&fresh.engine);
         store
-            .add_backup("bk", "k", &lww("v", 1), 0, 0)
+            .add_backup("bk", "k", &lww("v", 1), 0)
             .await
             .expect("add_backup");
         assert!(store.list_maps().await.expect("list").is_empty());
@@ -785,7 +782,7 @@ pub(super) mod cases {
         );
 
         for key in ["k1", "k2"] {
-            store.add("em", key, &lww("v", 1), 0, 0).await.expect("add");
+            store.add("em", key, &lww("v", 1), 0).await.expect("add");
         }
         for key in ["k1", "k2"] {
             store.remove("em", key, 0).await.expect("remove");
@@ -817,12 +814,9 @@ pub(super) mod cases {
     pub(in super::super) async fn s10<K: EngineKind>() {
         let fresh = K::fresh();
         let store = open(&fresh.engine);
+        store.add("foo", "k", &lww("v", 1), 0).await.expect("add");
         store
-            .add("foo", "k", &lww("v", 1), 0, 0)
-            .await
-            .expect("add");
-        store
-            .add_backup("foo", "k", &lww("b", 1), 0, 0)
+            .add_backup("foo", "k", &lww("b", 1), 0)
             .await
             .expect("add_backup");
         let before = dump(&*fresh.engine);
@@ -838,18 +832,12 @@ pub(super) mod cases {
             "a\0b",
             long_backup.as_str(),
         ] {
-            refused(store.add(name, "k", &value, 0, 0).await, "add");
-            refused(
-                store.add_encoded(name, "k", &bytes, 0, 0).await,
-                "add_encoded",
-            );
-            refused(
-                store.add_backup(name, "k", &value, 0, 0).await,
-                "add_backup",
-            );
+            refused(store.add(name, "k", &value, 0).await, "add");
+            refused(store.add_encoded(name, "k", &bytes, 0).await, "add_encoded");
+            refused(store.add_backup(name, "k", &value, 0).await, "add_backup");
             refused(
                 store
-                    .add_with_witness(name, "k", WriteSource::Value(&value), 0, 0, None)
+                    .add_with_witness(name, "k", WriteSource::Value(&value), 0, None)
                     .await,
                 "add_with_witness",
             );
@@ -911,10 +899,7 @@ pub(super) mod cases {
         );
 
         let long = "y".repeat(600);
-        store
-            .add(&long, "k", &value, 0, 0)
-            .await
-            .expect("long name");
+        store.add(&long, "k", &value, 0).await.expect("long name");
         assert!(store.load(&long, "k").await.expect("load").is_some());
     }
 
@@ -1018,7 +1003,7 @@ pub(super) mod cases {
         let payload = lww("payload", 1);
         for i in 0..20 {
             store
-                .add("m", &format!("k{i:03}"), &payload, 0, 0)
+                .add("m", &format!("k{i:03}"), &payload, 0)
                 .await
                 .expect("add");
         }
@@ -1034,14 +1019,14 @@ pub(super) mod cases {
         assert!(batches.len() >= 7);
 
         let big = lww(&"x".repeat(4096), 1);
-        store.add("big", "only", &big, 0, 0).await.expect("add");
+        store.add("big", "only", &big, 0).await.expect("add");
         let batch = store.scan_values("big", false, 1).await.expect("scan");
         assert_eq!(batch_keys(&[batch]), vec!["only".to_string()]);
         let batch = store.scan_values("big", false, 1).await.expect("scan");
         assert!(batch.next_cursor.is_none(), "one record drains the map");
 
-        store.add("two", "a", &big, 0, 0).await.expect("add");
-        store.add("two", "b", &big, 0, 0).await.expect("add");
+        store.add("two", "a", &big, 0).await.expect("add");
+        store.add("two", "b", &big, 0).await.expect("add");
         let first = store.scan_values("two", false, 1).await.expect("scan");
         assert_eq!(first.records.len(), 1, "an oversized first row comes whole");
         assert!(first.next_cursor.is_some());
@@ -1092,11 +1077,11 @@ pub(super) mod cases {
         let store = open(&fresh.engine);
         for key in ["a", "b", "c"] {
             store
-                .add("m", key, &lww("primary", 1), 0, 0)
+                .add("m", key, &lww("primary", 1), 0)
                 .await
                 .expect("add");
             store
-                .add_backup("m", key, &lww("backup", 2), 0, 0)
+                .add_backup("m", key, &lww("backup", 2), 0)
                 .await
                 .expect("add_backup");
         }
@@ -1161,9 +1146,9 @@ pub(super) mod cases {
         .into_iter()
         .enumerate()
         {
-            store.add("a", "k", &value, 0, 0).await.expect("add");
+            store.add("a", "k", &value, 0).await.expect("add");
             store
-                .add_encoded("b", "k", &enc(&value), 0, 0)
+                .add_encoded("b", "k", &enc(&value), 0)
                 .await
                 .expect("add_encoded");
             let snapshot = fresh.engine.snapshot().expect("snapshot");
@@ -1187,7 +1172,7 @@ pub(super) mod cases {
         let failing = Arc::new(FailingWrites::new(Arc::clone(&fresh.engine)));
         let store = open(&failing);
         for key in ["k1", "k2", "k3"] {
-            store.add("m", key, &lww(key, 1), 0, 0).await.expect("add");
+            store.add("m", key, &lww(key, 1), 0).await.expect("add");
         }
         let got = store
             .load_all("m", &["k3".to_string(), "x".to_string(), "k1".to_string()])
@@ -1324,7 +1309,7 @@ pub(super) mod cases {
             );
         }
         let refusal = store
-            .add("", "k", &lww("v", 1), 0, 0)
+            .add("", "k", &lww("v", 1), 0)
             .await
             .expect_err("refused");
         let unknown = vec![
@@ -1440,11 +1425,11 @@ pub(super) mod cases {
                     let (map, key, value) = (MODEL_MAPS[*m], MODEL_KEYS[*k], model_value(*v));
                     let backup = matches!(op, ModelOp::AddBackup(..));
                     let outcome = match op {
-                        ModelOp::Add(..) => store.add(map, key, &value, 0, 0).await,
+                        ModelOp::Add(..) => store.add(map, key, &value, 0).await,
                         ModelOp::AddEncoded(..) => {
-                            store.add_encoded(map, key, &enc(&value), 0, 0).await
+                            store.add_encoded(map, key, &enc(&value), 0).await
                         }
-                        _ => store.add_backup(map, key, &value, 0, 0).await,
+                        _ => store.add_backup(map, key, &value, 0).await,
                     };
                     if refused_map(*m) {
                         assert!(outcome.is_err());
@@ -1586,7 +1571,7 @@ pub(super) mod cases {
     pub(in super::super) async fn s25<K: EngineKind>() {
         let fresh = K::fresh();
         let store = open(&fresh.engine);
-        store.add("m", "a", &lww("v", 1), 0, 0).await.expect("add");
+        store.add("m", "a", &lww("v", 1), 0).await.expect("add");
         let map_id = id_of(&*fresh.engine, "m").expect("id");
         let mut cursor = vec![KS_PRIMARY];
         cursor.extend_from_slice(&0u32.to_be_bytes());
@@ -1687,14 +1672,8 @@ pub(super) mod cases {
         assert!(p2 < p6 && p6 < p1, "s6 must lie between k2 and k1");
         let fresh = K::fresh();
         let inner = Arc::new(open(&fresh.engine));
-        inner
-            .add("m", "k1", &lww("d1", 1), 0, 0)
-            .await
-            .expect("add");
-        inner
-            .add("m", "k2", &lww("d2", 1), 0, 0)
-            .await
-            .expect("add");
+        inner.add("m", "k1", &lww("d1", 1), 0).await.expect("add");
+        inner.add("m", "k2", &lww("d2", 1), 0).await.expect("add");
         let config = WriteBehindConfig {
             write_delay_ms: 0,
             flush_interval_ms: 600_000,
@@ -1702,14 +1681,8 @@ pub(super) mod cases {
             ..WriteBehindConfig::default()
         };
         let store = WriteBehindDataStore::new(Arc::clone(&inner) as Arc<dyn MapDataStore>, config);
-        store
-            .add("m", "k2", &lww("st", 2), 0, 0)
-            .await
-            .expect("stage");
-        store
-            .add("m", "s6", &lww("st", 2), 0, 0)
-            .await
-            .expect("stage");
+        store.add("m", "k2", &lww("st", 2), 0).await.expect("stage");
+        store.add("m", "s6", &lww("st", 2), 0).await.expect("stage");
 
         let batches = scan_batches(store.as_ref(), "m", false, 1).await;
         let keys: Vec<Vec<String>> = batches
@@ -1839,9 +1812,9 @@ pub(super) mod cases {
         let store = open(&fresh.engine);
         for map in ["ma", "mb"] {
             for key in ["a", "b", "c"] {
-                store.add(map, key, &lww("v", 1), 0, 0).await.expect("add");
+                store.add(map, key, &lww("v", 1), 0).await.expect("add");
                 store
-                    .add_backup(map, key, &lww("v", 1), 0, 0)
+                    .add_backup(map, key, &lww("v", 1), 0)
                     .await
                     .expect("add");
             }
@@ -1934,16 +1907,13 @@ pub(super) mod cases {
         let store = open(&fresh.engine);
         let before = dump(&*fresh.engine);
         let err = store
-            .add("new", "k", &lww("v", 1), 0, 0)
+            .add("new", "k", &lww("v", 1), 0)
             .await
             .expect_err("no id left");
         assert!(err.to_string().contains("map id space exhausted"), "{err}");
         assert_eq!(store.classify_error(&err), StoreErrorClass::Unknown);
         assert_eq!(dump(&*fresh.engine), before);
-        store
-            .add("old", "k", &lww("v", 1), 0, 0)
-            .await
-            .expect("add");
+        store.add("old", "k", &lww("v", 1), 0).await.expect("add");
         assert!(store.load("old", "k").await.expect("load").is_some());
     }
 
@@ -1951,19 +1921,19 @@ pub(super) mod cases {
         let fresh = K::fresh();
         let store = open(&fresh.engine);
         store
-            .add("users", "u1", &lww("v", 1), 0, 0)
+            .add("users", "u1", &lww("v", 1), 0)
             .await
             .expect("add");
         store
-            .add("users", "u2", &lww("v", 2), 0, 0)
+            .add("users", "u2", &lww("v", 2), 0)
             .await
             .expect("add");
         store
-            .add("user-profiles", "p1", &lww("v", 1), 0, 0)
+            .add("user-profiles", "p1", &lww("v", 1), 0)
             .await
             .expect("add");
         store
-            .add_backup("bk", "b1", &lww("v", 1), 0, 0)
+            .add_backup("bk", "b1", &lww("v", 1), 0)
             .await
             .expect("add");
         store
@@ -2304,7 +2274,7 @@ mod mem_only {
     fn s35_map_id_in_returns_an_engine_error_not_absent() {
         let engine = Arc::new(MemKvEngine::new());
         let store = open(&engine);
-        block_on(store.add("users", "k", &lww("v", 1), 0, 0)).expect("add");
+        block_on(store.add("users", "k", &lww("v", 1), 0)).expect("add");
         let snapshot = engine.snapshot().expect("snapshot");
         assert_eq!(map_id_in(&*snapshot, "users").expect("live read"), Some(1));
         engine.arm_death(engine.calls_so_far());

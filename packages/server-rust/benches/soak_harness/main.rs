@@ -5362,7 +5362,7 @@ mod tests {
         tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime")
-            .block_on(store.add(OR_MAP, "ork-1", &value, 0, 0))
+            .block_on(store.add(OR_MAP, "ork-1", &value, 0))
             .expect("write row");
     }
 

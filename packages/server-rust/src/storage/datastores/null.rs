@@ -23,7 +23,6 @@ impl MapDataStore for NullDataStore {
         _map: &str,
         _key: &str,
         _value: &RecordValue,
-        _expiration_time: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
         Ok(())
@@ -34,7 +33,6 @@ impl MapDataStore for NullDataStore {
         _map: &str,
         _key: &str,
         _value: &RecordValue,
-        _expiration_time: i64,
         _now: i64,
     ) -> anyhow::Result<()> {
         Ok(())
@@ -125,14 +123,14 @@ mod tests {
     async fn add_returns_ok() {
         let store = NullDataStore;
         let val = dummy_value();
-        assert!(store.add("map", "key", &val, 0, 1000).await.is_ok());
+        assert!(store.add("map", "key", &val, 1000).await.is_ok());
     }
 
     #[tokio::test]
     async fn add_backup_returns_ok() {
         let store = NullDataStore;
         let val = dummy_value();
-        assert!(store.add_backup("map", "key", &val, 0, 1000).await.is_ok());
+        assert!(store.add_backup("map", "key", &val, 1000).await.is_ok());
     }
 
     #[tokio::test]

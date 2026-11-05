@@ -2078,7 +2078,7 @@ mod tests {
     async fn add_then_load_returns_value() {
         let (store, _dir) = fresh_store();
         store
-            .add("users", "alice", &dummy_value("v1"), 0, 1000)
+            .add("users", "alice", &dummy_value("v1"), 1000)
             .await
             .unwrap();
         let got = store
@@ -2093,11 +2093,11 @@ mod tests {
     async fn add_overwrites_previous_value() {
         let (store, _dir) = fresh_store();
         store
-            .add("users", "alice", &dummy_value("v1"), 0, 1000)
+            .add("users", "alice", &dummy_value("v1"), 1000)
             .await
             .unwrap();
         store
-            .add("users", "alice", &dummy_value("v2"), 0, 1001)
+            .add("users", "alice", &dummy_value("v2"), 1001)
             .await
             .unwrap();
         let got = store
@@ -2112,11 +2112,11 @@ mod tests {
     async fn add_backup_is_isolated_from_primary() {
         let (store, _dir) = fresh_store();
         store
-            .add("users", "alice", &dummy_value("primary"), 0, 1000)
+            .add("users", "alice", &dummy_value("primary"), 1000)
             .await
             .unwrap();
         store
-            .add_backup("users", "alice", &dummy_value("backup"), 0, 1000)
+            .add_backup("users", "alice", &dummy_value("backup"), 1000)
             .await
             .unwrap();
         let got = store
@@ -2133,7 +2133,7 @@ mod tests {
     async fn remove_deletes_value() {
         let (store, _dir) = fresh_store();
         store
-            .add("users", "alice", &dummy_value("v1"), 0, 1000)
+            .add("users", "alice", &dummy_value("v1"), 1000)
             .await
             .unwrap();
         store.remove("users", "alice", 1001).await.unwrap();
@@ -2146,7 +2146,7 @@ mod tests {
         // Both nonexistent table and nonexistent key paths must be no-op.
         store.remove("never_written", "k", 1000).await.unwrap();
         store
-            .add("users", "bob", &dummy_value("v"), 0, 1000)
+            .add("users", "bob", &dummy_value("v"), 1000)
             .await
             .unwrap();
         store
@@ -2159,11 +2159,11 @@ mod tests {
     async fn remove_backup_only_affects_backup() {
         let (store, _dir) = fresh_store();
         store
-            .add("users", "alice", &dummy_value("primary"), 0, 1000)
+            .add("users", "alice", &dummy_value("primary"), 1000)
             .await
             .unwrap();
         store
-            .add_backup("users", "alice", &dummy_value("backup"), 0, 1000)
+            .add_backup("users", "alice", &dummy_value("backup"), 1000)
             .await
             .unwrap();
         store.remove_backup("users", "alice", 1001).await.unwrap();
@@ -2178,7 +2178,7 @@ mod tests {
         assert!(store.load("never", "k").await.unwrap().is_none());
         // Table exists but key missing path:
         store
-            .add("users", "alice", &dummy_value("v"), 0, 1000)
+            .add("users", "alice", &dummy_value("v"), 1000)
             .await
             .unwrap();
         assert!(store.load("users", "ghost").await.unwrap().is_none());
@@ -2187,14 +2187,8 @@ mod tests {
     #[tokio::test]
     async fn load_all_returns_subset() {
         let (store, _dir) = fresh_store();
-        store
-            .add("m", "a", &dummy_value("a"), 0, 1000)
-            .await
-            .unwrap();
-        store
-            .add("m", "b", &dummy_value("b"), 0, 1000)
-            .await
-            .unwrap();
+        store.add("m", "a", &dummy_value("a"), 1000).await.unwrap();
+        store.add("m", "b", &dummy_value("b"), 1000).await.unwrap();
         let got = store
             .load_all(
                 "m",
@@ -2216,7 +2210,7 @@ mod tests {
     async fn remove_all_atomic_per_map() {
         let (store, _dir) = fresh_store();
         for k in ["a", "b", "c"] {
-            store.add("m", k, &dummy_value(k), 0, 1000).await.unwrap();
+            store.add("m", k, &dummy_value(k), 1000).await.unwrap();
         }
         store
             .remove_all("m", &["a".to_string(), "b".to_string()])
@@ -2266,7 +2260,7 @@ mod tests {
         {
             let store = RedbDataStore::new(&path).unwrap();
             store
-                .add("m", "k", &dummy_value("persisted"), 0, 1000)
+                .add("m", "k", &dummy_value("persisted"), 1000)
                 .await
                 .unwrap();
             store.close().await.unwrap();
@@ -2292,7 +2286,7 @@ mod tests {
         let (store, engine, _dir) = fresh_engine_store();
         let name = "foo; DROP TABLE x";
         store
-            .add(name, "k", &dummy_value("v"), 0, 1000)
+            .add(name, "k", &dummy_value("v"), 1000)
             .await
             .expect("a metacharacter map name is storable");
         assert_eq!(
@@ -2307,7 +2301,7 @@ mod tests {
     #[tokio::test]
     async fn empty_map_name_rejected() {
         let (store, _dir) = fresh_store();
-        let err = store.add("", "k", &dummy_value("v"), 0, 1000).await;
+        let err = store.add("", "k", &dummy_value("v"), 1000).await;
         assert!(err.is_err());
     }
 
@@ -2403,13 +2397,10 @@ mod tests {
         {
             let by_value = format!("by_value_{i}");
             let by_bytes = format!("by_bytes_{i}");
-            store
-                .add("golden", &by_value, &value, 0, 1000)
-                .await
-                .unwrap();
+            store.add("golden", &by_value, &value, 1000).await.unwrap();
             let bytes = rmp_serde::to_vec_named(&value).unwrap();
             store
-                .add_encoded("golden", &by_bytes, &bytes, 0, 1000)
+                .add_encoded("golden", &by_bytes, &bytes, 1000)
                 .await
                 .unwrap();
 
@@ -2430,15 +2421,11 @@ mod tests {
                     "golden",
                     &by_value,
                     &rmp_serde::to_vec_named(&next).unwrap(),
-                    0,
                     1001,
                 )
                 .await
                 .unwrap();
-            store
-                .add("golden", &by_bytes, &next, 0, 1001)
-                .await
-                .unwrap();
+            store.add("golden", &by_bytes, &next, 1001).await.unwrap();
             assert_eq!(
                 raw_row(&store, "golden", &by_value),
                 raw_row(&store, "golden", &by_bytes),
@@ -2457,11 +2444,11 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&value).unwrap();
         for bad in ["", "users__backup", "has-dash__backup", "a\0b"] {
             let via_add = store
-                .add(bad, "k", &value, 0, 1000)
+                .add(bad, "k", &value, 1000)
                 .await
                 .expect_err("add refuses");
             let via_encoded = store
-                .add_encoded(bad, "k", &bytes, 0, 1000)
+                .add_encoded(bad, "k", &bytes, 1000)
                 .await
                 .expect_err("add_encoded refuses");
             assert_eq!(via_encoded.to_string(), via_add.to_string(), "map {bad:?}");
@@ -2481,11 +2468,11 @@ mod tests {
 
         for name in ["foo; DROP TABLE x", "9starts_with_digit", "has-dash"] {
             store
-                .add(name, "by_value", &value, 0, 1000)
+                .add(name, "by_value", &value, 1000)
                 .await
                 .expect("add stores a name outside the identifier class");
             store
-                .add_encoded(name, "by_bytes", &bytes, 0, 1000)
+                .add_encoded(name, "by_bytes", &bytes, 1000)
                 .await
                 .expect("add_encoded stores it too");
             assert_eq!(
@@ -2511,14 +2498,14 @@ mod tests {
         let s2 = Arc::clone(&store);
         let h1 = tokio::spawn(async move {
             for i in 0..10 {
-                s1.add("m", &format!("a{i}"), &dummy_value("A"), 0, 1000)
+                s1.add("m", &format!("a{i}"), &dummy_value("A"), 1000)
                     .await
                     .unwrap();
             }
         });
         let h2 = tokio::spawn(async move {
             for i in 0..10 {
-                s2.add("m", &format!("b{i}"), &dummy_value("B"), 0, 1000)
+                s2.add("m", &format!("b{i}"), &dummy_value("B"), 1000)
                     .await
                     .unwrap();
             }
@@ -2636,7 +2623,7 @@ mod tests {
             timestamp: ts.clone(),
             ttl_ms: None,
         };
-        store.add("users", "alice", &value, 0, 1000).await.unwrap();
+        store.add("users", "alice", &value, 1000).await.unwrap();
 
         let mut sink = CollectingSink { leaves: Vec::new() };
         store
@@ -2672,7 +2659,7 @@ mod tests {
         let (store, _dir) = fresh_store();
         for i in 0..50 {
             store
-                .add("m", &format!("k{i:03}"), &dummy_value("v"), 0, 1000)
+                .add("m", &format!("k{i:03}"), &dummy_value("v"), 1000)
                 .await
                 .unwrap();
         }
@@ -2736,10 +2723,7 @@ mod tests {
         .collect();
         keys.sort();
         for key in keys.iter().rev() {
-            store
-                .add("m", key, &dummy_value("v"), 0, 1000)
-                .await
-                .unwrap();
+            store.add("m", key, &dummy_value("v"), 1000).await.unwrap();
         }
 
         let mut expected = keys.clone();
@@ -2822,7 +2806,7 @@ mod tests {
         let (store, _dir) = fresh_store();
         for i in 0..20 {
             store
-                .add("m", &format!("k{i:03}"), &dummy_value("payload"), 0, 1000)
+                .add("m", &format!("k{i:03}"), &dummy_value("payload"), 1000)
                 .await
                 .unwrap();
         }
@@ -2860,7 +2844,7 @@ mod tests {
         let (store, _dir) = fresh_store();
         let big = "x".repeat(4096);
         store
-            .add("m", "only", &dummy_value(&big), 0, 1000)
+            .add("m", "only", &dummy_value(&big), 1000)
             .await
             .unwrap();
         let budget = 1; // far smaller than the record's byte cost
@@ -2971,7 +2955,7 @@ mod tests {
 
         // The premise: the store itself refuses this name outright.
         let direct = redb
-            .add(REFUSED_MAP, KEY, &value, 0, now)
+            .add(REFUSED_MAP, KEY, &value, now)
             .await
             .expect_err("the embedded store refuses the reserved suffix");
         assert!(direct.to_string().contains("Invalid map name"), "{direct}");
@@ -2981,7 +2965,7 @@ mod tests {
 
         // The write is accepted: the buffering layer does not look at the name.
         store
-            .add(REFUSED_MAP, KEY, &value, 0, now)
+            .add(REFUSED_MAP, KEY, &value, now)
             .await
             .expect("write-behind accepts the write");
         let accepted_at = Instant::now();
@@ -3185,7 +3169,7 @@ mod tests {
         let value = dummy_value(tag);
 
         store
-            .add(name, KEY, &value, 0, 1000)
+            .add(name, KEY, &value, 1000)
             .await
             .map_err(|e| format!("add: {e}"))?;
         let loaded = store
@@ -3211,7 +3195,7 @@ mod tests {
         }
 
         store
-            .add_backup(name, KEY, &dummy_value("backup"), 0, 1000)
+            .add_backup(name, KEY, &dummy_value("backup"), 1000)
             .await
             .map_err(|e| format!("add_backup: {e}"))?;
         let listed_after_backup = store
@@ -3308,7 +3292,6 @@ mod tests {
             key: key.to_string(),
             op: WalOp::Store {
                 value: WalStorePayload::Record(value.clone()),
-                expiration_time: None,
             },
             timestamp: match value {
                 RecordValue::Lww { timestamp, .. } => Some(timestamp.clone()),
@@ -3618,9 +3601,9 @@ mod tests {
         let (store, engine, _dir) = fresh_engine_store();
         let value = dummy_value("v");
 
-        store.add("foo", "k", &value, 0, 1000).await.unwrap();
+        store.add("foo", "k", &value, 1000).await.unwrap();
         store
-            .add_backup("foo", "k", &dummy_value("backup"), 0, 1000)
+            .add_backup("foo", "k", &dummy_value("backup"), 1000)
             .await
             .unwrap();
         assert_eq!(store.list_maps().await.unwrap(), vec!["foo".to_string()]);
@@ -3629,7 +3612,7 @@ mod tests {
 
         for refused in ["foo__backup", "a-b__backup", "", "a\0b"] {
             assert!(
-                store.add(refused, "k", &value, 0, 1000).await.is_err(),
+                store.add(refused, "k", &value, 1000).await.is_err(),
                 "add {refused:?}"
             );
             assert!(store.load(refused, "k").await.is_err(), "load {refused:?}");
@@ -3649,10 +3632,7 @@ mod tests {
                 assert!(sink.leaves.is_empty(), "no leaf for {refused:?}");
             }
             // The remaining entry points take the same check.
-            assert!(store
-                .add_backup(refused, "k", &value, 0, 1000)
-                .await
-                .is_err());
+            assert!(store.add_backup(refused, "k", &value, 1000).await.is_err());
             assert!(store.remove(refused, "k", 1000).await.is_err());
             assert!(store.remove_backup(refused, "k", 1000).await.is_err());
             assert!(store.load_all(refused, &["k".to_string()]).await.is_err());
@@ -3674,7 +3654,7 @@ mod tests {
         for name in [&long_identifier, &long_raw] {
             assert_eq!(name.len(), 600);
             store
-                .add(name, "k", &value, 0, 1000)
+                .add(name, "k", &value, 1000)
                 .await
                 .unwrap_or_else(|e| panic!("add {}: {e}", shown(name)));
             assert_eq!(
@@ -3691,7 +3671,7 @@ mod tests {
         let long_reserved = format!("{}__backup", "a".repeat(592));
         assert_eq!(long_reserved.len(), 600);
         let err = store
-            .add(&long_reserved, "k", &value, 0, 1000)
+            .add(&long_reserved, "k", &value, 1000)
             .await
             .expect_err("a long name with the reserved suffix is refused");
         assert!(err.to_string().contains("__backup"), "{err}");
@@ -3925,7 +3905,7 @@ mod store_broken_tests {
                 .collect();
             seed.write_records(&touches, WriteOptions { sync: true })
                 .expect("seed the maps around");
-            seed.add(map, key, &value("v"), 0, 0).await.expect("seed");
+            seed.add(map, key, &value("v"), 0).await.expect("seed");
         }
         let store = backend.store();
         // Every read from here on fails: the open's reads are done.
@@ -3948,7 +3928,7 @@ mod store_broken_tests {
 
         backend.full.store(true, Ordering::SeqCst);
         store
-            .add("m", "k1", &value("v1"), 0, 0)
+            .add("m", "k1", &value("v1"), 0)
             .await
             .expect("the write is accepted into the buffer");
         store.soft_flush().await.expect("soft flush");
@@ -3959,7 +3939,7 @@ mod store_broken_tests {
         // The disk has room again; the handle stays latched.
         backend.full.store(false, Ordering::SeqCst);
 
-        let second = store.add("m", "k2", &value("v2"), 0, 0).await;
+        let second = store.add("m", "k2", &value("v2"), 0).await;
         assert!(
             second.is_err(),
             "add returned Ok after the redb handle latched"
@@ -3981,7 +3961,7 @@ mod store_broken_tests {
 
         backend.full.store(true, Ordering::SeqCst);
         store
-            .add("m", "k1", &value("v1"), 0, 0)
+            .add("m", "k1", &value("v1"), 0)
             .await
             .expect("the write is accepted into the buffer");
 
@@ -4093,7 +4073,7 @@ mod store_broken_tests {
 
         // The store's own map-name refusal is a string, not an engine error.
         let name = store
-            .add("x__backup", "k", &value("v"), 0, 0)
+            .add("x__backup", "k", &value("v"), 0)
             .await
             .unwrap_err();
         assert_eq!(store.classify_error(&name), StoreErrorClass::Unknown);
@@ -4135,9 +4115,9 @@ mod store_broken_tests {
         // Latch the handle before the write-behind store sees it, then give
         // the disk room again: only the latch is left.
         backend.full.store(true, Ordering::SeqCst);
-        assert!(inner.add("m", "k0", &value("v"), 0, 0).await.is_err());
+        assert!(inner.add("m", "k0", &value("v"), 0).await.is_err());
         backend.full.store(false, Ordering::SeqCst);
-        let latched = inner.add("m", "k0", &value("v"), 0, 0).await.unwrap_err();
+        let latched = inner.add("m", "k0", &value("v"), 0).await.unwrap_err();
         assert!(
             matches!(
                 latched.downcast_ref::<KvError>(),
@@ -4155,7 +4135,7 @@ mod store_broken_tests {
 
         let store = write_behind(inner);
         let mut recorded = store.background_failure();
-        store.add("m", "k1", &value("v1"), 0, 0).await.unwrap();
+        store.add("m", "k1", &value("v1"), 0).await.unwrap();
         store.soft_flush().await.unwrap();
         let failure = wait_for_failure(&mut recorded).await;
         assert!(failure.store_broken(), "{failure}");
@@ -4189,7 +4169,7 @@ mod store_broken_tests {
                 sequence_start: 1,
             }),
         );
-        store.add("m", "k0", &value("v0"), 0, 0).await.unwrap();
+        store.add("m", "k0", &value("v0"), 0).await.unwrap();
         store.soft_flush().await.unwrap();
         // k0 must be in redb before the disk fills, so the reopen proves it
         // survived the latch rather than being replayed.
@@ -4213,8 +4193,8 @@ mod store_broken_tests {
 
         backend.full.store(true, Ordering::SeqCst);
         let mut recorded = store.background_failure();
-        store.add("m", "k1", &value("v1"), 0, 0).await.unwrap();
-        store.add("m", "k2", &value("v2"), 0, 0).await.unwrap();
+        store.add("m", "k1", &value("v1"), 0).await.unwrap();
+        store.add("m", "k2", &value("v2"), 0).await.unwrap();
         store.remove("m", "k2", 0).await.unwrap();
         store.soft_flush().await.unwrap();
         let failure = wait_for_failure(&mut recorded).await;

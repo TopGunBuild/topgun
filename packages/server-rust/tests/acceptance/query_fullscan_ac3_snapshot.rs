@@ -111,7 +111,7 @@ async fn snapshot_reflects_durable_state_at_scan_time() {
             ttl_ms: None,
         };
         data_store
-            .add(map_name, &format!("key{i:04}"), &value, 0, 1_704_067_200)
+            .add(map_name, &format!("key{i:04}"), &value, 1_704_067_200)
             .await
             .expect("durable write phase 1");
     }
@@ -147,7 +147,7 @@ async fn snapshot_reflects_durable_state_at_scan_time() {
             ttl_ms: None,
         };
         data_store
-            .add(map_name, &format!("key{i:04}"), &value, 0, 1_704_067_200)
+            .add(map_name, &format!("key{i:04}"), &value, 1_704_067_200)
             .await
             .expect("durable write phase 2");
     }
@@ -207,7 +207,7 @@ async fn snapshot_merges_resident_over_datastore_by_hlc_direction() {
             ttl_ms: None,
         };
         data_store
-            .add(map_name, key, &value, 0, 1_704_067_200)
+            .add(map_name, key, &value, 1_704_067_200)
             .await
             .expect("durable write");
     }

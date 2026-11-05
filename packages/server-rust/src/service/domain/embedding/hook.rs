@@ -1742,7 +1742,6 @@ mod tests {
                 map: &str,
                 key: &str,
                 value: &RecordValue,
-                _expiration_time: i64,
                 _now: i64,
             ) -> anyhow::Result<()> {
                 let gate = if carries_embedding(value) {
@@ -1765,7 +1764,6 @@ mod tests {
                 _map: &str,
                 _key: &str,
                 _value: &RecordValue,
-                _expiration_time: i64,
                 _now: i64,
             ) -> anyhow::Result<()> {
                 Ok(())
