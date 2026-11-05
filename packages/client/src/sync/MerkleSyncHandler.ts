@@ -50,6 +50,11 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
     const rootHash = Number(payload.rootHash);
     const map = this.config.getMap(mapName);
     if (map instanceof LWWMap) {
+      // The server forgets the leaf of a key its sweep expired, so a client
+      // root that still holds an expired leaf never matches. The prune and its
+      // storage removal are awaited before the root is read, so the root the
+      // walk starts from is one that a reload would also give (TG-TTL-002).
+      await this.config.pruneExpired(mapName);
       const localRootHash = map.getMerkleTree().getRootHash();
       if (localRootHash !== rootHash) {
         logger.info(

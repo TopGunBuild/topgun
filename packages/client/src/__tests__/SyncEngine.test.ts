@@ -764,7 +764,7 @@ describe('SyncEngine', () => {
       const hlc = syncEngine.getHLC();
       const lwwMap = new LWWMap<string, any>(hlc);
       syncEngine.registerMap('users', lwwMap);
-      await jest.runAllTimersAsync();
+      await jest.runOnlyPendingTimersAsync();
 
       const ws = MockWebSocket.getLastInstance()!;
       const timestamp = { millis: Date.now(), counter: 1, nodeId: 'remote-node' };
@@ -778,7 +778,7 @@ describe('SyncEngine', () => {
           record: { value: { name: 'Alice' }, timestamp },
         },
       });
-      await jest.runAllTimersAsync();
+      await jest.runOnlyPendingTimersAsync();
 
       expect(lwwMap.get('user1')).toEqual({ name: 'Alice' });
       expect(mockStorage.put).toHaveBeenCalledWith(
@@ -798,7 +798,7 @@ describe('SyncEngine', () => {
       const hlc = syncEngine.getHLC();
       const lwwMap = new LWWMap<string, any>(hlc);
       syncEngine.registerMap('users', lwwMap);
-      await jest.runAllTimersAsync();
+      await jest.runOnlyPendingTimersAsync();
 
       const value = { name: 'Alice' };
       // Optimistic local write with a timestamp far ahead of the server.
@@ -819,7 +819,7 @@ describe('SyncEngine', () => {
           record: { value, timestamp: serverStamp },
         },
       });
-      await jest.runAllTimersAsync();
+      await jest.runOnlyPendingTimersAsync();
 
       // Memory adopted the server's authoritative timestamp (converged)...
       expect(lwwMap.getRecord('user1')?.timestamp).toEqual(serverStamp);
@@ -835,7 +835,7 @@ describe('SyncEngine', () => {
       const hlc = syncEngine.getHLC();
       const lwwMap = new LWWMap<string, any>(hlc);
       syncEngine.registerMap('users', lwwMap);
-      await jest.runAllTimersAsync();
+      await jest.runOnlyPendingTimersAsync();
 
       // A newer local write the server hasn't seen yet.
       const newer = { name: 'Bob' };
@@ -859,7 +859,7 @@ describe('SyncEngine', () => {
           },
         },
       });
-      await jest.runAllTimersAsync();
+      await jest.runOnlyPendingTimersAsync();
 
       // The newer local write is preserved, and the stale echo was NOT persisted.
       expect(lwwMap.get('user1')).toEqual(newer);
@@ -903,7 +903,7 @@ describe('SyncEngine', () => {
       lwwMap.remove('user1');
 
       mockStorage.getAllKeys.mockResolvedValue(['users:user1']);
-      await jest.runAllTimersAsync();
+      await jest.runOnlyPendingTimersAsync();
 
       const ws = MockWebSocket.getLastInstance()!;
       const olderThan = { millis: Date.now() + 10000, counter: 0, nodeId: 'gc' };
@@ -912,7 +912,7 @@ describe('SyncEngine', () => {
         type: 'GC_PRUNE',
         payload: { olderThan },
       });
-      await jest.runAllTimersAsync();
+      await jest.runOnlyPendingTimersAsync();
 
       // Tombstone should be pruned
     });
@@ -925,7 +925,7 @@ describe('SyncEngine', () => {
       syncEngine.registerMap('users', lwwMap);
 
       mockStorage.getAllKeys.mockResolvedValue(['users:user1']);
-      await jest.runAllTimersAsync();
+      await jest.runOnlyPendingTimersAsync();
 
       const ws = MockWebSocket.getLastInstance()!;
       ws.sentMessages = [];
@@ -934,7 +934,7 @@ describe('SyncEngine', () => {
         type: 'SYNC_RESET_REQUIRED',
         payload: { mapName: 'users' },
       });
-      await jest.runAllTimersAsync();
+      await jest.runOnlyPendingTimersAsync();
 
       // Should clear storage
       expect(mockStorage.remove).toHaveBeenCalledWith('users:user1');

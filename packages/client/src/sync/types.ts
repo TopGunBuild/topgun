@@ -957,6 +957,13 @@ export interface MerkleSyncHandlerConfig {
    * @param mapName - Map name to reset
    */
   resetMap: (mapName: string) => Promise<void>;
+
+  /**
+   * Drops the map's expired LWW records and resolves once their removal from
+   * storage has settled. Awaited before the local root is read (TG-TTL-002).
+   * @param mapName - Map name to prune
+   */
+  pruneExpired: (mapName: string) => Promise<void>;
 }
 
 // ============================================
