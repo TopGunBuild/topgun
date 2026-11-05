@@ -913,7 +913,7 @@ mod tests {
         use crate::storage::factory::RecordStoreFactory;
         use crate::storage::impls::StorageConfig;
         use crate::storage::key_writer::KeyWriteToken;
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy, RecordStore};
+        use crate::storage::record_store::{CallerProvenance, RecordStore};
 
         /// A store factory with `index_factory` wired in, as the server wires it.
         fn wired() -> (Arc<IndexObserverFactory>, Arc<RecordStoreFactory>) {
@@ -952,7 +952,6 @@ mod tests {
                     &KeyWriteToken::for_test(store.name(), key),
                     key,
                     status_record(status),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await

@@ -2320,7 +2320,7 @@ mod tests {
     /// which the linear predicate engine cannot do.
     #[tokio::test]
     async fn query_subscribe_multi_field_sort_via_dag() {
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
         use topgun_core::messages::base::{SortDirection, SortField};
 
         let registry = Arc::new(QueryRegistry::new());
@@ -2352,7 +2352,6 @@ mod tests {
                         timestamp: make_timestamp(),
                         ttl_ms: None,
                     },
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await
@@ -2633,7 +2632,7 @@ mod tests {
     /// real keys and clean values for a simple filter query.
     #[tokio::test]
     async fn query_subscribe_linear_engine_opt_out_filters() {
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
 
         let registry = Arc::new(QueryRegistry::new());
         let factory = make_factory();
@@ -2652,7 +2651,6 @@ mod tests {
                         timestamp: make_timestamp(),
                         ttl_ms: None,
                     },
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await
@@ -3497,7 +3495,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_vector_search_include_value_default_true() {
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
 
         let (svc, index_registry) =
             make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
@@ -3517,7 +3515,6 @@ mod tests {
                     timestamp: make_timestamp(),
                     ttl_ms: None,
                 },
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -3639,7 +3636,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_vector_search_include_vectors_populated() {
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
         use std::collections::BTreeMap;
         use topgun_core::{vector::Vector, Value};
 
@@ -3672,7 +3669,6 @@ mod tests {
                     timestamp: make_timestamp(),
                     ttl_ms: None,
                 },
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -3748,7 +3744,7 @@ mod tests {
         use crate::storage::factory::ttl_fixture::{
             expired_now, live_now, live_stamp, ts, wall_stamp, TTL_MS,
         };
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
 
         async fn search(stamp: u64, now: u64, include_value: Option<bool>) -> Vec<(String, bool)> {
             let factory = Arc::new(
@@ -3784,7 +3780,6 @@ mod tests {
                             timestamp: ts(stamp),
                             ttl_ms,
                         },
-                        ExpiryPolicy::NONE,
                         CallerProvenance::Client,
                     )
                     .await

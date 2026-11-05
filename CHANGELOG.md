@@ -52,6 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it.
 - **Note (server): records written before this release do not expire.** The server never kept
   their TTL, and nothing migrates them.
+- **Removed (server): the store-level expiry configuration.** `StorageConfig::default_ttl_millis`
+  and `default_max_idle_millis`, `ExpiryPolicy` and `ExpiryReason`, the `expiry` parameter of
+  `RecordStore::put` and `RecordStore::update_in_place`, and `RecordStore::has_expired`,
+  `evict_expired` and `is_expirable` are gone. Nothing in the server set them: every value was
+  `0` or `ExpiryPolicy::NONE`, so no behaviour changes. A record expires by its own `ttlMs`
+  (`TG-TTL-001`).
 - **Note (rollback):** the store format is unchanged. A server built before this release starts
   on a store and write-ahead log written by this one: it serves records with a TTL as records
   without one, and drops the TTL of any record, or of every entry of an OR-Map key, that it

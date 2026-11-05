@@ -210,7 +210,7 @@ mod tests {
     use crate::storage::key_writer::KeyWriteToken;
     use crate::storage::map_data_store::MapDataStore;
     use crate::storage::record::Record;
-    use crate::storage::record_store::{CallerProvenance, ExpiryPolicy, ExpiryReason, RecordStore};
+    use crate::storage::record_store::{CallerProvenance, RecordStore};
 
     // ---------------------------------------------------------------------------
     // Mock RecordStore implementation for orchestrator tests
@@ -300,7 +300,6 @@ mod tests {
             _writer: &KeyWriteToken<'_>,
             _key: &str,
             _value: crate::storage::record::RecordValue,
-            _expiry: ExpiryPolicy,
             _provenance: CallerProvenance,
         ) -> anyhow::Result<Option<crate::storage::record::RecordValue>> {
             Ok(None)
@@ -363,16 +362,6 @@ mod tests {
         }
 
         fn for_each_boxed(&self, _consumer: &mut dyn FnMut(&str, &Record), _is_backup: bool) {}
-
-        fn has_expired(&self, _key: &str, _now: i64, _is_backup: bool) -> ExpiryReason {
-            ExpiryReason::NotExpired
-        }
-
-        fn evict_expired(&self, _percentage: u32, _now: i64, _is_backup: bool) {}
-
-        fn is_expirable(&self) -> bool {
-            false
-        }
 
         fn evict(
             &self,
@@ -815,7 +804,7 @@ mod tests {
 
         use crate::storage::datastores::RedbDataStore;
         use crate::storage::record::RecordValue;
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
 
         // Build a factory over a real redb datastore so put() writes through
         // (records become durable AND marked clean via R6).
@@ -859,7 +848,6 @@ mod tests {
                     &KeyWriteToken::for_test(store.name(), &key),
                     &key,
                     value,
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await
@@ -986,7 +974,6 @@ mod tests {
                         &writer,
                         "k-requested",
                         Some(empty()),
-                        ExpiryPolicy::NONE,
                         CallerProvenance::Client,
                         &mut mutate,
                     )

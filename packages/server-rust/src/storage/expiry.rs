@@ -330,7 +330,7 @@ mod durability {
     use crate::storage::key_writer::KeyWriteToken;
     use crate::storage::map_data_store::MapDataStore;
     use crate::storage::record::{OrMapEntry, RecordValue};
-    use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+    use crate::storage::record_store::CallerProvenance;
     use crate::storage::wal::{
         Wal, WalEntry, WalFsyncPolicy, WalOp, WalRecovery, WalStorePayload, WalWriter,
     };
@@ -389,7 +389,6 @@ mod durability {
                     &KeyWriteToken::for_test(MAP, "k"),
                     "k",
                     value.clone(),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await

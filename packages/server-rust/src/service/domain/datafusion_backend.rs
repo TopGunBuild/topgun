@@ -149,7 +149,7 @@ mod tests {
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
     use crate::storage::record::RecordValue;
-    use crate::storage::{CallerProvenance, ExpiryPolicy};
+    use crate::storage::CallerProvenance;
 
     /// Test schema provider that returns a fixed schema for "users".
     struct TestSchemaProvider {
@@ -257,7 +257,6 @@ mod tests {
                         timestamp: test_timestamp(),
                         ttl_ms: None,
                     },
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await
@@ -477,7 +476,6 @@ mod tests {
                     timestamp: test_timestamp(),
                     ttl_ms: None,
                 },
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await

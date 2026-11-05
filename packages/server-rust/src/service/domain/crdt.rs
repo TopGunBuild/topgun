@@ -36,9 +36,7 @@ use crate::service::security::WriteAdmission;
 use crate::storage::expiry::{expired_or_tags, lww_is_live, ExpiryExpectation};
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::wal::OrDelta;
-use crate::storage::{
-    CallerProvenance, ExpiryPolicy, MutateOutcome, RecordStore, RecordStoreFactory,
-};
+use crate::storage::{CallerProvenance, MutateOutcome, RecordStore, RecordStoreFactory};
 use crate::tombstone_frontier::{Epoch, PruneEpochRecord, PruneExit, PrunePassRecord};
 use crate::tombstone_frontier_impl::{TombstoneFrontier, TombstoneRef};
 use crate::traits::SchemaProvider;
@@ -745,7 +743,6 @@ impl CrdtService {
                         records: Vec::new(),
                         tombstones: Vec::new(),
                     }),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
                     &mut merge_add,
                 )
@@ -833,7 +830,6 @@ impl CrdtService {
                             records: Vec::new(),
                             tombstones: Vec::new(),
                         }),
-                        ExpiryPolicy::NONE,
                         CallerProvenance::CrdtMerge,
                         &mut apply_remove,
                     )
@@ -899,13 +895,7 @@ impl CrdtService {
                     self.record_store_factory.note_ttl_write(&op.map_name);
                 }
                 let old = store
-                    .put(
-                        writer,
-                        &op.key,
-                        record_value,
-                        ExpiryPolicy::NONE,
-                        CallerProvenance::CrdtMerge,
-                    )
+                    .put(writer, &op.key, record_value, CallerProvenance::CrdtMerge)
                     .await
                     .map_err(OperationError::Internal)?;
                 // An OR slot this put replaced leaves the live OR census. A
@@ -2395,7 +2385,6 @@ pub(crate) async fn prune_epoch_tombstones(
                     &key_guard,
                     &r.key,
                     None,
-                    ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
                     &mut drop_tag,
                 )
@@ -11020,7 +11009,6 @@ mod tests {
                     records,
                     tombstones: vec![tomb.to_string()],
                 },
-                ExpiryPolicy::NONE,
                 CallerProvenance::CrdtMerge,
             )
             .await
@@ -14067,7 +14055,6 @@ mod tests {
                 &KeyWriteToken::for_test(map, key),
                 key,
                 value,
-                ExpiryPolicy::NONE,
                 CallerProvenance::CrdtMerge,
             )
             .await

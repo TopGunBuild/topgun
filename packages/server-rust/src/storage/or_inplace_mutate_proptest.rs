@@ -67,7 +67,7 @@ mod tests {
     use crate::storage::record::{
         add_tombstone_bytes, estimated_cost, sub_tombstone_bytes, OrMapEntry, Record, RecordValue,
     };
-    use crate::storage::record_store::{CallerProvenance, ExpiryPolicy, RecordStore};
+    use crate::storage::record_store::{CallerProvenance, RecordStore};
     use crate::storage::tombstone_gauge::with_isolated_gauge;
 
     const MAP: &str = "omap";
@@ -394,7 +394,6 @@ mod tests {
                         &KeyWriteToken::for_test(store.name(), KEY),
                         KEY,
                         Some(empty_ormap()),
-                        ExpiryPolicy::NONE,
                         CallerProvenance::CrdtMerge,
                         &mut merge,
                     )
@@ -425,7 +424,6 @@ mod tests {
                         &KeyWriteToken::for_test(store.name(), KEY),
                         KEY,
                         Some(empty_ormap()),
-                        ExpiryPolicy::NONE,
                         CallerProvenance::CrdtMerge,
                         &mut apply,
                     )
@@ -453,7 +451,6 @@ mod tests {
                             &KeyWriteToken::for_test(store.name(), KEY),
                             KEY,
                             None,
-                            ExpiryPolicy::NONE,
                             CallerProvenance::CrdtMerge,
                             &mut drop_tag,
                         )
@@ -498,7 +495,6 @@ mod tests {
                         &KeyWriteToken::for_test(store.name(), KEY),
                         KEY,
                         rv,
-                        ExpiryPolicy::NONE,
                         CallerProvenance::CrdtMerge,
                     )
                     .await
@@ -521,7 +517,6 @@ mod tests {
                             records,
                             tombstones,
                         },
-                        ExpiryPolicy::NONE,
                         CallerProvenance::CrdtMerge,
                     )
                     .await
@@ -541,7 +536,6 @@ mod tests {
                                 records,
                                 tombstones,
                             },
-                            ExpiryPolicy::NONE,
                             CallerProvenance::CrdtMerge,
                         )
                         .await
@@ -770,7 +764,6 @@ mod tests {
                         RecordValue::OrTombstones {
                             tags: vec!["t0".into(), "t1".into()],
                         },
-                        ExpiryPolicy::NONE,
                         CallerProvenance::CrdtMerge,
                     )
                     .await
@@ -932,7 +925,6 @@ mod tests {
                         &KeyWriteToken::for_test(store.name(), KEY),
                         KEY,
                         Some(empty_ormap()),
-                        ExpiryPolicy::NONE,
                         CallerProvenance::CrdtMerge,
                         &mut remove_once,
                     )
@@ -945,7 +937,6 @@ mod tests {
                         &KeyWriteToken::for_test(store.name(), KEY),
                         KEY,
                         Some(empty_ormap()),
-                        ExpiryPolicy::NONE,
                         CallerProvenance::CrdtMerge,
                         &mut remove_once,
                     )
@@ -998,7 +989,6 @@ mod tests {
                     &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     Some(empty_ormap()),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
                     &mut counted,
                 )
@@ -1016,7 +1006,6 @@ mod tests {
                     &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     Some(empty_ormap()),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
                     &mut counted,
                 )
@@ -1038,7 +1027,6 @@ mod tests {
                         &KeyWriteToken::for_test(store.name(), KEY),
                         KEY,
                         Some(empty_ormap()),
-                        ExpiryPolicy::NONE,
                         CallerProvenance::CrdtMerge,
                         &mut counted,
                     )
@@ -1092,7 +1080,6 @@ mod tests {
                     &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     Some(empty_ormap()),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
                     &mut merge_once,
                 )
@@ -1143,7 +1130,6 @@ mod tests {
                     &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     lww.clone(),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await
@@ -1179,7 +1165,6 @@ mod tests {
                     &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     Some(empty_ormap()),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
                     &mut ingest,
                 )
@@ -1394,7 +1379,6 @@ mod tests {
                     &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     Some(empty_ormap()),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
                     &mut counted,
                 )
@@ -1442,7 +1426,6 @@ mod tests {
                     &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     None,
-                    ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
                     &mut no_op,
                 )
@@ -1477,7 +1460,6 @@ mod tests {
                     &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     None,
-                    ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
                     &mut counted,
                 )

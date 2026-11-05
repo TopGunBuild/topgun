@@ -3,10 +3,9 @@
 //! Defines [`RecordStore`], the primary interface that operation handlers
 //! interact with. Orchestrates Layer 1 ([`StorageEngine`](super::StorageEngine))
 //! and Layer 3 ([`MapDataStore`](super::MapDataStore)), adding metadata tracking,
-//! expiry, eviction, and mutation observation.
+//! eviction, and mutation observation.
 //!
-//! Also defines supporting types: [`CallerProvenance`], [`ExpiryPolicy`],
-//! [`ExpiryReason`], and [`MutateOutcome`].
+//! Also defines supporting types: [`CallerProvenance`] and [`MutateOutcome`].
 
 use async_trait::async_trait;
 
@@ -32,40 +31,6 @@ pub enum CallerProvenance {
     Load,
     /// Write is the result of a CRDT merge operation.
     CrdtMerge,
-}
-
-/// Expiry configuration for a record.
-///
-/// Controls time-to-live and maximum idle time for automatic expiration.
-/// Use [`ExpiryPolicy::NONE`] for records that should never expire.
-#[derive(Debug, Clone)]
-pub struct ExpiryPolicy {
-    /// Time-to-live in milliseconds from creation. 0 = no TTL.
-    pub ttl_millis: u64,
-    /// Maximum idle time in milliseconds since last access. 0 = no max idle.
-    pub max_idle_millis: u64,
-}
-
-impl ExpiryPolicy {
-    /// No expiration policy. Both TTL and max-idle are disabled.
-    pub const NONE: Self = Self {
-        ttl_millis: 0,
-        max_idle_millis: 0,
-    };
-}
-
-/// Reason a record expired.
-///
-/// Returned by [`RecordStore::has_expired`] to indicate whether and why
-/// a record has expired.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExpiryReason {
-    /// The record has not expired.
-    NotExpired,
-    /// The record expired due to time-to-live.
-    Ttl,
-    /// The record expired due to exceeding the maximum idle time.
-    MaxIdle,
 }
 
 /// What a [`RecordStore::update_in_place`] mutate closure reports back.
@@ -111,7 +76,7 @@ pub(crate) const KEY_WRITER_MISMATCH_CONTEXT: &str =
 ///
 /// Primary interface that operation handlers interact with.
 /// Orchestrates Layer 1 ([`StorageEngine`]) and Layer 3 ([`MapDataStore`]),
-/// adding metadata tracking, expiry, eviction, and mutation observation.
+/// adding metadata tracking, eviction, and mutation observation.
 ///
 /// **never-evict-dirty invariant:** Any record whose
 /// [`RecordMetadata::is_dirty`](super::record::RecordMetadata::is_dirty) returns
@@ -156,7 +121,7 @@ pub trait RecordStore: Send + Sync {
     /// ```no_run
     /// use topgun_server::storage::key_writer::KeyWriterRegistry;
     /// use topgun_server::storage::record::RecordValue;
-    /// use topgun_server::storage::record_store::{CallerProvenance, ExpiryPolicy, RecordStore};
+    /// use topgun_server::storage::record_store::{CallerProvenance, RecordStore};
     ///
     /// async fn write(
     ///     store: &dyn RecordStore,
@@ -165,7 +130,7 @@ pub trait RecordStore: Send + Sync {
     /// ) -> anyhow::Result<()> {
     ///     let writer = registry.acquire(store.name(), "k").await;
     ///     store
-    ///         .put(&writer, "k", value, ExpiryPolicy::NONE, CallerProvenance::Client)
+    ///         .put(&writer, "k", value, CallerProvenance::Client)
     ///         .await?;
     ///     Ok(())
     /// }
@@ -177,7 +142,7 @@ pub trait RecordStore: Send + Sync {
     /// ```compile_fail
     /// use topgun_server::storage::key_writer::KeyWriterRegistry;
     /// use topgun_server::storage::record::RecordValue;
-    /// use topgun_server::storage::record_store::{CallerProvenance, ExpiryPolicy, RecordStore};
+    /// use topgun_server::storage::record_store::{CallerProvenance, RecordStore};
     ///
     /// async fn write(
     ///     store: &dyn RecordStore,
@@ -186,7 +151,7 @@ pub trait RecordStore: Send + Sync {
     /// ) -> anyhow::Result<()> {
     ///     let writer = registry.acquire(store.name(), "k").await;
     ///     store
-    ///         .put("k", value, ExpiryPolicy::NONE, CallerProvenance::Client)
+    ///         .put("k", value, CallerProvenance::Client)
     ///         .await?;
     ///     Ok(())
     /// }
@@ -196,7 +161,6 @@ pub trait RecordStore: Send + Sync {
         writer: &KeyWriteToken<'_>,
         key: &str,
         value: RecordValue,
-        expiry: ExpiryPolicy,
         provenance: CallerProvenance,
     ) -> anyhow::Result<Option<RecordValue>>;
 
@@ -232,7 +196,6 @@ pub trait RecordStore: Send + Sync {
         writer: &KeyWriteToken<'_>,
         key: &str,
         init: Option<RecordValue>,
-        expiry: ExpiryPolicy,
         provenance: CallerProvenance,
         mutate: &mut (dyn for<'a> FnMut(&'a mut RecordValue) -> MutateOutcome + Send),
     ) -> anyhow::Result<bool> {
@@ -270,7 +233,7 @@ pub trait RecordStore: Send + Sync {
         if !outcome.changed {
             return Ok(false);
         }
-        self.put(writer, key, value, expiry, provenance).await?;
+        self.put(writer, key, value, provenance).await?;
         Ok(true)
     }
 
@@ -327,7 +290,7 @@ pub trait RecordStore: Send + Sync {
 
     /// Iterate all records with an object-safe consumer.
     ///
-    /// Calls `consumer` for each non-expired entry. Uses `&mut dyn FnMut`
+    /// Calls `consumer` for each entry. Uses `&mut dyn FnMut`
     /// instead of generic `F: FnMut` for `Box<dyn RecordStore>` compatibility.
     fn for_each_boxed(&self, consumer: &mut dyn FnMut(&str, &Record), is_backup: bool);
 
@@ -341,17 +304,6 @@ pub trait RecordStore: Send + Sync {
 
     /// Total estimated heap cost of all entries.
     fn owned_entry_cost(&self) -> u64;
-
-    // --- Expiry ---
-
-    /// Check if a record has expired.
-    fn has_expired(&self, key: &str, now: i64, is_backup: bool) -> ExpiryReason;
-
-    /// Evict expired entries up to a percentage of total expirable entries.
-    fn evict_expired(&self, percentage: u32, now: i64, is_backup: bool);
-
-    /// Whether this record store has any entries that can expire.
-    fn is_expirable(&self) -> bool;
 
     // --- Eviction ---
 
@@ -447,7 +399,7 @@ mod tests {
             "remove_backup",
         ];
         // Reads only: changes no resident, engine or durable state.
-        const READS_ONLY: [&str; 14] = [
+        const READS_ONLY: [&str; 12] = [
             "name",
             "partition_id",
             "exists_in_memory",
@@ -458,8 +410,6 @@ mod tests {
             "size",
             "is_empty",
             "owned_entry_cost",
-            "has_expired",
-            "is_expirable",
             "should_evict",
             "dirty_count",
         ];
@@ -467,10 +417,9 @@ mod tests {
         // record value: `get` load-inserts a resident copy and stamps the
         // access, `get_all` is a loop over `get`, `soft_flush` flushes pending
         // writes, the rest evict, clear or tear down.
-        const CHANGES_STATE_WITHOUT_A_NEW_VALUE: [&str; 11] = [
+        const CHANGES_STATE_WITHOUT_A_NEW_VALUE: [&str; 10] = [
             "evict",
             "evict_all",
-            "evict_expired",
             "evict_lru",
             "clear",
             "reset",
@@ -541,7 +490,7 @@ mod tests {
                 listed_but_not_in_the_trait,
                 token_disagrees_with_the_list,
             ),
-            (32, Vec::new(), Vec::new(), Vec::new()),
+            (29, Vec::new(), Vec::new(), Vec::new()),
             "(methods declared by the trait, methods not on exactly one list, listed names \
              the trait does not declare, methods whose signature names the token against \
              their list)"

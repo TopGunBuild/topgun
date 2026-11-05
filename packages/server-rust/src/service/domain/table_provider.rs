@@ -304,8 +304,8 @@ mod tests {
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
     use crate::storage::record::RecordValue;
+    use crate::storage::CallerProvenance;
     use crate::storage::RecordStoreFactory;
-    use crate::storage::{CallerProvenance, ExpiryPolicy};
 
     fn test_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
@@ -341,7 +341,6 @@ mod tests {
                     &KeyWriteToken::for_test(store.name(), key),
                     key,
                     record_value,
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await

@@ -2506,7 +2506,7 @@ mod tests {
         use crate::storage::factory::RecordStoreFactory;
         use crate::storage::key_writer::KeyWriteToken;
         use crate::storage::record::RecordValue;
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
         use crate::storage::StorageConfig;
 
         use super::super::ScanProcessor;
@@ -2545,7 +2545,6 @@ mod tests {
                     &KeyWriteToken::for_test(MAP, key),
                     key,
                     value,
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Replication,
                 )
                 .await

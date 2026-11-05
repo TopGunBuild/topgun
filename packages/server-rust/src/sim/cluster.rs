@@ -1269,7 +1269,7 @@ mod tests {
     use crate::network::config::ConnectionConfig;
     use crate::network::connection::{ConnectionKind, OutboundMessage};
     use crate::storage::record::RecordValue;
-    use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+    use crate::storage::record_store::CallerProvenance;
 
     use super::*;
 
@@ -1401,7 +1401,6 @@ mod tests {
                     },
                     ttl_ms: None,
                 },
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1920,7 +1919,6 @@ mod tests {
                         },
                         ttl_ms: None,
                     },
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await
@@ -2120,7 +2118,6 @@ mod tests {
                         },
                         ttl_ms: None,
                     },
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await
@@ -3341,7 +3338,6 @@ mod tests {
                     }],
                     tombstones: Vec::new(),
                 },
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await

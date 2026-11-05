@@ -749,7 +749,7 @@ mod tests {
     use super::*;
     use crate::storage::datastores::NullDataStore;
     use crate::storage::record::RecordValue;
-    use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+    use crate::storage::record_store::CallerProvenance;
 
     fn make_value(s: &str) -> RecordValue {
         RecordValue::Lww {
@@ -782,7 +782,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "alice"),
                 "alice",
                 make_value("data"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -828,8 +827,6 @@ mod tests {
     #[test]
     fn storage_config_default_all_zeros() {
         let config = StorageConfig::default();
-        assert_eq!(config.default_ttl_millis, 0);
-        assert_eq!(config.default_max_idle_millis, 0);
         assert_eq!(config.max_entry_count, 0);
     }
 
@@ -861,7 +858,6 @@ mod tests {
                 &KeyWriteToken::for_test(store_a.name(), "key1"),
                 "key1",
                 make_value("a"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -869,20 +865,6 @@ mod tests {
 
         assert_eq!(store_a.size(), 1);
         assert_eq!(store_b.size(), 0, "stores should be independent");
-    }
-
-    /// Factory with custom config propagates settings to created stores
-    #[tokio::test]
-    async fn factory_propagates_config() {
-        let config = StorageConfig {
-            default_ttl_millis: 5000,
-            default_max_idle_millis: 0,
-            max_entry_count: 100,
-        };
-        let factory = RecordStoreFactory::new(config, Arc::new(NullDataStore), Vec::new());
-
-        let store = factory.get_or_create("events", 3);
-        assert!(store.is_expirable());
     }
 
     /// AC1: get_or_create() called twice for the same (map, partition) returns
@@ -1119,7 +1101,7 @@ mod tests {
         use crate::storage::datastores::{WriteBehindConfig, WriteBehindDataStore};
         use crate::storage::key_writer::KeyWriteToken;
         use crate::storage::record::{OrMapEntry, RecordValue};
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
 
         const MAP: &str = "m";
 
@@ -1164,7 +1146,6 @@ mod tests {
                     &KeyWriteToken::for_test(MAP, key),
                     key,
                     value,
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Replication,
                 )
                 .await

@@ -1394,7 +1394,7 @@ mod tests {
     async fn cursor_pagination_returns_each_row_exactly_once() {
         use crate::query::cursor::{encode_cursor, rmpv_to_json_value, CursorData, SortValue};
         use crate::storage::record::RecordValue;
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
         use topgun_core::messages::base::{SortDirection, SortField};
         use topgun_core::{Timestamp, Value};
 
@@ -1437,7 +1437,6 @@ mod tests {
                     &KeyWriteToken::for_test(store.name(), key),
                     key,
                     value,
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await
@@ -1627,7 +1626,7 @@ mod tests {
     async fn cursor_rejected_when_hash_mismatches() {
         use crate::query::cursor::{encode_cursor, CursorData, SortValue};
         use crate::storage::record::RecordValue;
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
         use topgun_core::messages::base::{SortDirection, SortField};
         use topgun_core::{Timestamp, Value};
 
@@ -1672,7 +1671,6 @@ mod tests {
                     },
                     ttl_ms: None,
                 },
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1704,7 +1702,7 @@ mod tests {
     async fn cursor_rejected_when_expired() {
         use crate::query::cursor::{encode_cursor, CursorData, SortValue};
         use crate::storage::record::RecordValue;
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
         use topgun_core::messages::base::{SortDirection, SortField};
         use topgun_core::{Timestamp, Value};
 
@@ -1748,7 +1746,6 @@ mod tests {
                     },
                     ttl_ms: None,
                 },
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await

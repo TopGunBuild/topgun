@@ -3250,7 +3250,7 @@ mod tests {
         docs: &[(&str, &str)], // key -> text
     ) {
         use crate::storage::key_writer::KeyWriteToken;
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
 
         let store_factory = make_factory();
         for (key, text) in docs {
@@ -3268,7 +3268,6 @@ mod tests {
                         },
                         ttl_ms: None,
                     },
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await
@@ -3440,7 +3439,7 @@ mod tests {
         use crate::storage::factory::test_store::TestStore;
         use crate::storage::factory::ObserverFactory;
         use crate::storage::key_writer::KeyWriteToken;
-        use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+        use crate::storage::record_store::CallerProvenance;
 
         const M: &str = "m";
         const TERM: &str = "alpha";
@@ -3580,7 +3579,6 @@ mod tests {
                     &KeyWriteToken::for_test(M, key),
                     key,
                     doc(text),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await
@@ -3977,7 +3975,6 @@ mod tests {
                     &KeyWriteToken::for_test(M, "gone_resident"),
                     "gone_resident",
                     doc_ttl(&format!("{TERM} r"), w, Some(TTL_MS)),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await

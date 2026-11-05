@@ -182,7 +182,7 @@ async fn snapshot_reflects_durable_state_at_scan_time() {
 ///   matching the write-behind window where in-memory is the freshest replica)
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_merges_resident_over_datastore_by_hlc_direction() {
-    use topgun_server::storage::{CallerProvenance, ExpiryPolicy};
+    use topgun_server::storage::CallerProvenance;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let data_store =
@@ -230,13 +230,7 @@ async fn snapshot_merges_resident_over_datastore_by_hlc_direction() {
         };
         let writer = key_writer.acquire(map_name, key).await;
         store
-            .put(
-                &writer,
-                key,
-                value,
-                ExpiryPolicy::NONE,
-                CallerProvenance::Load,
-            )
+            .put(&writer, key, value, CallerProvenance::Load)
             .await
             .expect("resident write");
     }

@@ -3,7 +3,7 @@
 //! [`DefaultRecordStore`] is the Layer 2 component in the storage hierarchy.
 //! It coordinates the in-memory [`StorageEngine`](crate::storage::StorageEngine)
 //! (Layer 1) with the [`MapDataStore`](crate::storage::MapDataStore) (Layer 3),
-//! managing metadata, expiry, eviction, and mutation observation.
+//! managing metadata, eviction, and mutation observation.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,8 +18,7 @@ use crate::storage::map_data_store::{Loaded, MapDataStore, WriteSource};
 use crate::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
 use crate::storage::record_store::{
-    CallerProvenance, ExpiryPolicy, ExpiryReason, MutateOutcome, RecordStore,
-    KEY_WRITER_MISMATCH_CONTEXT,
+    CallerProvenance, MutateOutcome, RecordStore, KEY_WRITER_MISMATCH_CONTEXT,
 };
 use crate::storage::wal::OrDelta;
 
@@ -41,15 +40,11 @@ const MATERIALIZE_MAX_ATTEMPTS: u32 = 8;
 
 /// Configuration for storage behavior, applied per-RecordStore.
 ///
-/// Controls default TTL, max-idle, and eviction thresholds. Imported from
+/// Controls eviction thresholds. Imported from
 /// [`factory`](crate::storage::factory) when wiring via `RecordStoreFactory`,
 /// or constructed directly for tests.
 #[derive(Debug, Clone, Default)]
 pub struct StorageConfig {
-    /// Default TTL in milliseconds for new records. 0 = no TTL.
-    pub default_ttl_millis: u64,
-    /// Default max idle time in milliseconds. 0 = no max idle.
-    pub default_max_idle_millis: u64,
     /// Maximum number of entries before eviction triggers. 0 = unlimited.
     pub max_entry_count: u64,
 }
@@ -61,7 +56,7 @@ pub struct StorageConfig {
 /// - Layer 3 ([`MapDataStore`]): external persistence backend
 /// - [`CompositeMutationObserver`]: mutation notification fan-out
 ///
-/// Provides metadata tracking, TTL/max-idle expiry checks, eviction support,
+/// Provides metadata tracking, eviction support,
 /// and write-through persistence based on caller provenance.
 pub struct DefaultRecordStore {
     name: String,
@@ -169,26 +164,6 @@ impl DefaultRecordStore {
                 self.observer
                     .on_update(key, record, &record.value, &record.value, false);
             }
-        }
-    }
-
-    /// Computes `expiration_time` from the expiry policy and config defaults.
-    ///
-    /// Returns 0 if no TTL applies (the record does not expire based on absolute time).
-    fn compute_expiration_time(&self, expiry: &ExpiryPolicy, creation_time: i64) -> i64 {
-        let ttl = if expiry.ttl_millis > 0 {
-            expiry.ttl_millis
-        } else {
-            self.config.default_ttl_millis
-        };
-
-        if ttl > 0 {
-            // TTL values are always reasonable millisecond durations, not near u64::MAX
-            #[allow(clippy::cast_possible_wrap)]
-            let ttl_signed = ttl as i64;
-            creation_time + ttl_signed
-        } else {
-            0
         }
     }
 }
@@ -314,7 +289,6 @@ impl RecordStore for DefaultRecordStore {
         writer: &KeyWriteToken<'_>,
         key: &str,
         value: RecordValue,
-        expiry: ExpiryPolicy,
         provenance: CallerProvenance,
     ) -> anyhow::Result<Option<RecordValue>> {
         self.refuse_foreign_token("put", writer, key)?;
@@ -364,9 +338,8 @@ impl RecordStore for DefaultRecordStore {
             provenance,
             CallerProvenance::Client | CallerProvenance::CrdtMerge
         ) {
-            let expiration_time = self.compute_expiration_time(&expiry, now);
             self.data_store
-                .add(&self.name, key, &record.value, expiration_time, now)
+                .add(&self.name, key, &record.value, 0, now)
                 .await?;
 
             // Mark the record clean only if the value was written to a real
@@ -421,7 +394,6 @@ impl RecordStore for DefaultRecordStore {
         writer: &KeyWriteToken<'_>,
         key: &str,
         init: Option<RecordValue>,
-        expiry: ExpiryPolicy,
         provenance: CallerProvenance,
         mutate: &mut (dyn for<'a> FnMut(&'a mut RecordValue) -> MutateOutcome + Send),
     ) -> anyhow::Result<bool> {
@@ -550,7 +522,6 @@ impl RecordStore for DefaultRecordStore {
             provenance,
             CallerProvenance::Client | CallerProvenance::CrdtMerge
         ) {
-            let expiration_time = self.compute_expiration_time(&expiry, now);
             // The witness rides alongside the very value it describes, so a store
             // that records deltas can never pair one with a different write. A
             // store that records none takes the defaulted body, which drops the
@@ -560,7 +531,7 @@ impl RecordStore for DefaultRecordStore {
                     &self.name,
                     key,
                     WriteSource::Cell(&cell),
-                    expiration_time,
+                    0,
                     now,
                     witness.as_ref(),
                 )
@@ -714,13 +685,9 @@ impl RecordStore for DefaultRecordStore {
     }
 
     fn for_each_boxed(&self, consumer: &mut dyn FnMut(&str, &Record), is_backup: bool) {
-        let now = now_millis();
         let _ = is_backup;
         for (key, record) in self.engine.snapshot_iter() {
-            // Skip expired entries
-            if self.check_expired(&record, now) == ExpiryReason::NotExpired {
-                consumer(&key, &record);
-            }
+            consumer(&key, &record);
         }
     }
 
@@ -736,47 +703,6 @@ impl RecordStore for DefaultRecordStore {
 
     fn owned_entry_cost(&self) -> u64 {
         self.engine.estimated_cost()
-    }
-
-    // --- Expiry ---
-
-    fn has_expired(&self, key: &str, now: i64, _is_backup: bool) -> ExpiryReason {
-        let Some(record) = self.engine.get(key) else {
-            return ExpiryReason::NotExpired;
-        };
-
-        self.check_expired(&record, now)
-    }
-
-    fn evict_expired(&self, percentage: u32, now: i64, _is_backup: bool) {
-        let snapshot = self.engine.snapshot_iter();
-        let total = snapshot.len();
-        if total == 0 {
-            return;
-        }
-
-        // Calculate how many expired entries to remove (percentage of total)
-        let max_removals = ((total as u64 * u64::from(percentage)) / 100) as usize;
-        if max_removals == 0 {
-            return;
-        }
-
-        let mut removed = 0_usize;
-        for (key, record) in &snapshot {
-            if removed >= max_removals {
-                break;
-            }
-            if self.check_expired(record, now) != ExpiryReason::NotExpired {
-                if let Some(removed_record) = self.engine.remove(key) {
-                    self.observer.on_evict(key, &removed_record, false);
-                    removed += 1;
-                }
-            }
-        }
-    }
-
-    fn is_expirable(&self) -> bool {
-        self.config.default_ttl_millis > 0 || self.config.default_max_idle_millis > 0
     }
 
     // --- Eviction ---
@@ -908,28 +834,6 @@ impl RecordStore for DefaultRecordStore {
 
     fn map_data_store(&self) -> &dyn MapDataStore {
         &*self.data_store
-    }
-}
-
-impl DefaultRecordStore {
-    /// Checks whether a record has expired based on store-wide config defaults.
-    #[allow(clippy::cast_possible_wrap)]
-    fn check_expired(&self, record: &Record, now: i64) -> ExpiryReason {
-        // Check TTL: config values are reasonable millisecond durations
-        if self.config.default_ttl_millis > 0
-            && now - record.metadata.creation_time > self.config.default_ttl_millis as i64
-        {
-            return ExpiryReason::Ttl;
-        }
-
-        // Check max-idle
-        if self.config.default_max_idle_millis > 0
-            && now - record.metadata.last_access_time > self.config.default_max_idle_millis as i64
-        {
-            return ExpiryReason::MaxIdle;
-        }
-
-        ExpiryReason::NotExpired
     }
 }
 
@@ -1113,7 +1017,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "k"),
                 "k",
                 Some(make_value("init")),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Backup,
                 &mut set,
             )
@@ -1138,7 +1041,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "k"),
                 "k",
                 Some(make_value("init")),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Backup,
                 &mut set,
             )
@@ -1159,7 +1061,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 value.clone(),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1189,7 +1090,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1212,7 +1112,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1224,7 +1123,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v2"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1247,7 +1145,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1265,90 +1162,6 @@ mod tests {
         assert_eq!(observer.remove_count.load(Ordering::Relaxed), 1);
     }
 
-    // --- AC3: Expiry returns Ttl when TTL exceeded ---
-
-    #[tokio::test]
-    async fn has_expired_returns_ttl() {
-        let config = StorageConfig {
-            default_ttl_millis: 1000,
-            default_max_idle_millis: 0,
-            max_entry_count: 0,
-        };
-        let store = make_store_with_observer(Arc::new(CountingObserver::new()), config);
-
-        store
-            .put(
-                &KeyWriteToken::for_test(store.name(), "key1"),
-                "key1",
-                make_value("v1"),
-                ExpiryPolicy::NONE,
-                CallerProvenance::Client,
-            )
-            .await
-            .unwrap();
-
-        // Use a now far in the future (creation_time + 2000ms > 1000ms TTL)
-        let far_future = now_millis() + 2000;
-        let reason = store.has_expired("key1", far_future, false);
-        assert_eq!(reason, ExpiryReason::Ttl);
-    }
-
-    // --- AC3: Expiry returns MaxIdle when max-idle exceeded ---
-
-    #[tokio::test]
-    async fn has_expired_returns_max_idle() {
-        let config = StorageConfig {
-            default_ttl_millis: 0,
-            default_max_idle_millis: 500,
-            max_entry_count: 0,
-        };
-        let store = make_store_with_observer(Arc::new(CountingObserver::new()), config);
-
-        store
-            .put(
-                &KeyWriteToken::for_test(store.name(), "key1"),
-                "key1",
-                make_value("v1"),
-                ExpiryPolicy::NONE,
-                CallerProvenance::Client,
-            )
-            .await
-            .unwrap();
-
-        // Use a now far in the future (last_access_time + 1000ms > 500ms max-idle)
-        let far_future = now_millis() + 1000;
-        let reason = store.has_expired("key1", far_future, false);
-        assert_eq!(reason, ExpiryReason::MaxIdle);
-    }
-
-    // --- AC3: Expiry returns NotExpired for fresh records ---
-
-    #[tokio::test]
-    async fn has_expired_returns_not_expired_for_fresh() {
-        let config = StorageConfig {
-            default_ttl_millis: 60_000,
-            default_max_idle_millis: 30_000,
-            max_entry_count: 0,
-        };
-        let store = make_store_with_observer(Arc::new(CountingObserver::new()), config);
-
-        store
-            .put(
-                &KeyWriteToken::for_test(store.name(), "key1"),
-                "key1",
-                make_value("v1"),
-                ExpiryPolicy::NONE,
-                CallerProvenance::Client,
-            )
-            .await
-            .unwrap();
-
-        // Check immediately -- should not be expired
-        let now = now_millis();
-        let reason = store.has_expired("key1", now, false);
-        assert_eq!(reason, ExpiryReason::NotExpired);
-    }
-
     // --- AC3: size() and owned_entry_cost() ---
 
     #[tokio::test]
@@ -1363,7 +1176,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1373,7 +1185,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "key2"),
                 "key2",
                 make_value("v2"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1399,7 +1210,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1409,7 +1219,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "key2"),
                 "key2",
                 make_value("v2"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1432,7 +1241,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1471,7 +1279,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1497,20 +1304,6 @@ mod tests {
     }
 
     #[test]
-    fn is_expirable_reflects_config() {
-        let store_no_expiry = make_store();
-        assert!(!store_no_expiry.is_expirable());
-
-        let config = StorageConfig {
-            default_ttl_millis: 1000,
-            default_max_idle_millis: 0,
-            max_entry_count: 0,
-        };
-        let store_with_ttl = make_store_with_observer(Arc::new(CountingObserver::new()), config);
-        assert!(store_with_ttl.is_expirable());
-    }
-
-    #[test]
     fn should_evict_reflects_config() {
         let store = make_store();
         assert!(
@@ -1518,11 +1311,7 @@ mod tests {
             "unlimited config should not trigger eviction"
         );
 
-        let config = StorageConfig {
-            default_ttl_millis: 0,
-            default_max_idle_millis: 0,
-            max_entry_count: 2,
-        };
+        let config = StorageConfig { max_entry_count: 2 };
         let store_limited = make_store_with_observer(Arc::new(CountingObserver::new()), config);
         assert!(
             !store_limited.should_evict(),
@@ -1540,7 +1329,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1562,7 +1350,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "a"),
                 "a",
                 make_value("v1"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1572,7 +1359,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "b"),
                 "b",
                 make_value("v2"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1582,7 +1368,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "c"),
                 "c",
                 make_value("v3"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1604,7 +1389,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1625,7 +1409,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "key1"),
                 "key1",
                 make_value("v1"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1651,7 +1434,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "a"),
                 "a",
                 make_value("va"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1661,7 +1443,6 @@ mod tests {
                 &KeyWriteToken::for_test(store.name(), "b"),
                 "b",
                 make_value("vb"),
-                ExpiryPolicy::NONE,
                 CallerProvenance::Client,
             )
             .await
@@ -1673,41 +1454,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn has_expired_returns_not_expired_for_missing_key() {
-        let store = make_store();
-        let reason = store.has_expired("nonexistent", now_millis(), false);
-        assert_eq!(reason, ExpiryReason::NotExpired);
-    }
-
-    #[tokio::test]
-    async fn for_each_boxed_skips_expired() {
-        let config = StorageConfig {
-            default_ttl_millis: 100,
-            default_max_idle_millis: 0,
-            max_entry_count: 0,
-        };
-        let store = make_store_with_observer(Arc::new(CountingObserver::new()), config);
-
-        store
-            .put(
-                &KeyWriteToken::for_test(store.name(), "key1"),
-                "key1",
-                make_value("v1"),
-                ExpiryPolicy::NONE,
-                CallerProvenance::Client,
-            )
-            .await
-            .unwrap();
-
-        // Wait for TTL to expire
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-        let mut count = 0_usize;
-        store.for_each_boxed(&mut |_key, _record| count += 1, false);
-        assert_eq!(count, 0, "expired entries should be skipped");
     }
 
     // --- Helper: build a clean record with a specific last_access_time ---
@@ -2021,7 +1767,6 @@ mod tests {
                     &KeyWriteToken::for_test(store.name(), KEY),
                     KEY,
                     Some(or_value(&[], &[])),
-                    ExpiryPolicy::NONE,
                     CallerProvenance::CrdtMerge,
                     &mut add,
                 )
@@ -3594,7 +3339,6 @@ mod tests {
                         &KeyWriteToken::for_test(MAP, key),
                         key,
                         make_value("seeded"),
-                        ExpiryPolicy::NONE,
                         CallerProvenance::Client,
                     )
                     .await
@@ -3638,13 +3382,7 @@ mod tests {
         ) -> anyhow::Result<()> {
             match mutator {
                 "put" => store
-                    .put(
-                        writer,
-                        key,
-                        make_value("written"),
-                        ExpiryPolicy::NONE,
-                        CallerProvenance::Client,
-                    )
+                    .put(writer, key, make_value("written"), CallerProvenance::Client)
                     .await
                     .map(|_| ()),
                 "update_in_place" => {
@@ -3657,14 +3395,7 @@ mod tests {
                         }
                     };
                     store
-                        .update_in_place(
-                            writer,
-                            key,
-                            None,
-                            ExpiryPolicy::NONE,
-                            CallerProvenance::Client,
-                            &mut mutate,
-                        )
+                        .update_in_place(writer, key, None, CallerProvenance::Client, &mut mutate)
                         .await
                         .map(|_| ())
                 }

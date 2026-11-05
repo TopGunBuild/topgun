@@ -1110,7 +1110,7 @@ mod tests {
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
     use crate::storage::record::RecordValue as StoreRecordValue;
-    use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+    use crate::storage::record_store::CallerProvenance;
     use topgun_core::hlc::Timestamp as HlcTimestamp;
     use topgun_core::messages::HttpQueryRequest as QueryReq;
     use topgun_core::types::Value as TgValue;
@@ -1143,7 +1143,6 @@ mod tests {
                         },
                         ttl_ms: None,
                     },
-                    ExpiryPolicy::NONE,
                     CallerProvenance::Client,
                 )
                 .await

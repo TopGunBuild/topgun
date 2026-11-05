@@ -2874,7 +2874,7 @@ use crate::storage::impls::{DefaultRecordStore, StorageConfig};
 use crate::storage::key_writer::KeyWriteToken;
 use crate::storage::mutation_observer::CompositeMutationObserver;
 use crate::storage::record::{OrMapEntry, Record, RecordMetadata};
-use crate::storage::record_store::{CallerProvenance, ExpiryPolicy, MutateOutcome, RecordStore};
+use crate::storage::record_store::{CallerProvenance, MutateOutcome, RecordStore};
 
 fn or_entry(tag: &str) -> OrMapEntry {
     OrMapEntry {
@@ -3003,7 +3003,6 @@ async fn apply_or(store: &DefaultRecordStore, key: &str, op: OrOp) -> anyhow::Re
             &KeyWriteToken::for_test(store.name(), key),
             key,
             Some(or_value(&[], &[])),
-            ExpiryPolicy::NONE,
             CallerProvenance::CrdtMerge,
             &mut mutate,
         )
