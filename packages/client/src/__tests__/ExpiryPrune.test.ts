@@ -212,6 +212,33 @@ describe('client-side LWW expiry prune', () => {
     );
   });
 
+  it('a map listener that throws fails the tick without an unhandled rejection, and the next tick runs', async () => {
+    const warn = jest.spyOn(logger, 'warn');
+    const e = build(false);
+    const map = openMap(e);
+    seed(map, storage, 'a', serverRecord(T0 - 5_000, 1_000));
+    let throwOnce = true;
+    map.subscribe(() => {
+      if (throwOnce) {
+        throwOnce = false;
+        throw new Error('listener');
+      }
+    });
+
+    await jest.advanceTimersByTimeAsync(1_000);
+    // The warning is the tick's rejection handler running: without it the
+    // rejection would go unhandled (Jest does not surface that under fake timers).
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      'Expiry prune run failed',
+    );
+
+    seed(map, storage, 'b', serverRecord(T0 - 5_000, 1_000));
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(map.getRecord('b')).toBeUndefined();
+    expect(storage.kv.has(`${MAP}:b`)).toBe(false);
+  });
+
   it('lww_prune_expired_skips_key_with_pending_put and prunes it once the PUT is acknowledged', async () => {
     const e = build(true);
     const ws = await connected();

@@ -2563,23 +2563,18 @@ export class SyncEngine {
     }
   }
 
-  /**
-   * Tags of this client's local removes in `mapName` that the server has
-   * neither acknowledged nor refused, grouped by the key they were removed from.
-   *
-   * Built in one pass over the op log so that a sync response covering many keys
-   * costs one scan, not one per key.
-   *
-   * Read from the op log on every call and never stored: an op that is
-   * acknowledged, refused or discarded stops contributing at once, and one that
-   * a full resync retains keeps contributing after the map's own state is wiped.
-   */
   private startPruneTimer(): void {
     if (this.pruneTimer || this.closed) return;
     this.pruneTimer = unrefTimer(
       setInterval(() => {
         // A tick is skipped while an earlier run is still waiting on storage.
-        if (this.pruneRunsQueued === 0) void this.enqueueExpiryPrune();
+        // A map listener that throws from notify() fails the run; the tick has
+        // no caller to report it to, so it is logged rather than left unhandled.
+        if (this.pruneRunsQueued === 0) {
+          this.enqueueExpiryPrune().catch((err) => {
+            logger.warn({ err }, 'Expiry prune run failed');
+          });
+        }
       }, 1000),
     );
   }
@@ -2639,6 +2634,17 @@ export class SyncEngine {
     }
   }
 
+  /**
+   * Tags of this client's local removes in `mapName` that the server has
+   * neither acknowledged nor refused, grouped by the key they were removed from.
+   *
+   * Built in one pass over the op log so that a sync response covering many keys
+   * costs one scan, not one per key.
+   *
+   * Read from the op log on every call and never stored: an op that is
+   * acknowledged, refused or discarded stops contributing at once, and one that
+   * a full resync retains keeps contributing after the map's own state is wiped.
+   */
   private getPendingRemoveTagsByKey(mapName: string): Map<string, string[]> {
     const tagsByKey = new Map<string, string[]>();
     for (const op of this.opLog) {
