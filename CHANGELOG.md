@@ -57,7 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RecordStore::put` and `RecordStore::update_in_place`, and `RecordStore::has_expired`,
   `evict_expired` and `is_expirable` are gone. Nothing in the server set them: every value was
   `0` or `ExpiryPolicy::NONE`, so no behaviour changes. A record expires by its own `ttlMs`
-  (`TG-TTL-001`).
+  (`TG-TTL-001`). The internal `expiration_time` parameter of the store's write methods and the
+  `expirationTime` field of the write-ahead log's store frame are gone too; nothing set them
+  either. Frames written by earlier versions that carry the field are still read, and the field is
+  ignored.
 - **Note (rollback):** the store format is unchanged. A server built before this release starts
   on a store and write-ahead log written by this one: it serves records with a TTL as records
   without one, and drops the TTL of any record, or of every entry of an OR-Map key, that it
