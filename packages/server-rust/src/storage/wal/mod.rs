@@ -6466,7 +6466,7 @@ mod tests {
 
     /// A `Store` frame as an earlier binary encoded it (`rmp_serde::to_vec_named`
     /// of the entry): the entry of [`lww_store_entry`] plus an
-    /// `expirationTime` key of 1_700_000_000_000 inside `store`.
+    /// `expirationTime` key of `1_700_000_000_000` inside `store`.
     const STORE_FRAME_WITH_EXPIRATION_TIME: &str = "85a36d6170a16da36b6579a16ba26f7081a573746f726582a576616c756581a36c777782a576616c756581a6537472696e67a176a974696d657374616d7083a66d696c6c6973cf0000018bcfe56800a7636f756e74657207a66e6f64654964a66e6f64652d61ae65787069726174696f6e54696d65cf0000018bcfe56800a974696d657374616d7083a66d696c6c6973cf0000018bcfe56800a7636f756e74657207a66e6f64654964a66e6f64652d61a873657175656e636509";
 
     /// The same frame without that key, which is what this binary writes.
