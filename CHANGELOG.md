@@ -10,6 +10,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Added (server): records written with a TTL expire on the server.** The `ttlMs` of
+  `map.set(key, value, ttlMs)` and `orMap.add(key, value, ttlMs)` used to be kept by clients only:
+  the server dropped it, kept the record for good and returned it to every query, HTTP `/sync`,
+  search and client that loaded the map later. The server now stores the TTL with the record and
+  counts it from the moment it stores the write (its own timestamp, never the client's). Once that
+  moment plus `ttlMs` has passed, query snapshots, HTTP `/sync`, full-text and hybrid search, and
+  vector search over records in memory leave the record out, and a background sweep then deletes it the ordinary way: live-query
+  subscribers get a LEAVE, clients get the usual remove event, and the event journal records a
+  DELETE with `metadata.reason = "expired"`. The delete can lag the expiry by up to the sweep
+  interval plus one sweep cycle. The TTL is part of the stored value, so it survives the
+  write-ahead log, eviction and restarts. A `ttlMs` of `0` is kept as no TTL. Readers whose clocks
+  differ can disagree about an expiring record for as long as their clocks differ.
+- **Added (server): `TOPGUN_EXPIRY_SWEEP_INTERVAL_MS` (default `10000`) and
+  `TOPGUN_EXPIRY_SWEEP_ROWS_PER_SEC` (default `4096`).** The least time between the starts of two
+  sweep cycles, and how many stored rows the sweep reads per second. An interval below `1000` or a
+  rate of `0` is fatal at startup; a value that does not parse warns and takes the default. The
+  boot summary line gains `expiry_sweep_interval_ms` and `expiry_sweep_rows_per_sec`.
+- **Added (server): expiry metrics**, present from the first scrape:
+  `topgun_expiry_removed_total{kind="lww_record"|"or_tag"}`,
+  `topgun_expiry_skipped_total{reason="absent"|"changed"|"not_expired"}`,
+  `topgun_expiry_sweep_rows_scanned_total`, `topgun_expiry_sweep_candidates_total{kind="lww"|"or"}`,
+  `topgun_expiry_dispatch_overloaded_total`, `topgun_expiry_dispatch_failed_total`,
+  `topgun_expiry_sweep_cycles_total`, `topgun_expiry_sweep_last_cycle_seconds`,
+  `topgun_expiry_sweep_task_alive`, `topgun_expiry_sweep_pass_panics_total` and
+  `topgun_expiry_sweep_maps_skipped_total`.
+- **Added (`@topgunbuild/core`, `@topgunbuild/client`): `LWWMap.pruneExpired()`.** It drops every
+  expired LWW record from the map and its Merkle tree, writes no tombstone and sends nothing.
+  `TopGunClient` runs it once a second while at least one LWW map is open, also offline, and
+  before it compares a map's Merkle root with the server, and removes the dropped records from
+  local storage; a key with an unsynced local write is kept until the server has it. Without it a
+  client would keep the Merkle leaf of a record the server deleted, and its sync would never find
+  the map in step again.
+- **Changed (server): an OR-Map entry that arrives by `ORMAP_PUSH_DIFF` is stamped at receipt.** A
+  tag the server does not hold yet is stored with a timestamp of the server's clock instead of the
+  client's, as an `OR_ADD` already was, because the timestamp is now the entry's expiry anchor. A
+  tag the server already holds keeps its stored timestamp and TTL. The tag itself is unchanged.
+- **Changed (wire):** a record without a TTL is sent without a `ttlMs` key, where the server used
+  to send `ttlMs: nil`, and the Merkle sync responses (leaf, bucket and diff, LWW and OR-Map) now
+  carry each record's `ttlMs`. `ttlMs` stays optional everywhere; the Merkle hashes do not include
+  it.
+- **Note (server): records written before this release do not expire.** The server never kept
+  their TTL, and nothing migrates them.
+- **Note (rollback):** the store format is unchanged. A server built before this release starts
+  on a store and write-ahead log written by this one: it serves records with a TTL as records
+  without one, and drops the TTL of any record, or of every entry of an OR-Map key, that it
+  rewrites. A record it did not rewrite still expires once this release runs again.
 - **Fixed (server): a scalar index created on a map that already holds records receives
   every later write and delete of that map.** Writes to the map's existing partitions did not
   reach an index created at runtime: its `entryCount` stayed at the backfill count, and deleted

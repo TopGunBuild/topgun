@@ -8,7 +8,7 @@ an explicit `NAKED` marker; the gate is "the NAKED count never grows silently", 
 
 Conventions: IDs are `TG-<DOMAIN>-<NNN>` (domains: WAL, WB write-behind, OR, LWW, MRK merkle,
 EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch, ENG byte engine, AUTHZ
-authorization, ENC encryption at rest, READ whole-map reads, IDX scalar indexes). Cite the ID verbatim in code comments and test names. Statuses:
+authorization, ENC encryption at rest, READ whole-map reads, IDX scalar indexes, TTL record expiry). Cite the ID verbatim in code comments and test names. Statuses:
 `decided` (holds by design) · `open (SPEC/TODO-nnn)` (not yet true / not yet wired) ·
 `aspirational`. Precedent: omnigraph `docs/invariants.md` (structure) — improved here with the
 CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
@@ -2477,6 +2477,8 @@ weaker than a test.
   - `Ping`, `PartitionMapRequest` — carry no data of any map; cluster routing under NO_AUTH depends
     on them.
   - `GarbageCollect` — not decoded from any client message; only the server issues it.
+  - `ExpireRecord` — server-built by the expiry sweep, never classified from a client message
+    (`System` origin); exempt from policy, tenant and map-name checks (TG-TTL-002).
   - `QueryUnsubscribe`, `SearchUnsubscribe`, `HybridSearchUnsubscribe`, `JournalUnsubscribe` —
     remove only the calling connection's subscription of that id (clause 4) and read nothing; the
     subscription was authorized when made.
@@ -2521,7 +2523,9 @@ weaker than a test.
   `search_subscriptions_are_owned_by_the_connection_that_made_them` (`search/mod.rs`),
   `subscriptions_with_the_same_id_on_two_connections_are_separate` (`journal.rs`),
   `lock_release_by_a_connection_that_does_not_hold_it_keeps_the_lock` (`coordination.rs`),
-  `ormap_push_diff_event_reaches_only_the_maps_subscribers` (`sync.rs`); at the wire,
+  `ormap_push_diff_event_reaches_only_the_maps_subscribers` (`sync.rs`);
+  `classify_never_yields_expire_record` and
+  `expire_record_reaches_the_handler_through_the_dispatcher_and_authorization` (`expiry.rs`); at the wire,
   `tests/integration-rust/journal.test.ts` and the `OR_ADD via ORMAP_PUSH_DIFF` case of
   `tests/integration-rust/crdt-ormap.test.ts`.
 - **Violation consequence:** a client reads or changes data of a map the policy denies it — every
@@ -3506,6 +3510,9 @@ weaker than a test.
   only after a swap whose scan no write overlapped: it clears the map's `needs_population` flag
   and reads the map's write generation before the resident snapshot, every non-backup observer
   callback bumps that generation, and an unchanged generation after the swap is the condition.
+  The read emits live rows only: after the merge decision, a row whose TTL has run out at the
+  read's `now` (`factory.now_ms()`, read once per scan) is dropped, so an expired resident still
+  shadows an older stored row and neither is emitted (TG-TTL-001).
 - **Precondition:** a key's HLC timestamps rise in write order (server-stamped writes).
 - **Stated limits:** an unsanitized write of a trusted origin with a lower timestamp than the stored
   row loses to that row between its engine put and its staging. Each data-store batch is its own
@@ -3513,7 +3520,7 @@ weaker than a test.
   acknowledged before it; that population then does not record "populated". Notifier passes never
   populate, so live `fullText` deltas after an overlapped population read an index that may miss
   writes applied to the old index (TODO-901). `Clear` / `reset` issued before a population reads
-  its generation are not covered (no production caller). TTL / max-idle are not addressed.
+  its generation are not covered (no production caller).
 - **Maintaining code:** `storage/factory.rs` — `scan_merged`, `scan_merged_batches`;
   `storage/datastores/write_behind.rs` — the scan overlay; `service/domain/search/mod.rs` —
   `SearchShared`, `PopState`, the population task and the observer's generation bump.
@@ -3521,7 +3528,9 @@ weaker than a test.
   `scan_merged_equal_timestamps_keep_the_resident_copy`, `scan_merged_emits_resident_only_and_stored_only_keys_once`,
   `scan_merged_skips_a_staged_delete_over_a_stored_row`, `scan_merged_leaves_engine_residency_unchanged`,
   `scan_merged_over_a_null_store_emits_residents_and_calls_nothing`, `scan_merged_fails_on_a_failing_resumed_batch`,
-  `scan_merged_a_resident_or_slot_wins_over_the_stored_one` (`storage/factory.rs`, AC8);
+  `scan_merged_a_resident_or_slot_wins_over_the_stored_one`, `scan_merged_hides_expired_non_resident`,
+  `scan_merged_expired_resident_still_shadows_stored`,
+  `scan_merged_expired_tombstone_does_not_resurrect_stored` (`storage/factory.rs`, AC8);
   `tg_read_001_population_survives_a_dropped_search`,
   `tg_read_001_a_skipped_write_during_population_blocks_populated`,
   `tg_read_001_an_enqueued_write_during_population_blocks_populated` (`search/mod.rs`, AC18); also
@@ -3602,3 +3611,148 @@ weaker than a test.
   set misses matching records or carries stale ones.
 - **Discovered by:** SPEC-398b2 (TODO-897); parts SPEC-401b1 and SPEC-401b2.
 - **Status:** decided.
+
+### TG-TTL-001: A record's expiry is fixed by its stored value, and no client-facing read returns it once the server clock is past it
+
+- **Scope:** the TTL of `RecordValue::Lww` (`ttl_ms`, `ttlMs` on the wire and in the stored
+  msgpack) and of `OrMapEntry`, from every ingest point to every client-facing read.
+- **Statement:** a record's expiry is `timestamp.millis + ttlMs` of the stored value, where the
+  timestamp is the server's own stamp of the write (LWW `PUT`, `OR_ADD`, a newly accepted tag of
+  `ORMAP_PUSH_DIFF`), never a client's write time; it survives WAL, store, eviction and restart,
+  and no client-facing read returns the record once the server clock is past it. The TTL rides in
+  the stored value itself (row, WAL `Store` frame, OR delta `Add` frame), so nothing outside the
+  value can drop it; a known OR tag keeps its stored stamp and TTL when it is pushed again; the
+  embedding write-back keeps the expiry instant when it re-stamps a record; a `ttlMs` of 0 is
+  stored as no TTL. The whole-map reads (`scan_merged_batches`, `ScanProcessor`), full-text,
+  hybrid and resident vector search leave expired records out (`storage/expiry.rs`); Merkle leaf,
+  bucket and diff responses are **not** filtered, because they must match the leaf the client
+  compares, and carry `ttlMs` so the client hides the record itself; the TTL is not part of the
+  Merkle hash.
+- **Stated limits:**
+  - each reader compares the expiry with its own clock, so readers whose clocks differ disagree
+    for the size of the skew;
+  - vector search over keys that are not resident is not filtered (TODO-896);
+  - a search page may hold fewer than `limit` hits until the sweep deletes the expired ones;
+  - the DataFusion SQL path (`service/domain/table_provider.rs:244`, disabled, `FEATURE_DISABLED`)
+    is not covered;
+  - a live query window keeps an expired row until the sweep's LEAVE (TG-TTL-002);
+  - the Event Journal is history, not a read of the map: it keeps, and `JournalRead` /
+    `getEventJournal` return, the PUT event of a record after it expired, followed by the expiry
+    DELETE once swept;
+  - the admin and MCP map listings count resident records and may include an expired record not
+    yet swept;
+  - records stored before the TTL was kept carry none and never expire;
+  - an OR entry is anchored at the receipt of the node that first stores its tag. Where nodes
+    exchange map data, the sync copies the stored stamp verbatim (`sim_propagate_carries_ttl`) and
+    the OR leaf hashes tags only (TG-MRK-001), so the same tag pushed to two nodes before they
+    sync keeps two anchors, apart by the gap between the two receipts. Each node's sweep reads its
+    own rows against its own clock (`service/expiry.rs` scan, `crdt.rs` `handle_expire_record`),
+    so the replica with the earlier anchor expires the entry first, and its tombstone, delivered
+    by the sync as an `OR_REMOVE`, removes the live entry of that tag on the other replica whatever
+    its stamp (`apply_or_delta`, remove-wins by tag). Until it arrives a reader of the other
+    replica can still see the entry, for at most the gap between the two receipts.
+- **Maintaining code:** `storage/record.rs` (`RecordValue::Lww`, `OrMapEntry`);
+  `storage/expiry.rs` (`lww_is_live`, `entry_is_live`, `is_visible`, `retain_live`);
+  `service/domain/crdt.rs` (`lww_record_to_record_value`, the `OR_ADD` entry, `stored_ttl_ms`);
+  `service/domain/sync.rs` (push-diff ingest, the leaf / bucket / diff responses);
+  `storage/factory.rs` `scan_merged_batches`; `dag/processors.rs` `ScanProcessor`;
+  `service/domain/search/` and `service/domain/query.rs` (search outputs);
+  `service/domain/embedding/hook.rs` (write-back).
+- **Enforcing test:** `lww_put_stores_ttl`, `or_add_stores_ttl`, `lww_put_with_ttl_zero_stores_none`
+  (`crdt.rs`); `push_diff_stores_ttl`, `push_diff_stamps_new_entry_at_receipt`,
+  `lww_leaf_response_carries_ttl`, `lww_diff_response_carries_ttl`, `lww_bucket_response_carries_ttl`,
+  `or_leaf_response_carries_ttl`, `merkle_leaf_hash_ignores_ttl` (`sync.rs`);
+  `ttl_survives_wal_replay_of_a_store_frame`, `ttl_survives_wal_replay_of_an_or_delta_add_frame`,
+  `ttl_survives_eviction_and_reload_from_the_durable_store`, `lww_is_live_boundaries`,
+  `entry_is_live_boundaries` (`storage/expiry.rs`); `scan_merged_hides_expired_non_resident`
+  (`storage/factory.rs`); `scan_processor_bounded_hides_expired_resident`,
+  `scan_processor_bounded_hides_expired_stored`, `scan_processor_unbounded_hides_expired_stored`
+  (`dag/processors.rs`); `fts_search_hides_expired_hit` (`search/mod.rs`),
+  `hybrid_search_hides_expired_with_include_value` (`search/hybrid.rs`),
+  `vector_search_hides_expired_resident` (`query.rs`); `embedding_write_back_keeps_expires_at`
+  (`embedding/hook.rs`); `sim_propagate_carries_ttl` (`sim/cluster.rs`);
+  `concurrent_or_remove_preserves_convergence` (`tests/simulation/proptest_sim.rs`).
+- **Integration tests:** `tests/integration-rust/record-ttl.test.ts` — the filter case (sweep
+  off), the pull case (`ttlMs` reaches a client that syncs later), the restart case and the
+  eviction case; `tests/integration-rust/ttl-rollback.test.ts` (opt-in, two binaries).
+- **Violation consequence:** an "expiring" record is kept and served for good, or reappears after a
+  restart or an eviction, or lives longer than its TTL because it was re-anchored.
+- **Discovered by:** TODO-906 (SPEC-403 family); TODO-721.
+- **Status:** decided, **enforced**.
+
+### TG-TTL-002: The sweep removes a record only while it is still expired, and only as an ordinary delete
+
+- **Scope:** the expiry sweep (`service/expiry.rs`) and `Operation::ExpireRecord`
+  (`service/domain/crdt.rs` `handle_expire_record`), and the client's expiry prune
+  (`LWWMap.pruneExpired`, `SyncEngine`).
+- **Statement:** the sweep removes a record only if, under the key's writer, it is still expired
+  (and, for LWW, still the record the sweep saw), and only through the ordinary REMOVE / OR_REMOVE
+  apply and fan-out: the same `apply_single_op`, `broadcast_server_event`,
+  `broadcast_query_updates` and journal path as a client remove, the journal event carrying
+  `metadata.reason = "expired"`. `ExpireRecord` is built by the server, dispatched through the
+  partition dispatcher with `System` origin and never classified from a client message
+  (TG-AUTHZ-001). A client drops expired LWW records itself, without a tombstone or a message, on
+  a one-second timer while at least one LWW map is open (also offline) and before it reads a map's
+  LWW root; a key with an unsynced PUT is kept until the PUT is acknowledged. A client writes no
+  expiry tombstone for an OR tag.
+- **Stated limits:**
+  - deletion latency: a record is deleted at most one sweep interval
+    (`TOPGUN_EXPIRY_SWEEP_INTERVAL_MS`) plus one sweep cycle after it expired; a cycle reads the
+    stored rows at `TOPGUN_EXPIRY_SWEEP_ROWS_PER_SEC`, so its length grows with the store, and an
+    `Overloaded` back-off (at most 5 s) adds to it;
+  - on a store with no durable backend (`STORAGE_BACKEND=null`) a cycle visits each map once and
+    takes at most 256 candidates from it; the rest wait for later cycles;
+  - the sweep task's exit when the sender of its stop signal is lost, and a counter for failed
+    `list_maps` calls, are open (TODO-915);
+  - client root convergence: **OR** — every client converges through the server's expiry
+    tombstone, delivered by `SERVER_EVENT` OR_REMOVE or by the OR leaf/diff walk, with no
+    client-side expiry write and no tombstone pushed; a pre-sweep leaf walk may re-push the tag as
+    a live record, which leaves the server's stored entry, timestamp and TTL unchanged, and after
+    the sweep it is ignored. A tag re-pushed after the server's epoch GC pruned its expiry
+    tombstone would be stored with a fresh receipt stamp (its TTL restarts); the pruned-tombstone
+    resync (TG-MRK-002) is what prevents that. **LWW** — a client that prunes converges once both
+    sides dropped the record; while only one side has, the roots differ and the Merkle sync walks
+    (never a false "in sync"): if the server still serves the record (not yet swept, or its
+    receipt stamp is later than the client's local stamp of an offline write), the walk delivers
+    it, the client merges it, shows it until the server-anchored expiry and prunes it again —
+    extra walks only, never a push. A client whose clock is behind the server by Δ keeps the LWW
+    leaf Δ longer;
+  - a client hides its own unsynced or offline entries by its local write timestamp, earlier than
+    the server's by up to its offline time — only that client's view, ended when it adopts the
+    server's record (LWW) or receives the server's tombstone (OR);
+  - a client **without** the prune (an older SDK) keeps the leaf of every expired LWW key it held
+    for good, because the op-path REMOVE without a record is ignored (TODO-908) and LWW sync is
+    pull-only (TODO-736), so on a TTL-heavy map such a client's walk never converges. TODO-908
+    removes that for online clients;
+  - convergence is about roots: while the server's tombstone protection is active, a client that
+    reports no confirmed epoch on its OR-Map sync init is answered with a full-snapshot resync
+    whatever its root (TG-MRK-002).
+- **Maintaining code:** `service/expiry.rs` (`SweepState`, `sweep_tick`, `expire_record_op`);
+  `service/domain/crdt.rs` `handle_expire_record`; `service/middleware/authorization.rs` (the
+  bypass group); `packages/core/src/LWWMap.ts` `pruneExpired`;
+  `packages/client/src/SyncEngine.ts` (the prune timer, `pruneExpiredMaps`);
+  `packages/client/src/sync/MerkleSyncHandler.ts` (the prune before the root is read).
+- **Enforcing test:** `expire_removes_expired_lww_record`, `expire_skips_live_record`,
+  `expire_skips_huge_ttl`, `expire_skips_shape_mismatch_as_changed`,
+  `expire_parked_before_acquire_skips_after_put`,
+  `expire_parked_before_acquire_keeps_or_add_applied_meanwhile`,
+  `expire_removes_only_expired_or_tags`, `expire_broadcasts_remove_and_query_leave`,
+  `expire_journals_delete_with_reason_expired`, `expire_removes_merkle_leaf_index_entry_and_row`,
+  `expire_tombstones_or_tag_in_merkle_leaf_and_row`, `expire_after_tenant_drop_does_not_recreate_map`
+  (`crdt.rs`); `classify_never_yields_expire_record`,
+  `expire_record_reaches_the_handler_through_the_dispatcher_and_authorization`,
+  `sweep_stale_scanned_row_is_skipped_changed`, `sweep_overloaded_keeps_candidate_and_backs_off`,
+  `sweep_first_cycle_waits_one_interval_and_cycles_are_spaced_from_start`,
+  `sweep_null_store_visits_residents_once_per_cycle_and_caps_candidates`,
+  `sweep_queues_or_slots_with_an_expired_entry` (`service/expiry.rs`); on the client,
+  `packages/client/src/__tests__/ExpiryPrune.test.ts` (including the interim states (a) and (b))
+  and `packages/core/src/__tests__/LWWMap.pruneExpired.test.ts`.
+- **Integration tests:** `tests/integration-rust/record-ttl.test.ts` — the sweep case (LEAVE,
+  journal DELETE with reason `expired`, a client connected before, a client connecting after) and
+  the convergence case, run with the client connected during the sweep and with it reconnecting
+  after it.
+- **Violation consequence:** the sweep deletes a record written again after it expired, or deletes
+  one silently (no LEAVE, no journal event, a stale index or Merkle leaf); or a client's Merkle
+  root never matches the server's again after an expiry.
+- **Discovered by:** TODO-906 (SPEC-403 family).
+- **Status:** decided, **enforced**.
