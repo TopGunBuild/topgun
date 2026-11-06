@@ -229,6 +229,27 @@ export class LWWMap<K, V> {
   }
 
   /**
+   * Drops a key's record (live or tombstone) and its Merkle leaf without
+   * writing a tombstone.
+   *
+   * The server keeps no record and no leaf for a removed LWW key, so a
+   * tombstone here would be a leaf the server does not have and the roots
+   * would never match again (TG-LWW-001). Like {@link prune} and
+   * {@link pruneExpired}, this is local housekeeping: it sends nothing and
+   * does not touch the clock.
+   *
+   * @returns `true` if a record was present (listeners were notified once).
+   */
+  public forget(key: K): boolean {
+    if (!this.data.delete(key)) {
+      return false;
+    }
+    this.merkleTree.remove(String(key));
+    this.notify();
+    return true;
+  }
+
+  /**
    * Garbage Collection: Prunes tombstones older than the specified timestamp.
    * Only removes records that are tombstones (deleted) AND older than the threshold.
    *

@@ -615,6 +615,23 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
   }
 
   /**
+   * Forget a key without a tombstone (with index updates).
+   */
+  public forget(key: K): boolean {
+    // Read the record, not `get`: `get` hides an expired record, which is
+    // still indexed and must leave the indexes too.
+    const oldValue = this.getRecord(key)?.value;
+    const forgotten = super.forget(key);
+
+    if (forgotten && oldValue !== undefined && oldValue !== null) {
+      this.indexRegistry.onRecordRemoved(key, oldValue);
+      this.liveQueryManager.onRecordRemoved(key, oldValue);
+    }
+
+    return forgotten;
+  }
+
+  /**
    * Merge a remote record (with index updates).
    */
   public merge(key: K, remote: LWWRecord<V>): boolean {
