@@ -1460,6 +1460,20 @@ async fn main() -> anyhow::Result<()> {
         ),
     };
 
+    // Rebuild every vector index from the stored records before set_ready(),
+    // so VECTOR_SEARCH is not served against empty indexes after a restart.
+    // build_services has registered the `_embedding` indexes of
+    // TOPGUN_VECTOR_MAPS by now, so they are filled too (TG-VEC-001).
+    if let Some(vector_index_path) = &state.vector_index_path {
+        topgun_server::service::domain::index::vector_index::rebuild_from_store(
+            &index_observer_factory,
+            &record_store_factory,
+            &topgun_server::network::handlers::admin::load_vector_descriptors(vector_index_path),
+            &state.backfill_progress,
+        )
+        .await;
+    }
+
     // Mirror NetworkModule::serve()'s scalar index rebuild for the topgun_server
     // path, which builds its router directly without going through NetworkModule.
     // Runs BEFORE set_ready() so queries arriving immediately after readiness see
@@ -2417,7 +2431,7 @@ fn build_services(
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
         config.max_query_records,
-        None,
+        Some(Arc::clone(&index_observer_factory)),
         #[cfg(feature = "datafusion")]
         None,
     )

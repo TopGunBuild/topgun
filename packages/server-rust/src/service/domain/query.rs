@@ -45,7 +45,6 @@ use crate::service::domain::predicate::{
 };
 use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
-use crate::storage::expiry::lww_is_live;
 use crate::storage::mutation_observer::MutationObserver;
 use crate::storage::record::{Record, RecordValue};
 use crate::storage::RecordStoreFactory;
@@ -482,8 +481,10 @@ pub struct QueryService {
     /// Maximum records returned in a single `QUERY_RESP`. Queries matching more
     /// records are clamped to this limit with `has_more: true`.
     max_query_records: u32,
-    /// Index observer factory for index-accelerated predicate evaluation.
-    /// `None` when index wiring is not enabled (sim/test call sites).
+    /// The index registries. Read by `VECTOR_SEARCH` and by the tests-only
+    /// linear engine; the production DAG and cluster coordinator paths do not
+    /// read it, so passing it changes no scalar query result. `None` on
+    /// sim/test call sites, where `VECTOR_SEARCH` answers with an error.
     index_observer_factory: Option<Arc<IndexObserverFactory>>,
     #[cfg(feature = "datafusion")]
     sql_query_backend: Option<Arc<dyn crate::service::domain::query_backend::SqlQueryBackend>>,
@@ -558,8 +559,10 @@ fn map_dag_rows_to_entries(raw: Vec<rmpv::Value>) -> Vec<QueryResultEntry> {
 impl QueryService {
     /// Creates a new `QueryService` with its required dependencies.
     ///
-    /// Pass `Some(index_observer_factory)` to enable index-accelerated predicate
-    /// evaluation. Pass `None` to fall back to full-scan (sim/test call sites).
+    /// `index_observer_factory` drives `VECTOR_SEARCH` and the tests-only
+    /// linear engine; the production DAG and cluster coordinator paths do not
+    /// read it, so it changes no scalar query result. With `None` (sim/test
+    /// call sites) `VECTOR_SEARCH` answers with an error.
     #[must_use]
     pub fn new(
         query_registry: Arc<QueryRegistry>,
@@ -1230,12 +1233,13 @@ impl QueryService {
             }};
         }
 
-        // 1. Require index registry.
-        let factory = self.index_observer_factory.as_ref().ok_or_else(|| {
-            OperationError::Internal(anyhow::anyhow!(
-                "VectorSearch requires IndexObserverFactory"
-            ))
-        })?;
+        // 1. Require index registry. An error response, not an `Err`: a failed
+        // dispatch is dropped and the client would wait for its timeout.
+        let Some(factory) = self.index_observer_factory.as_ref() else {
+            error_resp!(
+                "vector search is not available on this server: no index registry is configured"
+            );
+        };
         let Some(registry) = factory.get_registry(&payload.map_name) else {
             error_resp!(format!(
                 "map not registered for indexing: {}",
@@ -1309,11 +1313,12 @@ impl QueryService {
             scored.retain(|(_, score)| *score >= threshold);
         }
 
-        // 8. Apply post-filter predicate (best-effort: scalar leaf ops only).
+        // 8. Sort by descending score, then point-read the candidates in that
+        // order until `k` are visible at `now` and pass the filter
+        // (TG-VEC-001, TG-TTL-001). Only candidate keys are read, resident or
+        // stored; an absent, deleted, expired or unreadable key is dropped
+        // before the cut and never takes a slot.
         let filter = payload.options.as_ref().and_then(|o| o.filter.as_ref());
-        let stores = self.record_store_factory.get_all_for_map(&payload.map_name);
-
-        // Build a lookup table (key → rmpv::Value) once if we need it for filtering or include_value.
         let include_value = payload
             .options
             .as_ref()
@@ -1324,68 +1329,43 @@ impl QueryService {
             .as_ref()
             .and_then(|o| o.include_vectors)
             .unwrap_or(false);
-        let need_values = filter.is_some() || include_value || include_vectors;
-
-        // The resident pass always runs, so an expired resident key is dropped
-        // before the filter, the sort and the top-k cut and never takes a slot
-        // (TG-TTL-001). It records a value only for a record live at `now`.
-        // Non-resident keys are not checked here (TODO-896).
-        let now = self.record_store_factory.now_ms();
-        let mut value_map: std::collections::HashMap<String, rmpv::Value> =
-            std::collections::HashMap::new();
-        let mut expired: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for store in &stores {
-            store.for_each_boxed(
-                &mut |key, record| {
-                    if let RecordValue::Lww {
-                        ref value,
-                        ref timestamp,
-                        ttl_ms,
-                    } = record.value
-                    {
-                        if !lww_is_live(timestamp, ttl_ms, now) {
-                            expired.insert(key.to_string());
-                        } else if need_values {
-                            value_map.insert(key.to_string(), value_to_rmpv(value));
-                        }
-                    }
-                },
-                false,
-            );
-        }
-        scored.retain(|(key, _)| !expired.contains(key));
-
-        if let Some(pred) = filter {
-            scored.retain(|(key, _)| {
-                if let Some(val) = value_map.get(key) {
-                    evaluate_predicate(pred, &EvalContext::data_only(val))
-                } else {
-                    false
-                }
-            });
-        }
-
-        // 9. Sort by descending score, truncate to top-k.
         scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-        scored.truncate(k);
+        let now = self.record_store_factory.now_ms();
+        let mut kept: Vec<(String, f64, rmpv::Value)> = Vec::with_capacity(k);
+        for (key, score) in scored {
+            if kept.len() == k {
+                break;
+            }
+            let Some(RecordValue::Lww { value, .. }) =
+                crate::service::domain::search::read_visible(
+                    &self.record_store_factory,
+                    &payload.map_name,
+                    &key,
+                    now,
+                )
+                .await
+            else {
+                continue;
+            };
+            let value = value_to_rmpv(&value);
+            if filter.is_some_and(|pred| !evaluate_predicate(pred, &EvalContext::data_only(&value)))
+            {
+                continue;
+            }
+            kept.push((key, score, value));
+        }
 
-        // 10. Build result entries.
+        // 9. Build result entries.
         let extractor = AttributeExtractor::new(attribute.clone());
-        let results: Vec<VectorSearchResult> = scored
+        let results: Vec<VectorSearchResult> = kept
             .into_iter()
-            .map(|(key, score)| {
-                let value = if include_value {
-                    value_map.get(&key).cloned()
-                } else {
-                    None
-                };
+            .map(|(key, score, value)| {
                 let vector = if include_vectors {
-                    value_map
-                        .get(&key)
-                        .and_then(|rec| extract_vector_bytes_le(rec, &extractor))
+                    extract_vector_bytes_le(&value, &extractor)
                 } else {
                     None
                 };
+                let value = include_value.then_some(value);
                 VectorSearchResult {
                     key,
                     score,
@@ -3293,6 +3273,63 @@ mod tests {
         bytes
     }
 
+    /// A stored record value: `name` = `key`, and `attr` = the encoded vector.
+    fn vector_value(key: &str, attr: &str, data: &[f32]) -> Value {
+        make_value_map(vec![
+            ("name", Value::String(key.to_string())),
+            (
+                attr,
+                Value::Bytes(rmp_serde::to_vec_named(&Vector::F32(data.to_vec())).unwrap()),
+            ),
+        ])
+    }
+
+    /// Writes `value` under `key` into the store of the key's partition, where
+    /// the point read of a vector search looks for it.
+    async fn put_lww(
+        factory: &RecordStoreFactory,
+        map: &str,
+        key: &str,
+        value: Value,
+        timestamp: Timestamp,
+        ttl_ms: Option<u64>,
+    ) {
+        use crate::storage::record_store::CallerProvenance;
+        let store = factory.get_or_create(map, topgun_core::hash_to_partition(key));
+        store
+            .put(
+                &KeyWriteToken::for_test(map, key),
+                key,
+                RecordValue::Lww {
+                    value,
+                    timestamp,
+                    ttl_ms,
+                },
+                CallerProvenance::Client,
+            )
+            .await
+            .unwrap();
+    }
+
+    /// Indexes `key` with `data` and stores its record.
+    async fn index_and_store(
+        svc: &QueryService,
+        vi: &crate::service::domain::index::vector_index::VectorIndex,
+        key: &str,
+        data: &[f32],
+    ) {
+        vi.insert(key, &make_vector_record("embedding", data));
+        put_lww(
+            &svc.record_store_factory,
+            "maps",
+            key,
+            vector_value(key, "embedding", data),
+            make_timestamp(),
+            None,
+        )
+        .await;
+    }
+
     fn make_svc_with_vector_index(
         map_name: &str,
         attr: &str,
@@ -3354,8 +3391,7 @@ mod tests {
         // Insert 10 vectors: [0.1*i, 0.2*i] for i in 1..=10
         for i in 1u8..=10 {
             let fi = f32::from(i);
-            let rec = make_vector_record("embedding", &[0.1 * fi, 0.2 * fi]);
-            vi.insert(&format!("k{i}"), &rec);
+            index_and_store(&svc, &vi, &format!("k{i}"), &[0.1 * fi, 0.2 * fi]).await;
         }
         vi.commit_pending();
 
@@ -3463,8 +3499,7 @@ mod tests {
         // Insert vectors at varying distances from query [1.0, 0.0]
         for i in 1u8..=5 {
             let x = f32::from(i);
-            let rec = make_vector_record("embedding", &[x, 0.0]);
-            vi.insert(&format!("k{i}"), &rec);
+            index_and_store(&svc, &vi, &format!("k{i}"), &[x, 0.0]).await;
         }
         vi.commit_pending();
 
@@ -3505,7 +3540,9 @@ mod tests {
         vi.commit_pending();
 
         // Populate RecordStore so include_value (default true) can return a value.
-        let store = svc.record_store_factory.get_or_create("maps", 0);
+        let store = svc
+            .record_store_factory
+            .get_or_create("maps", topgun_core::hash_to_partition("k1"));
         store
             .put(
                 &KeyWriteToken::for_test(store.name(), "k1"),
@@ -3545,8 +3582,7 @@ mod tests {
         let (svc, index_registry) =
             make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
         let vi = index_registry.get_vector_index("embedding").unwrap();
-        let rec = make_vector_record("embedding", &[1.0, 0.0]);
-        vi.insert("k1", &rec);
+        index_and_store(&svc, &vi, "k1", &[1.0, 0.0]).await;
         vi.commit_pending();
 
         let ctx = make_ctx(None);
@@ -3577,8 +3613,7 @@ mod tests {
             make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
         let vi = index_registry.get_vector_index("embedding").unwrap();
         for i in 1u8..=5 {
-            let rec = make_vector_record("embedding", &[f32::from(i), 0.0]);
-            vi.insert(&format!("k{i}"), &rec);
+            index_and_store(&svc, &vi, &format!("k{i}"), &[f32::from(i), 0.0]).await;
         }
         vi.commit_pending();
 
@@ -3608,8 +3643,7 @@ mod tests {
         let vi = index_registry.get_vector_index("embedding").unwrap();
 
         let a = [1.0f32, 0.0f32];
-        let rec = make_vector_record("embedding", &a);
-        vi.insert("k1", &rec);
+        index_and_store(&svc, &vi, "k1", &a).await;
         vi.commit_pending();
 
         // Query with q = [1.0, 0.0]; expected dot = 1.0*1.0 + 0.0*0.0 = 1.0
@@ -3659,7 +3693,9 @@ mod tests {
 
         // Populate the record store so the handler can reach the attribute binary
         // for include_vectors via the value_map pass.
-        let store = svc.record_store_factory.get_or_create("maps", 0);
+        let store = svc
+            .record_store_factory
+            .get_or_create("maps", topgun_core::hash_to_partition("k1"));
         store
             .put(
                 &KeyWriteToken::for_test(store.name(), "k1"),
@@ -3711,8 +3747,7 @@ mod tests {
         let (svc, index_registry) =
             make_svc_with_vector_index("maps", "embedding", 2, DistanceMetric::Cosine);
         let vi = index_registry.get_vector_index("embedding").unwrap();
-        let rec_rmpv = make_vector_record("embedding", &[1.0, 0.0]);
-        vi.insert("k1", &rec_rmpv);
+        index_and_store(&svc, &vi, "k1", &[1.0, 0.0]).await;
         vi.commit_pending();
 
         let ctx = make_ctx(None);
@@ -3763,7 +3798,6 @@ mod tests {
                 DistanceMetric::Cosine,
             );
             let vi = index_registry.get_vector_index("embedding").unwrap();
-            let store = factory.get_or_create("maps", 0);
             for (key, vector, ttl_ms) in [
                 ("k1", [1.0f32, 0.0], Some(TTL_MS)),
                 ("k2", [0.9, 0.1], None),
@@ -3771,6 +3805,7 @@ mod tests {
             ] {
                 let rec = make_vector_record("embedding", &vector);
                 vi.insert(key, &rec);
+                let store = factory.get_or_create("maps", topgun_core::hash_to_partition(key));
                 store
                     .put(
                         &KeyWriteToken::for_test("maps", key),
@@ -3825,5 +3860,462 @@ mod tests {
                 "live, include_value {include_value:?}"
             );
         }
+    }
+
+    /// A query service over `store` (a `TestStore`) with an `embedding` index
+    /// of dimension 2 on `maps`, and `clock_ms` as the factory clock.
+    fn svc_over_test_store(
+        store: Arc<crate::storage::factory::test_store::TestStore>,
+        clock_ms: Option<u64>,
+    ) -> (
+        Arc<QueryService>,
+        Arc<crate::service::domain::index::vector_index::VectorIndex>,
+    ) {
+        let mut factory = RecordStoreFactory::new(StorageConfig::default(), store, Vec::new());
+        if let Some(now) = clock_ms {
+            factory = factory.with_clock(Arc::new(crate::storage::expiry::ManualClock::new(now)));
+        }
+        let (svc, index_registry) = make_svc_with_vector_index_over(
+            Arc::new(factory),
+            "maps",
+            "embedding",
+            2,
+            DistanceMetric::Cosine,
+        );
+        let vi = index_registry.get_vector_index("embedding").unwrap();
+        (svc, vi)
+    }
+
+    fn stored_row(
+        key: &str,
+        data: &[f32],
+        extra: Vec<(&str, Value)>,
+        millis: u64,
+        ttl_ms: Option<u64>,
+    ) -> RecordValue {
+        let Value::Map(mut map) = vector_value(key, "embedding", data) else {
+            unreachable!()
+        };
+        for (k, v) in extra {
+            map.insert(k.to_string(), v);
+        }
+        RecordValue::Lww {
+            value: Value::Map(map),
+            timestamp: crate::storage::factory::ttl_fixture::ts(millis),
+            ttl_ms,
+        }
+    }
+
+    async fn vector_search(
+        svc: &Arc<QueryService>,
+        query: &[f32],
+        k: u32,
+        options: Option<topgun_core::messages::vector::VectorSearchOptions>,
+    ) -> topgun_core::messages::vector::VectorSearchRespPayload {
+        let payload = VectorSearchPayload {
+            id: "vs".to_string(),
+            map_name: "maps".to_string(),
+            index_name: Some("embedding".to_string()),
+            query_vector: make_query_vec(query),
+            k,
+            ef_search: None,
+            options,
+        };
+        let op = Operation::VectorSearch {
+            ctx: make_ctx(None),
+            payload,
+        };
+        extract_vector_resp(Arc::clone(svc).oneshot(op).await.unwrap())
+    }
+
+    fn result_keys(resp: &topgun_core::messages::vector::VectorSearchRespPayload) -> Vec<String> {
+        resp.results.iter().map(|r| r.key.clone()).collect()
+    }
+
+    /// A candidate that is only in the data store is read and returned with
+    /// its value; nothing was resident before the search.
+    #[tokio::test]
+    async fn vector_search_returns_a_non_resident_candidate_with_its_value() {
+        use crate::storage::factory::test_store::TestStore;
+        let store = Arc::new(TestStore::new(100));
+        store.put_row(
+            "maps",
+            "k1",
+            stored_row("k1", &[1.0, 0.0], vec![], 1_000, None),
+        );
+        let (svc, vi) = svc_over_test_store(Arc::clone(&store), None);
+        vi.insert("k1", &make_vector_record("embedding", &[1.0, 0.0]));
+
+        let resp = vector_search(&svc, &[1.0, 0.0], 1, None).await;
+        assert!(resp.error.is_none());
+        assert_eq!(result_keys(&resp), vec!["k1"]);
+        let value = resp.results[0]
+            .value
+            .as_ref()
+            .expect("value of a stored record");
+        let name = value
+            .as_map()
+            .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("name")))
+            .map(|(_, v)| v.clone());
+        assert_eq!(name, Some(rmpv::Value::from("k1")));
+    }
+
+    /// TG-TTL-001: a stored, non-resident candidate whose TTL has passed is not
+    /// returned and takes no slot.
+    #[tokio::test]
+    async fn vector_search_hides_expired_non_resident() {
+        use crate::storage::factory::test_store::TestStore;
+        use crate::storage::factory::ttl_fixture::{expired_now, wall_stamp, TTL_MS};
+        let store = Arc::new(TestStore::new(100));
+        let stamp = wall_stamp();
+        store.put_row(
+            "maps",
+            "k1",
+            stored_row("k1", &[1.0, 0.0], vec![], stamp, Some(TTL_MS)),
+        );
+        store.put_row(
+            "maps",
+            "k2",
+            stored_row("k2", &[0.9, 0.1], vec![], stamp, None),
+        );
+        let (svc, vi) = svc_over_test_store(Arc::clone(&store), Some(expired_now()));
+        vi.insert("k1", &make_vector_record("embedding", &[1.0, 0.0]));
+        vi.insert("k2", &make_vector_record("embedding", &[0.9, 0.1]));
+
+        let resp = vector_search(&svc, &[1.0, 0.0], 1, None).await;
+        assert!(resp.error.is_none());
+        assert_eq!(result_keys(&resp), vec!["k2"]);
+    }
+
+    /// The `filter` is evaluated on the value read for a non-resident
+    /// candidate, not dropped for lack of a resident copy.
+    #[tokio::test]
+    async fn vector_search_filter_applies_to_non_resident_candidates() {
+        use crate::storage::factory::test_store::TestStore;
+        let store = Arc::new(TestStore::new(100));
+        for (key, data, status) in [
+            ("k1", [1.0f32, 0.0], "inactive"),
+            ("k2", [0.9, 0.1], "active"),
+            ("k3", [0.5, 0.5], "active"),
+        ] {
+            store.put_row(
+                "maps",
+                key,
+                stored_row(
+                    key,
+                    &data,
+                    vec![("status", Value::String(status.to_string()))],
+                    1_000,
+                    None,
+                ),
+            );
+        }
+        let (svc, vi) = svc_over_test_store(Arc::clone(&store), None);
+        for (key, data) in [
+            ("k1", [1.0f32, 0.0]),
+            ("k2", [0.9, 0.1]),
+            ("k3", [0.5, 0.5]),
+        ] {
+            vi.insert(key, &make_vector_record("embedding", &data));
+        }
+        let filter = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("status".to_string()),
+            value: Some(rmpv::Value::from("active")),
+            ..PredicateNode::default()
+        };
+        let resp = vector_search(
+            &svc,
+            &[1.0, 0.0],
+            2,
+            Some(topgun_core::messages::vector::VectorSearchOptions {
+                filter: Some(filter),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert!(resp.error.is_none());
+        assert_eq!(result_keys(&resp), vec!["k2", "k3"]);
+    }
+
+    /// Only candidate keys are read: no scan of the map, and at most `4k`
+    /// point loads.
+    #[tokio::test]
+    async fn vector_search_reads_only_candidate_keys() {
+        use crate::storage::factory::test_store::TestStore;
+        let store = Arc::new(TestStore::new(100));
+        let (svc, vi) = svc_over_test_store(Arc::clone(&store), None);
+        for i in 0u8..50 {
+            let key = format!("k{i}");
+            let data = [1.0, f32::from(i) / 50.0];
+            store.put_row("maps", &key, stored_row(&key, &data, vec![], 1_000, None));
+            vi.insert(&key, &make_vector_record("embedding", &data));
+        }
+        let calls_before = store.calls();
+
+        let resp = vector_search(&svc, &[1.0, 0.0], 2, None).await;
+        assert!(resp.error.is_none());
+        assert_eq!(resp.results.len(), 2);
+        assert_eq!(store.scans("maps"), 0, "the map must not be scanned");
+        let loads = store.calls() - calls_before;
+        assert!(loads <= 8, "at most 4k point loads, got {loads}");
+    }
+
+    /// The top-scored candidate has expired: it is skipped before the cut, so
+    /// `k` visible results are still returned.
+    #[tokio::test]
+    async fn vector_search_skips_invisible_candidates_before_the_k_cut() {
+        use crate::storage::expiry::ManualClock;
+        use crate::storage::factory::ttl_fixture::{expired_now, ts, wall_stamp, TTL_MS};
+        let factory = Arc::new(
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            )
+            .with_clock(Arc::new(ManualClock::new(expired_now()))),
+        );
+        let (svc, index_registry) = make_svc_with_vector_index_over(
+            Arc::clone(&factory),
+            "maps",
+            "embedding",
+            2,
+            DistanceMetric::Cosine,
+        );
+        let vi = index_registry.get_vector_index("embedding").unwrap();
+        let stamp = wall_stamp();
+        for (key, data, ttl_ms) in [
+            ("k1", [1.0f32, 0.0], Some(TTL_MS)),
+            ("k2", [0.9, 0.1], None),
+            ("k3", [0.5, 0.5], None),
+            ("k4", [0.0, 1.0], None),
+        ] {
+            vi.insert(key, &make_vector_record("embedding", &data));
+            put_lww(
+                &factory,
+                "maps",
+                key,
+                vector_value(key, "embedding", &data),
+                ts(stamp),
+                ttl_ms,
+            )
+            .await;
+        }
+
+        let resp = vector_search(&svc, &[1.0, 0.0], 2, None).await;
+        assert!(resp.error.is_none());
+        assert_eq!(result_keys(&resp), vec!["k2", "k3"]);
+    }
+
+    /// Without an index registry the search is answered with an error, not
+    /// dropped as a failed dispatch that leaves the client to time out.
+    #[tokio::test]
+    async fn vector_search_without_factory_answers_with_an_error() {
+        let svc = Arc::new(QueryService::new(
+            Arc::new(QueryRegistry::new()),
+            make_factory(),
+            Arc::new(ConnectionRegistry::new()),
+            10_000,
+            None,
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
+        let resp = vector_search(&svc, &[1.0, 0.0], 1, None).await;
+        assert_eq!(
+            resp.error.as_deref(),
+            Some("vector search is not available on this server: no index registry is configured")
+        );
+        assert!(resp.results.is_empty());
+    }
+
+    /// Sort by `age` desc, then `status` asc.
+    fn by_age() -> Vec<topgun_core::messages::base::SortField> {
+        use topgun_core::messages::base::{SortDirection, SortField};
+        vec![
+            SortField {
+                field: "age".to_string(),
+                direction: SortDirection::Desc,
+            },
+            SortField {
+                field: "status".to_string(),
+                direction: SortDirection::Asc,
+            },
+        ]
+    }
+
+    /// eq, neq, range, `and`/`or`/`not`, and sort + limit.
+    fn scalar_equivalence_queries() -> Vec<Query> {
+        let leaf = |op: PredicateOp, attribute: &str, value: rmpv::Value| PredicateNode {
+            op,
+            attribute: Some(attribute.to_string()),
+            value: Some(value),
+            ..PredicateNode::default()
+        };
+        let node = |op: PredicateOp, children: Vec<PredicateNode>| PredicateNode {
+            op,
+            children: Some(children),
+            ..PredicateNode::default()
+        };
+        vec![
+            Query {
+                predicate: Some(leaf(PredicateOp::Eq, "status", rmpv::Value::from("active"))),
+                ..Query::default()
+            },
+            Query {
+                predicate: Some(leaf(
+                    PredicateOp::Neq,
+                    "status",
+                    rmpv::Value::from("active"),
+                )),
+                ..Query::default()
+            },
+            Query {
+                predicate: Some(leaf(PredicateOp::Gte, "age", rmpv::Value::from(35))),
+                ..Query::default()
+            },
+            Query {
+                predicate: Some(node(
+                    PredicateOp::And,
+                    vec![
+                        leaf(PredicateOp::Eq, "status", rmpv::Value::from("idle")),
+                        node(
+                            PredicateOp::Or,
+                            vec![
+                                leaf(PredicateOp::Lt, "age", rmpv::Value::from(30)),
+                                node(
+                                    PredicateOp::Not,
+                                    vec![leaf(PredicateOp::Lte, "age", rmpv::Value::from(45))],
+                                ),
+                            ],
+                        ),
+                    ],
+                )),
+                ..Query::default()
+            },
+            Query {
+                sort: Some(by_age()),
+                limit: Some(5),
+                ..Query::default()
+            },
+        ]
+    }
+
+    async fn run_query_page(
+        svc: &Arc<QueryService>,
+        conn: ConnectionId,
+        query: Query,
+    ) -> (Vec<(String, rmpv::Value)>, Option<bool>, Option<String>) {
+        let payload = QuerySubMessage {
+            payload: QuerySubPayload {
+                query_id: "q".to_string(),
+                map_name: "users".to_string(),
+                query,
+                fields: None,
+            },
+        };
+        let op = Operation::QuerySubscribe {
+            ctx: make_ctx(Some(conn)),
+            payload,
+        };
+        match Arc::clone(svc).oneshot(op).await.unwrap() {
+            OperationResponse::Message(msg) => match *msg {
+                Message::QueryResp(resp) => {
+                    let mut results: Vec<(String, rmpv::Value)> = resp
+                        .payload
+                        .results
+                        .into_iter()
+                        .map(|e| (e.key, e.value))
+                        .collect();
+                    if resp.payload.next_cursor.is_none() && resp.payload.has_more != Some(true) {
+                        // An unsorted, unbounded result has no defined order.
+                        results.sort_by(|a, b| a.0.cmp(&b.0));
+                    }
+                    (results, resp.payload.has_more, resp.payload.next_cursor)
+                }
+                other => panic!("expected QueryResp, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    /// Regression guard: the production DAG path gives the same scalar query
+    /// results with and without the index factory (it does not read it).
+    #[tokio::test]
+    async fn scalar_query_results_equal_with_and_without_index_factory() {
+        use crate::storage::factory::ObserverFactory;
+
+        let index_factory = Arc::new(IndexObserverFactory::new());
+        let index_registry = index_factory.register_map("users");
+        index_registry.add_hash_index("status");
+        index_registry.add_navigable_index("age");
+        index_registry.add_inverted_index("bio");
+        let factory = Arc::new(
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            )
+            .with_observer_factories(vec![Arc::clone(&index_factory) as Arc<dyn ObserverFactory>]),
+        );
+        for i in 0..20i64 {
+            let key = format!("u{i:02}");
+            let value = make_value_map(vec![
+                (
+                    "status",
+                    Value::String(if i % 3 == 0 { "active" } else { "idle" }.to_string()),
+                ),
+                ("age", Value::Int(20 + (i * 7) % 30)),
+                (
+                    "bio",
+                    Value::String(format!("likes rust and item{}", i % 4)),
+                ),
+            ]);
+            put_lww(&factory, "users", &key, value, make_timestamp(), None).await;
+        }
+        assert!(
+            index_registry.get_index("status").unwrap().entry_count() > 0,
+            "the observer populates the indexes"
+        );
+
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &test_config());
+        let make = |with: bool| {
+            Arc::new(QueryService::new(
+                Arc::new(QueryRegistry::new()),
+                Arc::clone(&factory),
+                Arc::clone(&conn_registry),
+                10_000,
+                with.then(|| Arc::clone(&index_factory)),
+                #[cfg(feature = "datafusion")]
+                None,
+            ))
+        };
+        let (plain, indexed) = (make(false), make(true));
+
+        for query in scalar_equivalence_queries() {
+            let a = run_query_page(&plain, handle.id, query.clone()).await;
+            let b = run_query_page(&indexed, handle.id, query.clone()).await;
+            assert_eq!(a.0, b.0, "results differ for {query:?}");
+            assert_eq!(a.1, b.1, "has_more differs for {query:?}");
+            assert!(!a.0.is_empty() || query.predicate.is_some());
+        }
+
+        // Cursor page: the second page after a sorted, limited first page.
+        let first = Query {
+            sort: Some(by_age()),
+            limit: Some(4),
+            ..Query::default()
+        };
+        let (_, _, cursor) = run_query_page(&plain, handle.id, first.clone()).await;
+        let cursor = cursor.expect("a limited first page carries a cursor");
+        let second = Query {
+            cursor: Some(cursor),
+            ..first
+        };
+        let a = run_query_page(&plain, handle.id, second.clone()).await;
+        let b = run_query_page(&indexed, handle.id, second).await;
+        assert_eq!(a.0, b.0, "second page differs");
+        assert_eq!(a.1, b.1);
+        assert!(!a.0.is_empty());
     }
 }

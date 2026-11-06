@@ -1,4 +1,5 @@
 import { serialize, deserialize } from '../serializer';
+import { vectorToBytes } from '../utils/vector';
 
 describe('Serializer Module', () => {
   describe('Primitive Serialization', () => {
@@ -299,6 +300,81 @@ describe('Serializer Module', () => {
       const deserialized = deserialize<typeof original>(arrayBuffer);
 
       expect(deserialized).toEqual(original);
+    });
+  });
+
+  describe('Byte fields', () => {
+    // The bytes that follow `key` (a fixstr) in `packed`.
+    const afterKey = (packed: Uint8Array, key: string): number[] => {
+      const marker = [0xa0 | key.length, ...Array.from(Buffer.from(key))];
+      for (let i = 0; i + marker.length <= packed.length; i++) {
+        if (marker.every((b, j) => packed[i + j] === b)) {
+          return Array.from(packed.subarray(i + marker.length));
+        }
+      }
+      throw new Error(`key ${key} not found`);
+    };
+
+    test('Uint8Array field is encoded as bin', () => {
+      const packed = serialize({ b: new Uint8Array([1, 2, 3]) });
+      expect(afterKey(packed, 'b').slice(0, 5)).toEqual([0xc4, 0x03, 0x01, 0x02, 0x03]);
+      const back = deserialize<{ b: Uint8Array }>(packed);
+      expect(back.b).toBeInstanceOf(Uint8Array);
+      expect(Array.from(back.b)).toEqual([1, 2, 3]);
+    });
+
+    test('Buffer and ArrayBuffer fields are encoded as bin', () => {
+      const fromBuffer = serialize({ b: Buffer.from([4, 5]) });
+      expect(afterKey(fromBuffer, 'b').slice(0, 4)).toEqual([0xc4, 0x02, 0x04, 0x05]);
+
+      const fromArrayBuffer = serialize({ a: new Uint8Array([6, 7, 8]).buffer });
+      expect(afterKey(fromArrayBuffer, 'a').slice(0, 5)).toEqual([0xc4, 0x03, 0x06, 0x07, 0x08]);
+      const back = deserialize<{ a: Uint8Array }>(fromArrayBuffer);
+      expect(back.a).toBeInstanceOf(Uint8Array);
+      expect(back.a).not.toBeInstanceOf(ArrayBuffer);
+      expect(Array.from(back.a)).toEqual([6, 7, 8]);
+    });
+
+    test('Float32Array keeps its numeric-key shape and DataView is still sent as an empty map', () => {
+      // Bytes produced before byte fields were passed through as `bin`.
+      const f32 = serialize({ f: new Float32Array([0.5, 2.7, 300]) });
+      expect(Array.from(f32)).toEqual([
+        0xde, 0x00, 0x01, 0xa1, 0x66, 0xde, 0x00, 0x03, 0xa1, 0x30, 0xcb, 0x3f, 0xe0, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0xa1, 0x31, 0xcb, 0x40, 0x05, 0x99, 0x99, 0xa0, 0x00, 0x00, 0x00,
+        0xa1, 0x32, 0xcd, 0x01, 0x2c,
+      ]);
+      expect([0xc4, 0xc5, 0xc6]).not.toContain(afterKey(f32, 'f')[0]);
+      const back = deserialize<{ f: Record<string, number> }>(f32);
+      expect(Object.keys(back.f)).toEqual(['0', '1', '2']);
+      expect(back.f['0']).toBe(Math.fround(0.5));
+      expect(back.f['1']).toBe(Math.fround(2.7));
+      expect(back.f['2']).toBe(Math.fround(300));
+
+      const dv = serialize({ d: new DataView(new ArrayBuffer(4)) });
+      expect(Array.from(dv)).toEqual([0xde, 0x00, 0x01, 0xa1, 0x64, 0xde, 0x00, 0x00]);
+      expect([0xc4, 0xc5, 0xc6]).not.toContain(afterKey(dv, 'd')[0]);
+      expect(deserialize<{ d: unknown }>(dv).d).toEqual({});
+    });
+
+    test('a nested undefined next to a Uint8Array is still stripped', () => {
+      const back = deserialize<Record<string, unknown>>(
+        serialize({ nested: { b: new Uint8Array([9]), gone: undefined } }),
+      );
+      const nested = back.nested as Record<string, unknown>;
+      expect(Object.keys(nested)).toEqual(['b']);
+      expect(Array.from(nested.b as Uint8Array)).toEqual([9]);
+    });
+
+    test('a VECTOR_SEARCH query vector is sent as bin', () => {
+      const packed = serialize({
+        type: 'VECTOR_SEARCH',
+        payload: { queryVector: vectorToBytes([1, 0]) },
+      });
+      const value = afterKey(packed, 'queryVector');
+      expect(value[0]).toBe(0xc4);
+      expect(value[1]).toBe(8);
+      expect(value[0] & 0xf0).not.toBe(0x80);
+      expect(value[0]).not.toBe(0xde);
     });
   });
 

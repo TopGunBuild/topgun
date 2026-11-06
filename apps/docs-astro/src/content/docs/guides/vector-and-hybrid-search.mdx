@@ -207,8 +207,9 @@ TOPGUN_EMBEDDING_DIMENSION=768
 # Which maps/fields to auto-embed on write (dimension must match the provider)
 TOPGUN_VECTOR_MAPS='{"products":{"fields":["title","description"],"dimension":768}}'
 
-# Optional: directory where the HNSW index is persisted across restarts
-TOPGUN_VECTOR_INDEX_PATH=./data/vectors
+# Optional: JSON file listing the vector indexes created through the admin API
+# (default ./vector_indexes.json)
+TOPGUN_VECTOR_INDEX_PATH=./data/vector_indexes.json
 ```
 
 On startup the server logs a single line showing the active provider, dimension, and the maps it will auto-embed, so you can confirm the configuration from the logs. For the full variable reference see the [Server reference](/docs/reference/server).
@@ -221,7 +222,9 @@ On startup the server logs a single line showing the active provider, dimension,
 
 TopGun builds an **HNSW (Hierarchical Navigable Small World)** approximate nearest-neighbour index over each configured map. HNSW provides sub-linear query time at high recall — typical `k=10` queries over millions of vectors complete in single-digit milliseconds.
 
-The index is persisted to `TOPGUN_VECTOR_INDEX_PATH` and loaded into memory at server start. Writes auto-insert into the live index so there is no explicit rebuild step.
+The HNSW graph is not persisted. At every start the server rebuilds each vector index in memory from the stored records, before it accepts connections, so start-up time grows with the stored records of vector maps. Writes then update the live index. `TOPGUN_VECTOR_INDEX_PATH` names a JSON file that lists the vector indexes created through the admin API, so they are registered again at start.
+
+A vector index created through the admin API (`POST /api/admin/indexes/vector`) indexes the records written after it is created; records written before are indexed at the next restart. The `dedupEnabled` field of that request is deprecated and ignored: every record is indexed under its own entry, also when several records hold the same vector.
 
 ---
 

@@ -10,13 +10,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server): vector search works on the server binary.** `VECTOR_SEARCH` used to get no
+  answer from the shipped binary, so `client.vectorSearch` waited for its timeout; the server now
+  answers it. Vector indexes, including the `_embedding` indexes of `TOPGUN_VECTOR_MAPS`, are
+  rebuilt from the stored records at every start, where they used to be empty after a restart
+  until their records were written again; start-up time grows with the stored records of vector
+  maps. Vector search no longer returns a record that was deleted or has expired while it was not
+  in memory, returns records that are not in memory with their value, and applies its `filter` to
+  them. When several records hold the same vector, each of them is found, also after a restart.
+- **Fixed (client): vector and hybrid search with a `queryVector` reach the server.** The TS SDK
+  sent the query vector as a map instead of bytes, and the server refused the request.
+- **Changed (`@topgunbuild/core`, `@topgunbuild/client`): a `Uint8Array` or `Buffer` value is
+  stored and synced as binary.** It used to be sent as an object with numeric keys. An
+  `ArrayBuffer` value, previously sent as an empty object, is now stored as binary too and reads
+  back as a `Uint8Array` (a `Buffer` in Node), not as an `ArrayBuffer`. Other typed arrays (for
+  example a `Float32Array`) are unchanged and still sent as an object with numeric keys; a
+  `DataView` is unchanged too and still sent as an empty object, so its bytes are lost. Records
+  written earlier keep their old shape.
+- **Deprecated (server): `dedupEnabled` of vector indexes.** The field of
+  `POST /api/admin/indexes/vector` and of stored vector index descriptors is still accepted and has
+  no effect: every record is indexed under its own entry, including records that share a vector.
 - **Added (server): records written with a TTL expire on the server.** The `ttlMs` of
   `map.set(key, value, ttlMs)` and `orMap.add(key, value, ttlMs)` used to be kept by clients only:
   the server dropped it, kept the record for good and returned it to every query, HTTP `/sync`,
   search and client that loaded the map later. The server now stores the TTL with the record and
   counts it from the moment it stores the write (its own timestamp, never the client's). Once that
   moment plus `ttlMs` has passed, query snapshots, HTTP `/sync`, full-text and hybrid search, and
-  vector search over records in memory leave the record out, and a background sweep then deletes it the ordinary way: live-query
+  vector search leave the record out, and a background sweep then deletes it the ordinary way: live-query
   subscribers get a LEAVE, clients get the usual remove event, and the event journal records a
   DELETE with `metadata.reason = "expired"`. The delete can lag the expiry by up to the sweep
   interval plus one sweep cycle. The TTL is part of the stored value, so it survives the

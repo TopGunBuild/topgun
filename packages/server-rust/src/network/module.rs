@@ -33,7 +33,7 @@ use super::shutdown::ShutdownController;
 use crate::cluster::state::ClusterState;
 use crate::service::config::ServerConfig;
 use crate::service::domain::index::mutation_observer::IndexObserverFactory;
-use crate::service::domain::index::vector_index::{rebuild_from_store, VectorRebuildSpec};
+use crate::service::domain::index::vector_index::rebuild_from_store;
 use crate::service::middleware::ObservabilityHandle;
 use crate::service::policy::PolicyStore;
 use crate::storage::factory::RecordStoreFactory;
@@ -357,27 +357,15 @@ impl NetworkModule {
         if let (Some(ref index_factory), Some(ref store_factory)) =
             (&self.index_observer_factory, &self.store_factory)
         {
-            let descriptor_path = std::path::PathBuf::from(
-                std::env::var("TOPGUN_VECTOR_INDEX_PATH")
-                    .unwrap_or_else(|_| "./vector_indexes.json".to_string()),
-            );
-            let descriptors = load_vector_descriptors(&descriptor_path);
-            if !descriptors.is_empty() {
-                let specs: Vec<VectorRebuildSpec> = descriptors
-                    .into_iter()
-                    .map(|d| VectorRebuildSpec {
-                        map_name: d.map_name,
-                        attribute: d.attribute,
-                        index_name: d.index_name,
-                        dimension: d.dimension,
-                        distance_metric: d.distance_metric,
-                        hnsw_m: d.hnsw_m,
-                        hnsw_ef_construction: d.hnsw_ef_construction,
-                        dedup_enabled: d.dedup_enabled,
-                    })
-                    .collect();
-                rebuild_from_store(index_factory, store_factory, &specs, &backfill_progress).await;
-            }
+            rebuild_from_store(
+                index_factory,
+                store_factory,
+                &load_vector_descriptors(
+                    &crate::network::handlers::admin::vector_index_path_from_env(),
+                ),
+                &backfill_progress,
+            )
+            .await;
         }
 
         // Mirror the vector rebuild for scalar (Hash / Navigable / Inverted) indexes.
