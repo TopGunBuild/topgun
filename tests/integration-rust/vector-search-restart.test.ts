@@ -280,11 +280,18 @@ describe('Integration: vector search on the server binary (TG-VEC-001)', () => {
     docs.set('doc1', { text: 'quiet harbor lighthouse at dawn' });
     docs.set('doc2', { text: 'spicy noodle soup recipe' });
     await searchUntil(writer, 'evict', [1, 0, 0, 0], N + 2, (keys) => keys.length === N + 2);
-    await waitUntil(
-      async () =>
-        keysOf(await semantic(writer, 'quiet harbor lighthouse at dawn')).includes('doc1'),
-      SIGNAL_MS,
-    );
+    // The client sends an operation again with every sync pass until it is
+    // acknowledged, and each repeat replaces the stored value, `_embedding`
+    // included, and queues another embedding. Only once nothing is pending
+    // does a stored `_embedding` stay, and only a stored one survives the stop.
+    await waitUntil(() => writer.getPendingOpsCount() === 0, SIGNAL_MS);
+    await waitUntil(async () => {
+      const stored = await semantic(writer, 'quiet harbor lighthouse at dawn');
+      return (
+        stored.length === 2 &&
+        stored.every((hit) => (hit.value as Record<string, unknown>)?._embedding !== undefined)
+      );
+    }, SIGNAL_MS);
 
     await restart();
     // Nothing of either map is in memory, and the boot rebuild committed
