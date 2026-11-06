@@ -41,6 +41,15 @@ function stripUndefined(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(stripUndefined);
   }
+  // Bytes go out as MsgPack `bin` (a Node Buffer is a Uint8Array). Other
+  // ArrayBuffer views keep the numeric-key object path: msgpackr packs them as
+  // wrong or empty `bin`, which would lose data silently.
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
+  }
   if (value !== null && typeof value === 'object') {
     const result: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
@@ -64,6 +73,10 @@ function coerceBigInts(value: unknown): unknown {
     for (let i = 0; i < value.length; i++) {
       value[i] = coerceBigInts(value[i]);
     }
+    return value;
+  }
+  // Unpacked `bin` holds no BigInt; walking its bytes would cost O(n) per field.
+  if (value instanceof Uint8Array) {
     return value;
   }
   if (value !== null && typeof value === 'object') {
