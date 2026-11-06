@@ -84,8 +84,8 @@ All variables below correspond to direct `std::env::var(...)` reads or `tracing-
 
 | Variable | Type | Default | Consumer | Notes |
 |---|---|---|---|---|
-| `TOPGUN_INDEX_PATH` | path | none | `bin/topgun_server.rs:516`, `network/module.rs:316`, `network/handlers/admin.rs:1078` | Directory holding the BM25 full-text-search index. |
-| `TOPGUN_VECTOR_INDEX_PATH` | path | none | `network/module.rs:286`, `network/handlers/admin.rs:1139` | Directory holding the HNSW vector index. |
+| `TOPGUN_INDEX_PATH` | path | `./scalar_indexes.json` | `bin/topgun_server.rs:1485`, `network/module.rs:377`, `network/handlers/admin.rs:1441` | JSON file listing the scalar index descriptors created through the admin API; indexes are rebuilt from stored records at start. |
+| `TOPGUN_VECTOR_INDEX_PATH` | path | `./vector_indexes.json` | `network/handlers/admin.rs:1531` | JSON file listing the vector index descriptors created through the admin API; indexes are rebuilt from stored records at start. |
 
 ### Embeddings and semantic search
 

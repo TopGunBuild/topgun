@@ -8,7 +8,8 @@ an explicit `NAKED` marker; the gate is "the NAKED count never grows silently", 
 
 Conventions: IDs are `TG-<DOMAIN>-<NNN>` (domains: WAL, WB write-behind, OR, LWW, MRK merkle,
 EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch, ENG byte engine, AUTHZ
-authorization, ENC encryption at rest, READ whole-map reads, IDX scalar indexes, TTL record expiry). Cite the ID verbatim in code comments and test names. Statuses:
+authorization, ENC encryption at rest, READ whole-map reads, IDX scalar indexes, VEC vector indexes,
+TTL record expiry). Cite the ID verbatim in code comments and test names. Statuses:
 `decided` (holds by design) · `open (SPEC/TODO-nnn)` (not yet true / not yet wired) ·
 `aspirational`. Precedent: omnigraph `docs/invariants.md` (structure) — improved here with the
 CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
@@ -3558,7 +3559,7 @@ weaker than a test.
 
 - **Scope:** the scalar indexes `HashIndex`, `NavigableIndex` and `InvertedIndex`
   (`service/domain/index/`) and `IndexMutationObserver`, which feeds them from the record store's
-  observer callbacks. Vector indexes are out of scope (TODO-896).
+  observer callbacks. Vector indexes: see TG-VEC-001.
 - **Statement:** once the startup rebuild or backfill reports `done`, and with no write in flight, every key with a stored or resident `Lww` value has exactly one reverse entry,
   holding the attribute value of its current value, and the index's buckets hold the key under
   exactly that value. Eviction removes no entry. A delete removes the key's entry, resident or not.
@@ -3590,7 +3591,7 @@ weaker than a test.
     `insert_if_absent` after the delete's `remove_key`, and nothing removes that entry later;
   - lookups are not atomic with respect to a concurrent mutation of the same key (pre-existing);
   - `entry_count` counts `(value, key)` pairs, so an array attribute counts once per element;
-  - vector indexes (TODO-896);
+  - vector indexes: see TG-VEC-001;
   - index memory (O(map), outside `TOPGUN_MAX_RAM_MB`).
 - **Maintaining code:** `service/domain/index/mod.rs` — the `Index` contract; `hash_index.rs`,
   `navigable_index.rs`, `inverted_index.rs` — the reverse entry and its lock;
@@ -3612,6 +3613,101 @@ weaker than a test.
 - **Discovered by:** SPEC-398b2 (TODO-897); parts SPEC-401b1 and SPEC-401b2.
 - **Status:** decided.
 
+### TG-VEC-001: A vector index holds at most one entry per stored LWW record of its map, under the record's current vector, and vector search returns only records visible at `now`
+
+- **Scope:** `VectorIndex` (`service/domain/index/vector_index.rs`), fed by `IndexMutationObserver`
+  and filled at start by `vector_index::rebuild_from_store`; `VECTOR_SEARCH`
+  (`QueryService::handle_vector_search`) and the `semantic` leg of hybrid search.
+- **Statement:** once the startup rebuild reports `done`, and with no write in flight, every key
+  whose stored or resident `Lww` value has a decodable vector of the index's dimension has exactly
+  one entry, under that vector, and no other key has one: a key whose current value has no such
+  vector has no entry, keys that share a vector are separate entries and graph nodes, and a delete
+  removes the key's entry whether or not the key is resident. `VECTOR_SEARCH` returns a candidate
+  only after reading the key through the merged point read and finding it visible at `now`
+  (TG-TTL-001), so a deleted or expired record is never returned, resident or not.
+- **Mechanism:** a key has an entry when it is in `pending_snapshot`, or in `key_to_id` and not in
+  `pending_removed`. `insert` replaces the key's entry (a value without a decodable vector removes
+  an existing entry and is a no-op for a key without one), `insert_if_absent` inserts only when the
+  key has no entry, `remove` and `remove_key` remove by key, and each runs its entry check and its
+  snapshot / mark / queue changes in one hold of the `pending` mutex; the vector is decoded before
+  the mutex is taken. `commit_pending` drains the queue under `pending`, applies it to the graph
+  under the HNSW write lock while every drained key keeps its snapshot entry or removal mark, and
+  then, under `pending` again, clears those marks only for drained keys with no newer queued
+  mutation, so a mutation queued during a commit keeps its mark until it is itself committed. Lock
+  order: `pending` and the HNSW lock are never held together; the `DashMap`/`DashSet` shards and
+  `next_id` are leaves; `search_nearest` never takes `pending`. Precondition: calls of
+  `commit_pending` are serialized and `clear` does not run during a commit; in production the only
+  commit is the startup rebuild, before `set_ready()`. The rebuild reads every map that has a
+  vector index (descriptor indexes and the `_embedding` indexes of `TOPGUN_VECTOR_MAPS`) through
+  `RecordStoreFactory::scan_merged` (`TG-READ-001`), which emits each key at most once, as its
+  newest live version, and gives each `Lww` row to every vector index of the map with
+  `insert_if_absent`. `VECTOR_SEARCH` sorts the `4k` candidates the index returns by score and
+  point-reads them in that order through `search::read_visible` until `k` are visible and pass the
+  `filter`.
+- **Not claimed:**
+  - `dedupEnabled` (admin API) and `dedup_enabled` (descriptor) are accepted and have no effect;
+    equal vectors under different keys are separate graph nodes and each costs index memory
+    (TODO-926 removes the field);
+  - two `commit_pending` calls at the same time, or `clear` during a commit, can leave a stale
+    vector or re-insert a drained key into a cleared graph; production has one committer;
+  - that `settle_drained` holds the `pending` mutex is enforced by review and the stress check,
+    not by a unit test;
+  - a search that runs while `commit_pending` applies a batch reads the graph and the pending marks
+    at two moments, so that one search can miss a key whose `Upsert` is being committed or list a
+    key whose `Remove` is being committed; the index state itself has no such window, and the next
+    search sees it. In production the only commit is the startup rebuild, before `set_ready()`,
+    so no client search runs alongside it; a listed removed key is still kept out of results by
+    the point read;
+  - writes after start stay in `pending_snapshot`, which every search scans linearly, until the
+    next restart: the only production caller of `commit_pending` is the startup rebuild, and
+    `optimize` does not commit the pending queue, so search cost grows with the writes since start
+    (TODO-924);
+  - `VECTOR_SEARCH` can return fewer than `k` results although `k` matching visible records exist:
+    when more than `3k` of the `4k` nearest candidates are invisible (expired but not yet swept, or
+    a stale entry) or fail the `filter`; HNSW recall is approximate as well;
+  - `create_vector_index` does not backfill records written before it until the next restart
+    (TODO-923);
+  - `hnsw_m` / `hnsw_ef_construction` are accepted and ignored;
+  - a load that races a delete can leave one stale entry; the point read still keeps it out of
+    results;
+  - hybrid `semantic` candidates that are not visible take a rank slot before fusion, so a page may
+    hold fewer than `k`;
+  - index memory is outside `TOPGUN_MAX_RAM_MB`, and start-up time grows with the stored rows of
+    vector maps;
+  - vector indexes are node-local in cluster mode;
+  - there is no public TS helper for encoding a vector record field; an SDK user builds the
+    `{ type, data }` map by hand (TODO-925).
+- **Maintaining code:** `service/domain/index/vector_index.rs` (`VectorIndex`, `rebuild_from_store`);
+  `service/domain/index/mod.rs` (the `Index` contract); `service/domain/index/mutation_observer.rs`
+  (`IndexMutationObserver`); `service/domain/query.rs` (`handle_vector_search`);
+  `bin/topgun_server.rs` and `network/module.rs` (the rebuild before `set_ready()`).
+- **Enforcing test:** `vector_remove_key_removes_without_old_value`,
+  `vector_insert_if_absent_keeps_the_existing_entry`,
+  `vector_insert_without_a_decodable_vector_drops_the_entry`,
+  `vector_insert_without_a_decodable_vector_is_a_no_op_without_an_entry`,
+  `vector_same_vector_under_two_keys_gets_two_entries`,
+  `vector_remove_key_then_same_vector_under_a_new_key_is_committed`,
+  `vector_commit_keeps_the_marks_of_mutations_queued_after_the_drain`,
+  `vector_concurrent_insert_if_absent_and_insert_leave_the_insert` (stress check),
+  `rebuild_indexes_stored_non_resident_records`, `rebuild_indexes_keys_that_share_a_vector`,
+  `rebuild_skips_expired_rows`, `rebuild_backfills_indexes_registered_before_the_call`,
+  `rebuild_failed_scan_leaves_done_false_and_continues`, `rebuild_keeps_a_newer_entry`,
+  `decodes_a_vector_field_encoded_by_the_ts_client` (`vector_index.rs`);
+  `vector_search_returns_a_non_resident_candidate_with_its_value`,
+  `vector_search_hides_expired_non_resident`, `vector_search_filter_applies_to_non_resident_candidates`,
+  `vector_search_reads_only_candidate_keys`, `vector_search_skips_invisible_candidates_before_the_k_cut`,
+  `vector_search_without_factory_answers_with_an_error` (`query.rs`).
+- **Integration tests:** `tests/integration-rust/vector-search-restart.test.ts` —
+  `AC10: vector search returns a written record`,
+  `AC11: after a restart vector search still returns it`,
+  `AC12: evict + delete of a non-resident key is not returned`,
+  `AC13: an expired record is not returned`.
+- **Violation consequence:** vector search returns deleted or expired records, misses records
+  after a restart or when another record holds the same vector, or keeps a key under a vector it
+  no longer has.
+- **Discovered by:** SPEC-405 (the vector-search defects of the server binary); TODO-895.
+- **Status:** decided, **enforced**.
+
 ### TG-TTL-001: A record's expiry is fixed by its stored value, and no client-facing read returns it once the server clock is past it
 
 - **Scope:** the TTL of `RecordValue::Lww` (`ttl_ms`, `ttlMs` on the wire and in the stored
@@ -3624,14 +3720,13 @@ weaker than a test.
   value can drop it; a known OR tag keeps its stored stamp and TTL when it is pushed again; the
   embedding write-back keeps the expiry instant when it re-stamps a record; a `ttlMs` of 0 is
   stored as no TTL. The whole-map reads (`scan_merged_batches`, `ScanProcessor`), full-text,
-  hybrid and resident vector search leave expired records out (`storage/expiry.rs`); Merkle leaf,
+  hybrid and vector search (by candidate point read) leave expired records out (`storage/expiry.rs`); Merkle leaf,
   bucket and diff responses are **not** filtered, because they must match the leaf the client
   compares, and carry `ttlMs` so the client hides the record itself; the TTL is not part of the
   Merkle hash.
 - **Stated limits:**
   - each reader compares the expiry with its own clock, so readers whose clocks differ disagree
     for the size of the skew;
-  - vector search over keys that are not resident is not filtered (TODO-896);
   - a search page may hold fewer than `limit` hits until the sweep deletes the expired ones;
   - the DataFusion SQL path (`service/domain/table_provider.rs:244`, disabled, `FEATURE_DISABLED`)
     is not covered;
@@ -3669,12 +3764,16 @@ weaker than a test.
   `scan_processor_bounded_hides_expired_stored`, `scan_processor_unbounded_hides_expired_stored`
   (`dag/processors.rs`); `fts_search_hides_expired_hit` (`search/mod.rs`),
   `hybrid_search_hides_expired_with_include_value` (`search/hybrid.rs`),
-  `vector_search_hides_expired_resident` (`query.rs`); `embedding_write_back_keeps_expires_at`
+  `vector_search_hides_expired_resident`, `vector_search_hides_expired_non_resident`,
+  `vector_search_skips_invisible_candidates_before_the_k_cut` (`query.rs`);
+  `rebuild_skips_expired_rows` (`vector_index.rs`); `embedding_write_back_keeps_expires_at`
   (`embedding/hook.rs`); `sim_propagate_carries_ttl` (`sim/cluster.rs`);
   `concurrent_or_remove_preserves_convergence` (`tests/simulation/proptest_sim.rs`).
 - **Integration tests:** `tests/integration-rust/record-ttl.test.ts` — the filter case (sweep
   off), the pull case (`ttlMs` reaches a client that syncs later), the restart case and the
-  eviction case; `tests/integration-rust/ttl-rollback.test.ts` (opt-in, two binaries).
+  eviction case; `tests/integration-rust/vector-search-restart.test.ts` —
+  `AC13: an expired record is not returned` (vector and hybrid `semantic`, before and after a
+  restart); `tests/integration-rust/ttl-rollback.test.ts` (opt-in, two binaries).
 - **Violation consequence:** an "expiring" record is kept and served for good, or reappears after a
   restart or an eviction, or lives longer than its TTL because it was re-anchored.
 - **Discovered by:** TODO-906 (SPEC-403 family); TODO-721.
