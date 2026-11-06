@@ -65,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on a store and write-ahead log written by this one: it serves records with a TTL as records
   without one, and drops the TTL of any record, or of every entry of an OR-Map key, that it
   rewrites. A record it did not rewrite still expires once this release runs again.
+- **Fixed (client): a key deleted on one client, or removed by the server's expiry sweep, now
+  disappears from other online clients.** Until now `map.get` on another connected client kept
+  returning the old value and `useMap` kept rendering it until a reload. Now the key is dropped
+  from that client's map and from its local storage as soon as the delete arrives, unless that
+  client has its own unsynced write of the same key, which is kept and sent. The server is
+  unchanged, so older client versions keep the old behaviour until they are upgraded.
 - **Fixed (server): a scalar index created on a map that already holds records receives
   every later write and delete of that map.** Writes to the map's existing partitions did not
   reach an index created at runtime: its `entryCount` stayed at the backfill count, and deleted
