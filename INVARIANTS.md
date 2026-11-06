@@ -3721,9 +3721,10 @@ weaker than a test.
     the server's by up to its offline time — only that client's view, ended when it adopts the
     server's record (LWW) or receives the server's tombstone (OR);
   - a client **without** the prune (an older SDK) keeps the leaf of every expired LWW key it held
-    for good, because the op-path REMOVE without a record is ignored (TODO-908) and LWW sync is
-    pull-only (TODO-736), so on a TTL-heavy map such a client's walk never converges. TODO-908
-    removes that for online clients;
+    for good, because it ignores the sweep's REMOVE event and LWW sync is pull-only (TODO-736), so
+    on a TTL-heavy map such a client's walk never converges. A current client drops the leaf on
+    the REMOVE event while it is online and subscribed to the map (`TG-LWW-001`), and through its
+    own expiry prune while it is not;
   - convergence is about roots: while the server's tombstone protection is active, a client that
     reports no confirmed epoch on its OR-Map sync init is answered with a full-snapshot resync
     whatever its root (TG-MRK-002).
@@ -3755,4 +3756,98 @@ weaker than a test.
   one silently (no LEAVE, no journal event, a stale index or Merkle leaf); or a client's Merkle
   root never matches the server's again after an expiry.
 - **Discovered by:** TODO-906 (SPEC-403 family).
+- **Status:** decided, **enforced**.
+
+### TG-LWW-001: An online client of a single server that receives an LWW REMOVE server event holds no record and no Merkle leaf for that key, unless it has a pending local PUT of it
+
+- **Scope:** `SyncEngine.applyServerEvent` for `SERVER_EVENT` / `SERVER_BATCH_EVENT` with
+  `eventType: 'REMOVE'` and no `record` on a registered `LWWMap`, connected to a single
+  (non-cluster) server; the server's REMOVE fan-out (`apply_single_op`, `handle_expire_record`,
+  `broadcast_server_event`).
+- **Statement:** the server broadcasts an LWW REMOVE (a client's or the expiry sweep's) with no
+  record to every connection subscribed to the map except the writer. The client, unless the key
+  has a pending local PUT (an op-log PUT neither acknowledged nor refused, or a `recordOperation`
+  that has not reached the op log), removes the key's record and Merkle leaf without writing a
+  tombstone, notifies listeners once if it held a record, and removes the key from storage — also
+  when memory held none — before it reports the event's coverage. While the map's restore from
+  storage (`TopGunClient.getMap`) runs, the key is remembered for that restore only, and the
+  restore does not merge it back; nor does the restore merge a key whose memory already holds a
+  record with the `record.timestamp` of one of its pending local PUTs (any other key, e.g. one
+  whose pending PUT comes from an earlier session, is merged by stamp). A pending local PUT keeps
+  the key: the server orders LWW writes by arrival (`TG-KEY-001`) and that PUT has not arrived.
+- **Not claimed:**
+  1. The writer itself: it keeps the tombstone of its own remove (TODO-736 (1)).
+  2. Offline or reconnecting clients: the Merkle walk does not remove keys the server lacks
+     (TODO-736).
+  3. A connection with no live query subscription on the map receives no event.
+  4. Older SDKs ignore the event and keep the key.
+  5. The acknowledgement race: when B's PUT of the key reached the server *before* the REMOVE but
+     B receives the REMOVE before B's `OP_ACK`, B keeps its value while the server holds none;
+     nothing heals it until the walk can remove keys (TODO-918). The window is not narrow:
+     `OP_BATCH` is acked once, after every op in the batch is applied, and the client flushes all
+     its pending ops in one batch, so it lasts as long as the server takes to apply B's batch.
+  6. A pending PUT kept by this rule, or whose record the restore kept in memory instead of
+     merging the stored record, and later `OP_REJECTED`: the rejection path keeps local values by
+     design, so B holds a value the server never had, in memory and in storage, and the older
+     stored server record is gone locally until a walk (TODO-919).
+  7. Any timestamp comparison (`TG-KEY-001`). This includes a PUT of an earlier session still
+     pending while a server PUT of another client with a larger stamp reaches memory during the
+     restore: the restore merges by stamp and B shows the other value, while the server ends with
+     B's PUT (arrival order) and does not echo it back to B (TODO-736 (2)).
+  8. HTTP `/sync`: the Rust handler never fills `deltas` (`HttpSyncResponse` is built from
+     `Default` and only acks and query results are added, `network/handlers/http_sync.rs`), so no
+     REMOVE delta reaches a client over `/sync` from this server.
+  9. A REMOVE dropped by slow-consumer back-pressure (`try_send_broadcast` drops on a full
+     channel, `network/connection.rs`) leaves the key, as for an offline client.
+  10. A pending local REMOVE whose `recordOperation` has not committed when the event is applied:
+      its `commitWrite` writes the tombstone into storage afterwards, and a reload restores the
+      leaf (the writer-tombstone class, TODO-736 (1)).
+  11. A key dropped by the client's expiry prune or by `handleGcPrune` while the map's restore
+      runs and merged back by that restore: only the server-REMOVE path is guarded (TODO-920).
+  12. A REMOVE applied before the boot op-log load forgets a key whose PUT from an earlier session
+      is still queued on disk: the PUT is still sent and wins on the server, and the walk brings
+      the key back (TODO-921). Waiting for the load inside `applyServerEvent` is deliberately not
+      done, because it would break applying events to memory in arrival order.
+  13. A live query on a map never opened with `getMap` registers no map, so the event is a no-op
+      and a later `getMap` restores the key from an earlier session's storage.
+  14. Cluster mode: a REMOVE and a later PUT applied on different nodes can reach the client on
+      different connections out of server order, so the client may forget a key the server holds
+      (the Merkle walk heals this direction).
+  15. A failed storage removal: the key and its leaf come back at every later restore and no
+      further REMOVE arrives (TODO-922).
+  16. Several tabs sharing one IndexedDB: another tab's in-flight `commitWrite` can write the key
+      back after this tab removed it, and a tab that missed the broadcast keeps it (TODO-922).
+  17. A local PUT acknowledged before the running restore reaches its key is no longer pending,
+      and the restore's stamp merge decides as before. Likewise a local `remove` made while the
+      restore runs: the tombstone's stamp is no pending PUT's, so the restore merges the stored
+      record, and one with a stamp ahead of the client clock brings the deleted value back
+      locally while the REMOVE is queued.
+- **Maintaining code:** `packages/core/src/LWWMap.ts` `forget`; `packages/core/src/IndexedLWWMap.ts`
+  `forget`; `packages/client/src/SyncEngine.ts` (`applyServerEvent`, `pendingPutKeys`,
+  `recordOperation`'s in-flight PUT registry, `beginLwwMapRestore` / `endLwwMapRestore` /
+  `lwwRestoreSkips`); `packages/client/src/TopGunClient.ts` (`getMap`'s restore);
+  `packages/server-rust/src/service/domain/crdt.rs` (`apply_single_op` REMOVE arm,
+  `handle_expire_record`, `broadcast_server_event`).
+- **Enforcing test:**
+  `expire_broadcasts_remove_and_query_leave` (`crdt.rs`; pins `record: None` on the REMOVE event);
+  on the client, `packages/client/src/__tests__/LwwRemoveEvent.test.ts` ("a REMOVE event drops a
+  live key from memory, the Merkle tree and storage, and notifies once", "a REMOVE event keeps a
+  key with an unsynced PUT in the op log", "a REMOVE event keeps a key whose PUT has not yet
+  reached the op log", "a PUT whose commit failed does not keep the key", "a rejected PUT does not
+  keep the key", "a REMOVE event drops the tombstone of a pending local REMOVE and leaves the op
+  queued", "a REMOVE event for an absent key changes nothing in memory and still removes the key
+  from storage", "a REMOVE event never records an op", "a REMOVE inside SERVER_BATCH_EVENT is
+  applied like a single event", "a storage removal that fails is logged and does not stop coverage
+  reporting", "a REMOVE that arrives during the map restore is not undone by the restore", "a
+  REMOVE during the restore whose get reads after the removal leaves no key", "the restore-scoped
+  set is dropped when the restore ends", "the restore does not overwrite a local set whose PUT is
+  pending", "the restore merges a key whose only pending PUT came from an earlier session", "the
+  restore merges by stamp when memory holds a record other than the pending PUT"); and
+  `packages/core/src/__tests__/LWWMap.forget.test.ts` (`LWWMap.forget`, `IndexedLWWMap.forget`).
+- **Integration tests:** `tests/integration-rust/lww-remove-event.test.ts` — "client delete
+  reaches an online client", "expiry-sweep variant", "Merkle parity after the delete".
+- **Violation consequence:** a deleted LWW key stays visible on online clients (`map.get`,
+  `useMap`) and its leaf keeps their LWW root from ever matching the server's; or a client's own
+  unsynced PUT disappears from its view while the server keeps it.
+- **Discovered by:** TODO-908 (TODO-906 research).
 - **Status:** decided, **enforced**.

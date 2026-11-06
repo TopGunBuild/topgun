@@ -691,6 +691,8 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     const lwwMap = new LWWMap<any, any>(this.syncEngine.getHLC());
     this.maps.set(name, lwwMap);
     this.syncEngine.registerMap(name, lwwMap);
+    // Before any await: a server event may reach the map as soon as it is registered.
+    this.syncEngine.beginLwwMapRestore(name);
 
     // Restore state from storage asynchronously
     this.storageAdapter
@@ -705,6 +707,13 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
               // Strip prefix to get actual key
               // eslint-disable-next-line @typescript-eslint/no-explicit-any -- key is a string that needs to be cast back to the map's K type; the caller's overload constrains K at the public API
               const key = fullKey.substring(mapPrefix.length) as unknown as any;
+              // A server REMOVE applied after the key list was read must not be
+              // undone, and a pending local write already in memory must not be
+              // overwritten by an older stored record with a larger stamp; a
+              // pending write of an earlier session is still merged, since only
+              // this restore brings it back (TG-LWW-001). No await between the
+              // check and the merge.
+              if (this.syncEngine.lwwRestoreSkips(name, key)) continue;
               // Merge into in-memory map without triggering new ops
               // eslint-disable-next-line @typescript-eslint/no-explicit-any -- LWWRecord<any> used for the merge; actual value type erased at restore time and re-typed by the public overload
               lwwMap.merge(key, record as LWWRecord<any>);
@@ -712,7 +721,8 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
           }
         }
       })
-      .catch((err) => logger.error({ err }, 'Failed to restore keys from storage'));
+      .catch((err) => logger.error({ err }, 'Failed to restore keys from storage'))
+      .finally(() => this.syncEngine.endLwwMapRestore(name));
 
     // Wrap LWWMap with IMap interface logic
     const originalSet = lwwMap.set.bind(lwwMap);
