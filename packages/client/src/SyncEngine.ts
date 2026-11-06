@@ -379,6 +379,18 @@ export class SyncEngine {
   // Periods in which an OR-Map's attribution buckets must not be written from
   // the map in memory (it is still loading, or is being reset).
   private readonly orMapKeyTombstonesHolds = new OrMapKeyTombstonesWriteHolds();
+  /**
+   * Record stamps of LWW PUTs whose `recordOperation` has started but whose op
+   * is not in the op log yet, one entry per call, keyed by `inFlightPutSlot`.
+   * The local `set` has already written memory, so such a PUT is pending even
+   * though the op log does not show it.
+   */
+  private readonly inFlightPuts: Map<string, Timestamp[]> = new Map();
+  /**
+   * Keys a server REMOVE forgot while the map's restore from storage runs; an
+   * entry exists only for the duration of that restore (TG-LWW-001).
+   */
+  private readonly lwwRestoreForgotten: Map<string, Set<string>> = new Map();
   private lastSyncTimestamp: number = 0;
   // Highest server epoch this client has confirmed to the server via CLIENT_APPLY_ACK.
   // The confirmed-apply cursor is cumulative-monotonic: a non-advancing epoch is never
@@ -1344,70 +1356,90 @@ export class SyncEngine {
      */
     mutationsOrBuilder?: StorageMutation[] | (() => StorageMutation[]),
   ): Promise<string> {
-    // Check backpressure before adding new operation (delegates to BackpressureController)
-    await this.backpressureController.checkBackpressure();
-
-    // Everything from here to the commit call below is synchronous, so mutations built
-    // now describe the state the commit is issued against.
-    const mutations =
-      typeof mutationsOrBuilder === 'function' ? mutationsOrBuilder() : mutationsOrBuilder;
-
-    const opLogEntry: Omit<OpLogEntry, 'id'> & { id?: string } = {
-      mapName,
-      opType,
-      key,
-      record: data.record,
-      orRecord: data.orRecord,
-      orTag: data.orTag,
-      timestamp: data.timestamp,
-      synced: false,
-    };
-
-    // Stamp the eager OR-Map existence marker in the SAME transaction as the first
-    // durable OR write for this map (local-write seam). Bundling it into `mutations`
-    // makes marker-and-data atomic — no crash window in which the records are durable
-    // but the marker (and therefore the held-set membership) is not. Once per session,
-    // and the in-memory guard is set only AFTER the commit succeeds (below) so a
-    // rejected commit does not leave the map flagged-but-unmarked.
-    const stampingOrMapMarker =
-      (opType === 'OR_ADD' || opType === 'OR_REMOVE') &&
-      mutations !== undefined &&
-      mutations.length > 0 &&
-      !this.markedOrMaps.has(mapName);
-    if (stampingOrMapMarker && mutations) {
-      mutations.unshift({ store: 'meta', type: 'put', key: orMapMarkerKey(mapName), value: 1 });
+    // A PUT counts as pending from the synchronous step in which its `set`
+    // wrote memory, not only once its op reaches the op log; see `pendingPutKeys`.
+    const inFlightStamp = opType === 'PUT' ? (data.record?.timestamp ?? data.timestamp) : undefined;
+    const slot = inFlightPutSlot(mapName, key);
+    if (inFlightStamp) {
+      const stamps = this.inFlightPuts.get(slot);
+      if (stamps) stamps.push(inFlightStamp);
+      else this.inFlightPuts.set(slot, [inFlightStamp]);
     }
+    try {
+      // Check backpressure before adding new operation (delegates to BackpressureController)
+      await this.backpressureController.checkBackpressure();
 
-    // Commit-first ordering: persist durably BEFORE touching the in-memory opLog. If the
-    // commit rejects, no op is pushed — the in-memory opLog and the durable op_log stay
-    // consistent (no op-without-record in either layer) — and we rethrow so the caller's
-    // .catch surfaces the durability failure. The atomic commitWrite keeps the (record, op)
-    // pair crash-consistent on disk; the bare appendOpLog path is for ops with no KV write.
-    const id =
-      mutations && mutations.length > 0
-        ? // eslint-disable-next-line @typescript-eslint/no-explicit-any -- adapter OpLogEntry (numeric id/synced) differs from the engine's; the adapter stores it opaquely
-          await this.storageAdapter.commitWrite(mutations, opLogEntry as any)
-        : // eslint-disable-next-line @typescript-eslint/no-explicit-any -- IStorageAdapter.appendOpLog accepts any; the op log entry is typed internally but the adapter interface is backend-agnostic
-          await this.storageAdapter.appendOpLog(opLogEntry as any);
-    opLogEntry.id = String(id);
-    // Commit succeeded and the marker (if any) is now durable — arm the guard so we
-    // don't re-stamp it on every subsequent write to this map.
-    if (stampingOrMapMarker) {
-      this.markedOrMaps.add(mapName);
+      // Everything from here to the commit call below is synchronous, so mutations built
+      // now describe the state the commit is issued against.
+      const mutations =
+        typeof mutationsOrBuilder === 'function' ? mutationsOrBuilder() : mutationsOrBuilder;
+
+      const opLogEntry: Omit<OpLogEntry, 'id'> & { id?: string } = {
+        mapName,
+        opType,
+        key,
+        record: data.record,
+        orRecord: data.orRecord,
+        orTag: data.orTag,
+        timestamp: data.timestamp,
+        synced: false,
+      };
+
+      // Stamp the eager OR-Map existence marker in the SAME transaction as the first
+      // durable OR write for this map (local-write seam). Bundling it into `mutations`
+      // makes marker-and-data atomic — no crash window in which the records are durable
+      // but the marker (and therefore the held-set membership) is not. Once per session,
+      // and the in-memory guard is set only AFTER the commit succeeds (below) so a
+      // rejected commit does not leave the map flagged-but-unmarked.
+      const stampingOrMapMarker =
+        (opType === 'OR_ADD' || opType === 'OR_REMOVE') &&
+        mutations !== undefined &&
+        mutations.length > 0 &&
+        !this.markedOrMaps.has(mapName);
+      if (stampingOrMapMarker && mutations) {
+        mutations.unshift({ store: 'meta', type: 'put', key: orMapMarkerKey(mapName), value: 1 });
+      }
+
+      // Commit-first ordering: persist durably BEFORE touching the in-memory opLog. If the
+      // commit rejects, no op is pushed — the in-memory opLog and the durable op_log stay
+      // consistent (no op-without-record in either layer) — and we rethrow so the caller's
+      // .catch surfaces the durability failure. The atomic commitWrite keeps the (record, op)
+      // pair crash-consistent on disk; the bare appendOpLog path is for ops with no KV write.
+      const id =
+        mutations && mutations.length > 0
+          ? // eslint-disable-next-line @typescript-eslint/no-explicit-any -- adapter OpLogEntry (numeric id/synced) differs from the engine's; the adapter stores it opaquely
+            await this.storageAdapter.commitWrite(mutations, opLogEntry as any)
+          : // eslint-disable-next-line @typescript-eslint/no-explicit-any -- IStorageAdapter.appendOpLog accepts any; the op log entry is typed internally but the adapter interface is backend-agnostic
+            await this.storageAdapter.appendOpLog(opLogEntry as any);
+      opLogEntry.id = String(id);
+      // Commit succeeded and the marker (if any) is now durable — arm the guard so we
+      // don't re-stamp it on every subsequent write to this map.
+      if (stampingOrMapMarker) {
+        this.markedOrMaps.add(mapName);
+      }
+
+      this.opLog.push(opLogEntry as OpLogEntry);
+      // Notify per-record sync-state tracker on fresh local write.
+      this.recordSyncStateTracker.onAppend(opLogEntry as OpLogEntry);
+
+      // Check high water mark after adding operation (delegates to BackpressureController)
+      this.backpressureController.checkHighWaterMark();
+
+      if (this.isAuthenticated()) {
+        this.syncPendingOperations();
+      }
+
+      return opLogEntry.id;
+    } finally {
+      // Runs in the same synchronous step as the op-log push (nothing is awaited
+      // after it), so the PUT is never in neither place.
+      if (inFlightStamp) {
+        const stamps = this.inFlightPuts.get(slot);
+        const at = stamps?.indexOf(inFlightStamp) ?? -1;
+        if (stamps && at >= 0) stamps.splice(at, 1);
+        if (stamps?.length === 0) this.inFlightPuts.delete(slot);
+      }
     }
-
-    this.opLog.push(opLogEntry as OpLogEntry);
-    // Notify per-record sync-state tracker on fresh local write.
-    this.recordSyncStateTracker.onAppend(opLogEntry as OpLogEntry);
-
-    // Check high water mark after adding operation (delegates to BackpressureController)
-    this.backpressureController.checkHighWaterMark();
-
-    if (this.isAuthenticated()) {
-      this.syncPendingOperations();
-    }
-
-    return opLogEntry.id;
   }
 
   private syncPendingOperations(): void {
@@ -2338,6 +2370,22 @@ export class SyncEngine {
         // else: a strictly newer local write supersedes the echo. Keep memory
         // and disk as-is (both carry the local write); do NOT persist the stale
         // server record — that unconditional put was the F8 skew bug.
+      } else if (localMap instanceof LWWMap && eventType === 'REMOVE') {
+        // The server keeps no record for a removed LWW key, so the client drops
+        // its record and leaf too rather than writing a tombstone (TG-LWW-001).
+        // A pending local PUT keeps the key: the server orders writes by
+        // arrival and that PUT has not arrived yet. Nothing is awaited until the
+        // storage removal is issued, so no local write can slip in between.
+        if (this.pendingPutKeys(mapName).has(key)) return;
+        localMap.forget(key);
+        this.lwwRestoreForgotten.get(mapName)?.add(key);
+        // Always, also when memory held nothing: a restore may not have merged
+        // the key yet while storage still holds it.
+        try {
+          await this.storageAdapter.remove(`${mapName}:${key}`);
+        } catch (err) {
+          logger.warn({ err, mapName, key }, 'Failed to remove a deleted record from storage');
+        }
       } else if (localMap instanceof ORMap) {
         if (eventType === 'OR_ADD' && orRecord) {
           localMap.apply(key, orRecord);
@@ -2595,6 +2643,60 @@ export class SyncEngine {
   }
 
   /**
+   * Keys of `mapName` with a PUT the server has not taken yet: an op-log PUT
+   * that is neither acknowledged nor refused, or a PUT whose `recordOperation`
+   * has not reached the op log (its `set` already wrote memory).
+   */
+  private pendingPutKeys(mapName: string): Set<string> {
+    const keys = new Set<string>();
+    for (const op of this.opLog) {
+      if (isPendingPut(op, mapName)) keys.add(op.key);
+    }
+    const prefix = inFlightPutSlot(mapName, '');
+    for (const slot of this.inFlightPuts.keys()) {
+      if (slot.startsWith(prefix)) keys.add(slot.slice(prefix.length));
+    }
+    return keys;
+  }
+
+  /**
+   * Opens the set of keys a server REMOVE forgets while `mapName` is restored
+   * from storage. Call it synchronously right after `registerMap`, and end it
+   * with `endLwwMapRestore` whatever the restore's outcome.
+   */
+  public beginLwwMapRestore(mapName: string): void {
+    this.lwwRestoreForgotten.set(mapName, new Set());
+  }
+
+  public endLwwMapRestore(mapName: string): void {
+    this.lwwRestoreForgotten.delete(mapName);
+  }
+
+  /**
+   * Whether the restore of `mapName` must not merge the stored record of `key`
+   * (TG-LWW-001): a server REMOVE forgot the key after the restore read its key
+   * list, or memory already holds the very record of a pending local PUT of the
+   * key, which the stored record must not overwrite even with a larger stamp —
+   * the server orders that PUT by arrival, after whatever storage held. A
+   * pending PUT of an earlier session has not written memory; only the restore
+   * brings it back, so it is merged by stamp like any other key.
+   */
+  public lwwRestoreSkips(mapName: string, key: string): boolean {
+    if (this.lwwRestoreForgotten.get(mapName)?.has(key)) return true;
+    const map = this.maps.get(mapName);
+    const held = map instanceof LWWMap ? map.getRecord(key)?.timestamp : undefined;
+    if (!held) return false;
+    const isHeld = (stamp: Timestamp | undefined) =>
+      stamp !== undefined && HLC.compare(stamp, held) === 0;
+    return (
+      (this.inFlightPuts.get(inFlightPutSlot(mapName, key))?.some(isHeld) ?? false) ||
+      this.opLog.some(
+        (op) => op.key === key && isPendingPut(op, mapName) && isHeld(op.record?.timestamp),
+      )
+    );
+  }
+
+  /**
    * Drops expired LWW records from memory and from storage (TG-TTL-002).
    *
    * A key with an unsynced PUT is kept: dropping it would let a walk pull the
@@ -2612,13 +2714,7 @@ export class SyncEngine {
       const map = this.maps.get(name);
       if (!(map instanceof LWWMap)) continue;
 
-      const pendingPuts = new Set<string>();
-      for (const op of this.opLog) {
-        if (op.mapName === name && op.opType === 'PUT' && !op.synced && op.rejected !== true) {
-          pendingPuts.add(op.key);
-        }
-      }
-
+      const pendingPuts = this.pendingPutKeys(name);
       const removedKeys = map.pruneExpired((key) => pendingPuts.has(String(key)));
       for (const key of removedKeys) {
         // Removals are awaited one by one, and meanwhile a local write or a
@@ -3684,4 +3780,14 @@ export class SyncEngine {
     const { code, message: errorMessage, details } = message.payload;
     logger.error({ code, message: errorMessage, details }, 'Server error received');
   }
+}
+
+/** Registry key of one map's key; NUL cannot occur in a map name. */
+function inFlightPutSlot(mapName: string, key: string): string {
+  return `${mapName}\u0000${key}`;
+}
+
+/** An op-log PUT of `mapName` the server has neither acknowledged nor refused. */
+function isPendingPut(op: OpLogEntry, mapName: string): boolean {
+  return op.mapName === mapName && op.opType === 'PUT' && !op.synced && op.rejected !== true;
 }
