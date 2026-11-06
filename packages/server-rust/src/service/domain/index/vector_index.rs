@@ -18,7 +18,7 @@ use parking_lot::{Mutex, RwLock};
 use topgun_core::vector::{distance_for_metric, Distance, DistanceMetric, SharedVector};
 use tracing::{info, warn};
 
-use crate::network::handlers::admin_types::{BackfillProgress, RebuildType};
+use crate::network::handlers::admin_types::{BackfillProgress, RebuildType, VectorIndexDescriptor};
 use crate::service::domain::index::attribute::AttributeExtractor;
 use crate::service::domain::index::hnsw::{ElementId, Hnsw, HnswParams};
 use crate::service::domain::index::registry::VectorIndexStats;
@@ -31,6 +31,14 @@ use crate::storage::record::RecordValue;
 pub enum VectorPendingUpdate {
     Upsert { key: String, vector: SharedVector },
     Remove { key: String },
+}
+
+impl VectorPendingUpdate {
+    fn key(&self) -> &str {
+        match self {
+            Self::Upsert { key, .. } | Self::Remove { key } => key,
+        }
+    }
 }
 
 /// Tracks progress of an in-progress HNSW optimize (graph rebuild) operation.
@@ -62,6 +70,19 @@ pub struct OptimizeHandle {
 /// `InvertedIndex`. Vector-specific operations (`search_nearest`,
 /// `commit_pending`) are accessible via a concrete `Arc<VectorIndex>` obtained
 /// through `IndexRegistry::get_vector_index`.
+///
+/// One entry per key (`TG-VEC-001`): a key "has an entry" when it is in
+/// `pending_snapshot`, or in `key_to_id` and not in `pending_removed`. Keys
+/// that share a vector are separate entries and separate graph nodes.
+///
+/// Lock order: the `pending` mutex and the `hnsw` lock are never held at the
+/// same time. `insert`, `insert_if_absent` and `remove_key` hold `pending`
+/// alone; `commit_pending` takes `pending` to drain, releases it, takes `hnsw`
+/// (write) to apply, releases it, and takes `pending` again to settle. The
+/// shard locks of `pending_snapshot`, `pending_removed`, `key_to_id` and
+/// `id_to_key`, and the `next_id` mutex, are leaves: they may be taken while
+/// `pending` or `hnsw` is held, and nothing else is taken while one is held.
+/// `search_nearest` takes `hnsw` (read) and leaves only, never `pending`.
 pub struct VectorIndex {
     attribute: String,
     /// User-visible name for this index (e.g. `embedding_index`).
@@ -89,13 +110,6 @@ pub struct VectorIndex {
     pending_snapshot: DashMap<String, SharedVector>,
     /// Keys queued for removal — suppressed in read results until commit.
     pending_removed: DashSet<String>,
-    /// When `true`, BLAKE3 hashes of inserted vectors are recorded in `blake3_seen`
-    /// and duplicates skip HNSW insertion. Defaults to `true` (`SurrealDB` pattern).
-    dedup_enabled: bool,
-    /// BLAKE3-256 hashes of all committed vectors (when dedup is enabled).
-    /// `DashSet::insert` returns `false` for duplicates — the atomic check-and-insert
-    /// prevents double-counting even under concurrent writes.
-    blake3_seen: DashSet<[u8; 32]>,
     /// ISO-8601 UTC timestamp of the last completed optimize, or `None`.
     last_optimized: RwLock<Option<String>>,
     /// In-flight optimize handle, if an optimize is currently running.
@@ -108,13 +122,14 @@ impl VectorIndex {
     /// and distance metric.
     ///
     /// `index_name` is the user-visible name for this index (used in admin API responses).
-    /// `dedup_enabled` controls BLAKE3-based duplicate vector suppression (default: `true`).
+    /// `_dedup_enabled` is accepted and ignored: every key is its own entry,
+    /// also when another key holds the same vector (`TG-VEC-001`).
     pub fn new(
         attribute: impl Into<String>,
         index_name: impl Into<String>,
         dimension: u16,
         distance_metric: DistanceMetric,
-        dedup_enabled: bool,
+        _dedup_enabled: bool,
     ) -> Self {
         let attr = attribute.into();
         let params = HnswParams {
@@ -139,8 +154,6 @@ impl VectorIndex {
             id_to_key: DashMap::new(),
             pending_snapshot: DashMap::new(),
             pending_removed: DashSet::new(),
-            dedup_enabled,
-            blake3_seen: DashSet::new(),
             last_optimized: RwLock::new(None),
             optimize_handle: Mutex::new(None),
         }
@@ -156,56 +169,64 @@ impl VectorIndex {
     /// running on a tokio runtime MUST wrap this call in
     /// `tokio::task::spawn_blocking` when the pending queue may be large;
     /// otherwise the HNSW write lock will block the current tokio worker for
-    /// the duration of the batch apply.
+    /// the duration of the batch apply. Callers must not run two commits, or a
+    /// commit and `clear`, at the same time.
     ///
     /// Returns the number of mutations that were drained.
     pub fn commit_pending(&self) -> u64 {
-        // Drain the pending queue under the mutex, then release it before
-        // taking the HNSW write lock — avoids holding two locks simultaneously.
-        let mutations = {
-            let mut guard = self.pending.lock();
-            std::mem::take(&mut *guard)
-        };
-
-        let count = mutations.len() as u64;
-        if count == 0 {
+        let drained = self.take_pending();
+        if drained.is_empty() {
             return 0;
         }
+        self.apply_to_graph(&drained);
+        self.settle_drained(&drained);
+        drained.len() as u64
+    }
 
+    /// Drains the pending queue under the `pending` mutex.
+    fn take_pending(&self) -> Vec<VectorPendingUpdate> {
+        std::mem::take(&mut *self.pending.lock())
+    }
+
+    /// Applies drained mutations to the graph under the HNSW write lock. Every
+    /// drained key keeps its snapshot entry or removal mark meanwhile, so a
+    /// search never misses an upsert or returns a removed key in between.
+    fn apply_to_graph(&self, drained: &[VectorPendingUpdate]) {
         let mut hnsw = self.hnsw.write();
-        for mutation in mutations {
-            match mutation {
-                VectorPendingUpdate::Upsert { key, vector } => {
-                    // HNSW has no native update; replace via remove-then-insert.
-                    if let Some((_, old_id)) = self.key_to_id.remove(&key) {
-                        self.id_to_key.remove(&old_id);
-                        hnsw.remove(old_id);
-                    }
-                    let new_id = {
-                        let mut id = self.next_id.lock();
-                        let allocated = *id;
-                        *id += 1;
-                        allocated
-                    };
-                    self.key_to_id.insert(key.clone(), new_id);
-                    self.id_to_key.insert(new_id, key);
-                    hnsw.insert(new_id, vector);
-                }
-                VectorPendingUpdate::Remove { key } => {
-                    if let Some((_, id)) = self.key_to_id.remove(&key) {
-                        self.id_to_key.remove(&id);
-                        hnsw.remove(id);
-                    }
-                }
+        for mutation in drained {
+            // HNSW has no native update: an upsert replaces via remove-then-insert.
+            if let Some((_, old_id)) = self.key_to_id.remove(mutation.key()) {
+                self.id_to_key.remove(&old_id);
+                hnsw.remove(old_id);
+            }
+            if let VectorPendingUpdate::Upsert { key, vector } = mutation {
+                let new_id = {
+                    let mut id = self.next_id.lock();
+                    let allocated = *id;
+                    *id += 1;
+                    allocated
+                };
+                self.key_to_id.insert(key.clone(), new_id);
+                self.id_to_key.insert(new_id, key.clone());
+                hnsw.insert(new_id, vector.clone());
             }
         }
-        drop(hnsw);
+    }
 
-        // Clear the read-merge snapshot — committed state is now in the graph.
-        self.pending_snapshot.clear();
-        self.pending_removed.clear();
-
-        count
+    /// Clears the snapshot entry and removal mark of each drained key that has
+    /// no newer mutation queued, under the `pending` mutex. A key queued again
+    /// after the drain keeps the entry or mark its newer mutation set, until
+    /// that mutation is itself committed.
+    fn settle_drained(&self, drained: &[VectorPendingUpdate]) {
+        let queue = self.pending.lock();
+        let queued: HashSet<&str> = queue.iter().map(VectorPendingUpdate::key).collect();
+        for mutation in drained {
+            let key = mutation.key();
+            if !queued.contains(key) {
+                self.pending_snapshot.remove(key);
+                self.pending_removed.remove(key);
+            }
+        }
     }
 
     /// Returns the number of queued mutations not yet applied to the graph.
@@ -438,13 +459,30 @@ impl VectorIndex {
     // Private helpers
     // ------------------------------------------------------------------
 
-    /// Computes the BLAKE3-256 hash of the raw f32 byte representation of a vector.
-    ///
-    /// The vector is serialized as little-endian f32 values (matching `Vector::to_f32_bytes_le`).
-    /// The 32-byte hash is stored in `blake3_seen` for duplicate detection.
-    fn blake3_hash(vector: &SharedVector) -> [u8; 32] {
-        let bytes = vector.vector().to_f32_bytes_le();
-        *blake3::hash(&bytes).as_bytes()
+    /// Whether `key` has an entry. Called with the `pending` mutex held.
+    fn has_entry(&self, key: &str) -> bool {
+        self.pending_snapshot.contains_key(key)
+            || (self.key_to_id.contains_key(key) && !self.pending_removed.contains(key))
+    }
+
+    /// Queues an upsert of `key`. Called with the `pending` mutex held.
+    fn queue_upsert(&self, queue: &mut Vec<VectorPendingUpdate>, key: &str, vector: SharedVector) {
+        self.pending_snapshot
+            .insert(key.to_string(), vector.clone());
+        self.pending_removed.remove(key);
+        queue.push(VectorPendingUpdate::Upsert {
+            key: key.to_string(),
+            vector,
+        });
+    }
+
+    /// Queues a removal of `key`. Called with the `pending` mutex held.
+    fn queue_remove(&self, queue: &mut Vec<VectorPendingUpdate>, key: &str) {
+        self.pending_snapshot.remove(key);
+        self.pending_removed.insert(key.to_string());
+        queue.push(VectorPendingUpdate::Remove {
+            key: key.to_string(),
+        });
     }
 
     /// Estimated memory usage of the HNSW graph in bytes.
@@ -552,57 +590,42 @@ impl Index for VectorIndex {
     }
 
     fn insert(&self, key: &str, value: &rmpv::Value) {
-        let Some(vector) = self.decode_vector_from_record(value) else {
-            return;
-        };
-
-        // BLAKE3 deduplication: skip HNSW insertion if this exact vector bytes
-        // have already been committed. `DashSet::insert` returns `false` if the
-        // hash was already present — the atomic check-and-insert prevents
-        // duplicate HNSW nodes even under concurrent writes.
-        if self.dedup_enabled {
-            let hash = Self::blake3_hash(&vector);
-            if !self.blake3_seen.insert(hash) {
-                // Duplicate — update the pending_snapshot so reads return the key,
-                // but skip HNSW mutation (the vector data is already in the graph).
-                self.pending_snapshot
-                    .insert(key.to_string(), vector.clone());
-                self.pending_removed.remove(key);
-                return;
-            }
+        // Decoded before the lock: only the entry check and the queue changes
+        // need the `pending` hold.
+        let vector = self.decode_vector_from_record(value);
+        let mut queue = self.pending.lock();
+        match vector {
+            Some(vector) => self.queue_upsert(&mut queue, key, vector),
+            // A value without a usable vector must not leave the key indexed
+            // under its previous vector; a key without an entry stays without
+            // one, so a load of such a record queues nothing.
+            None if self.has_entry(key) => self.queue_remove(&mut queue, key),
+            None => {}
         }
+    }
 
-        self.pending_snapshot
-            .insert(key.to_string(), vector.clone());
-        self.pending_removed.remove(key);
-        self.pending.lock().push(VectorPendingUpdate::Upsert {
-            key: key.to_string(),
-            vector,
-        });
+    fn insert_if_absent(&self, key: &str, value: &rmpv::Value) {
+        let vector = self.decode_vector_from_record(value);
+        let mut queue = self.pending.lock();
+        if self.has_entry(key) {
+            return;
+        }
+        if let Some(vector) = vector {
+            self.queue_upsert(&mut queue, key, vector);
+        }
     }
 
     fn update(&self, key: &str, _old_value: &rmpv::Value, new_value: &rmpv::Value) {
-        // HNSW has no native update; delegate to insert (commit path does
-        // remove-then-insert for keys already in the graph).
         self.insert(key, new_value);
     }
 
-    fn remove(&self, key: &str, old_value: &rmpv::Value) {
-        // Evict the BLAKE3 hash when the vector is removed, so the same bytes
-        // can be inserted again after deletion.
-        if self.dedup_enabled {
-            if let Some(vector) = self.decode_vector_from_record(old_value) {
-                let hash = Self::blake3_hash(&vector);
-                self.blake3_seen.remove(&hash);
-            }
-            // If old_value doesn't decode (e.g. Nil), we cannot evict the hash,
-            // but the HNSW node is still removed via the pending queue.
-        }
-        self.pending_snapshot.remove(key);
-        self.pending_removed.insert(key.to_string());
-        self.pending.lock().push(VectorPendingUpdate::Remove {
-            key: key.to_string(),
-        });
+    fn remove(&self, key: &str, _old_value: &rmpv::Value) {
+        self.remove_key(key);
+    }
+
+    fn remove_key(&self, key: &str) {
+        let mut queue = self.pending.lock();
+        self.queue_remove(&mut queue, key);
     }
 
     fn clear(&self) {
@@ -621,7 +644,6 @@ impl Index for VectorIndex {
         self.id_to_key.clear();
         self.pending_snapshot.clear();
         self.pending_removed.clear();
-        self.blake3_seen.clear();
     }
 
     fn lookup_eq(&self, _value: &rmpv::Value) -> HashSet<String> {
@@ -653,129 +675,109 @@ impl Index for VectorIndex {
 // Startup rebuild support
 // ------------------------------------------------------------------
 
-/// Minimal descriptor for re-registering and rebuilding a vector index at startup.
+/// Re-registers the vector indexes of `descriptors` and fills every vector
+/// index registered in `index_factory` from the stored records, before
+/// `set_ready()` (`TG-VEC-001`).
 ///
-/// Populated from the on-disk `VectorIndexDescriptor` JSON (loaded in `module.rs`).
-/// Keeping a separate struct avoids a circular import between the service domain
-/// layer and the network handler layer.
-pub struct VectorRebuildSpec {
-    /// Map name this index belongs to.
-    pub map_name: String,
-    /// Attribute name this index covers.
-    pub attribute: String,
-    /// User-visible index name.
-    pub index_name: String,
-    /// Vector dimensionality.
-    pub dimension: u16,
-    /// Distance metric.
-    pub distance_metric: DistanceMetric,
-    /// HNSW m parameter.
-    pub hnsw_m: u16,
-    /// HNSW `ef_construction` parameter.
-    pub hnsw_ef_construction: u32,
-    /// BLAKE3 dedup setting.
-    pub dedup_enabled: bool,
-}
-
-/// Re-registers and rebuilds vector indexes from persisted record stores after restart.
+/// 1. Each descriptor's index is registered with
+///    `add_vector_index_with_params`, which replaces an index already
+///    registered for that attribute by a fresh one.
+/// 2. Every map whose registry holds a vector index is rebuilt, so indexes
+///    registered before the call (the `_embedding` indexes of
+///    `TOPGUN_VECTOR_MAPS`) are filled too.
+/// 3. A `BackfillProgress { rebuild_type: StartupRebuild }` entry is written
+///    per `(map, attribute)` before the scan.
+/// 4. One [`RecordStoreFactory::scan_merged`] per map reads the stored and
+///    resident live rows (expired ones are not emitted, `TG-TTL-001`) without
+///    loading them into memory. Each `Lww` row is given to every vector index
+///    of the map with `insert_if_absent`, so a write the observer applied
+///    during the scan is not replaced by its older stored row.
+/// 5. After a successful scan each index is committed and marked `done`. A
+///    failed scan logs one `ERROR`, leaves `done == false` and the next map is
+///    rebuilt; a failure never aborts the boot.
 ///
-/// Called from `NetworkModule::serve` after `start()` binds the TCP listener and
-/// before `set_ready()` is called, ensuring vector indexes are fully populated
-/// before `VECTOR_SEARCH` requests are served.
-///
-/// For each descriptor:
-/// 1. Re-registers the vector index via `registry.add_vector_index_with_params`.
-/// 2. Creates a `BackfillProgress` entry with `rebuild_type = StartupRebuild` before iterating.
-/// 3. Iterates all partition stores for the map and inserts records containing
-///    the attribute of matching dimension into the rebuilt index.
-/// 4. Calls `commit_pending()` to flush all buffered mutations into the HNSW graph.
-/// 5. Sets `done = true` on the progress entry.
-/// 6. Logs progress at INFO level.
-///
-/// Missing `store_factory` records are a no-op (clean first start).
-///
-/// The `backfill_progress` `Arc` is the same instance stored in `AppState` —
-/// progress entries written here are visible through the admin status endpoint
-/// immediately after `set_ready()`.
+/// The `backfill_progress` `Arc` is the one in `AppState`, so the entries are
+/// visible through the admin status endpoint after `set_ready()`.
 pub async fn rebuild_from_store(
     index_factory: &crate::service::domain::index::mutation_observer::IndexObserverFactory,
     store_factory: &RecordStoreFactory,
-    specs: &[VectorRebuildSpec],
+    descriptors: &[VectorIndexDescriptor],
     backfill_progress: &Arc<DashMap<(String, String), Arc<BackfillProgress>>>,
 ) {
-    // Emit the Arc strong_count at entry — confirms shared-identity invariant
-    // (count must be >= 2: one in the caller, one passed into this function).
-    tracing::debug!(
-        "rebuild_from_store: Arc strong_count={}",
-        Arc::strong_count(backfill_progress)
-    );
-
-    if specs.is_empty() {
-        return;
+    for d in descriptors {
+        index_factory
+            .register_map(&d.map_name)
+            .add_vector_index_with_params(
+                d.attribute.clone(),
+                d.index_name.clone(),
+                d.dimension,
+                d.distance_metric,
+                d.hnsw_m,
+                d.hnsw_ef_construction,
+                d.dedup_enabled,
+            );
     }
 
-    for spec in specs {
+    for (map_name, _) in index_factory.all_index_stats() {
+        let Some(registry) = index_factory.get_registry(&map_name) else {
+            continue;
+        };
+        let indexes = registry.all_vector_indexes();
+        if indexes.is_empty() {
+            continue;
+        }
         let started = std::time::Instant::now();
-        let registry = index_factory.register_map(&spec.map_name);
+        let progress: Vec<Arc<BackfillProgress>> = indexes
+            .iter()
+            .map(|vi| {
+                let entry = Arc::new(BackfillProgress {
+                    total: AtomicU64::new(0),
+                    processed: AtomicU64::new(0),
+                    done: AtomicBool::new(false),
+                    rebuild_type: RebuildType::StartupRebuild,
+                });
+                backfill_progress
+                    .insert((map_name.clone(), vi.attribute.clone()), Arc::clone(&entry));
+                entry
+            })
+            .collect();
 
-        let vi = registry.add_vector_index_with_params(
-            spec.attribute.clone(),
-            spec.index_name.clone(),
-            spec.dimension,
-            spec.distance_metric,
-            spec.hnsw_m,
-            spec.hnsw_ef_construction,
-            spec.dedup_enabled,
-        );
-
-        // Create progress entry before iteration so operators can observe liveness
-        // through the backfill status endpoint during the rebuild window.
-        // `total = 0` here because a cheap pre-count API is not available on RecordStore;
-        // `processed` provides a liveness signal, and `done = true` marks completion.
-        let progress = Arc::new(BackfillProgress {
-            total: AtomicU64::new(0),
-            processed: AtomicU64::new(0),
-            done: AtomicBool::new(false),
-            rebuild_type: RebuildType::StartupRebuild,
-        });
-        backfill_progress.insert(
-            (spec.map_name.clone(), spec.attribute.clone()),
-            Arc::clone(&progress),
-        );
-
-        let stores = store_factory.get_all_for_map(&spec.map_name);
-        let mut count: u64 = 0;
-
-        for store in &stores {
-            store.for_each_boxed(
-                &mut |key, record| {
-                    if let RecordValue::Lww { ref value, .. } = record.value {
-                        let rmpv_val = crate::service::domain::predicate::value_to_rmpv(value);
-                        vi.insert(key, &rmpv_val);
-                        count += 1;
-                        progress.processed.fetch_add(1, Ordering::Relaxed);
+        let scanned = store_factory
+            .scan_merged(&map_name, &mut |key, value| {
+                for entry in &progress {
+                    entry.total.fetch_add(1, Ordering::Relaxed);
+                }
+                if let RecordValue::Lww { value, .. } = value {
+                    let value = crate::service::domain::predicate::value_to_rmpv(value);
+                    for (vi, entry) in indexes.iter().zip(&progress) {
+                        vi.insert_if_absent(key, &value);
+                        entry.processed.fetch_add(1, Ordering::Relaxed);
                     }
-                },
-                false,
+                }
+            })
+            .await;
+        if let Err(error) = scanned {
+            tracing::error!(
+                map = %map_name,
+                error = %error,
+                "vector index rebuild: the scan of the map failed; its vector indexes are not marked done"
             );
+            continue;
         }
 
-        // Flush all buffered inserts into the HNSW graph.
-        let flushed = vi.commit_pending();
-        // Mark done after commit_pending() — operators see done=true only when
-        // the HNSW graph is fully populated and ready to serve queries.
-        progress.done.store(true, Ordering::Release);
-        let elapsed = started.elapsed();
-
-        info!(
-            map = %spec.map_name,
-            attribute = %spec.attribute,
-            index_name = %spec.index_name,
-            count = count,
-            flushed = flushed,
-            elapsed_ms = elapsed.as_millis(),
-            "vector index rebuilt from store"
-        );
+        for (vi, entry) in indexes.iter().zip(&progress) {
+            let flushed = vi.commit_pending();
+            entry.done.store(true, Ordering::Release);
+            info!(
+                map = %map_name,
+                attribute = %vi.attribute,
+                index_name = %vi.index_name,
+                count = entry.processed.load(Ordering::Relaxed),
+                flushed = flushed,
+                elapsed_ms = started.elapsed().as_millis(),
+                "vector index rebuilt from store"
+            );
+        }
     }
 }
 
@@ -785,17 +787,26 @@ pub async fn rebuild_from_store(
 
 #[cfg(test)]
 mod rebuild_tests {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use dashmap::DashMap;
-    use topgun_core::vector::DistanceMetric;
+    use topgun_core::types::Value;
+    use topgun_core::vector::{DistanceMetric, Vector};
 
-    use super::VectorRebuildSpec;
-    use crate::network::handlers::admin_types::{BackfillProgress, RebuildType};
+    use crate::network::handlers::admin_types::{
+        BackfillProgress, RebuildType, VectorIndexDescriptor,
+    };
     use crate::service::domain::index::mutation_observer::IndexObserverFactory;
+    use crate::service::domain::index::Index;
     use crate::storage::datastores::NullDataStore;
+    use crate::storage::expiry::ManualClock;
+    use crate::storage::factory::test_store::TestStore;
+    use crate::storage::factory::ttl_fixture::{expired_now, ts, wall_stamp, TTL_MS};
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
+    use crate::storage::record::RecordValue;
 
     fn make_store_factory() -> Arc<RecordStoreFactory> {
         Arc::new(RecordStoreFactory::new(
@@ -809,6 +820,55 @@ mod rebuild_tests {
         Arc::new(DashMap::new())
     }
 
+    fn descriptor(map: &str, attribute: &str) -> VectorIndexDescriptor {
+        VectorIndexDescriptor {
+            map_name: map.to_string(),
+            attribute: attribute.to_string(),
+            index_name: "emb_idx".to_string(),
+            dimension: 4,
+            distance_metric: DistanceMetric::Cosine,
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            dedup_enabled: true,
+            created_at: "2026-11-06T00:00:00Z".to_string(),
+        }
+    }
+
+    /// A stored LWW row whose `attribute` holds `data` as an encoded vector.
+    fn row(attribute: &str, data: &[f32], millis: u64, ttl_ms: Option<u64>) -> RecordValue {
+        let bytes = rmp_serde::to_vec_named(&Vector::F32(data.to_vec())).unwrap();
+        RecordValue::Lww {
+            value: Value::Map(BTreeMap::from([(
+                attribute.to_string(),
+                Value::Bytes(bytes),
+            )])),
+            timestamp: ts(millis),
+            ttl_ms,
+        }
+    }
+
+    fn rmpv_record(attribute: &str, data: &[f32]) -> rmpv::Value {
+        let bytes = rmp_serde::to_vec_named(&Vector::F32(data.to_vec())).unwrap();
+        rmpv::Value::Map(vec![(
+            rmpv::Value::from(attribute),
+            rmpv::Value::Binary(bytes),
+        )])
+    }
+
+    fn keys_at(results: &[(String, f64)], max_distance: f64) -> Vec<String> {
+        let mut keys: Vec<String> = results
+            .iter()
+            .filter(|(_, d)| *d <= max_distance)
+            .map(|(k, _)| k.clone())
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    fn store_factory_over(store: Arc<TestStore>) -> RecordStoreFactory {
+        RecordStoreFactory::new(StorageConfig::default(), store, Vec::new())
+    }
+
     #[tokio::test]
     async fn rebuild_from_store_no_op_when_empty_specs() {
         let factory = IndexObserverFactory::new();
@@ -817,6 +877,7 @@ mod rebuild_tests {
         // Should complete without error and without registering any indexes.
         super::rebuild_from_store(&factory, &store_factory, &[], &bp).await;
         assert_eq!(factory.all_index_stats().len(), 0);
+        assert!(bp.is_empty());
     }
 
     #[tokio::test]
@@ -824,17 +885,13 @@ mod rebuild_tests {
         let factory = IndexObserverFactory::new();
         let store_factory = make_store_factory();
         let bp = make_backfill_progress();
-        let specs = vec![VectorRebuildSpec {
-            map_name: "users".to_string(),
-            attribute: "_embedding".to_string(),
-            index_name: "emb_idx".to_string(),
-            dimension: 4,
-            distance_metric: DistanceMetric::Cosine,
-            hnsw_m: 16,
-            hnsw_ef_construction: 200,
-            dedup_enabled: true,
-        }];
-        super::rebuild_from_store(&factory, &store_factory, &specs, &bp).await;
+        super::rebuild_from_store(
+            &factory,
+            &store_factory,
+            &[descriptor("users", "_embedding")],
+            &bp,
+        )
+        .await;
         // Index should be registered even with no records (empty store).
         let registry = factory
             .get_registry("users")
@@ -848,37 +905,25 @@ mod rebuild_tests {
 
     #[tokio::test]
     async fn rebuild_from_store_progress_done_and_startup_rebuild_type() {
-        use std::sync::atomic::Ordering;
-
         let factory = IndexObserverFactory::new();
         let store_factory = make_store_factory();
         let bp = make_backfill_progress();
 
-        let specs = vec![VectorRebuildSpec {
-            map_name: "users".to_string(),
-            attribute: "_embedding".to_string(),
-            index_name: "emb_idx".to_string(),
-            dimension: 4,
-            distance_metric: DistanceMetric::Cosine,
-            hnsw_m: 16,
-            hnsw_ef_construction: 200,
-            dedup_enabled: true,
-        }];
+        super::rebuild_from_store(
+            &factory,
+            &store_factory,
+            &[descriptor("users", "_embedding")],
+            &bp,
+        )
+        .await;
 
-        super::rebuild_from_store(&factory, &store_factory, &specs, &bp).await;
-
-        // Progress entry must exist after rebuild.
         let entry = bp
             .get(&("users".to_string(), "_embedding".to_string()))
             .expect("progress entry must be created by rebuild_from_store");
-
-        // done must be set after commit_pending() (AC #11).
         assert!(
             entry.done.load(Ordering::Acquire),
             "done must be true after rebuild_from_store returns"
         );
-
-        // rebuild_type must be StartupRebuild (AC #12).
         assert_eq!(
             entry.rebuild_type,
             RebuildType::StartupRebuild,
@@ -886,21 +931,247 @@ mod rebuild_tests {
         );
     }
 
-    #[test]
-    fn rebuild_spec_fields_preserved() {
-        let spec = VectorRebuildSpec {
-            map_name: "m".to_string(),
-            attribute: "a".to_string(),
-            index_name: "n".to_string(),
-            dimension: 8,
-            distance_metric: DistanceMetric::Euclidean,
-            hnsw_m: 12,
-            hnsw_ef_construction: 100,
-            dedup_enabled: false,
+    /// Stored rows that are not resident are indexed, and the rebuild loads
+    /// nothing into the record stores.
+    #[tokio::test]
+    async fn rebuild_indexes_stored_non_resident_records() {
+        let store = Arc::new(TestStore::new(2));
+        let vectors = [
+            ("a", [1.0, 0.0, 0.0, 0.0]),
+            ("b", [0.0, 1.0, 0.0, 0.0]),
+            ("c", [0.0, 0.0, 1.0, 0.0]),
+            ("d", [0.0, 0.0, 0.0, 1.0]),
+            ("e", [1.0, 1.0, 0.0, 0.0]),
+        ];
+        for (key, data) in &vectors {
+            store.put_row("m", key, row("embedding", data, 1_000, None));
+        }
+        let store_factory = store_factory_over(Arc::clone(&store));
+        let factory = IndexObserverFactory::new();
+        let bp = make_backfill_progress();
+
+        super::rebuild_from_store(
+            &factory,
+            &store_factory,
+            &[descriptor("m", "embedding")],
+            &bp,
+        )
+        .await;
+
+        let vi = factory
+            .get_registry("m")
+            .and_then(|r| r.get_vector_index("embedding"))
+            .expect("index registered");
+        assert_eq!(vi.entry_count(), 5);
+        for (key, data) in &vectors {
+            let hits = vi.search_nearest(data, 1, 16);
+            assert_eq!(keys_at(&hits, 1e-6), vec![(*key).to_string()]);
+        }
+        let resident: usize = store_factory
+            .get_all_for_map("m")
+            .iter()
+            .map(|s| s.size())
+            .sum();
+        assert_eq!(resident, 0, "the rebuild must not load records into memory");
+        let entry = bp.get(&("m".to_string(), "embedding".to_string())).unwrap();
+        assert_eq!(entry.total.load(Ordering::Relaxed), 5);
+        assert_eq!(entry.processed.load(Ordering::Relaxed), 5);
+        assert!(entry.done.load(Ordering::Acquire));
+    }
+
+    /// Two stored records with the same vector are two entries after the
+    /// rebuild's single commit.
+    #[tokio::test]
+    async fn rebuild_indexes_keys_that_share_a_vector() {
+        let store = Arc::new(TestStore::new(100));
+        store.put_row(
+            "m",
+            "s1",
+            row("embedding", &[0.5, 0.5, 0.0, 0.0], 1_000, None),
+        );
+        store.put_row(
+            "m",
+            "s2",
+            row("embedding", &[0.5, 0.5, 0.0, 0.0], 1_000, None),
+        );
+        let store_factory = store_factory_over(store);
+        let factory = IndexObserverFactory::new();
+
+        super::rebuild_from_store(
+            &factory,
+            &store_factory,
+            &[descriptor("m", "embedding")],
+            &make_backfill_progress(),
+        )
+        .await;
+
+        let vi = factory
+            .get_registry("m")
+            .and_then(|r| r.get_vector_index("embedding"))
+            .unwrap();
+        assert_eq!(vi.entry_count(), 2);
+        let hits = vi.search_nearest(&[0.5, 0.5, 0.0, 0.0], 2, 16);
+        assert_eq!(keys_at(&hits, 1e-6), vec!["s1", "s2"]);
+    }
+
+    /// A row expired at the factory clock is not indexed (TG-TTL-001).
+    #[tokio::test]
+    async fn rebuild_skips_expired_rows() {
+        let store = Arc::new(TestStore::new(100));
+        let stamp = wall_stamp();
+        store.put_row(
+            "m",
+            "gone",
+            row("embedding", &[1.0, 0.0, 0.0, 0.0], stamp, Some(TTL_MS)),
+        );
+        store.put_row(
+            "m",
+            "kept",
+            row("embedding", &[0.0, 1.0, 0.0, 0.0], stamp, None),
+        );
+        let store_factory =
+            store_factory_over(store).with_clock(Arc::new(ManualClock::new(expired_now())));
+        let factory = IndexObserverFactory::new();
+
+        super::rebuild_from_store(
+            &factory,
+            &store_factory,
+            &[descriptor("m", "embedding")],
+            &make_backfill_progress(),
+        )
+        .await;
+
+        let vi = factory
+            .get_registry("m")
+            .and_then(|r| r.get_vector_index("embedding"))
+            .unwrap();
+        assert_eq!(vi.entry_count(), 1);
+        let hits = vi.search_nearest(&[1.0, 0.0, 0.0, 0.0], 5, 16);
+        assert!(hits.iter().all(|(k, _)| k != "gone"), "{hits:?}");
+        assert_eq!(keys_at(&hits, 1.5), vec!["kept"]);
+    }
+
+    /// An index registered without a descriptor (the `_embedding` index of
+    /// `TOPGUN_VECTOR_MAPS`) is filled by a rebuild with no descriptors.
+    #[tokio::test]
+    async fn rebuild_backfills_indexes_registered_before_the_call() {
+        let store = Arc::new(TestStore::new(100));
+        store.put_row(
+            "docs",
+            "a",
+            row("_embedding", &[1.0, 0.0, 0.0, 0.0], 1_000, None),
+        );
+        store.put_row(
+            "docs",
+            "b",
+            row("_embedding", &[0.0, 1.0, 0.0, 0.0], 1_000, None),
+        );
+        let store_factory = store_factory_over(store);
+        let factory = IndexObserverFactory::new();
+        factory
+            .register_map("docs")
+            .add_vector_index("_embedding", 4, DistanceMetric::Cosine);
+        let bp = make_backfill_progress();
+
+        super::rebuild_from_store(&factory, &store_factory, &[], &bp).await;
+
+        let vi = factory
+            .get_registry("docs")
+            .and_then(|r| r.get_vector_index("_embedding"))
+            .unwrap();
+        assert_eq!(vi.entry_count(), 2);
+        let entry = bp
+            .get(&("docs".to_string(), "_embedding".to_string()))
+            .expect("progress entry");
+        assert!(entry.done.load(Ordering::Acquire));
+    }
+
+    /// Counts the ERROR events logged while it is the default subscriber.
+    #[derive(Clone, Default)]
+    struct ErrorCount(Arc<AtomicUsize>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorCount {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::ERROR {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// A map whose scan fails logs one ERROR and stays `done == false`; the
+    /// other maps are rebuilt.
+    #[tokio::test]
+    async fn rebuild_failed_scan_leaves_done_false_and_continues() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let store = Arc::new(TestStore::new(100));
+        for map in ["bad", "good1", "good2"] {
+            store.put_row(
+                map,
+                "a",
+                row("embedding", &[1.0, 0.0, 0.0, 0.0], 1_000, None),
+            );
+        }
+        store.fail_scans("bad", true);
+        let store_factory = store_factory_over(store);
+        let factory = IndexObserverFactory::new();
+        let bp = make_backfill_progress();
+        let descriptors = ["bad", "good1", "good2"].map(|m| descriptor(m, "embedding"));
+
+        let errors = ErrorCount::default();
+        let guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(errors.clone()));
+        super::rebuild_from_store(&factory, &store_factory, &descriptors, &bp).await;
+        drop(guard);
+
+        assert_eq!(errors.0.load(Ordering::SeqCst), 1, "one ERROR line");
+        let done = |map: &str| {
+            bp.get(&(map.to_string(), "embedding".to_string()))
+                .expect("progress entry")
+                .done
+                .load(Ordering::Acquire)
         };
-        assert_eq!(spec.dimension, 8);
-        assert_eq!(spec.hnsw_m, 12);
-        assert!(!spec.dedup_enabled);
+        assert!(!done("bad"));
+        for map in ["good1", "good2"] {
+            assert!(done(map), "{map} must be rebuilt after the failed map");
+            let vi = factory
+                .get_registry(map)
+                .and_then(|r| r.get_vector_index("embedding"))
+                .unwrap();
+            assert_eq!(vi.entry_count(), 1);
+        }
+    }
+
+    /// A key that an index registered without a descriptor already holds
+    /// under a newer vector keeps it when the scan meets its older stored row.
+    #[tokio::test]
+    async fn rebuild_keeps_a_newer_entry() {
+        let store = Arc::new(TestStore::new(100));
+        store.put_row(
+            "docs",
+            "k",
+            row("_embedding", &[1.0, 0.0, 0.0, 0.0], 1_000, None),
+        );
+        let store_factory = store_factory_over(store);
+        let factory = IndexObserverFactory::new();
+        let registry = factory.register_map("docs");
+        registry.add_vector_index("_embedding", 4, DistanceMetric::Cosine);
+        let vi = registry.get_vector_index("_embedding").unwrap();
+        vi.insert("k", &rmpv_record("_embedding", &[0.0, 1.0, 0.0, 0.0]));
+
+        super::rebuild_from_store(&factory, &store_factory, &[], &make_backfill_progress()).await;
+
+        assert_eq!(vi.entry_count(), 1);
+        let hits = vi.search_nearest(&[0.0, 1.0, 0.0, 0.0], 1, 16);
+        assert_eq!(
+            keys_at(&hits, 1e-6),
+            vec!["k"],
+            "the newer vector must survive the rebuild: {hits:?}"
+        );
     }
 }
 
@@ -1069,7 +1340,7 @@ mod tests {
         assert!(idx.lookup_contains("token").is_empty());
     }
 
-    // --- G3: stats, dedup, optimize ---
+    // --- stats, optimize ---
 
     #[test]
     fn stats_returns_correct_vector_count() {
@@ -1108,72 +1379,214 @@ mod tests {
         assert!(stats.memory_bytes > 0, "memory_bytes should be nonzero");
     }
 
-    #[test]
-    fn dedup_prevents_duplicate_hnsw_insert() {
-        // Two inserts with identical vectors — only one should go to HNSW.
-        let idx = VectorIndex::new("embedding", "emb_idx", 4, DistanceMetric::Cosine, true);
-        let record = make_record(&[1.0, 0.0, 0.0, 0.0]);
-        idx.insert("k1", &record);
-        idx.commit_pending();
-        assert_eq!(idx.entry_count(), 1);
-
-        // Second insert of same bytes to a different key — dedup should skip HNSW.
-        idx.insert("k2", &record);
-        idx.commit_pending();
-        // Dedup fires: k2 gets the same BLAKE3 hash as k1, HNSW insert is skipped.
-        // key_to_id has k1 only; entry_count stays 1.
-        assert_eq!(
-            idx.entry_count(),
-            1,
-            "dedup should prevent second HNSW insert"
-        );
+    fn hits(idx: &VectorIndex, query: &[f32], k: usize) -> Vec<(String, f64)> {
+        idx.search_nearest(query, k, 16)
     }
 
-    #[test]
-    fn dedup_disabled_allows_duplicate_hnsw_insert() {
-        let idx = VectorIndex::new("embedding", "emb_idx", 4, DistanceMetric::Cosine, false);
-        let record = make_record(&[1.0, 0.0, 0.0, 0.0]);
-        idx.insert("k1", &record);
-        idx.commit_pending();
-        assert_eq!(idx.entry_count(), 1);
+    fn returns(idx: &VectorIndex, query: &[f32], key: &str) -> bool {
+        hits(idx, query, 16).iter().any(|(k, _)| k == key)
+    }
 
-        // With dedup disabled, second insert proceeds to HNSW.
-        idx.insert("k2", &record);
-        // pending queue should have 1 upsert for k2.
+    fn returns_at_zero(idx: &VectorIndex, query: &[f32], key: &str) -> bool {
+        hits(idx, query, 16)
+            .iter()
+            .any(|(k, d)| k == key && d.abs() < 1e-6)
+    }
+
+    fn no_vector() -> rmpv::Value {
+        rmpv::Value::Map(vec![(rmpv::Value::from("other"), rmpv::Value::from("x"))])
+    }
+
+    fn wrong_dimension() -> rmpv::Value {
+        make_record(&[1.0, 0.0])
+    }
+
+    const V1: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+    const V2: [f32; 4] = [0.0, 1.0, 0.0, 0.0];
+    const V2B: [f32; 4] = [0.0, 0.0, 1.0, 0.0];
+    const V3: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+    const V4: [f32; 4] = [1.0, 1.0, 0.0, 0.0];
+
+    #[test]
+    fn vector_remove_key_removes_without_old_value() {
+        // Committed entry.
+        let idx = make_index();
+        idx.insert("k", &make_record(&V1));
+        idx.commit_pending();
+        idx.remove_key("k");
+        assert!(!returns(&idx, &V1, "k"));
         assert_eq!(idx.pending_count(), 1);
+        idx.commit_pending();
+        assert_eq!(idx.entry_count(), 0);
+        assert!(!returns(&idx, &V1, "k"));
+
+        // Pending entry.
+        let idx = make_index();
+        idx.insert("k", &make_record(&V1));
+        idx.remove_key("k");
+        assert!(!returns(&idx, &V1, "k"));
+        idx.commit_pending();
+        assert_eq!(idx.entry_count(), 0);
+        assert!(!returns(&idx, &V1, "k"));
     }
 
-    #[tokio::test]
-    async fn concurrent_dedup_same_embedding_yields_single_entry() {
-        use std::sync::Arc;
-
-        let idx = Arc::new(VectorIndex::new(
-            "embedding",
-            "emb_idx",
-            4,
-            DistanceMetric::Cosine,
-            true,
-        ));
-        let record = make_record(&[1.0, 0.0, 0.0, 0.0]);
-
-        // Two concurrent writers with the same vector bytes.
-        let idx1 = Arc::clone(&idx);
-        let r1 = record.clone();
-        let t1 = tokio::task::spawn_blocking(move || idx1.insert("k1", &r1));
-        let idx2 = Arc::clone(&idx);
-        let r2 = record.clone();
-        let t2 = tokio::task::spawn_blocking(move || idx2.insert("k2", &r2));
-
-        let _ = tokio::join!(t1, t2);
+    #[test]
+    fn vector_insert_if_absent_keeps_the_existing_entry() {
+        // Pending entry.
+        let idx = make_index();
+        idx.insert("k", &make_record(&V1));
+        idx.insert_if_absent("k", &make_record(&V2));
+        assert_eq!(idx.pending_count(), 1);
+        assert!(returns_at_zero(&idx, &V1, "k"));
         idx.commit_pending();
+        assert!(returns_at_zero(&idx, &V1, "k"));
+        assert!(!returns_at_zero(&idx, &V2, "k"));
 
-        // DashSet::insert is atomic — only one writer succeeds in reserving the hash.
-        // entry_count should be 1.
-        assert_eq!(
-            idx.entry_count(),
-            1,
-            "concurrent dedup: only one HNSW node expected"
-        );
+        // Committed entry.
+        idx.insert_if_absent("k", &make_record(&V2));
+        assert_eq!(idx.pending_count(), 0);
+        idx.commit_pending();
+        assert!(returns_at_zero(&idx, &V1, "k"));
+        assert_eq!(idx.entry_count(), 1);
+
+        // A removed key has no entry: insert_if_absent inserts it.
+        idx.remove_key("k");
+        idx.insert_if_absent("k", &make_record(&V2));
+        assert!(returns_at_zero(&idx, &V2, "k"));
+        idx.commit_pending();
+        assert!(returns_at_zero(&idx, &V2, "k"));
+        assert_eq!(idx.entry_count(), 1);
+    }
+
+    #[test]
+    fn vector_insert_without_a_decodable_vector_drops_the_entry() {
+        for value in [no_vector(), wrong_dimension()] {
+            let idx = make_index();
+            idx.insert("k", &make_record(&V1));
+            idx.insert("other", &make_record(&V2));
+            idx.commit_pending();
+            let before = idx.entry_count();
+
+            idx.insert("k", &value);
+            assert!(!returns(&idx, &V1, "k"), "{value:?}");
+            assert_eq!(idx.pending_count(), 1, "{value:?}");
+            idx.commit_pending();
+            assert_eq!(idx.entry_count(), before - 1, "{value:?}");
+            assert!(!returns(&idx, &V1, "k"), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn vector_insert_without_a_decodable_vector_is_a_no_op_without_an_entry() {
+        let idx = make_index();
+        for value in [no_vector(), wrong_dimension()] {
+            idx.insert("k", &value);
+            idx.insert_if_absent("k", &value);
+        }
+        assert_eq!(idx.pending_count(), 0);
+        assert!(!idx.pending_removed.contains("k"));
+    }
+
+    #[test]
+    fn vector_same_vector_under_two_keys_gets_two_entries() {
+        let idx = make_index();
+        idx.insert("a", &make_record(&V1));
+        idx.insert("b", &make_record(&V1));
+        idx.commit_pending();
+        assert_eq!(idx.entry_count(), 2);
+        let found: Vec<String> = hits(&idx, &V1, 2)
+            .into_iter()
+            .filter(|(_, d)| d.abs() < 1e-6)
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(found.len(), 2, "{found:?}");
+    }
+
+    #[test]
+    fn vector_remove_key_then_same_vector_under_a_new_key_is_committed() {
+        let idx = make_index();
+        idx.insert("a", &make_record(&V1));
+        idx.commit_pending();
+        idx.remove_key("a");
+        idx.commit_pending();
+        idx.insert("b", &make_record(&V1));
+        idx.commit_pending();
+        assert_eq!(idx.entry_count(), 1);
+        assert!(idx.key_to_id.contains_key("b"));
+    }
+
+    /// Mutations queued between the drain and the settle of a commit keep
+    /// their snapshot entries and removal marks until they are committed.
+    #[test]
+    fn vector_commit_keeps_the_marks_of_mutations_queued_after_the_drain() {
+        let idx = make_index();
+        idx.insert("k1", &make_record(&V1));
+        idx.commit_pending();
+        idx.insert("k2", &make_record(&V2));
+
+        let drained = idx.take_pending();
+        assert_eq!(drained.len(), 1);
+        idx.insert("k3", &make_record(&V3));
+        idx.remove_key("k1");
+        idx.insert("k2", &make_record(&V2B));
+        idx.apply_to_graph(&drained);
+        idx.insert("k4", &make_record(&V4));
+        idx.settle_drained(&drained);
+
+        assert!(returns_at_zero(&idx, &V3, "k3"));
+        assert!(returns_at_zero(&idx, &V4, "k4"));
+        assert!(!returns(&idx, &V1, "k1"));
+        assert!(returns_at_zero(&idx, &V2B, "k2"));
+        assert_eq!(idx.pending_count(), 4);
+
+        idx.commit_pending();
+        assert_eq!(idx.entry_count(), 3);
+        assert!(!idx.key_to_id.contains_key("k1"));
+        assert!(idx.pending_snapshot.is_empty());
+        assert!(idx.pending_removed.is_empty());
+    }
+
+    /// Stress check, no mutant: whatever the interleaving, a racing load never
+    /// replaces the write.
+    #[test]
+    fn vector_concurrent_insert_if_absent_and_insert_leave_the_insert() {
+        for _ in 0..200 {
+            let idx = Arc::new(make_index());
+            let loader = {
+                let idx = Arc::clone(&idx);
+                std::thread::spawn(move || {
+                    for _ in 0..20 {
+                        idx.insert_if_absent("k", &make_record(&V1));
+                    }
+                })
+            };
+            idx.insert("k", &make_record(&V2));
+            loader.join().unwrap();
+            assert!(returns_at_zero(&idx, &V2, "k"));
+            idx.commit_pending();
+            assert!(returns_at_zero(&idx, &V2, "k"));
+            assert_eq!(idx.entry_count(), 1);
+        }
+    }
+
+    /// The vector field the TS client writes: msgpackr
+    /// `Uint8Array.from(pack({ type: 'f32', data: vectorToBytes([1, 0.5, -2, 0.25]) }))`
+    /// (msgpackr 1.11.8), the encoding `vector-search-restart.test.ts` uses.
+    #[test]
+    fn decodes_a_vector_field_encoded_by_the_ts_client() {
+        const FIXTURE: [u8; 35] = [
+            0xde, 0x00, 0x02, 0xa4, 0x74, 0x79, 0x70, 0x65, 0xa3, 0x66, 0x33, 0x32, 0xa4, 0x64,
+            0x61, 0x74, 0x61, 0xc4, 0x10, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x3f, 0x00,
+            0x00, 0x00, 0xc0, 0x00, 0x00, 0x80, 0x3e,
+        ];
+        let record = rmpv::Value::Map(vec![(
+            rmpv::Value::from("embedding"),
+            rmpv::Value::Binary(FIXTURE.to_vec()),
+        )]);
+        let decoded = make_index()
+            .decode_vector_from_record(&record)
+            .expect("the TS encoding decodes");
+        assert_eq!(*decoded.vector(), Vector::F32(vec![1.0, 0.5, -2.0, 0.25]));
     }
 
     #[tokio::test]
