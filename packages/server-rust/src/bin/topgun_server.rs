@@ -96,11 +96,10 @@ use topgun_server::storage::impls::StorageConfig;
 use topgun_server::storage::map_data_store::MapDataStore;
 use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
 use topgun_server::storage::mutation_observer::MutationObserver;
-use topgun_server::storage::record::reconcile_tombstone_bytes;
 use topgun_server::storage::sealing::{
     Encryption, EncryptionMode, FileKeyProvider, MasterKeyProvider,
 };
-use topgun_server::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
+use topgun_server::storage::wal::WalFsyncPolicy;
 
 // ---------------------------------------------------------------------------
 // Storage backend selection
@@ -932,60 +931,18 @@ async fn main() -> anyhow::Result<()> {
     // skipped (mirrors the write-behind skip: buffering a no-op store is wasteful).
     let wal_opt: Option<WalBootstrap> = match backend {
         StorageBackend::Redb => {
-            match WalWriter::open_over_store(
+            match WalBootstrap::open_over_store(
                 write_behind_config.wal_dir.clone(),
                 write_behind_config.wal_fsync_policy,
                 Arc::clone(&inner_data_store),
-            ) {
-                Ok(writer) => {
-                    // Run recovery through the inner store (before write-behind wrap)
-                    // so replay bypasses the in-memory buffer and does not generate
-                    // new WAL entries. Recovery must complete before set_ready().
-                    let recovery = WalRecovery::new(Arc::clone(&writer), Vec::new());
-                    if let Err(err) = recovery.run(Arc::clone(&inner_data_store)).await {
-                        // Mid-file WAL corruption is fatal: refuse to start rather
-                        // than silently serving potentially stale data.
-                        eprintln!("FATAL: WAL recovery failed: {err}");
-                        std::process::exit(1);
-                    }
-
-                    // Re-baseline the OR-Map tombstone-bytes gauge from the now-
-                    // recovered durable keyspace, before the listener accepts any
-                    // connections, so the scraped metric survives kill -9 restarts
-                    // instead of sawtoothing back to 0 on every process start.
-                    // Clone the Arc here because `inner_data_store` is moved into
-                    // the write-behind wrap below — the walk reads through the clone.
-                    // The returned total is the gauge value the walk just set, which
-                    // the bootstrap has no use for — the side effect IS the point here.
-                    let _reconciled_total =
-                        reconcile_tombstone_bytes(Arc::clone(&inner_data_store)).await;
-
-                    // Seed the live sequence counter to one past the highest
-                    // sequence ever durably observed. Computed AFTER recovery so
-                    // it sees the watermarks `mark_applied` advanced, and while
-                    // `writer` is still the concrete `WalWriter` (the method is
-                    // not on the `Wal` trait). A seed at or below a watermark lets
-                    // a post-restart write reuse a number the recovery filter
-                    // drops — the durability defect this guards against.
-                    let sequence_start = match writer.max_observed_sequence().await {
-                        Ok(max) => max + 1,
-                        Err(err) => {
-                            eprintln!("FATAL: WAL max-sequence scan failed: {err}");
-                            std::process::exit(1);
-                        }
-                    };
-
-                    let wal: Arc<dyn Wal> = writer;
-                    Some(WalBootstrap {
-                        wal,
-                        sequence_start,
-                    })
-                }
+            )
+            .await
+            {
+                Ok(bootstrap) => Some(bootstrap),
                 Err(err) => {
-                    // Cannot create the WAL directory alongside the durable store.
-                    // Emit a startup error and exit rather than silently proceeding
-                    // without durability guarantees.
-                    eprintln!("FATAL: Cannot initialise WAL: {err}");
+                    // Refuse to start rather than proceed without durability
+                    // guarantees or serve potentially stale data.
+                    eprintln!("FATAL: {err}");
                     std::process::exit(1);
                 }
             }
