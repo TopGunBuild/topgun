@@ -1,9 +1,12 @@
 //! Open-loop write load at a fixed aggregate rate.
 //!
-//! Every batch has a scheduled send instant fixed before the run starts, and
-//! its ack latency is measured from that instant, not from the moment it was
-//! actually sent: a stalled server then shows up as latency instead of as a
-//! silently lower offered load (coordinated omission).
+//! Every batch has a scheduled send instant fixed before the run starts. A
+//! batch sent late because the server answered its predecessor late has its
+//! ack latency measured from that instant, not from the moment it was actually
+//! sent: a stalled server then shows up as latency instead of as a silently
+//! lower offered load (coordinated omission). A batch the generator reached in
+//! time is measured from its send, so the generator's own timer lag is not
+//! charged to the server.
 //!
 //! Each connection keeps exactly one batch in flight. The server's `ERROR`
 //! frame names no operation and answers to several in-flight batches on one
@@ -490,6 +493,22 @@ fn remaining_window_batches(schedule: &Schedule, conn: usize, mut k: u64) -> u64
     }
 }
 
+/// Where a batch's ack latency starts: the instant from which the batch
+/// waited because of the server. A batch reached before its scheduled instant
+/// waited only for the generator's own timer (tokio rounds a sleep up to the
+/// next millisecond), which belongs in the wake lag, not in the server's
+/// figure, so it counts from its actual send. A batch reached after its
+/// instant waited for the server's late previous answer, so it counts from
+/// the scheduled instant (coordinated-omission correction); lateness caused by
+/// a starved generator is then charged to the server, the conservative side.
+fn latency_origin(reached_early: bool, scheduled: Instant, sent_at: Instant) -> Instant {
+    if reached_early {
+        sent_at
+    } else {
+        scheduled
+    }
+}
+
 /// Drives one connection through the schedule.
 #[allow(clippy::too_many_lines)]
 async fn drive_connection(
@@ -518,16 +537,15 @@ async fn drive_connection(
             tally.scheduled += unsent * batch;
             break;
         }
-        if now < scheduled {
+        let reached_early = now < scheduled;
+        if reached_early {
             tokio::time::sleep_until(scheduled).await;
             if in_window {
                 tally
                     .wake_lag
                     .saturating_record(micros(Instant::now() - scheduled).max(1));
             }
-        } else {
-            // Counted over every send, warm-up included: a generator so far
-            // behind that it never reaches the window must still show it.
+        } else if in_window {
             let behind = micros(now - scheduled);
             tally.behind_schedule_sends += 1;
             tally.max_behind_us = tally.max_behind_us.max(behind);
@@ -568,9 +586,9 @@ async fn drive_connection(
             tally.sent += batch;
             tally.anomalies += answer.anomalies;
             if terminal {
-                tally
-                    .ack
-                    .saturating_record(micros(answered_at - scheduled).max(1));
+                tally.ack.saturating_record(
+                    micros(answered_at - latency_origin(reached_early, scheduled, sent_at)).max(1),
+                );
                 tally
                     .service
                     .saturating_record(micros(answered_at - sent_at).max(1));
@@ -978,7 +996,7 @@ impl OpenLoopReport {
             self.achieved.sent_ops_per_sec
         );
         println!(
-            "ack latency (from scheduled instant) us: p50 {} p99 {} p99.9 {} max {}",
+            "ack latency (CO-corrected) us: p50 {} p99 {} p99.9 {} max {}",
             a.p50, a.p99, a.p999, a.max
         );
         println!(
@@ -1262,10 +1280,20 @@ pub fn classify_full_rejection_and_partial_ack() {
     assert_eq!(stray.anomalies, 1);
 }
 
+/// A batch reached before its instant counts from its actual send, so the
+/// generator's timer lag stays out of the ack latency; a batch reached after
+/// its instant counts from the scheduled instant.
+pub fn latency_origin_early_from_send_late_from_schedule() {
+    let scheduled = Instant::now();
+    let sent_at = scheduled + Duration::from_micros(900);
+    assert_eq!(latency_origin(true, scheduled, sent_at), sent_at);
+    assert_eq!(latency_origin(false, scheduled, sent_at), scheduled);
+}
+
 /// Runs every check, each isolated so that one failing check does not hide the
 /// others, and prints a libtest-shaped summary. Returns the exit code.
 pub fn run_self_tests() -> i32 {
-    let checks: [(&str, fn()); 2] = [
+    let checks: [(&str, fn()); 3] = [
         (
             "classify_partial_reject_then_error_counts_each_op_once",
             classify_partial_reject_then_error_counts_each_op_once,
@@ -1273,6 +1301,10 @@ pub fn run_self_tests() -> i32 {
         (
             "classify_full_rejection_and_partial_ack",
             classify_full_rejection_and_partial_ack,
+        ),
+        (
+            "latency_origin_early_from_send_late_from_schedule",
+            latency_origin_early_from_send_late_from_schedule,
         ),
     ];
     let mut failed = Vec::new();

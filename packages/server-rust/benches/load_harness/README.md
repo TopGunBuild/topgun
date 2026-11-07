@@ -37,7 +37,7 @@ In-process load testing harness for TopGun's Rust server. It boots a full server
 | Scenario name | What it measures |
 |--------------|-----------------|
 | `throughput` | Full request path: WebSocket → msgpack → partition dispatcher → CRDT merge |
-| `open_loop` | The same path at a fixed offered rate, latency from the scheduled instant (see [Open loop](#open-loop)) |
+| `open_loop` | The same path at a fixed offered rate, coordinated-omission-corrected latency (see [Open loop](#open-loop)) |
 | `vector_search` | HNSW/hybrid-search hot path: directly calls `VectorIndex` and `HybridSearchEngine`, bypassing the WebSocket layer |
 
 ### When to use which scenario
@@ -170,9 +170,9 @@ On first ever run (placeholder zeros in baseline), the assertion emits `[no base
 
 **Schedule.** With rate `R`, batch size `B` and `C` connections, connection `i` sends its `k`-th batch at `t0 + i·(B/R) + k·(C·B/R)`, so the aggregate schedule is uniform. The schedule never skips: a connection behind schedule sends its next due batch at once until it has caught up. Batches scheduled in the first `--warmup` seconds are sent but excluded from every statistic; the measurement window is the next `--duration` seconds, by **scheduled** instant. After the window nothing new is scheduled; window batches not yet sent keep being sent until the window end plus `--ack-timeout-ms`.
 
-**Coordinated-omission correction.** `ack_latency_us` is measured from each batch's scheduled instant to its answer, so a stalled server raises the reported latency instead of lowering the offered load. `service_latency_us` (from the actual send) is diagnostic.
+**Coordinated-omission correction.** `ack_latency_us` starts at the instant from which a batch waited because of the server. A batch the connection reached **after** its scheduled instant (its previous answer came late) is measured from the scheduled instant, so a stalled server raises the reported latency instead of lowering the offered load. A batch reached **before** its instant is measured from its actual send: the generator sleeps until the instant and tokio rounds every sleep up to the next millisecond, and that timer lag is the generator's, not the server's — it goes to `generator.wake_lag_us` and to the `generator_saturated` rule instead. Lateness caused by a starved generator rather than by the server is charged to the server: the reported figure errs on the worse side, never the better. `service_latency_us` (from the actual send, every batch) is diagnostic.
 
-**One batch in flight per connection.** The server's `ERROR` frame names no operation, and answers to several in-flight batches on one connection can arrive in any order; with one outstanding batch every frame answers that batch, so refusals are counted exactly. The consequence: a connection whose answer arrives after its next scheduled instant sends late; that lateness is inside `ack_latency_us` and is reported as `generator.behind_schedule_sends` / `max_behind_us`, which count every send, warm-up included, so a generator that never gets through the warm-up backlog still shows it (the wake-lag histogram covers window batches only). Size `--connections` so that `C·B/R` is well above the expected p99.9 — e.g. `--connections 1000` at `--rate 20000`, `--batch-size 10` gives each connection 500 ms per batch. The server also limits each connection's data plane to 20 000 ops/s with a burst of 40 000 (`network/config.rs`); if `rate / connections` exceeds it, the best-effort `ERROR 429` may be dropped, the batch counts as unanswered and its connection is abandoned — a generator-setup error, not a server result. Keep `rate / connections` well under that limit.
+**One batch in flight per connection.** The server's `ERROR` frame names no operation, and answers to several in-flight batches on one connection can arrive in any order; with one outstanding batch every frame answers that batch, so refusals are counted exactly. The consequence: a connection whose answer arrives after its next scheduled instant sends late; that lateness is inside `ack_latency_us` and is reported, for window batches, as `generator.behind_schedule_sends` / `max_behind_us`. Size `--connections` so that `C·B/R` is well above the expected p99.9 — e.g. `--connections 1000` at `--rate 20000`, `--batch-size 10` gives each connection 500 ms per batch. The server also limits each connection's data plane to 20 000 ops/s with a burst of 40 000 (`network/config.rs`); if `rate / connections` exceeds it, the best-effort `ERROR 429` may be dropped, the batch counts as unanswered and its connection is abandoned — a generator-setup error, not a server result. Keep `rate / connections` well under that limit.
 
 **Refusal accounting.** Per batch, frames are read until a terminal one: each `OP_REJECTED` refuses its op permanently (counted under its `code`); `OP_ACK` without `results` acks every op not already refused; `OP_ACK` with `results` acks exactly the listed ops; `ERROR {code}` refuses transiently every op not already refused by an `OP_REJECTED`; a batch whose every op is rejected ends at the last `OP_REJECTED`. No answer within `--ack-timeout-ms` makes the batch's ops `unanswered` and abandons the connection (its later batches count as `unsent`). **The harness never retries:** a refused write is not re-sent and never counted as acked, so the offered load stays fixed. `refused_transient` means **"answered by `ERROR`, not acknowledged"**, whatever the reason — the `ERROR` frame carries a transient failure (the write-behind capacity refusal is code `500`, overload is `429`) and also a non-attributed permanent batch error, and the server sends it even when some ops of the batch were applied. It is therefore **not** "not applied": write-behind depth and `store_bytes` may include writes counted as `refused_transient`. `refusals.transient_by_code` tells the kinds apart.
 
@@ -186,7 +186,7 @@ The identities `scheduled = sent + unsent` and `sent = acked + refused_permanent
 
 | Reason | When |
 |---|---|
-| `generator_saturated` | wake-lag p99.9 (µs) > `--max-wake-lag-ms` × 1000: the client could not keep its own schedule while it was free, so its lag is inside the reported latency (with `--max-wake-lag-ms 0` any positive lag trips it) |
+| `generator_saturated` | wake-lag p99.9 (µs) > `--max-wake-lag-ms` × 1000: the client could not keep its own schedule while it was free, so the load reached the server later and less evenly than scheduled (with `--max-wake-lag-ms 0` any positive lag trips it) |
 | `load_not_offered` | `ops.unsent > 0`: part of the scheduled load never reached the server |
 | `unanswered_batches` | `ops.unanswered > 0`: the latency tail is censored |
 | `store_failed` | the durable store's failure watch holds a failure at the end of the run (text in `validity.store_failure`) |
@@ -206,7 +206,7 @@ Refusals do not invalidate a run: they are a result. Nothing here is a threshold
   ops: { scheduled, sent, unsent, acked, refused_permanent, refused_transient, unanswered },
   refusals: { transient_by_code: {"<code>": n}, permanent_by_code: {"<code>": n},
               sample_messages: {"<code>": [up to 5 distinct ERROR messages]} },
-  ack_latency_us: { count, p50, p90, p99, p999, max, mean },      // from the scheduled instant
+  ack_latency_us: { count, p50, p90, p99, p999, max, mean },      // CO-corrected: from the scheduled instant when sent late, else from the send
   service_latency_us: { count, p50, p90, p99, p999, max, mean },  // from the actual send
   generator: { wake_lag_us: { count, p50, p99, p999, max }, behind_schedule_sends, max_behind_us,
                connections_abandoned, protocol_anomalies, max_wake_lag_ms },
@@ -260,7 +260,7 @@ Each spread figure is `{ min, max, mean, relative_spread }` over the arm's runs 
 
 ## Known limits
 
-- Client and server share the host's CPUs, and both runtimes default to `available_parallelism` workers. `generator_saturated` detects a starved generator; it does not remove the shared-CPU effect.
+- Client and server share the host's CPUs, and both runtimes default to `available_parallelism` workers. `generator_saturated` sees a starved generator only while it still reaches batches early enough to sleep; a generator so starved that it reaches every batch late leaves the wake-lag histogram empty, and that shows only as `load_not_offered` or as `generator.behind_schedule_sends` / `max_behind_us` — with one batch in flight it cannot be told apart from a slow server. Neither removes the shared-CPU effect.
 - Loopback only, no TLS.
 - No Prometheus recorder is installed; the binary pays the recorder's cost on every metric and the harness does not.
 - Wiring differences from the binary that remain: no tombstone frontier and no prune task (a PUT-only LWW load creates no OR tombstones); no RBAC policy evaluator; the `SearchObserverFactory` batch parameters differ (16 ms / 100 here).
