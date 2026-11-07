@@ -507,8 +507,10 @@ fn build_embedding_setup() -> Result<EmbeddingSetup, String> {
 /// Synchronous, but it must run on a multi-thread tokio runtime: the Merkle seed
 /// drives its async read through `block_in_place`, which panics elsewhere.
 ///
-/// Returns the `FATAL:` line of a malformed embedding configuration as `Err`,
-/// before any task is spawned; the caller prints it and exits.
+/// # Errors
+///
+/// The `FATAL:` line of a malformed embedding configuration, returned before
+/// any task is spawned; the caller prints it and exits.
 #[allow(clippy::too_many_lines)]
 pub fn build_services(
     node_id: String,
@@ -995,6 +997,11 @@ pub fn build_services(
 /// Starts what must run before the router serves: the tombstone epoch rebuild,
 /// then the eviction orchestrator and the expiry sweep. Returns the sweep's
 /// handle, which the caller waits on (bounded) at stop.
+///
+/// # Errors
+///
+/// The `FATAL:` line of a failed tombstone epoch rebuild, returned before
+/// anything is spawned; the caller prints it and exits.
 pub async fn start_background(
     services: &Services,
     eviction: EvictionConfig,
