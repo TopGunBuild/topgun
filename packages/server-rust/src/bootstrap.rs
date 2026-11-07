@@ -253,8 +253,8 @@ impl ObserverFactory for SearchObserverFactory {
         map_name: &str,
         _partition_id: u32,
     ) -> Option<Arc<dyn MutationObserver>> {
-        // Use fast batch parameters for integration tests to keep test latency low.
-        // Production uses SearchConfig::default() (100ms / 500 threshold).
+        // The shipped server runs these batch parameters, not SearchConfig::default()
+        // (100 ms / 500); their cost on the write path is weighed separately.
         let config = SearchConfig {
             batch_interval_ms: 16,
             batch_flush_threshold: 100,
@@ -1015,9 +1015,9 @@ pub async fn start_background(
     // so nothing is prune-eligible — and no stale high cursor prematurely licenses a
     // prune of a freshly-numbered epoch — until every tracked client re-confirms.
     //
-    // This MUST run in the pre-listener window: strictly BEFORE set_ready()/serve()
-    // below, so `durable_epoch_watermark` stays 0 (prune dark, gate transparent)
-    // until the rebuild completes and a reconnecting client never observes a
+    // This MUST run in the pre-listener window: strictly BEFORE the caller's
+    // set_ready()/serve(), so `durable_epoch_watermark` stays 0 (prune dark, gate
+    // transparent) until the rebuild completes and a reconnecting client never observes a
     // half-rebuilt index. It runs on the live serving path (the router
     // `into_router` builds — not a secondary router, so the dual-router trap does
     // not apply). A scan failure is FATAL: continuing with an
