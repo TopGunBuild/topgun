@@ -7728,7 +7728,7 @@ mod tests {
     fn prune_task_supervision_is_wired() {
         const SOURCE: &str = include_str!("crdt.rs");
         const IMPL_SOURCE: &str = include_str!("../../tombstone_frontier_impl.rs");
-        const BIN_SOURCE: &str = include_str!("../../bin/topgun_server.rs");
+        const WIRING_SOURCE: &str = include_str!("../../bootstrap.rs");
 
         let release = concat!("release_prune", "_task(");
         let lease_impl = concat!("impl Drop for ", "PruneTaskLease");
@@ -7773,19 +7773,19 @@ mod tests {
         }
 
         // (d) — the spawn site checks its result and warns.
-        let bin = normalized(production_half(BIN_SOURCE));
+        let wiring = normalized(production_half(WIRING_SOURCE));
         assert!(
-            !bin.contains(concat!("let _prune", "_task")),
+            !wiring.contains(concat!("let _prune", "_task")),
             "a discarding binding is how the only failure this call can report \
              became invisible"
         );
         let call = concat!("spawn_prune", "_task(");
         assert_eq!(
-            bin.matches(call).count(),
+            wiring.matches(call).count(),
             1,
-            "the bin spawns the prune task exactly once"
+            "the server's shared wiring spawns the prune task exactly once"
         );
-        let after_call = &bin[bin.find(call).expect("the call was just counted")..];
+        let after_call = &wiring[wiring.find(call).expect("the call was just counted")..];
         let window = &after_call[..after_call.find("let ").unwrap_or(after_call.len())];
         let none_at = window
             .find(".is_none()")

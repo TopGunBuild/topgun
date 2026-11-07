@@ -86,7 +86,7 @@ pub fn tombstone_bytes() -> u64 {
 ///
 /// This is the **only** absolute-set path for the gauge. It exists exclusively
 /// for the one-time startup reconciliation that runs after WAL recovery
-/// completes (see [`reconcile_tombstone_bytes`], which the server bootstrap
+/// completes (see `reconcile_tombstone_bytes`, which the server bootstrap
 /// invokes at that point): the process-local
 /// [`ProcessGauge`](super::tombstone_gauge::ProcessGauge) atomic and both exported Prometheus series
 /// (`topgun_ormap_tombstone_bytes_total` and `topgun_ormap_tombstone_bytes`)
@@ -128,7 +128,7 @@ pub fn set_tombstone_bytes(total: u64) {
 /// evicted (TG-OR-008). It is charged from the OR algebra the write path
 /// already runs, under the key's writer, in the same closures that charge
 /// [`add_tombstone_bytes`]; eviction and rehydration never move it; the boot
-/// walk [`reconcile_tombstone_bytes`] sets it absolutely ([`set_live_census`]).
+/// walk `reconcile_tombstone_bytes` sets it absolutely ([`set_live_census`]).
 /// `/metrics` exports it as `topgun_ormap_live_entries`,
 /// `topgun_ormap_live_tag_bytes` and `topgun_ormap_live_census_seeded`.
 ///
@@ -148,7 +148,7 @@ pub fn sub_live_census(entries: u64, tag_bytes: u64) {
 }
 
 /// Sets the process live census to absolute values and marks it seeded; boot
-/// only, from [`reconcile_tombstone_bytes`]. See [`add_live_census`].
+/// only, from `reconcile_tombstone_bytes`. See [`add_live_census`].
 pub fn set_live_census(entries: u64, tag_bytes: u64) {
     with_sink(|s| s.set_live(entries, tag_bytes));
 }
@@ -180,7 +180,7 @@ pub(crate) fn sub_live_census_of(value: &RecordValue) {
 /// bytes are deliberate, not a leak.
 ///
 /// Kept a pure `count -> Option<message>` decision so it is unit-testable
-/// independently of [`reconcile_tombstone_bytes`], the boot walk that supplies
+/// independently of `reconcile_tombstone_bytes`, the boot walk that supplies
 /// the count.
 #[must_use]
 pub fn legacy_tombstone_warning(legacy_row_count: u64) -> Option<String> {
@@ -217,10 +217,10 @@ pub fn legacy_tombstone_warning(legacy_row_count: u64) -> Option<String> {
 /// a durability invariant, so a failed reconcile degrades to today's
 /// process-local behavior rather than aborting startup.
 ///
-/// `pub` because its consumer is the server bootstrap in
-/// `src/bin/topgun_server.rs` — a separate `[[bin]]` target that links this
-/// crate externally and therefore cannot see `pub(crate)` items. The boot-only
-/// contract travels with that exposure and binds every caller: like
+/// Its callers are all in this crate: `WalBootstrap::open_over_store`, which runs
+/// it once after WAL recovery, the WAL test driver, the prefix-watermark proptest
+/// and this module's own tests. It is `pub(crate)` so no caller outside the crate
+/// can run it on a hot path. The boot-only contract binds every caller: like
 /// [`set_tombstone_bytes`], which it re-baselines through, it MUST NEVER be
 /// called on the hot read/write path — only once, at boot, before the listener
 /// accepts connections. It is not a general-purpose runtime API: it is a full
@@ -236,7 +236,7 @@ pub fn legacy_tombstone_warning(legacy_row_count: u64) -> Option<String> {
 /// `list_maps` on the redb backend enumerates primary partitions only, so backup
 /// tombstones are excluded — correct for the single-node soak/demo tier this
 /// targets; a future cluster/backup-accounting revisit is out of scope here.
-pub async fn reconcile_tombstone_bytes(store: Arc<dyn MapDataStore>) -> u64 {
+pub(crate) async fn reconcile_tombstone_bytes(store: Arc<dyn MapDataStore>) -> u64 {
     // Every `tracing` site below keeps the `topgun_server::bootstrap` target even
     // though this walk now lives in the library rather than the binary: the target
     // string is an operator-facing boot-log filter contract, so re-targeting it to

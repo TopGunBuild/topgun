@@ -10,6 +10,7 @@
 // threshold and the lint fires with no span on generated code. Test-only.
 #![cfg_attr(test, allow(clippy::large_stack_arrays))]
 
+pub mod bootstrap;
 pub mod cluster;
 pub mod dag;
 pub mod network;
