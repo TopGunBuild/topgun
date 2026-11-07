@@ -13109,10 +13109,13 @@ mod tests {
                 crate::storage::datastores::EngineMapDataStore::open(Arc::new(engine))
                     .expect("store open"),
             );
-            let bootstrap =
-                WalBootstrap::open_over_store(dir.path().join("wal"), WalFsyncPolicy::None, inner)
-                    .await
-                    .expect("a fresh durable store bootstraps");
+            // The bootstrap seeds the tombstone gauge, which the process gauge
+            // refuses once any other test in this process has added to it.
+            let (bootstrap, _) = crate::storage::tombstone_gauge::with_isolated_gauge(
+                WalBootstrap::open_over_store(dir.path().join("wal"), WalFsyncPolicy::None, inner),
+            )
+            .await;
+            let bootstrap = bootstrap.expect("a fresh durable store bootstraps");
             assert_eq!(bootstrap.sequence_start, 1);
         }
 
