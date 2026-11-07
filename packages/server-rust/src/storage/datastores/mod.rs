@@ -39,4 +39,4 @@ pub use null::NullDataStore;
 pub use redb::RedbDataStore;
 #[cfg(feature = "redb")]
 pub use redb_engine::RedbKvEngine;
-pub use write_behind::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
+pub use write_behind::{BackgroundFailure, WalBootstrap, WriteBehindConfig, WriteBehindDataStore};

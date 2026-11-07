@@ -2083,6 +2083,104 @@ pub struct WalBootstrap {
     pub sequence_start: u64,
 }
 
+/// Which step of the WAL bootstrap failed.
+///
+/// `Display` is the server's startup line without its `FATAL: ` prefix, so the
+/// binary prints exactly the line operators already grep for.
+#[derive(Debug)]
+pub enum WalBootstrapError {
+    /// The WAL could not be opened over the store.
+    Open(anyhow::Error),
+    /// Replaying the WAL into the store failed.
+    Recovery(anyhow::Error),
+    /// Reading the highest sequence the WAL and the store have seen failed.
+    MaxSequence(anyhow::Error),
+}
+
+impl std::fmt::Display for WalBootstrapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open(e) => write!(f, "Cannot initialise WAL: {e}"),
+            Self::Recovery(e) => write!(f, "WAL recovery failed: {e}"),
+            Self::MaxSequence(e) => write!(f, "WAL max-sequence scan failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for WalBootstrapError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Open(e) | Self::Recovery(e) | Self::MaxSequence(e) => Some(e.as_ref()),
+        }
+    }
+}
+
+impl WalBootstrap {
+    /// Opens the WAL over `inner`, replays it into `inner`, and seeds the live
+    /// sequence counter — the startup sequence of every durable node, in one
+    /// place so the server and the load harness run the same one.
+    ///
+    /// Must run before the node accepts a connection: every write acked before
+    /// the last crash is replayed to the inner store before any client can
+    /// observe stale state.
+    ///
+    /// # Errors
+    ///
+    /// - [`WalBootstrapError::Open`] when the WAL directory cannot be opened
+    ///   over `inner` (including a store that keeps no applied watermark).
+    /// - [`WalBootstrapError::Recovery`] when replay fails, e.g. on mid-file
+    ///   corruption: the node must refuse to start rather than serve
+    ///   potentially stale data.
+    /// - [`WalBootstrapError::MaxSequence`] when the highest observed sequence
+    ///   cannot be read, so no safe seed exists.
+    pub async fn open_over_store(
+        wal_dir: PathBuf,
+        fsync_policy: WalFsyncPolicy,
+        inner: Arc<dyn MapDataStore>,
+    ) -> Result<Self, WalBootstrapError> {
+        let writer = crate::storage::wal::WalWriter::open_over_store(
+            wal_dir,
+            fsync_policy,
+            Arc::clone(&inner),
+        )
+        .map_err(WalBootstrapError::Open)?;
+
+        // Run recovery through the inner store (before the write-behind wrap)
+        // so replay bypasses the in-memory buffer and does not generate new
+        // WAL entries.
+        crate::storage::wal::WalRecovery::new(Arc::clone(&writer), Vec::new())
+            .run(Arc::clone(&inner))
+            .await
+            .map_err(WalBootstrapError::Recovery)?;
+
+        // Re-baseline the OR-Map tombstone-bytes gauge from the now-recovered
+        // durable keyspace, before any connection is accepted, so the scraped
+        // metric survives kill -9 restarts instead of sawtoothing back to 0 on
+        // every process start. The returned total is the gauge value the walk
+        // just set; the side effect is the point.
+        let _reconciled_total =
+            crate::storage::record::reconcile_tombstone_bytes(Arc::clone(&inner)).await;
+
+        // Seed the live sequence counter to one past the highest sequence ever
+        // durably observed. Computed AFTER recovery so it sees the watermarks
+        // `mark_applied` advanced, and while `writer` is still the concrete
+        // `WalWriter` (the method is not on the `Wal` trait). A seed at or
+        // below a watermark lets a post-restart write reuse a number the
+        // recovery filter drops.
+        let sequence_start = writer
+            .max_observed_sequence()
+            .await
+            .map_err(WalBootstrapError::MaxSequence)?
+            + 1;
+
+        let wal: Arc<dyn Wal> = writer;
+        Ok(Self {
+            wal,
+            sequence_start,
+        })
+    }
+}
+
 impl WriteBehindDataStore {
     /// Creates a new write-behind data store wrapping `inner`.
     ///
@@ -12994,6 +13092,45 @@ mod tests {
             .filter(|event| event.says(BACKLOG_CLEARED))
             .count();
         assert_eq!((warnings, cleared), (0, 0));
+    }
+
+    /// The bootstrap opens, recovers and seeds over a fresh durable store, and
+    /// refuses a store with no applied watermark at the open step with the
+    /// server's startup wording.
+    #[tokio::test]
+    async fn wal_bootstrap_open_over_store_stages() {
+        #[cfg(feature = "redb")]
+        {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let engine =
+                crate::storage::datastores::RedbKvEngine::open(&dir.path().join("engine.redb"))
+                    .expect("engine open");
+            let inner: Arc<dyn MapDataStore> = Arc::new(
+                crate::storage::datastores::EngineMapDataStore::open(Arc::new(engine))
+                    .expect("store open"),
+            );
+            // The bootstrap seeds the tombstone gauge, which the process gauge
+            // refuses once any other test in this process has added to it.
+            let (bootstrap, _) = crate::storage::tombstone_gauge::with_isolated_gauge(
+                WalBootstrap::open_over_store(dir.path().join("wal"), WalFsyncPolicy::None, inner),
+            )
+            .await;
+            let bootstrap = bootstrap.expect("a fresh durable store bootstraps");
+            assert_eq!(bootstrap.sequence_start, 1);
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let null: Arc<dyn MapDataStore> = Arc::new(crate::storage::datastores::NullDataStore);
+        let Err(err) =
+            WalBootstrap::open_over_store(dir.path().join("wal"), WalFsyncPolicy::None, null).await
+        else {
+            panic!("a store without applied watermarks must be refused");
+        };
+        assert!(matches!(err, WalBootstrapError::Open(_)), "{err:?}");
+        assert!(
+            err.to_string().starts_with("Cannot initialise WAL: "),
+            "{err}"
+        );
     }
 }
 
