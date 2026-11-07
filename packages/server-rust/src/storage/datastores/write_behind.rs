@@ -2107,7 +2107,13 @@ impl std::fmt::Display for WalBootstrapError {
     }
 }
 
-impl std::error::Error for WalBootstrapError {}
+impl std::error::Error for WalBootstrapError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Open(e) | Self::Recovery(e) | Self::MaxSequence(e) => Some(e.as_ref()),
+        }
+    }
+}
 
 impl WalBootstrap {
     /// Opens the WAL over `inner`, replays it into `inner`, and seeds the live
@@ -13087,6 +13093,7 @@ mod tests {
             .count();
         assert_eq!((warnings, cleared), (0, 0));
     }
+
     /// The bootstrap opens, recovers and seeds over a fresh durable store, and
     /// refuses a store with no applied watermark at the open step with the
     /// server's startup wording.
