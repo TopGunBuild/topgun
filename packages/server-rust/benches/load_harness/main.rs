@@ -792,7 +792,7 @@ async fn build_store(
             .map_err(|e| format!("cannot open the redb engine: {e}"))?;
             let store = store_arm::build_durable_store(Arc::new(engine), config)
                 .await
-                .map_err(|e| format!("cannot build the durable store: {e:#}"))?;
+                .map_err(|e| format!("cannot build the durable store: {e}"))?;
             let failure = store.background_failure();
             Ok((store as Arc<dyn MapDataStore>, Some(failure)))
         }
