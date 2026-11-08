@@ -184,4 +184,6 @@ jobs:
           docker buildx imagetools create "${tags[@]}" "${sources[@]}"
 
       - name: Inspect the published image
-        run: docker buildx imagetools inspect ghcr.io/topgunbuild/topgun-server:${{ steps.meta.outputs.version }}
+        # The first tag the metadata step emits; `version` is empty for a v*
+        # tag that is not semver, while the sha tag exists for every tag.
+        run: docker buildx imagetools inspect "$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")"
