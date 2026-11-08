@@ -22,10 +22,10 @@ use super::record::{Record, RecordMetadata, RecordValue};
 ///
 /// [`SlotCell::lock`] is the only way to lock a cell. In debug builds it counts
 /// the cell locks the current thread holds, and every engine entry point that
-/// takes a lock calls [`held_cell_locks::check`], so an engine call made while its own thread
-/// holds a cell lock — which would wait on that lock, or take an entry lock
-/// after a cell lock against the entry → cell order — panics by name instead
-/// of hanging.
+/// takes a lock calls [`held_cell_locks::check`], so an engine call made while
+/// its own thread holds a cell lock — which would wait on that lock, or take an
+/// entry lock after a cell lock against the entry → cell order — panics by
+/// name instead of hanging.
 pub struct SlotCell {
     record: parking_lot::Mutex<Record>,
 }
