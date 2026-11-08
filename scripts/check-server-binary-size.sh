@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-MAX_SIZE_BYTES=$((20 * 1024 * 1024))  # 20 MiB
+MAX_SIZE_BYTES=$((32 * 1024 * 1024))  # 32 MiB: the server links RocksDB (~7 MiB)
 
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then
   echo "usage: $0 <binary> [label]" >&2

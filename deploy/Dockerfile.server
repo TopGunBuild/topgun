@@ -1,6 +1,13 @@
 # deploy/Dockerfile.server
 # Canonical production server image for TopGun (Rust)
+# 1.88 is the minimum Rust version of the rocksdb crate: no headroom below it.
 FROM rust:1.88-bookworm AS builder
+
+# RocksDB is C++ built by the rocksdb crate's build script: bindgen needs
+# libclang, and the C++ compiler is the image's gcc.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends clang libclang-dev && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

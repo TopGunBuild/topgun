@@ -1,0 +1,6 @@
+[env]
+# RocksDB's build script does not define HAVE_FULLFSYNC on macOS, and without it
+# RocksDB's Sync() is a plain fsync, which macOS does not make durable on the
+# device. The cc crate reads this per-target variable for native and
+# cross (zigbuild) builds alike. scripts/check-rocksdb-fullfsync.sh guards it.
+CXXFLAGS_aarch64_apple_darwin = "-DHAVE_FULLFSYNC"

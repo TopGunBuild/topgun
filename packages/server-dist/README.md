@@ -58,7 +58,7 @@ custom build directory to override; an explicit value is never overwritten.
 > **316 kB packed / 1.1 MB unpacked** (v2.1.0). The increase is the Monaco-editor-heavy
 > admin SPA (~991 kB JS + ~40 kB CSS, gzipping to ~298 kB). The SPA ships **only** here in
 > the platform-independent meta package — the per-platform binary packages stay
-> binary-only and well under 20 MB.
+> binary-only and within the 32 MiB size ceiling.
 
 ## Storage
 

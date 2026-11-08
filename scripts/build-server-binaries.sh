@@ -74,6 +74,13 @@ rustup target add aarch64-apple-darwin x86_64-unknown-linux-gnu
 # The published binaries must carry the vendored redb, not the crates.io one.
 bash "${REPO_ROOT}/scripts/check-redb-vendor.sh" --resolve-only
 
+# RocksDB's build script does not define HAVE_FULLFSYNC on macOS, and without it
+# RocksDB's Sync() is a plain fsync, which macOS does not make durable on the
+# device. .cargo/config.toml sets the same variable; the export keeps the flag
+# also when this script runs with another cargo config.
+# scripts/check-rocksdb-fullfsync.sh guards both.
+export CXXFLAGS_aarch64_apple_darwin="-DHAVE_FULLFSYNC"
+
 echo ""
 echo "[1/5] Building darwin-arm64 (aarch64-apple-darwin)..."
 cd "${REPO_ROOT}"
@@ -125,7 +132,7 @@ echo "  All binaries within the size ceiling."
 # ── Build + bundle admin SPA into the meta package ──────────────────────────────
 #
 # The admin SPA ships ONCE, in the platform-independent meta package, NOT in the
-# per-platform binary packages (those stay binary-only and < 20 MB). The bin shim
+# per-platform binary packages (those stay binary-only and within the size ceiling). The bin shim
 # resolves admin-dist/ relative to its own __dirname and injects TOPGUN_ADMIN_DIR
 # so an `npx @topgunbuild/server` user outside the monorepo gets a working admin.
 
@@ -151,7 +158,7 @@ mkdir -p "${ADMIN_META_DIST}"
 cp -R "${ADMIN_SRC_DIST}/." "${ADMIN_META_DIST}/"
 
 # Fail-closed: the published meta package MUST carry the SPA entrypoint, mirroring
-# the < 20 MB binary assertion above. A missing admin-dist/index.html means npm
+# the binary size assertion above. A missing admin-dist/index.html means npm
 # would publish an empty admin again (the exact bug this pipeline step prevents).
 if [ ! -f "${ADMIN_META_DIST}/index.html" ]; then
   echo "ERROR: admin SPA was not copied into the meta package (${ADMIN_META_DIST}/index.html missing)."
