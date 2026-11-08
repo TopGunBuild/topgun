@@ -102,17 +102,17 @@ impl RocksKvEngine {
     /// # Errors
     ///
     /// [`KvError::Broken`] or [`KvError::Other`] as RocksDB reports them
-    /// (also when the directory holds no store and `mode` is not
-    /// [`OpenMode::CreateNew`], and when another engine holds its `LOCK`);
-    /// [`KvError::Other`] without calling RocksDB when `mode` is not
-    /// [`OpenMode::CreateNew`] and `path` is not a directory.
+    /// (also when another engine holds its `LOCK`); [`KvError::Other`]
+    /// without calling RocksDB when `mode` is not [`OpenMode::CreateNew`] and
+    /// `path` holds no store (no `CURRENT` file).
     pub fn open(path: &Path, mode: OpenMode, config: &RocksConfig) -> KvResult<Self> {
-        // RocksDB creates the directory for its info log before it looks at
-        // `create_if_missing`, so an absent one is refused here, where nothing
-        // has been created yet.
-        if mode != OpenMode::CreateNew && !path.is_dir() {
+        // RocksDB creates the directory, its info log and its LOCK before it
+        // looks at `create_if_missing`, and a read-only open reports a missing
+        // store as an I/O error; a path without a store is refused here,
+        // where nothing has been touched yet.
+        if mode != OpenMode::CreateNew && !path.join("CURRENT").is_file() {
             return Err(KvError::Other(anyhow::anyhow!(
-                "{}: no store directory",
+                "{}: holds no store",
                 path.display()
             )));
         }
@@ -334,6 +334,10 @@ impl KvEngine for RocksKvEngine {
 
     /// Syncs the engine WAL, then latches; the files are released when the
     /// engine is dropped. A read-only handle has nothing to sync.
+    ///
+    /// The caller stops writing first: nothing on the write path waits for
+    /// `shutdown`, so the final sync covers only the writes that returned
+    /// before it was called.
     fn shutdown(&self) -> KvResult<()> {
         self.enter()?;
         if !self.read_only {
@@ -615,14 +619,22 @@ mod tests {
         assert!(RocksKvEngine::open(&absent, OpenMode::Existing, &small()).is_err());
         assert!(!absent.exists(), "an Existing open created the directory");
 
-        // A directory that holds no store is not made one.
+        // A directory that holds no store is left as it is, and a read-only
+        // open reports the missing store as no store, not as a broken one.
         let empty = dir.path().join("empty");
         std::fs::create_dir(&empty).unwrap();
-        assert!(RocksKvEngine::open(&empty, OpenMode::Existing, &small()).is_err());
-        assert!(
-            !empty.join("CURRENT").exists(),
-            "an Existing open created a store"
-        );
+        for mode in [OpenMode::Existing, OpenMode::ReadOnly] {
+            match RocksKvEngine::open(&empty, mode, &small()) {
+                Err(KvError::Other(_)) => {}
+                Err(other) => panic!("{mode:?} on an empty directory: {other:?}"),
+                Ok(_) => panic!("{mode:?} opened an empty directory"),
+            }
+            let left: Vec<_> = std::fs::read_dir(&empty)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert!(left.is_empty(), "{mode:?} wrote into it: {left:?}");
+        }
     }
 
     #[test]
