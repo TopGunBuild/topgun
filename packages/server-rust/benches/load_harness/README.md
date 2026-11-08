@@ -267,6 +267,7 @@ Each spread figure is `{ min, max, mean, relative_spread }` over the arm's runs 
 - Every connection sends the client's `PING` every 5 s, as the shipped client does; without it the connection reaper closes connections after 60 s. The ping shares the connection's send lock with the batches, so a batch send can wait for one small `PING` write every 5 s.
 - On macOS a WAL fsync is a full `F_FULLFSYNC` device barrier, so `redb` figures from a Mac are far slower on fsync-bound passes than on Linux and are not comparable to a Linux target host.
 - Subscriber deliveries are not measured: every connection only writes.
+- At 10 000 writes/s the server's eviction tick sets the `null` arm's tail. Every second the tick scans every resident record. In 3 runs of 60 s on an M1 Max, ack p99 / p99.9 averaged 31.2 / 71.9 ms as shipped and 5.5 / 12.1 ms with `TOPGUN_EVICTION_INTERVAL_MS=3600000`. This is a server cost, not a harness one, and it is open as TODO-941.
 
 ## Linux run on a ccx33-class host
 

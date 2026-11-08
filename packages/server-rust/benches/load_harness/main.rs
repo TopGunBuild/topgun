@@ -798,6 +798,8 @@ async fn build_store(
 
 /// The server thread's whole life on its runtime: the binary's single-node
 /// wiring from the shared module, served and stopped in the binary's order.
+// One function on purpose: boot, serve and the stop sequence read top to
+// bottom in the binary's order, which a split into helpers would hide.
 #[allow(clippy::too_many_lines)]
 async fn serve(
     spec: ServerSpec,
