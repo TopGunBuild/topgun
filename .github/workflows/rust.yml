@@ -97,6 +97,9 @@ jobs:
       - name: Check the vendored redb
         run: ./scripts/check-redb-vendor.sh
 
+      - name: Check RocksDB is built with F_FULLFSYNC on macOS
+        run: ./scripts/check-rocksdb-fullfsync.sh
+
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 

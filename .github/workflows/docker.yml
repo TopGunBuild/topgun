@@ -38,52 +38,51 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+  build:
+    # One job per architecture, each on a native runner: the image compiles
+    # RocksDB's C++, which under QEMU emulation of arm64 on an amd64 runner is
+    # many times slower and outlasts the job timeout. Every PR builds and
+    # smoke-tests both images; a release tag also pushes each by digest, and
+    # the merge job below publishes them as one multi-arch tag.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: startsWith(github.ref, 'refs/tags/')
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/topgunbuild/topgun-server
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha,format=short,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build smoke-test image (amd64)
+      - name: Build smoke-test image (${{ matrix.arch }})
         uses: docker/build-push-action@v5
         with:
           context: .
           file: deploy/Dockerfile.server
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           load: true
           push: false
           tags: topgun-server:smoke
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.arch }}
 
       - name: Run smoke test
         run: |
@@ -108,20 +107,81 @@ jobs:
         if: always()
         run: docker rm -f topgun-smoke || true
 
-      - name: Build and push multi-arch image
-        # QEMU emulation of linux/arm64 on an amd64 runner is 5-10x slower than native and
-        # routinely blows past the job timeout on push-to-main (cancelled at 45 min), reddening
-        # the badge while pushing nothing useful for a normal merge. Gate the multi-arch publish
-        # to release tags (v*), where the images are actually consumed. push-to-main and PRs keep
-        # the fast amd64 smoke-test above as the real validation; multi-arch publish runs on tags.
+      - name: Push image by digest
+        # Release tags only: the images are consumed there. The layers come
+        # from the cache the smoke build just filled.
         if: startsWith(github.ref, 'refs/tags/')
+        id: push
         uses: docker/build-push-action@v5
         with:
           context: .
           file: deploy/Dockerfile.server
-          platforms: linux/amd64,linux/arm64
-          push: ${{ startsWith(github.ref, 'refs/tags/') }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=ghcr.io/topgunbuild/topgun-server,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+
+      - name: Export digest
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.push.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    # One multi-arch tag over the per-architecture digests.
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/topgunbuild/topgun-server
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,format=short,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Create and push the multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          tags=()
+          while IFS= read -r tag; do tags+=(-t "$tag"); done < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          sources=()
+          for digest in *; do sources+=("ghcr.io/topgunbuild/topgun-server@sha256:${digest}"); done
+          docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+
+      - name: Inspect the published image
+        run: docker buildx imagetools inspect ghcr.io/topgunbuild/topgun-server:${{ steps.meta.outputs.version }}
