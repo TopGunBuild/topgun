@@ -88,8 +88,9 @@ pub struct RocksStats {
 /// and a snapshot borrows the engine, which owns the database.
 pub struct RocksKvEngine {
     db: DB,
-    /// Kept for the statistics tickers; the cache and the write buffer
-    /// manager it names are kept alive by the database.
+    /// Only the tests read the statistics tickers through it; the cache and
+    /// the write buffer manager it names are kept alive by the database.
+    #[cfg(test)]
     options: Options,
     read_only: bool,
     shut: AtomicBool,
@@ -123,6 +124,7 @@ impl RocksKvEngine {
         .map_err(kv_error)?;
         Ok(Self {
             db,
+            #[cfg(test)]
             options,
             read_only: mode == OpenMode::ReadOnly,
             shut: AtomicBool::new(false),
