@@ -87,13 +87,13 @@ For exact tool signatures and return shapes, see the [MCP reference](/docs/refer
 
 ## Scoping which maps an agent can touch
 
-By default the MCP server exposes every map the connected client can read. Restrict the surface with the `TOPGUN_ALLOWED_MAPS` env var (comma-separated):
+By default the MCP server exposes every map the connected client can read. Restrict the surface with the `TOPGUN_MAPS` env var (comma-separated):
 
 ```json
 {
   "env": {
     "TOPGUN_URL": "ws://localhost:8080",
-    "TOPGUN_ALLOWED_MAPS": "todos,notes,public_settings"
+    "TOPGUN_MAPS": "todos,notes,public_settings"
   }
 }
 ```

@@ -161,7 +161,15 @@ By default the app runs in local-only mode — data persists in IndexedDB and wo
 1. Uncomment the `serverUrl` line in the client init above.
 2. Start the TopGun server. Two paths:
 
-**Using the CLI (recommended — works from any directory once the server binary is present):**
+**Zero-install path (recommended — no Rust toolchain required):**
+
+```bash
+npx @topgunbuild/server
+```
+
+This downloads a prebuilt binary for your platform and starts the server immediately. No compiler, no Docker.
+
+**Using the CLI (inside a TopGun checkout):** the published `@topgunbuild/cli` 2.0.0 looks for the server binary only at `./target/release/topgun-server`, so outside the monorepo `topgun dev` stops with "Rust server binary not found". Use the zero-install path above there.
 
 ```bash
 # Install the unified TopGun developer CLI
@@ -180,14 +188,6 @@ topgun dev
 
 The setup→dev flow is cohesive: `topgun setup` writes a `.env` that `topgun dev` reads to start the server without any JWT or database configuration. Run `topgun setup --yes` to skip prompts and accept all defaults.
 
-**Zero-install path (no Rust toolchain required):**
-
-```bash
-npx @topgunbuild/server
-```
-
-This downloads a prebuilt binary for your platform and starts the server immediately. No compiler, no Docker.
-
 **Inside the TopGun monorepo (contributor path):**
 
 ```bash
@@ -196,7 +196,7 @@ pnpm start:server
 
 `pnpm start:server` uses a prebuilt binary when present and falls back to `cargo run --bin topgun-server --release` for contributors who have the Rust toolchain.
 
-The server boots in seconds with embedded storage in the data directory `./topgun-data` — no database to run, no Docker required.
+The server boots in seconds with embedded storage — no database to run, no Docker required. A server built from the repository keeps it in the data directory `./topgun-data`; the npm package `@topgunbuild/server` 2.2.x keeps it in the file `./topgun.redb`.
 
 3. Open your app in two browser tabs and watch changes sync in real time.
 

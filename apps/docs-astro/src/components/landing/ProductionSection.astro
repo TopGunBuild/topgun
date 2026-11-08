@@ -17,13 +17,13 @@ const cards = [
   },
   {
     title: 'CRDTs handle the merge',
-    body: 'No conflict UI. No last-write-wins surprises. Hybrid logical clocks order events; CRDTs converge them deterministically. Math, not heuristics.',
+    body: 'No conflict UI. Hybrid logical clocks order events; CRDTs (LWW-Map, OR-Map) converge them deterministically, so every device ends on the same state. Math, not heuristics.',
     proof: '~ deterministic · convergent · no manual merge',
     icon: 'merge',
   },
   {
     title: 'Self-host. Apache 2.0.',
-    body: 'A single Rust binary on the server. Embedded storage out of the box. Swap in your own database when scale demands. No vendor, no lock-in.',
+    body: 'A single Rust binary on the server. Embedded storage out of the box, no database to run. No vendor, no lock-in.',
     proof: '~ one binary · embedded storage · apache 2.0',
     icon: 'shield',
   },

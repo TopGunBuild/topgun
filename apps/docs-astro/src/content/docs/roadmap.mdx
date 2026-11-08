@@ -95,6 +95,12 @@ Single-node APIs are stable for development and self-hosted evaluation today.
         <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented — partition-routing only; no Raft leader election, no split-brain protection</td>
         <td className="py-3 px-4 text-neutral-500">Raft-replicated via openraft — planned; enables QUORUM/STRONG consistency, safe distributed locks, cluster mTLS</td>
       </tr>
+      <tr>
+        <td className="py-3 px-4 font-medium text-foreground">Data replication &amp; partition migration</td>
+        <td className="py-3 px-4 text-neutral-500">N/A — one node holds all data</td>
+        <td className="py-3 px-4 text-red-600 dark:text-red-400">Not implemented — each partition's data lives only on its owner node; no backup copies are written to other nodes, and partition data is not moved when ownership changes</td>
+        <td className="py-3 px-4 text-neutral-500">Replicated backups and chunked partition migration — planned</td>
+      </tr>
     </tbody>
   </table>
 </div>

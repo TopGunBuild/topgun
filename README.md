@@ -60,7 +60,7 @@ docker pull ghcr.io/topgunbuild/topgun-server:latest
 docker run -p 8080:8080 -e TOPGUN_NO_AUTH=1 ghcr.io/topgunbuild/topgun-server:latest
 ```
 
-The image is multi-arch (linux/amd64 + linux/arm64) and is rebuilt on every push to `main`. For tagged releases use `:v2.0.0` (or `:2`, `:2.0`) instead of `:latest`.
+The image is multi-arch (linux/amd64 + linux/arm64) and is rebuilt on every push to `main`. For tagged releases use `:2.0.0` (or `:2`, `:2.0`) instead of `:latest`.
 
 ### Production
 
@@ -198,7 +198,7 @@ function DocSearch({ query }: { query: string }) {
 }
 ```
 
-> **Semantic search** requires server-side embedding config (`VectorConfig` on the server — set `TOPGUN_VECTOR_INDEX_PATH` and configure your embedding provider). `fullText` and `exact` work fully offline. See the [Vector & hybrid search guide](https://topgun.build/docs/guides/vector-and-hybrid-search).
+> **Semantic search** requires server-side embedding config (set `TOPGUN_EMBEDDING_PROVIDER`, `TOPGUN_EMBEDDING_MODEL` and `TOPGUN_EMBEDDING_DIMENSION` for your embedding provider, and `TOPGUN_VECTOR_MAPS` for the maps and fields to embed). `fullText` and `exact` work fully offline. See the [Vector & hybrid search guide](https://topgun.build/docs/guides/vector-and-hybrid-search).
 
 ## Documentation
 
@@ -254,11 +254,11 @@ Migrating from another sync stack? Each guide names what TopGun does not replace
 
 | Coming from | Why migrate | Migration guide | Status |
 |-------------|-------------|-----------------|--------|
-| Firebase Realtime | SQL, FTS, no vendor lock-in | [Guide](https://topgun.build/docs/guides/migrating-from-firebase) | Live |
-| Y.js / Automerge | Server backend + SQL queries | [Guide](https://topgun.build/docs/guides/migrating-from-yjs) | Live |
+| Firebase Realtime | Server-side queries, full-text search, no vendor lock-in | [Guide](https://topgun.build/docs/guides/migrating-from-firebase) | Live |
+| Y.js / Automerge | Server backend + server-side queries | [Guide](https://topgun.build/docs/guides/migrating-from-yjs) | Live |
 | Replicache | Open source, no SaaS invoice | [Guide](https://topgun.build/docs/guides/migrating-from-replicache) | Live |
 | Supabase Realtime | Offline-first, CRDT auto-merge | [Guide](https://topgun.build/docs/guides/migrating-from-supabase-realtime) | Live |
-| Liveblocks | Self-hosted option | (planned) | Q3 2026 |
+| Liveblocks | Self-hosted option | (planned) | Planned |
 
 ## Performance Testing
 
