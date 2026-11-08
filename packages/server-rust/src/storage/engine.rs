@@ -21,8 +21,8 @@ use super::record::{Record, RecordMetadata, RecordValue};
 /// shard locks.
 ///
 /// [`SlotCell::lock`] is the only way to lock a cell. In debug builds it counts
-/// the cell locks the current thread holds, and every engine entry point calls
-/// [`held_cell_locks::check`], so an engine call made while its own thread
+/// the cell locks the current thread holds, and every engine entry point that
+/// takes a lock calls [`held_cell_locks::check`], so an engine call made while its own thread
 /// holds a cell lock — which would wait on that lock, or take an entry lock
 /// after a cell lock against the entry → cell order — panics by name instead
 /// of hanging.
@@ -383,6 +383,13 @@ pub trait StorageEngine: Send + Sync + 'static {
     fn destroy(&self);
 
     /// Estimated heap cost of all stored entries in bytes.
+    ///
+    /// Implementor contract (TG-EVI-002): the answer is O(1) in the number of
+    /// entries and takes no entry or cell lock, because the eviction tick calls
+    /// it for every store every interval and must not wait on, or stall, the
+    /// writers of any key. At every quiescent point it equals the sum of
+    /// `metadata.cost` over the resident entries, so the engine keeps that sum
+    /// as it mutates rather than walking the entries here.
     fn estimated_cost(&self) -> u64;
 
     /// Fetch at least `size` keys starting from `cursor`.
