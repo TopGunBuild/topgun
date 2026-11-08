@@ -22,3 +22,7 @@ await-holding-invalid-types = [
     { path = "dashmap::iter_set::Iter", reason = "holds a DashSet shard lock; a worker blocked on that lock can stall the runtime" },
     { path = "dashmap::try_result::TryResult", reason = "may hold a DashMap shard lock; a worker blocked on that lock can stall the runtime" },
 ]
+
+# Product names written in prose, not code (clippy::doc_markdown); `..` keeps
+# clippy's default list.
+doc-valid-idents = ["RocksDB", ".."]
