@@ -9,8 +9,9 @@ description = "TopGun server: axum, tokio, clustering, storage"
 workspace = true
 
 [features]
-default = ["redb"]
+default = ["redb", "rocksdb"]
 redb = ["dep:redb"]
+rocksdb = ["dep:rocksdb"]
 simulation = ["dep:madsim"]
 datafusion = ["dep:datafusion", "dep:arrow"]
 # Heap-profiling instrument (off by default): installs a dhat global allocator and
@@ -77,6 +78,9 @@ ahash = "0.8"
 ordered-float = "4"
 regex = "1"
 redb = { version = "2", optional = true }
+# No compression features: the engine runs with block compression off (values
+# are incompressible or sealed), so no compression library is linked.
+rocksdb = { version = "=0.25.0", default-features = false, features = ["bindgen-runtime"], optional = true }
 fs4 = { version = "0.8", default-features = false }
 madsim = { workspace = true, optional = true }
 # Default features minus `compression` and `parquet`: the SQL path only queries
