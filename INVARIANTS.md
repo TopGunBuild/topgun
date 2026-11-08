@@ -1569,6 +1569,41 @@ weaker than a test.
 - **Memory.** A slot's memory is not returned by eviction, and the capacity counts keys, not
   bytes (`TG-WB-007`; TODO-826).
 
+### TG-EVI-002: The in-memory engine's owned cost is a running sum read in O(1)
+
+- **Scope:** `HashMapStorage` (`storage/engines/hashmap.rs`), the only production
+  `StorageEngine`, and through it `DefaultRecordStore::owned_entry_cost`, which the eviction
+  tick reads for every store every interval.
+- **Statement:** `StorageEngine::estimated_cost` of `HashMapStorage` equals the sum of resident
+  `metadata.cost` at every quiescent point and is read in O(1) — no per-entry walk, no cell
+  lock, no shard lock.
+- **Maintaining code:** `hashmap.rs` — the `cost` counter, updated by `put`, `update_in_place`,
+  `put_if_absent_at`, `remove`, `remove_if` and `clear` while the key's entry guard is alive
+  (an addition before the vacant insert, a subtraction before the occupied removal or inside
+  the `remove_if` / `retain` closure, per entry in `clear` and never a reset); `estimated_cost`
+  is one relaxed load. `record.rs` — the caller obligation on `RecordMetadata::cost`: a
+  resident record's cost changes only through engine methods.
+- **Enforcing test:** `hashmap.rs::estimated_cost_equals_the_resident_sum_after_every_op`,
+  `::estimated_cost_reads_no_cell_lock_and_no_shard_lock`,
+  `::estimated_cost_equals_the_resident_sum_after_concurrent_ops` and
+  `::a_put_into_a_shard_clear_has_passed_stays_counted`.
+- **Violation consequence:** eviction decides on a wrong total — it misses memory pressure, or
+  evicts with none; a wrap below zero would read as about 2^64 bytes and evict everything it
+  can. A walk brought back makes the idle tick O(resident records) and stalls the writers of
+  every shard it holds.
+- **Discovered by:** TODO-941 (the idle eviction tick was the load harness's null-arm tail),
+  SPEC-408.
+- **Status:** decided, **enforced**.
+
+**Not claimed.**
+
+- **Accuracy of `metadata.cost` against real heap use** (TODO-538).
+- **The pressure path** above the high-water mark (`evict_lru`, `dirty_count`) still clones
+  and sorts every resident record per store per tick (TODO-942).
+- **A cell resident under two keys or two engines.** The sum assumes a cell is resident under
+  at most one key of one engine; `SlotInit::Cell` comes only from the load path's pending
+  entry for the same key, inserted into a vacant slot.
+
 ### TG-OR-001: `update_in_place`'s mutate closure runs at most once per call
 
 - **Scope:** `RecordStore::update_in_place` seam (SPEC-347).

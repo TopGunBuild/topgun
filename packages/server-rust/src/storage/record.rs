@@ -389,10 +389,14 @@ pub struct RecordMetadata {
     /// Estimated heap cost of this record in bytes.
     ///
     /// LOCAL ONLY — never serialized to the wire or persisted to the datastore.
-    /// Set at write time via [`estimated_cost`] + `key.len()`, then summed by
-    /// the eviction orchestrator each tick to compare against the RAM ceiling.
-    /// Re-derived on every load/hydrate so records entering via any path carry
-    /// a real cost (eviction → reload steady state).
+    /// Set at write time via [`estimated_cost`] + `key.len()`, and compared
+    /// against the RAM ceiling by the eviction orchestrator through the engine's
+    /// running sum. Re-derived on every load/hydrate so records entering via any
+    /// path carry a real cost (eviction → reload steady state).
+    ///
+    /// Caller obligation: the cost of a record resident in an engine changes
+    /// only through `StorageEngine` methods, which keep the engine's running sum
+    /// (TG-EVI-002); writing it through a cell guard leaves that sum wrong.
     pub cost: u64,
     /// Process-monotonic per-write identity token.
     ///

@@ -38,6 +38,10 @@ pub struct HashMapStorage {
     /// Vacancy generations, indexed by key hash (see
     /// [`StorageEngine::vacancy_generation`]).
     vacancy: Box<[AtomicU64]>,
+    /// The sum of `metadata.cost` over the resident entries, kept by every
+    /// mutating method while it holds the key's entry guard, so the eviction
+    /// tick reads it without walking or locking anything (TG-EVI-002).
+    cost: AtomicU64,
 }
 
 impl HashMapStorage {
@@ -47,6 +51,7 @@ impl HashMapStorage {
         Self {
             entries: DashMap::new(),
             vacancy: (0..VACANCY_STRIPES).map(|_| AtomicU64::new(0)).collect(),
+            cost: AtomicU64::new(0),
         }
     }
 
@@ -62,6 +67,17 @@ impl HashMapStorage {
     /// either the key still present or the advanced generation (TG-OR-007).
     fn bump(&self, key: &str) {
         self.stripe(key).fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Moves the running sum from a key's old cost to its new one. Called under
+    /// the key's entry guard, which orders every update of one key, so the sum
+    /// only ever passes through totals the keys really had and never wraps;
+    /// `wrapping_sub` merely encodes the signed delta.
+    fn recost(&self, old: u64, new: u64) {
+        if old != new {
+            self.cost
+                .fetch_add(new.wrapping_sub(old), Ordering::Relaxed);
+        }
     }
 }
 
@@ -109,18 +125,24 @@ impl StorageEngine for HashMapStorage {
                 // reference to a slot's cell is made by the engine under this
                 // lock or cloned from a holder, so "unshared" cannot change
                 // before the replace below.
-                if Arc::strong_count(occ.get()) == 1 {
+                let new = record.metadata.cost;
+                let old = if Arc::strong_count(occ.get()) == 1 {
                     let mut current = occ.get().lock();
-                    Some(std::mem::replace(&mut *current, record))
+                    std::mem::replace(&mut *current, record)
                 } else {
                     // A pending write still holds this cell and must persist what
                     // it holds: the new record gets a cell of its own.
                     let old = occ.get().lock().clone();
                     occ.insert(new_slot_cell(record));
-                    Some(old)
-                }
+                    old
+                };
+                self.recost(old.metadata.cost, new);
+                Some(old)
             }
             Entry::Vacant(vac) => {
+                // Counted before the insert: nobody can see the key until then,
+                // and the guard `insert` returns ends with its statement.
+                self.cost.fetch_add(record.metadata.cost, Ordering::Relaxed);
                 vac.insert(new_slot_cell(record));
                 None
             }
@@ -176,7 +198,9 @@ impl StorageEngine for HashMapStorage {
                     // Mint a fresh write token and bump version/last_update in
                     // place, then re-cost from the mutated value.
                     record.metadata.on_update(now);
+                    let old = record.metadata.cost;
                     record.metadata.cost = cost_of(&record.value);
+                    self.recost(old, record.metadata.cost);
                 }
                 UpdateInPlaceOutcome::Written {
                     cell: Arc::clone(cell),
@@ -193,19 +217,20 @@ impl StorageEngine for HashMapStorage {
                 if init_generation.is_some_and(|g| g != self.vacancy_generation(key)) {
                     return UpdateInPlaceOutcome::Stale;
                 }
-                let cell = match init {
+                let (cell, cost) = match init {
                     SlotInit::Value(mut value) => {
                         if !mutate(&mut value) {
                             return UpdateInPlaceOutcome::Unchanged;
                         }
                         let cost = cost_of(&value);
-                        new_slot_cell(Record {
+                        let cell = new_slot_cell(Record {
                             value,
                             metadata: RecordMetadata::new(now, cost),
-                        })
+                        });
+                        (cell, cost)
                     }
                     SlotInit::Cell(cell) => {
-                        {
+                        let cost = {
                             // A pending write owns this cell: a `false` from the
                             // closure leaves it untouched (the caller obligation
                             // above), and nothing is inserted.
@@ -215,10 +240,13 @@ impl StorageEngine for HashMapStorage {
                             }
                             let cost = cost_of(&record.value);
                             record.metadata = RecordMetadata::new(now, cost);
-                        }
-                        cell
+                            cost
+                        };
+                        (cell, cost)
                     }
                 };
+                // Counted before the insert, while the vacant guard still hides the key.
+                self.cost.fetch_add(cost, Ordering::Relaxed);
                 vac.insert(Arc::clone(&cell));
                 UpdateInPlaceOutcome::Written {
                     cell,
@@ -247,6 +275,8 @@ impl StorageEngine for HashMapStorage {
                 if generation != self.vacancy_generation(key) {
                     return PutIfAbsentOutcome::Stale;
                 }
+                // Counted before the insert, while the vacant guard still hides the key.
+                self.cost.fetch_add(metadata.cost, Ordering::Relaxed);
                 let cell = match init {
                     SlotInit::Value(value) => new_slot_cell(Record { value, metadata }),
                     SlotInit::Cell(cell) => {
@@ -268,6 +298,11 @@ impl StorageEngine for HashMapStorage {
         match self.entries.entry(key.to_string()) {
             Entry::Occupied(occ) => {
                 self.bump(key);
+                // Read and subtracted while `occ` still guards the key: once
+                // `remove` releases it, a loader may re-insert and re-cost this
+                // very cell, and its record would no longer carry the old cost.
+                let cost = occ.get().lock().metadata.cost;
+                self.cost.fetch_sub(cost, Ordering::Relaxed);
                 Some(take_record(occ.remove()))
             }
             Entry::Vacant(_vac) => {
@@ -281,9 +316,13 @@ impl StorageEngine for HashMapStorage {
         held_cell_locks::check("remove_if");
         self.entries
             .remove_if(key, |_, cell| {
-                let remove = predicate(&cell.lock());
+                // Inside the closure, so the shard lock still guards the key
+                // (see `remove`).
+                let record = cell.lock();
+                let remove = predicate(&record);
                 if remove {
                     self.bump(key);
+                    self.cost.fetch_sub(record.metadata.cost, Ordering::Relaxed);
                 }
                 remove
             })
@@ -318,9 +357,13 @@ impl StorageEngine for HashMapStorage {
         // Each resident key is bumped under its own lock as it is removed; the
         // stripes are then all advanced, because `retain` never visits a key
         // that is absent but being loaded. A cell a pending write still holds
-        // stays alive with that holder.
-        self.entries.retain(|key, _| {
+        // stays alive with that holder. Each cost is subtracted under its own
+        // shard lock rather than the sum reset afterwards: a put into a shard
+        // `retain` has already passed stays resident and must stay counted.
+        self.entries.retain(|key, cell| {
             self.bump(key);
+            self.cost
+                .fetch_sub(cell.lock().metadata.cost, Ordering::Relaxed);
             false
         });
         for stripe in &*self.vacancy {
@@ -333,11 +376,7 @@ impl StorageEngine for HashMapStorage {
     }
 
     fn estimated_cost(&self) -> u64 {
-        held_cell_locks::check("estimated_cost");
-        self.entries
-            .iter()
-            .map(|entry| entry.value().lock().metadata.cost)
-            .sum()
+        self.cost.load(Ordering::Relaxed)
     }
 
     fn snapshot_iter(&self) -> Vec<(String, Record)> {
@@ -436,6 +475,7 @@ impl StorageEngine for HashMapStorage {
 mod tests {
     use super::*;
     use crate::storage::record::{RecordMetadata, RecordValue};
+    use proptest::prelude::*;
     use topgun_core::hlc::Timestamp;
     use topgun_core::types::Value;
 
@@ -860,5 +900,306 @@ mod tests {
 
         storage.remove("b");
         assert_eq!(storage.estimated_cost(), 400);
+    }
+
+    /// What the old `estimated_cost` computed: the walk over every resident cell.
+    fn walk(storage: &HashMapStorage) -> u64 {
+        storage
+            .snapshot_iter()
+            .iter()
+            .map(|(_, r)| r.metadata.cost)
+            .sum()
+    }
+
+    /// The number of distinct engine operations `apply_op` decodes.
+    const OP_KINDS: u8 = 15;
+
+    /// Applies one engine operation, chosen by `kind`, so the proptest and the
+    /// concurrent test drive every cost-changing branch through one decoder.
+    /// `held` keeps cells alive outside the engine, as a pending write-behind
+    /// entry does: a held slot takes `put`'s shared branch, and a held fresh
+    /// cell is what the load path hands in as `SlotInit::Cell` (never one that
+    /// is resident).
+    fn apply_op(
+        storage: &HashMapStorage,
+        held: &mut Vec<Arc<SlotCell>>,
+        kind: u8,
+        key: &str,
+        cost: u64,
+        flag: bool,
+    ) {
+        let mut mutate = |_: &mut RecordValue| flag;
+        let cost_of = |_: &RecordValue| cost;
+        let fresh_cell = |held: &mut Vec<Arc<SlotCell>>| {
+            let cell = new_slot_cell(make_record(0));
+            held.push(Arc::clone(&cell));
+            cell
+        };
+        match kind {
+            0 => {
+                storage.put(key, make_record(cost));
+            }
+            1 => {
+                // Holding the slot makes the overwrite take the shared branch.
+                if let Some(slot) = storage.test_slot(key) {
+                    held.push(slot);
+                }
+                storage.put(key, make_record(cost));
+            }
+            2 => {
+                // Occupied: mutate true or false; vacant: `Absent`.
+                storage.update_in_place(key, 1, None, None, &mut mutate, &cost_of);
+            }
+            3 => {
+                let init = SlotInit::Value(make_record(0).value);
+                storage.update_in_place(key, 1, Some(init), None, &mut mutate, &cost_of);
+            }
+            4 => {
+                let init = SlotInit::Cell(fresh_cell(held));
+                storage.update_in_place(key, 1, Some(init), None, &mut mutate, &cost_of);
+            }
+            5 => {
+                // A removal after the generation was read: `Stale`.
+                let generation = storage.vacancy_generation(key);
+                storage.remove(key);
+                let init = SlotInit::Value(make_record(0).value);
+                storage.update_in_place(
+                    key,
+                    1,
+                    Some(init),
+                    Some(generation),
+                    &mut mutate,
+                    &cost_of,
+                );
+            }
+            6 => {
+                let generation = storage.vacancy_generation(key);
+                let init = SlotInit::Value(make_record(0).value);
+                storage.put_if_absent_at(key, init, RecordMetadata::new(1, cost), generation);
+            }
+            7 => {
+                let generation = storage.vacancy_generation(key);
+                let init = SlotInit::Cell(fresh_cell(held));
+                storage.put_if_absent_at(key, init, RecordMetadata::new(1, cost), generation);
+            }
+            8 => {
+                let generation = storage.vacancy_generation(key);
+                storage.remove(key);
+                let init = SlotInit::Value(make_record(0).value);
+                storage.put_if_absent_at(key, init, RecordMetadata::new(1, cost), generation);
+            }
+            9 => {
+                storage.remove(key);
+            }
+            10 => {
+                storage.remove_if(key, &|_| flag);
+            }
+            11 => {
+                storage.touch(key, 2);
+            }
+            12 => {
+                let token = match storage.get(key) {
+                    Some(record) if flag => record.metadata.write_token,
+                    _ => u64::MAX,
+                };
+                storage.mark_stored(key, 2, token);
+            }
+            13 => storage.clear(),
+            _ => held.clear(),
+        }
+    }
+
+    fn any_cost() -> impl Strategy<Value = u64> {
+        // Eight keys of at most 2^56 cannot overflow the sum.
+        prop_oneof![
+            Just(0u64),
+            Just(1u64),
+            2u64..1_000,
+            (1u64 << 50)..=(1u64 << 56)
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+        #[test]
+        fn estimated_cost_equals_the_resident_sum_after_every_op(
+            ops in proptest::collection::vec(
+                (0..OP_KINDS, 0u8..8, any_cost(), any::<bool>()),
+                1..=64,
+            )
+        ) {
+            let storage = HashMapStorage::new();
+            let mut held = Vec::new();
+            for (step, (kind, key, cost, flag)) in ops.into_iter().enumerate() {
+                apply_op(&storage, &mut held, kind, &format!("k{key}"), cost, flag);
+                prop_assert_eq!(
+                    storage.estimated_cost(),
+                    walk(&storage),
+                    "after op {} (kind {})",
+                    step,
+                    kind
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn estimated_cost_equals_the_resident_sum_after_concurrent_ops() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        const THREADS: u64 = 8;
+        const OPS: usize = 2_000;
+        for iteration in 0..20u64 {
+            let storage = Arc::new(HashMapStorage::new());
+            let workers: Vec<_> = (0..THREADS)
+                .map(|thread| {
+                    let storage = Arc::clone(&storage);
+                    std::thread::spawn(move || {
+                        let seed = iteration * 1_000 + thread;
+                        let mut rng = StdRng::seed_from_u64(seed);
+                        let mut held = Vec::new();
+                        for _ in 0..OPS {
+                            // `clear` is rarer than the rest, so the keys fill up between clears.
+                            let kind = if rng.random_ratio(1, 200) {
+                                13
+                            } else {
+                                loop {
+                                    let k = rng.random_range(0..OP_KINDS);
+                                    if k != 13 {
+                                        break k;
+                                    }
+                                }
+                            };
+                            let key = format!("k{}", rng.random_range(0..16u8));
+                            let cost = match rng.random_range(0..4u8) {
+                                0 => 0,
+                                1 => 1,
+                                2 => rng.random_range(2..1_000),
+                                _ => rng.random_range((1u64 << 50)..=(1u64 << 56)),
+                            };
+                            let flag = rng.random_bool(0.5);
+                            apply_op(&storage, &mut held, kind, &key, cost, flag);
+                        }
+                        seed
+                    })
+                })
+                .collect();
+            for worker in workers {
+                worker.join().expect("worker panicked");
+            }
+            assert_eq!(
+                storage.estimated_cost(),
+                walk(&storage),
+                "iteration {iteration}: seeds {}..{}",
+                iteration * 1_000,
+                iteration * 1_000 + THREADS - 1
+            );
+        }
+    }
+
+    /// Runs `estimated_cost` on a thread of its own and waits at most 10 s, so
+    /// a cost read that waits on a lock fails the test instead of hanging it.
+    fn estimated_cost_within_deadline(storage: &Arc<HashMapStorage>, what: &str) -> u64 {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = Arc::clone(storage);
+        std::thread::spawn(move || {
+            let _ = tx.send(reader.estimated_cost());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("estimated_cost did not answer within 10 s while {what}"))
+    }
+
+    #[test]
+    fn estimated_cost_reads_no_cell_lock_and_no_shard_lock() {
+        let storage = Arc::new(HashMapStorage::new());
+        storage.put("a", make_record(100));
+        storage.put("b", make_record(20));
+
+        // (a) Another thread holds a resident cell's lock.
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let cell = storage.test_slot("a").expect("resident");
+        let holder = std::thread::spawn(move || {
+            let _guard = cell.lock();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        held_rx.recv().unwrap();
+        let cost = estimated_cost_within_deadline(&storage, "a cell lock is held");
+        assert_eq!(cost, 120);
+        drop(release_tx);
+        holder.join().unwrap();
+
+        // (b) Another thread holds the shard write lock of a resident key.
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let shard_holder = Arc::clone(&storage);
+        let holder = std::thread::spawn(move || {
+            let _guard = shard_holder.entries.get_mut("b").expect("resident");
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        held_rx.recv().unwrap();
+        let cost = estimated_cost_within_deadline(&storage, "a shard write lock is held");
+        assert_eq!(cost, 120);
+        drop(release_tx);
+        holder.join().unwrap();
+    }
+
+    #[test]
+    fn a_put_into_a_shard_clear_has_passed_stays_counted() {
+        use dashmap::try_result::TryResult;
+
+        const KEYS: u64 = 256;
+        const PUT_COST: u64 = 7_777;
+        let keys: Vec<String> = (0..KEYS).map(|i| format!("k{i}")).collect();
+        for attempt in 0..16 {
+            let storage = Arc::new(HashMapStorage::new());
+            for (i, key) in keys.iter().enumerate() {
+                storage.put(key, make_record(i as u64 + 1));
+            }
+            // Write-lock the shard of a populated key, so `clear` (which retains
+            // shards in index order) stops there.
+            let x = keys[attempt * 16 % keys.len()].clone();
+            let (held_tx, held_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let shard_holder = Arc::clone(&storage);
+            let holder = std::thread::spawn(move || {
+                let _guard = shard_holder.entries.get_mut(&x).expect("populated");
+                held_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+            });
+            held_rx.recv().unwrap();
+            let clearer = Arc::clone(&storage);
+            let clearing = std::thread::spawn(move || clearer.clear());
+
+            // A key whose shard `clear` has already retained reads `Absent`;
+            // keys of the held shard read `Locked` and are skipped.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut passed = None;
+            while passed.is_none() && std::time::Instant::now() < deadline {
+                passed = keys
+                    .iter()
+                    .find(|k| matches!(storage.entries.try_get(k.as_str()), TryResult::Absent))
+                    .cloned();
+            }
+            let Some(k0) = passed else {
+                // The held shard is the first one `clear` visits: try another key.
+                drop(release_tx);
+                holder.join().unwrap();
+                clearing.join().unwrap();
+                continue;
+            };
+            storage.put(&k0, make_record(PUT_COST));
+            drop(release_tx);
+            holder.join().unwrap();
+            clearing.join().unwrap();
+            assert_eq!(storage.estimated_cost(), PUT_COST);
+            assert_eq!(walk(&storage), PUT_COST);
+            return;
+        }
+        panic!("no attempt found a shard that clear had already passed");
     }
 }
