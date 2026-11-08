@@ -31,6 +31,8 @@ use super::engine_store::{
     META_NEXT_MAP_ID,
 };
 use super::kv_engine::{BatchOp, KeyRange, KvEngine, MemKvEngine, WriteBatch, WriteOptions};
+#[cfg(feature = "rocksdb")]
+use super::kv_engine::{KvCapabilities, KvError, KvResult, KvSnapshot};
 use super::redb_engine::RedbKvEngine;
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::record::RecordValue;
@@ -313,6 +315,9 @@ pub(crate) trait CrashTarget: Sized {
     /// `crash`'s `seed` as how many of them to keep (`mode` is ignored);
     /// `false` for one that tears bytes by `mode` and `seed`.
     const KEEPS_WHOLE_BATCHES: bool;
+    /// `true` for a whole-batch target whose crash keeps every batch whose
+    /// `write` returned and ignores `seed`: one crash variant per point.
+    const KEEPS_EVERY_RETURNED_BATCH: bool = false;
     /// A fresh, open, empty engine; its death is not armed.
     fn fresh() -> Self;
     /// The engine, shared with the caller.
@@ -428,6 +433,183 @@ impl CrashTarget for MemTarget {
         Self {
             engine: Arc::new(image),
         }
+    }
+}
+
+/// `RocksKvEngine` behind a call counter, crashed as a process dies
+/// (`kill -9`): the page cache survives, so a crash keeps every batch whose
+/// `write` returned and the crash seed is ignored.
+///
+/// The crash image is every file of the database directory, the engine's own
+/// WAL included, copied after RocksDB's background threads have stopped, so
+/// no file is created or deleted during the copy. Nothing is flushed for the
+/// occasion: a RocksDB checkpoint would flush the memtables first and give a
+/// clean image that hides WAL-replay faults. Power loss (unsynced page cache
+/// lost) is not modelled for RocksDB.
+#[cfg(feature = "rocksdb")]
+pub(crate) struct RocksTarget {
+    dir: tempfile::TempDir,
+    engine: Arc<CountingRocks>,
+}
+
+#[cfg(feature = "rocksdb")]
+fn rocks_crash_config() -> super::rocks_engine::RocksConfig {
+    // Memtables of 64 KiB, so a workload of a few megabytes flushes and
+    // compacts while it runs and a crash meets that background work.
+    let mut config = super::rocks_engine::RocksConfig::production(64 * 1024 * 1024, -1);
+    config.write_buffer_size = 64 * 1024;
+    config
+}
+
+#[cfg(feature = "rocksdb")]
+impl CrashTarget for RocksTarget {
+    type Engine = CountingRocks;
+    const NAME: &'static str = "rocksdb";
+    const KEEPS_WHOLE_BATCHES: bool = true;
+    const KEEPS_EVERY_RETURNED_BATCH: bool = true;
+
+    fn fresh() -> Self {
+        use super::rocks_engine::{OpenMode, RocksKvEngine};
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let inner = RocksKvEngine::open(
+            &dir.path().join("db"),
+            OpenMode::CreateNew,
+            &rocks_crash_config(),
+        )
+        .unwrap_or_else(|e| panic!("rocksdb in a fresh directory: {e}"));
+        Self {
+            dir,
+            engine: Arc::new(CountingRocks::new(inner)),
+        }
+    }
+
+    fn engine(&self) -> Arc<CountingRocks> {
+        Arc::clone(&self.engine)
+    }
+
+    fn arm_death(&self, at_op: u64) {
+        self.engine
+            .die_at
+            .store(at_op, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn ops_so_far(&self) -> u64 {
+        self.engine.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn crash(self, _mode: CrashMode, _seed: u64) -> Self {
+        use super::rocks_engine::{OpenMode, RocksKvEngine};
+        let Self { dir, engine } = self;
+        assert_eq!(
+            Arc::strong_count(&engine),
+            1,
+            "the dead engine is still shared"
+        );
+        engine.inner.stop_background_work();
+        let image = tempfile::tempdir().expect("a temp dir");
+        std::fs::create_dir(image.path().join("db")).expect("the image directory");
+        for entry in std::fs::read_dir(dir.path().join("db")).expect("the database directory") {
+            let entry = entry.expect("a directory entry");
+            std::fs::copy(
+                entry.path(),
+                image.path().join("db").join(entry.file_name()),
+            )
+            .unwrap_or_else(|e| panic!("copy {}: {e}", entry.path().display()));
+        }
+        drop(engine);
+        drop(dir);
+        let reopened = RocksKvEngine::open(
+            &image.path().join("db"),
+            OpenMode::Existing,
+            &rocks_crash_config(),
+        )
+        .unwrap_or_else(|e| panic!("reopen after the crash failed: {e}"));
+        Self {
+            dir: image,
+            engine: Arc::new(CountingRocks::new(reopened)),
+        }
+    }
+}
+
+/// A `RocksKvEngine` whose counted calls (`write`, `ingest`, `sync`,
+/// `shutdown`) are numbered; the call with index `die_at` and every later
+/// call fail without reaching RocksDB.
+#[cfg(feature = "rocksdb")]
+pub(crate) struct CountingRocks {
+    inner: super::rocks_engine::RocksKvEngine,
+    calls: std::sync::atomic::AtomicU64,
+    die_at: std::sync::atomic::AtomicU64,
+    dead: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "rocksdb")]
+impl CountingRocks {
+    fn new(inner: super::rocks_engine::RocksKvEngine) -> Self {
+        Self {
+            inner,
+            calls: std::sync::atomic::AtomicU64::new(0),
+            die_at: std::sync::atomic::AtomicU64::new(u64::MAX),
+            dead: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn enter(&self) -> KvResult<()> {
+        if self.dead.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(KvError::Other(anyhow::anyhow!("rocksdb engine is dead")))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn enter_counted(&self) -> KvResult<()> {
+        use std::sync::atomic::Ordering;
+        let index = self.calls.fetch_add(1, Ordering::SeqCst);
+        if index >= self.die_at.load(Ordering::SeqCst) {
+            self.dead.store(true, Ordering::SeqCst);
+        }
+        self.enter()
+    }
+}
+
+#[cfg(feature = "rocksdb")]
+impl KvEngine for CountingRocks {
+    fn capabilities(&self) -> KvCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
+        self.enter()?;
+        self.inner.get(key)
+    }
+
+    fn write(&self, batch: WriteBatch, opts: WriteOptions) -> KvResult<()> {
+        self.enter_counted()?;
+        self.inner.write(batch, opts)
+    }
+
+    fn snapshot(&self) -> KvResult<Box<dyn KvSnapshot + '_>> {
+        self.enter()?;
+        self.inner.snapshot()
+    }
+
+    fn ingest(
+        &self,
+        range: KeyRange,
+        sorted: Vec<(Vec<u8>, Vec<u8>)>,
+        opts: WriteOptions,
+    ) -> KvResult<()> {
+        self.enter_counted()?;
+        self.inner.ingest(range, sorted, opts)
+    }
+
+    fn sync(&self) -> KvResult<()> {
+        self.enter_counted()?;
+        self.inner.sync()
+    }
+
+    fn shutdown(&self) -> KvResult<()> {
+        self.enter_counted()?;
+        self.inner.shutdown()
     }
 }
 
@@ -595,10 +777,13 @@ pub(crate) fn dry_run_ops<T: CrashTarget, S: Scenario>(scenario: &S) -> u64 {
     target.ops_so_far()
 }
 
-/// The crash variants of one point: every mode (a byte-tearing target) or
-/// every number of unsynced batches to keep in `0..=B` (a whole-batch one).
+/// The crash variants of one point: every mode (a byte-tearing target),
+/// every number of unsynced batches to keep in `0..=B` (a whole-batch one),
+/// or the one crash of a target that keeps every returned batch.
 fn variants<T: CrashTarget>(units: usize, point: u64) -> Vec<(CrashMode, u64)> {
-    if T::KEEPS_WHOLE_BATCHES {
+    if T::KEEPS_EVERY_RETURNED_BATCH {
+        vec![(CrashMode::DropUnsynced, u64::MAX)]
+    } else if T::KEEPS_WHOLE_BATCHES {
         (0..=units as u64)
             .map(|keep| (CrashMode::DropUnsynced, keep))
             .collect()
@@ -628,7 +813,8 @@ pub(crate) fn every_crash_point<T: CrashTarget, S: Scenario>(scenario: &S) -> Re
 /// Seeded random crashes: per seed, a dry run counts `T_s` and the death
 /// point is uniform in `0..=T_s`. A byte-tearing target runs every mode
 /// (`every_mode`) or one drawn from the seed; a whole-batch target keeps a
-/// number of batches uniform in `0..=B`.
+/// number of batches uniform in `0..=B`; a target that keeps every returned
+/// batch crashes once.
 pub(crate) fn random_crashes<T: CrashTarget, S: Scenario>(
     seeds: Range<u64>,
     every_mode: bool,
@@ -640,7 +826,9 @@ pub(crate) fn random_crashes<T: CrashTarget, S: Scenario>(
         let ops = dry_run_ops::<T, S>(&scenario);
         report.ops = report.ops.max(ops);
         let mut rng = StdRng::seed_from_u64(seed ^ 0xC0A5_7E57_0000_0000);
-        let choices: Vec<(CrashMode, u64)> = if T::KEEPS_WHOLE_BATCHES {
+        let choices: Vec<(CrashMode, u64)> = if T::KEEPS_EVERY_RETURNED_BATCH {
+            vec![(CrashMode::DropUnsynced, u64::MAX)]
+        } else if T::KEEPS_WHOLE_BATCHES {
             vec![(
                 CrashMode::DropUnsynced,
                 rng.random_range(0..=scenario.units() as u64),

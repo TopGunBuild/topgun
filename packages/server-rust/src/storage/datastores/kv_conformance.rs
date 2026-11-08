@@ -76,6 +76,43 @@ impl KvReopenFactory for RedbFileFactory {
     }
 }
 
+/// RocksDB in a temporary directory; reopened on the same directory.
+#[cfg(feature = "rocksdb")]
+struct RocksFactory;
+
+#[cfg(feature = "rocksdb")]
+fn rocks_config() -> super::rocks_engine::RocksConfig {
+    super::rocks_engine::RocksConfig::production(64 * 1024 * 1024, -1)
+}
+
+#[cfg(feature = "rocksdb")]
+impl KvTestFactory for RocksFactory {
+    type Engine = super::rocks_engine::RocksKvEngine;
+    type Guard = tempfile::TempDir;
+    fn make() -> (Self::Engine, Self::Guard) {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = super::rocks_engine::RocksKvEngine::open(
+            &dir.path().join("kv.rocksdb"),
+            super::rocks_engine::OpenMode::CreateNew,
+            &rocks_config(),
+        )
+        .unwrap();
+        (engine, dir)
+    }
+}
+
+#[cfg(feature = "rocksdb")]
+impl KvReopenFactory for RocksFactory {
+    fn reopen(guard: &Self::Guard) -> Self::Engine {
+        super::rocks_engine::RocksKvEngine::open(
+            &guard.path().join("kv.rocksdb"),
+            super::rocks_engine::OpenMode::Existing,
+            &rocks_config(),
+        )
+        .unwrap()
+    }
+}
+
 // ---- helpers ----------------------------------------------------------------
 
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
@@ -1361,6 +1398,10 @@ kv_engine_conformance!(full mem, MemFactory);
 kv_engine_conformance!(full redb, RedbMemFactory);
 #[cfg(feature = "redb")]
 kv_engine_conformance!(file redb_file, RedbFileFactory);
+#[cfg(feature = "rocksdb")]
+kv_engine_conformance!(full rocksdb, RocksFactory);
+#[cfg(feature = "rocksdb")]
+kv_engine_conformance!(file rocksdb_file, RocksFactory);
 
 // ---- the reference engine's crash hooks ---------------------------------------
 

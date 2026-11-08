@@ -10,6 +10,8 @@ use rand::{Rng, SeedableRng};
 use redb::StorageBackend;
 
 use super::engine_store::KS_PRIMARY;
+#[cfg(feature = "rocksdb")]
+use super::kv_crash::RocksTarget;
 use super::kv_crash::{
     crash_case, every_crash_point, random_crashes, CrashMode, CrashTarget, CrashableBackend,
     KvWorkload, MemTarget, RedbTarget, RegistryWorkload, Scenario, Step, CRASH_MODES,
@@ -352,4 +354,72 @@ fn k09_redb_every_seventh_op_of_a_growing_workload_recovers_a_prefix_that_holds_
     let started = Instant::now();
     let cases = growing_crash_sweep(7);
     eprintln!("k09: stride 7, {cases} cases, {:?}", started.elapsed());
+}
+
+#[cfg(feature = "rocksdb")]
+#[test]
+fn k10_rocksdb_every_crash_point_keeps_every_returned_batch() {
+    let started = Instant::now();
+    let workload = KvWorkload::fixed();
+    let units = workload.units();
+    let report = every_crash_point::<RocksTarget, _>(&workload);
+    assert_eq!(report.cases, report.ops as usize + 1);
+    assert!(report.lossy > 0, "no crash point lost a batch");
+
+    // Never armed: a process crash keeps the unsynced trailing batch, which
+    // lives only in the engine WAL.
+    let outcome = crash_case::<RocksTarget, _>(&workload, None, CrashMode::DropUnsynced, 0);
+    assert_eq!(outcome.durable, 11);
+    assert_eq!(outcome.matches, vec![units], "B12 must be present");
+    eprintln!(
+        "k10: T = {}, {} cases, {} lossy, {:?}",
+        report.ops,
+        report.cases,
+        report.lossy,
+        started.elapsed()
+    );
+}
+
+#[cfg(feature = "rocksdb")]
+#[test]
+fn k11_rocksdb_random_crashes_keep_every_returned_batch() {
+    let report = random_crashes::<RocksTarget, _>(0..200, true, KvWorkload::random);
+    assert_eq!(report.cases, 200);
+    assert!(report.lossy > 0);
+}
+
+#[cfg(feature = "rocksdb")]
+#[test]
+fn k12_rocksdb_registry_after_any_crash_has_no_orphan_and_lists_exactly_the_recovered_maps() {
+    let started = Instant::now();
+    let exhaustive = registry_suite::<RocksTarget>();
+    for migration in [false, true] {
+        let report = random_crashes::<RocksTarget, _>(0..200, false, |seed| {
+            RegistryWorkload::random(seed, migration)
+        });
+        assert_eq!(report.cases, 200);
+        assert!(report.lossy > 0);
+    }
+    eprintln!(
+        "k12: {exhaustive} exhaustive cases, {:?}",
+        started.elapsed()
+    );
+}
+
+#[cfg(feature = "rocksdb")]
+#[test]
+fn k13_rocksdb_crashes_during_flushes_keep_every_returned_batch() {
+    // Megabytes over 64 KiB memtables: flushes and compactions run while the
+    // workload does, so the crash image is taken with background work in flight.
+    let workload = growing_workload();
+    let units = workload.units();
+    for point in 0..=units as u64 {
+        let outcome =
+            crash_case::<RocksTarget, _>(&workload, Some(point), CrashMode::DropUnsynced, 0);
+        assert_eq!(
+            outcome.matches,
+            vec![usize::try_from(point).expect("point fits")],
+            "death at {point}: every batch before it, none after"
+        );
+    }
 }
