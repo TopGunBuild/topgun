@@ -5,58 +5,27 @@ mod scenarios;
 mod store_arm;
 mod traits;
 
-use std::collections::HashMap;
+use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use dashmap::DashMap;
-
-use axum::routing::get;
-use parking_lot::RwLock;
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, watch};
-use topgun_core::{SystemClock, HLC};
 
+use topgun_server::bootstrap::{self, AppParams};
 use topgun_server::cluster::state::ClusterState;
 use topgun_server::cluster::types::ClusterConfig;
 use topgun_server::network::config::NetworkConfig;
-use topgun_server::network::connection::ConnectionRegistry;
-use topgun_server::network::handlers::AppState;
 use topgun_server::network::shutdown::ShutdownController;
-use topgun_server::service::config::ServerConfig;
-use topgun_server::service::dispatch::{DispatchConfig, PartitionDispatcher};
-use topgun_server::service::domain::coordination::CoordinationService;
-use topgun_server::service::domain::crdt::CrdtService;
-use topgun_server::service::domain::messaging::MessagingService;
-use topgun_server::service::domain::persistence::PersistenceService;
-use topgun_server::service::domain::query::{QueryRegistry, QueryService};
-use topgun_server::service::domain::schema::SchemaService;
-use topgun_server::service::domain::search::{
-    HybridSearchRegistry, SearchConfig, SearchMutationObserver, SearchRegistry, SearchService,
-    TantivyMapIndex,
-};
-use topgun_server::service::domain::sync::SyncService;
-use topgun_server::service::expiry::{
-    sweep_tick, ExpiryDispatch, SweepConfig, SweepState, SWEEP_TICK,
-};
-use topgun_server::service::middleware::build_operation_pipeline;
-use topgun_server::service::operation::{
-    service_names, Operation, OperationError, OperationResponse,
-};
-use topgun_server::service::router::OperationRouter;
-use topgun_server::service::security::{SecurityConfig, WriteAdmission};
-use topgun_server::service::OperationService;
-use topgun_server::storage::datastores::NullDataStore;
-use topgun_server::storage::durable_merkle::DurableMerkle;
-use topgun_server::storage::eviction_orchestrator::EvictionOrchestrator;
-use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
-use topgun_server::storage::impls::StorageConfig;
+use topgun_server::network::spawn_connection_reaper;
+use topgun_server::service::expiry::SweepConfig;
+use topgun_server::service::middleware::{init_observability, ObservabilityHandle};
+use topgun_server::service::{InMemoryPolicyStore, PolicyEvaluator, PolicyStore};
+use topgun_server::storage::datastores::{NullDataStore, WriteBehindConfig};
+use topgun_server::storage::eviction_config::EvictionConfig;
 use topgun_server::storage::map_data_store::MapDataStore;
-use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
-use topgun_server::storage::mutation_observer::MutationObserver;
 
 use metrics::HdrMetricsCollector;
 use open_loop::{OpenLoopConfig, ReportContext, SeriesReport};
@@ -106,12 +75,11 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .init();
+    // The binary's tracing and Prometheus recorder: every metric the server
+    // records costs here what it costs in production. The recorder is
+    // process-global, and every harness run is its own process (a series
+    // re-executes this binary per run), so a render holds one run's figures.
+    let observability = Arc::new(init_observability());
 
     // --- CLI argument parsing ---
     let args: Vec<String> = std::env::args().collect();
@@ -405,6 +373,9 @@ async fn main() {
         DurableEnv::from_env()
     });
     let sweep_config = sweep_config_from_env();
+    let eviction = durable_env
+        .as_ref()
+        .map_or_else(EvictionConfig::from_env, |env| env.eviction.clone());
     let run_dir = durable_env.as_ref().map(|_| {
         let root = data_dir_root.clone().unwrap_or_else(std::env::temp_dir);
         RunDir::create(&root).unwrap_or_else(|reason| {
@@ -420,17 +391,19 @@ async fn main() {
     // --- Server on dedicated tokio runtime (separate thread pool) ---
     // This isolates server I/O from harness client tasks, preventing
     // artificial scheduling contention that inflates latency measurements.
-    let sweep_totals = Arc::new(SweepTotals::default());
     let mut server = ServerControl::start(ServerSpec {
         store,
         durable_env,
         dirs: run_dir.as_ref().map(RunDir::dirs),
-        ttl_ms,
+        eviction,
         sweep_config,
-        sweep_totals: Arc::clone(&sweep_totals),
+        observability: Arc::clone(&observability),
     });
-    let handle = match server.handle() {
-        Ok(handle) => handle,
+    let Started {
+        handle,
+        journal_enabled,
+    } = match server.handle() {
+        Ok(started) => started,
         Err(reason) => {
             eprintln!("{reason}");
             server.drain().await;
@@ -441,12 +414,13 @@ async fn main() {
     let server_addr = handle.addr;
 
     if scenario_name == "open_loop" {
+        open_loop_config.ttl_ms = ttl_ms;
         let ctx = ReportContext {
             store: store.as_str(),
             run_index,
             timestamp: utc_timestamp_now(),
             config: effective_config,
-            journal_enabled: journal_enabled_from_env(),
+            journal_enabled,
             expiry_sweep_interval_ms: sweep_config.interval_ms,
             expiry_sweep_rows_per_sec: sweep_config.rows_per_sec,
         };
@@ -457,6 +431,7 @@ async fn main() {
             ctx,
             json_output.as_deref(),
             &mut server,
+            &observability,
         )
         .await;
         server.finish(run_dir).await;
@@ -483,6 +458,7 @@ async fn main() {
                 duration_secs,
                 send_interval_ms,
                 fire_and_forget,
+                ttl_ms,
                 ..Default::default()
             };
             Box::new(ThroughputScenario::new(config))
@@ -542,12 +518,11 @@ async fn main() {
         0
     };
     println!("\nops/sec: {ops_per_sec}");
-    let sweep_rows_scanned = sweep_totals.rows_scanned.load(Ordering::Relaxed);
-    let sweep_maps_skipped = sweep_totals.maps_skipped.load(Ordering::Relaxed);
+    let render = print_background_metrics(&observability);
+    let sweep_rows_scanned = counter_value(&render, "topgun_expiry_sweep_rows_scanned_total");
+    let sweep_maps_skipped = counter_value(&render, "topgun_expiry_sweep_maps_skipped_total");
     println!(
-        "topgun_expiry_sweep_rows_scanned_total: {sweep_rows_scanned}\n\
-         topgun_expiry_sweep_maps_skipped_total: {sweep_maps_skipped}\n\
-         ttl_ms: {}",
+        "ttl_ms: {}",
         ttl_ms.map_or_else(|| "off".to_string(), |t| t.to_string())
     );
 
@@ -675,7 +650,7 @@ fn sweep_config_from_env() -> SweepConfig {
     SweepConfig::from_env_values(
         env("TOPGUN_EXPIRY_SWEEP_INTERVAL_MS").as_deref(),
         env("TOPGUN_EXPIRY_SWEEP_ROWS_PER_SEC").as_deref(),
-        5000,
+        bootstrap::OPERATION_TIMEOUT_MS,
     )
     .unwrap_or_else(|reason| {
         eprintln!("{reason}");
@@ -683,19 +658,32 @@ fn sweep_config_from_env() -> SweepConfig {
     })
 }
 
-/// Event Journal capture, default-on as in the production binary, so the
-/// harness measures the real journal-on write-path cost rather than a
-/// configuration that would never ship. `TOPGUN_JOURNAL_ENABLED=false` turns it
-/// off for an on/off comparison.
-fn journal_enabled_from_env() -> bool {
-    std::env::var("TOPGUN_JOURNAL_ENABLED")
-        .map(|v| {
-            !matches!(
-                v.trim().to_lowercase().as_str(),
-                "false" | "0" | "no" | "off"
-            )
+/// One render of the recorder, taken at the end of a run before the stop:
+/// prints its expiry-sweep and reclamation lines to stdout, unchanged, and
+/// returns the render for the figures the report reads from it.
+fn print_background_metrics(observability: &ObservabilityHandle) -> String {
+    let render = observability.render_metrics();
+    for line in render
+        .lines()
+        .filter(|l| l.starts_with("topgun_expiry_") || l.starts_with("topgun_reclamation_"))
+    {
+        println!("{line}");
+    }
+    render
+}
+
+/// The value of a label-less counter in a render; 0 when it is not there.
+fn counter_value(render: &str, name: &str) -> u64 {
+    render
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix(name)?
+                .strip_prefix(' ')?
+                .trim()
+                .parse()
+                .ok()
         })
-        .unwrap_or(true)
+        .unwrap_or(0)
 }
 
 /// What the server thread needs to build and serve one arm.
@@ -703,16 +691,24 @@ struct ServerSpec {
     store: StoreArm,
     durable_env: Option<DurableEnv>,
     dirs: Option<RunDirs>,
-    ttl_ms: Option<u64>,
+    eviction: EvictionConfig,
     sweep_config: SweepConfig,
-    sweep_totals: Arc<SweepTotals>,
+    observability: Arc<ObservabilityHandle>,
+}
+
+/// What the server thread hands `main` once it listens. The journal setting is
+/// the one the shared wiring resolved, read before the router consumed the
+/// services; a boot error sends no value, so `main` never waits for one.
+struct Started {
+    handle: ServerHandle,
+    journal_enabled: bool,
 }
 
 /// The in-process server, seen from `main`: started on its own runtime and
 /// thread, stopped in the binary's order — stop serving, stop the sweep and
 /// eviction, drain the write-behind buffer — and only then torn down.
 struct ServerControl {
-    handle_rx: std::sync::mpsc::Receiver<Result<ServerHandle, String>>,
+    handle_rx: std::sync::mpsc::Receiver<Result<Started, String>>,
     stop_tx: Option<oneshot::Sender<()>>,
     teardown_rx: Option<oneshot::Receiver<Teardown>>,
     thread: std::thread::JoinHandle<()>,
@@ -741,7 +737,7 @@ impl ServerControl {
     }
 
     /// Waits for the server to listen, or for the reason it could not.
-    fn handle(&self) -> Result<ServerHandle, String> {
+    fn handle(&self) -> Result<Started, String> {
         self.handle_rx
             .recv_timeout(Duration::from_secs(60))
             .map_err(|_| "server did not start in time".to_string())?
@@ -800,10 +796,14 @@ async fn build_store(
     }
 }
 
-/// The server thread's whole life on its runtime.
+/// The server thread's whole life on its runtime: the binary's single-node
+/// wiring from the shared module, served and stopped in the binary's order.
+// One function on purpose: boot, serve and the stop sequence read top to
+// bottom in the binary's order, which a split into helpers would hide.
+#[allow(clippy::too_many_lines)]
 async fn serve(
     spec: ServerSpec,
-    handle_tx: std::sync::mpsc::Sender<Result<ServerHandle, String>>,
+    handle_tx: std::sync::mpsc::Sender<Result<Started, String>>,
     stop_rx: oneshot::Receiver<()>,
     teardown_tx: oneshot::Sender<Teardown>,
 ) {
@@ -814,67 +814,72 @@ async fn serve(
             return;
         }
     };
-    let (classify_svc, dispatcher, connection_registry, record_store_factory) =
-        build_services(spec.ttl_ms, Arc::clone(&datastore));
-    let dispatcher = Arc::new(dispatcher);
-
-    // Without eviction a long durable run grows memory without bound and
-    // measures a path the binary never runs.
-    let (eviction_stop_tx, eviction_stop_rx) = watch::channel(false);
-    if let Some(env) = &spec.durable_env {
-        let orchestrator = EvictionOrchestrator::new(
-            env.eviction.clone(),
-            Arc::clone(&record_store_factory),
-            eviction_stop_rx,
-        );
-        tokio::spawn(orchestrator.run());
-    }
-    let sweep = spawn_sweep(
-        record_store_factory,
-        Arc::clone(&dispatcher),
-        spec.sweep_totals,
-        spec.sweep_config,
-    );
-
-    let shutdown = Arc::new(ShutdownController::new());
-    let state = AppState {
-        registry: connection_registry,
-        shutdown: Arc::clone(&shutdown),
-        config: Arc::new(NetworkConfig::default()),
-        start_time: Instant::now(),
-        observability: None,
-        operation_service: Some(classify_svc),
-        dispatcher: Some(dispatcher),
-        jwt_secret: Some("test-e2e-secret".to_string()),
-        cluster_state: None,
-        store_factory: None,
-        frontier: None,
-        server_config: None,
-        policy_store: None,
-        admin_subjects: Arc::new(std::collections::HashSet::new()),
-        auth_providers: Arc::new(vec![]),
-        refresh_grant_store: None,
-        auth_validator: None,
-        index_observer_factory: None,
-        backfill_progress: Arc::new(DashMap::new()),
-        // Populated when registry Arcs are threaded into the harness.
-        lock_registry: None,
-        topic_registry: None,
-        counter_registry: None,
-        query_registry: None,
-        journal_store: None,
-        search_registry: None,
-        hybrid_search_registry: None,
-        admin_enabled: true,
-        // Load harness never creates vector indexes; default path is fine.
-        vector_index_path: None,
+    // Index descriptors of this run only: an operator's files in the working
+    // directory are never loaded, and the directory goes with the run.
+    let index_dir = match spec.dirs.as_ref().and_then(|d| d.data_dir.parent()) {
+        Some(run_dir) => tempfile::tempdir_in(run_dir),
+        None => tempfile::tempdir(),
+    };
+    let index_dir = match index_dir {
+        Ok(dir) => dir,
+        Err(e) => {
+            let _ = handle_tx.send(Err(format!("cannot create the index directory: {e}")));
+            return;
+        }
     };
 
-    let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);
-    let app = axum::Router::new()
-        .route("/ws", ws_handler.clone())
-        .route("/", ws_handler)
-        .with_state(state);
+    // The binary's single-node values: its default node id, a cluster state
+    // that is not exposed, and an evaluator with no admin subjects and no
+    // tenancy over an empty policy store.
+    let node_id = "topgun-server-node".to_string();
+    let (cluster_state, _cluster_rx) =
+        ClusterState::new(Arc::new(ClusterConfig::default()), node_id.clone());
+    let policy_store: Arc<dyn PolicyStore> = Arc::new(InMemoryPolicyStore::new());
+    let policy_evaluator = Arc::new(PolicyEvaluator::new(Arc::clone(&policy_store)));
+    let services = match bootstrap::build_services(
+        node_id,
+        Arc::new(cluster_state),
+        Some(policy_evaluator),
+        Arc::clone(&datastore),
+        None,
+    ) {
+        Ok(services) => services,
+        Err(reason) => {
+            let _ = handle_tx.send(Err(reason));
+            return;
+        }
+    };
+    let journal_enabled = services.journal_store.is_enabled();
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut sweep =
+        match bootstrap::start_background(&services, spec.eviction, spec.sweep_config, shutdown_rx)
+            .await
+        {
+            Ok(sweep) => sweep,
+            Err(reason) => {
+                let _ = handle_tx.send(Err(reason));
+                return;
+            }
+        };
+
+    let shutdown = Arc::new(ShutdownController::new());
+    let built = bootstrap::into_router(
+        services,
+        AppParams {
+            shutdown: Arc::clone(&shutdown),
+            network_config: NetworkConfig::default(),
+            jwt_secret: Some("test-e2e-secret".to_string()),
+            cluster_state: None,
+            observability: Some(spec.observability),
+            policy_store,
+            admin_subjects: Arc::new(HashSet::new()),
+            admin_enabled: true,
+            vector_index_path: Some(index_dir.path().join("vector_indexes.json")),
+            scalar_index_path: index_dir.path().join("scalar_indexes.json"),
+        },
+    )
+    .await;
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -882,26 +887,49 @@ async fn serve(
     let addr = listener.local_addr().expect("failed to get local addr");
 
     shutdown.set_ready();
+    let reaper = spawn_connection_reaper(built.reaper_registry, built.reaper_config);
     let handle = ServerHandle {
         addr,
         datastore: Arc::clone(&datastore),
         failure,
     };
-    if handle_tx.send(Ok(handle)).is_err() {
+    if handle_tx
+        .send(Ok(Started {
+            handle,
+            journal_enabled,
+        }))
+        .is_err()
+    {
+        reaper.abort();
         return;
     }
 
-    // The binary's stop order: stop serving, stop the sweep (its removals are
-    // writes, so none may follow the drain) and eviction, then drain.
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = stop_rx.await;
-        })
-        .await
-        .expect("server error");
-    sweep.abort();
-    let _ = eviction_stop_tx.send(true);
+    // The binary's stop order: the stop signal also stops eviction and the
+    // sweep; once serving has ended the reaper goes, the sweep is awaited
+    // within the drain's own bound (its removals are writes, so none may
+    // follow the drain), and then the store is drained.
+    axum::serve(
+        listener,
+        built
+            .router
+            .into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = stop_rx.await;
+        let _ = shutdown_tx.send(true);
+    })
+    .await
+    .expect("server error");
+    reaper.abort();
+    let sweep_bound = Duration::from_millis(spec.durable_env.as_ref().map_or_else(
+        || WriteBehindConfig::default().shutdown_timeout_ms,
+        |env| env.write_behind.shutdown_timeout_ms,
+    ));
+    if tokio::time::timeout(sweep_bound, &mut sweep).await.is_err() {
+        sweep.abort();
+    }
     let _ = teardown_tx.send(Teardown::drain(&datastore).await);
+    drop(index_dir);
 }
 
 /// One open-loop run; returns the exit code (non-zero only on a harness
@@ -913,6 +941,7 @@ async fn run_open_loop(
     ctx: ReportContext,
     json_output: Option<&str>,
     server: &mut ServerControl,
+    observability: &ObservabilityHandle,
 ) -> i32 {
     println!("Running scenario: open_loop");
     println!(
@@ -925,6 +954,7 @@ async fn run_open_loop(
     let report = measured
         .map_err(|e| format!("open-loop run failed: {e:#}"))
         .and_then(|m| open_loop::report(&m, config, ctx));
+    print_background_metrics(observability);
     let teardown = server.drain().await;
     let mut report = match report {
         Ok(report) => report,
@@ -1079,312 +1109,4 @@ fn utc_timestamp_now() -> String {
 /// Returns true for Gregorian leap years.
 fn is_leap_year(year: u64) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
-}
-
-// ---------------------------------------------------------------------------
-// Observer factories (duplicated from topgun_server.rs — keep in sync)
-// ---------------------------------------------------------------------------
-
-struct SearchObserverFactory {
-    search_registry: Arc<SearchRegistry>,
-    hybrid_registry: Arc<HybridSearchRegistry>,
-    indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
-    connection_registry: Arc<ConnectionRegistry>,
-    needs_population: Arc<DashMap<String, AtomicBool>>,
-    search_service: std::sync::OnceLock<Arc<SearchService>>,
-}
-
-impl SearchObserverFactory {
-    fn new(
-        search_registry: Arc<SearchRegistry>,
-        hybrid_registry: Arc<HybridSearchRegistry>,
-        indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
-        connection_registry: Arc<ConnectionRegistry>,
-        needs_population: Arc<DashMap<String, AtomicBool>>,
-    ) -> Self {
-        Self {
-            search_registry,
-            hybrid_registry,
-            indexes,
-            connection_registry,
-            needs_population,
-            search_service: std::sync::OnceLock::new(),
-        }
-    }
-
-    fn init_search_service(&self, svc: Arc<SearchService>) {
-        let _ = self.search_service.set(svc);
-    }
-}
-
-impl ObserverFactory for SearchObserverFactory {
-    fn create_observer(
-        &self,
-        map_name: &str,
-        _partition_id: u32,
-    ) -> Option<Arc<dyn MutationObserver>> {
-        // Use fast batch parameters for bench harness (keep in sync with topgun_server.rs).
-        let config = SearchConfig {
-            batch_interval_ms: 16,
-            batch_flush_threshold: 100,
-        };
-        let (observer, hybrid_rx) = SearchMutationObserver::new(
-            map_name.to_string(),
-            Arc::clone(&self.search_registry),
-            Arc::clone(&self.hybrid_registry),
-            Arc::clone(&self.indexes),
-            Arc::clone(&self.connection_registry),
-            config,
-            Arc::clone(&self.needs_population),
-        );
-        if let Some(svc) = self.search_service.get() {
-            svc.spawn_hybrid_notifier(hybrid_rx);
-        }
-        Some(Arc::new(observer))
-    }
-}
-
-/// Wires all 7 domain services and builds the partition dispatcher.
-///
-/// Duplicated from `topgun_server.rs` — keep in sync.
-#[allow(clippy::too_many_lines)]
-fn build_services(
-    ttl_ms: Option<u64>,
-    datastore: Arc<dyn MapDataStore>,
-) -> (
-    Arc<OperationService>,
-    PartitionDispatcher,
-    Arc<ConnectionRegistry>,
-    Arc<RecordStoreFactory>,
-) {
-    let config = ServerConfig {
-        node_id: "bench-server-node".to_string(),
-        default_operation_timeout_ms: 5000,
-        max_concurrent_operations: 100,
-        gc_interval_ms: 60_000,
-        ..ServerConfig::default()
-    };
-
-    let hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
-        config.node_id.clone(),
-        Box::new(SystemClock),
-    )));
-
-    let classify_svc = Arc::new(OperationService::new(
-        Arc::clone(&hlc),
-        Arc::new(config.clone()),
-    ));
-
-    let cluster_config = Arc::new(ClusterConfig::default());
-    let (cluster_state, _rx) = ClusterState::new(cluster_config, "bench-server-node".to_string());
-    let cluster_state = Arc::new(cluster_state);
-    let connection_registry = Arc::new(ConnectionRegistry::new());
-
-    let search_registry = Arc::new(SearchRegistry::new());
-    let hybrid_registry = Arc::new(HybridSearchRegistry::new());
-    let search_indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>> =
-        Arc::new(RwLock::new(HashMap::new()));
-    let search_needs_population: Arc<DashMap<String, AtomicBool>> = Arc::new(DashMap::new());
-
-    let search_observer_factory = Arc::new(SearchObserverFactory::new(
-        Arc::clone(&search_registry),
-        Arc::clone(&hybrid_registry),
-        Arc::clone(&search_indexes),
-        Arc::clone(&connection_registry),
-        Arc::clone(&search_needs_population),
-    ));
-    let search_observer_factory_dyn: Arc<dyn ObserverFactory> =
-        Arc::clone(&search_observer_factory) as Arc<dyn ObserverFactory>;
-
-    let query_registry = Arc::new(QueryRegistry::new());
-
-    let merkle_manager = Arc::new(MerkleSyncManager::default());
-
-    let merkle_observer_factory: Arc<dyn ObserverFactory> =
-        Arc::new(MerkleObserverFactory::new(Arc::clone(&merkle_manager)));
-
-    // Wired into the record store factory as the production binary does, so the
-    // harness measures the index observer on every write, not a write path
-    // without it.
-    let index_observer_factory =
-        Arc::new(topgun_server::service::domain::index::IndexObserverFactory::new());
-
-    let record_store_factory = Arc::new(
-        RecordStoreFactory::new(StorageConfig::default(), Arc::clone(&datastore), Vec::new())
-            .with_observer_factories(vec![
-                search_observer_factory_dyn,
-                merkle_observer_factory,
-                Arc::clone(&index_observer_factory) as Arc<dyn ObserverFactory>,
-            ]),
-    );
-
-    // One clock for client writes and pushed OR entries, as in the production
-    // binary (TG-TTL-001).
-    let wv_hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
-        config.node_id.clone(),
-        Box::new(SystemClock),
-    )));
-    let write_validator = Arc::new(WriteAdmission::new(
-        Arc::new(SecurityConfig::default()),
-        Arc::clone(&wv_hlc),
-    ));
-
-    // Shared Event Journal store, as in production build_services.
-    let journal_store = Arc::new(
-        topgun_server::service::domain::journal::JournalStore::with_enabled(
-            10_000,
-            journal_enabled_from_env(),
-        ),
-    );
-    let crdt_svc = Arc::new(
-        CrdtService::new(
-            Arc::clone(&record_store_factory),
-            Arc::clone(&connection_registry),
-            write_validator,
-            Arc::clone(&query_registry),
-            Arc::new(SchemaService::new()),
-        )
-        .with_journal(Arc::clone(&journal_store)),
-    );
-    // The durable index only over a durable store, exactly as the binary
-    // guards it: a NullDataStore persists nothing, so a durable session would
-    // always be empty, and the in-memory MerkleSyncManager fallback is the only
-    // valid SYNC source there.
-    let sync_base = SyncService::new(
-        merkle_manager,
-        Arc::clone(&record_store_factory),
-        Arc::clone(&connection_registry),
-        Arc::clone(&query_registry),
-    )
-    .with_hlc(wv_hlc);
-    let sync_svc = Arc::new(if datastore.is_null() {
-        sync_base
-    } else {
-        sync_base.with_durable_index(Arc::new(DurableMerkle), datastore)
-    });
-    let query_svc = Arc::new(QueryService::new(
-        Arc::clone(&query_registry),
-        Arc::clone(&record_store_factory),
-        Arc::clone(&connection_registry),
-        config.max_query_records,
-        None,
-        #[cfg(feature = "datafusion")]
-        None,
-    ));
-    let messaging_svc = Arc::new(MessagingService::new(Arc::clone(&connection_registry)));
-    let coordination_svc = Arc::new(CoordinationService::new(
-        cluster_state,
-        Arc::clone(&connection_registry),
-    ));
-    let search_svc = Arc::new(SearchService::new(
-        search_registry,
-        hybrid_registry,
-        search_indexes,
-        Arc::clone(&record_store_factory),
-        Arc::clone(&connection_registry),
-        search_needs_population,
-        Arc::clone(&index_observer_factory),
-    ));
-    search_observer_factory.init_search_service(Arc::clone(&search_svc));
-    let persistence_svc = Arc::new(PersistenceService::with_journal_store(
-        Arc::clone(&connection_registry),
-        config.node_id.clone(),
-        Arc::clone(&journal_store),
-    ));
-
-    let sweep_factory = Arc::clone(&record_store_factory);
-    let pipeline_factory = move || {
-        let mut router = OperationRouter::new();
-        match ttl_ms {
-            Some(ttl_ms) => router.register(
-                service_names::CRDT,
-                WithTtl {
-                    inner: Arc::clone(&crdt_svc),
-                    ttl_ms,
-                },
-            ),
-            None => router.register(service_names::CRDT, Arc::clone(&crdt_svc)),
-        }
-        router.register(service_names::SYNC, Arc::clone(&sync_svc));
-        router.register(service_names::QUERY, Arc::clone(&query_svc));
-        router.register(service_names::MESSAGING, Arc::clone(&messaging_svc));
-        router.register(service_names::COORDINATION, Arc::clone(&coordination_svc));
-        router.register(service_names::SEARCH, Arc::clone(&search_svc));
-        router.register(service_names::PERSISTENCE, Arc::clone(&persistence_svc));
-        build_operation_pipeline(router, &config, None)
-    };
-
-    let dispatch_config = DispatchConfig::default();
-    let dispatcher = PartitionDispatcher::new(&dispatch_config, pipeline_factory);
-    (classify_svc, dispatcher, connection_registry, sweep_factory)
-}
-
-/// What the expiry sweep did over the run, summed from its tick reports.
-#[derive(Default)]
-struct SweepTotals {
-    rows_scanned: AtomicU64,
-    maps_skipped: AtomicU64,
-}
-
-/// Runs the expiry sweep as the binary does — a tick every `SWEEP_TICK`,
-/// removals through the dispatcher, the knobs from the same environment
-/// variables — so its cost is in every run. Driven here rather than by
-/// `spawn_expiry_sweep` so the totals are read from the tick reports: a
-/// metrics recorder installed only to read them would add its own cost to
-/// every metric of the server under measurement.
-/// Returns the sweep task's handle, so the server can stop it before the
-/// write-behind drain.
-fn spawn_sweep(
-    factory: Arc<RecordStoreFactory>,
-    dispatcher: Arc<PartitionDispatcher>,
-    totals: Arc<SweepTotals>,
-    config: SweepConfig,
-) -> tokio::task::JoinHandle<()> {
-    let mut state = SweepState::new(factory, dispatcher as Arc<dyn ExpiryDispatch>, config);
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(SWEEP_TICK);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await;
-            let report = sweep_tick(&mut state).await;
-            totals
-                .rows_scanned
-                .fetch_add(report.rows_scanned, Ordering::Relaxed);
-            totals
-                .maps_skipped
-                .fetch_add(report.maps_skipped, Ordering::Relaxed);
-        }
-    })
-}
-
-/// Gives every LWW write of a client op or batch the TTL of `--ttl-ms`, as if
-/// the client had sent it, so the sweep cannot pass over the written map.
-#[derive(Clone)]
-struct WithTtl {
-    inner: Arc<CrdtService>,
-    ttl_ms: u64,
-}
-
-impl tower::Service<Operation> for WithTtl {
-    type Response = OperationResponse;
-    type Error = OperationError;
-    type Future = <Arc<CrdtService> as tower::Service<Operation>>::Future;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, mut op: Operation) -> Self::Future {
-        let ops = match &mut op {
-            Operation::ClientOp { payload, .. } => std::slice::from_mut(&mut payload.payload),
-            Operation::OpBatch { payload, .. } => payload.payload.ops.as_mut_slice(),
-            _ => &mut [],
-        };
-        for client_op in ops {
-            if let Some(Some(record)) = &mut client_op.record {
-                record.ttl_ms = Some(self.ttl_ms);
-            }
-        }
-        self.inner.call(op)
-    }
 }

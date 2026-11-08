@@ -15,6 +15,7 @@ use topgun_core::hlc::{LWWRecord, Timestamp};
 use topgun_core::messages::{ClientOp, Message, OpBatchMessage, OpBatchPayload};
 
 use crate::connection_pool::ConnectionPool;
+use crate::open_loop::Heartbeat;
 use crate::traits::{Assertion, AssertionResult, HarnessContext, LoadScenario, ScenarioResult};
 
 /// Configuration for the throughput benchmark scenario.
@@ -30,6 +31,8 @@ pub struct ThroughputConfig {
     /// When true, send batches without waiting for ACK (fire-and-forget).
     /// A separate task per connection drains ACKs and records latency.
     pub fire_and_forget: bool,
+    /// The TTL every sent record asks for, as a client sets it (`--ttl-ms`).
+    pub ttl_ms: Option<u64>,
 }
 
 impl Default for ThroughputConfig {
@@ -40,6 +43,7 @@ impl Default for ThroughputConfig {
             batch_size: 10,
             send_interval_ms: 50,
             fire_and_forget: false,
+            ttl_ms: None,
         }
     }
 }
@@ -115,6 +119,7 @@ impl LoadScenario for ThroughputScenario {
         let batch_size = self.config.batch_size;
         let send_interval_ms = self.config.send_interval_ms;
         let fire_and_forget = self.config.fire_and_forget;
+        let ttl_ms = self.config.ttl_ms;
         let metrics = Arc::clone(&ctx.metrics);
 
         let mut join_set = tokio::task::JoinSet::new();
@@ -124,12 +129,14 @@ impl LoadScenario for ThroughputScenario {
             let metrics = Arc::clone(&metrics);
 
             join_set.spawn(async move {
+                let _heartbeat = Heartbeat::start(Arc::clone(&pool), conn_idx);
                 if fire_and_forget {
                     run_fire_and_forget(
                         &pool,
                         conn_idx,
                         duration_secs,
                         batch_size,
+                        ttl_ms,
                         send_interval_ms,
                         &metrics,
                     )
@@ -140,6 +147,7 @@ impl LoadScenario for ThroughputScenario {
                         conn_idx,
                         duration_secs,
                         batch_size,
+                        ttl_ms,
                         send_interval_ms,
                         &metrics,
                     )
@@ -186,7 +194,7 @@ impl LoadScenario for ThroughputScenario {
 // Per-connection task implementations
 // ---------------------------------------------------------------------------
 
-fn build_batch(conn_idx: usize, seq: u64, batch_size: usize) -> Vec<u8> {
+fn build_batch(conn_idx: usize, seq: u64, batch_size: usize, ttl_ms: Option<u64>) -> Vec<u8> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -211,7 +219,7 @@ fn build_batch(conn_idx: usize, seq: u64, batch_size: usize) -> Vec<u8> {
             record: Some(Some(LWWRecord {
                 value: Some(value),
                 timestamp: ts,
-                ttl_ms: None,
+                ttl_ms,
             })),
             ..Default::default()
         };
@@ -237,6 +245,7 @@ async fn run_fire_and_wait(
     conn_idx: usize,
     duration_secs: u64,
     batch_size: usize,
+    ttl_ms: Option<u64>,
     send_interval_ms: u64,
     metrics: &Arc<dyn crate::traits::MetricsCollector>,
 ) -> (u64, u64, u64) {
@@ -247,7 +256,7 @@ async fn run_fire_and_wait(
     let mut seq: u64 = 0;
 
     while tokio::time::Instant::now() < deadline {
-        let bytes = build_batch(conn_idx, seq, batch_size);
+        let bytes = build_batch(conn_idx, seq, batch_size, ttl_ms);
         let send_time = std::time::Instant::now();
 
         if let Err(e) = pool.send_to(conn_idx, &bytes).await {
@@ -259,24 +268,30 @@ async fn run_fire_and_wait(
             continue;
         }
 
-        match tokio::time::timeout(Duration::from_secs(5), pool.recv_from(conn_idx)).await {
-            Ok(Ok(ack_bytes)) => {
-                let elapsed_us = send_time.elapsed().as_micros() as u64;
-                if let Ok(Message::OpAck(_)) = rmp_serde::from_slice::<Message>(&ack_bytes) {
-                    metrics.record_latency("write_latency", elapsed_us);
-                    acked_count += batch_size as u64;
-                } else {
+        // A heartbeat PONG answers no batch: read past it until the batch's
+        // own answer, or the next answer would be taken for the next batch's.
+        let answer_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match tokio::time::timeout_at(answer_deadline, pool.recv_from(conn_idx)).await {
+                Ok(Ok(bytes)) => match rmp_serde::from_slice::<Message>(&bytes) {
+                    Ok(Message::Pong(_)) => continue,
+                    Ok(Message::OpAck(_)) => {
+                        let elapsed_us = send_time.elapsed().as_micros() as u64;
+                        metrics.record_latency("write_latency", elapsed_us);
+                        acked_count += batch_size as u64;
+                    }
+                    _ => timeout_count += 1,
+                },
+                Ok(Err(e)) => {
+                    tracing::warn!("conn-{conn_idx}: recv error: {e}");
+                    timeout_count += 1;
+                }
+                Err(_) => {
+                    tracing::warn!("conn-{conn_idx}: OP_ACK timed out after 5s");
                     timeout_count += 1;
                 }
             }
-            Ok(Err(e)) => {
-                tracing::warn!("conn-{conn_idx}: recv error: {e}");
-                timeout_count += 1;
-            }
-            Err(_) => {
-                tracing::warn!("conn-{conn_idx}: OP_ACK timed out after 5s");
-                timeout_count += 1;
-            }
+            break;
         }
 
         seq += batch_size as u64;
@@ -299,6 +314,7 @@ async fn run_fire_and_forget(
     conn_idx: usize,
     duration_secs: u64,
     batch_size: usize,
+    ttl_ms: Option<u64>,
     send_interval_ms: u64,
     _metrics: &Arc<dyn crate::traits::MetricsCollector>,
 ) -> (u64, u64, u64) {
@@ -313,7 +329,7 @@ async fn run_fire_and_forget(
     // Send-only: push batches as fast as possible without waiting for ACK.
     // This measures how fast the client can push data into the server pipeline.
     while tokio::time::Instant::now() < deadline {
-        let bytes = build_batch(conn_idx, seq, batch_size);
+        let bytes = build_batch(conn_idx, seq, batch_size, ttl_ms);
 
         if let Err(e) = pool.send_to(conn_idx, &bytes).await {
             send_errors += 1;

@@ -32,7 +32,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 use topgun_core::hlc::{LWWRecord, Timestamp};
-use topgun_core::messages::{ClientOp, Message, OpBatchMessage, OpBatchPayload};
+use topgun_core::messages::{ClientOp, Message, OpBatchMessage, OpBatchPayload, PingData};
 
 use crate::connection_pool::ConnectionPool;
 use crate::store_arm::{dir_bytes, EffectiveStoreConfig, RunDirs, ServerHandle, Teardown};
@@ -57,6 +57,8 @@ pub struct OpenLoopConfig {
     pub sample_ms: u64,
     pub ack_timeout_ms: u64,
     pub max_wake_lag_ms: u64,
+    /// The TTL every sent record asks for, as a client sets it (`--ttl-ms`).
+    pub ttl_ms: Option<u64>,
 }
 
 impl Default for OpenLoopConfig {
@@ -71,6 +73,7 @@ impl Default for OpenLoopConfig {
             sample_ms: 1000,
             ack_timeout_ms: 10_000,
             max_wake_lag_ms: 5,
+            ttl_ms: None,
         }
     }
 }
@@ -132,9 +135,19 @@ impl Default for KeyMix {
 /// One server frame, reduced to what the classification reads.
 #[derive(Debug, Clone)]
 pub enum Frame {
-    Rejected { op_id: String, code: Option<u32> },
-    Ack { results: Option<Vec<String>> },
-    Error { code: u32, message: String },
+    Rejected {
+        op_id: String,
+        code: Option<u32>,
+    },
+    Ack {
+        results: Option<Vec<String>>,
+    },
+    Error {
+        code: u32,
+        message: String,
+    },
+    /// The server's answer to the heartbeat; it answers no batch.
+    Pong,
     Other,
 }
 
@@ -155,6 +168,7 @@ impl Frame {
                 code: payload.code,
                 message: payload.message,
             },
+            Ok(Message::Pong(_)) => Self::Pong,
             _ => Self::Other,
         }
     }
@@ -285,6 +299,7 @@ impl BatchAnswer {
                 self.error_message = Some((code, message));
                 Step::Terminal
             }
+            Frame::Pong => Step::Continue,
             Frame::Other => {
                 self.anomalies += 1;
                 Step::Continue
@@ -429,6 +444,7 @@ fn build_batch(
     first_id: u64,
     batch_size: usize,
     key_mix: &KeyMix,
+    ttl_ms: Option<u64>,
     rng: &mut StdRng,
 ) -> Vec<u8> {
     let millis = SystemTime::now()
@@ -462,7 +478,7 @@ fn build_batch(
                         counter: id as u32,
                         node_id: format!("bench-{conn_idx}"),
                     },
-                    ttl_ms: None,
+                    ttl_ms,
                 })),
                 ..Default::default()
             }
@@ -491,6 +507,50 @@ fn remaining_window_batches(schedule: &Schedule, conn: usize, mut k: u64) -> u64
         }
         k += 1;
     }
+}
+
+/// How often the shipped client pings (`SyncEngine` sends `PING` every 5 s).
+/// The server's reaper closes a connection whose last `PING` is older than its
+/// idle timeout, and nothing else refreshes it, so a generator that never pings
+/// loses every connection once that timeout has passed.
+pub const PING_INTERVAL: Duration = Duration::from_secs(5);
+
+/// One connection's heartbeat: a task of its own that sends the client's
+/// `PING` every [`PING_INTERVAL`], so a ping is never sent from the batch loop
+/// and never shifts a batch's schedule. It shares the connection's sink lock
+/// with the batch loop, so a batch send may wait for one in-flight `PING`
+/// write. The task stops when the guard is dropped or a send fails.
+pub struct Heartbeat(tokio::task::JoinHandle<()>);
+
+impl Heartbeat {
+    pub fn start(pool: Arc<ConnectionPool>, conn: usize) -> Self {
+        Self(tokio::spawn(async move {
+            let mut ticker =
+                tokio::time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if pool.send_to(conn, &ping_frame()).await.is_err() {
+                    return;
+                }
+            }
+        }))
+    }
+}
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The client's `PING`, stamped with the wall clock in milliseconds.
+pub fn ping_frame() -> Vec<u8> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    rmp_serde::to_vec_named(&Message::Ping(PingData { timestamp })).expect("serialize PING")
 }
 
 /// Where a batch's ack latency starts: the instant from which the batch
@@ -524,6 +584,7 @@ async fn drive_connection(
     let mut tally = ConnTally::new();
     let mut next_id: u64 = 1;
     let mut k: u64 = 0;
+    let _heartbeat = Heartbeat::start(Arc::clone(&pool), conn);
 
     loop {
         let scheduled = schedule.instant(conn, k);
@@ -553,7 +614,14 @@ async fn drive_connection(
 
         let first_id = next_id;
         next_id += batch;
-        let bytes = build_batch(conn, first_id, config.batch_size, &config.key_mix, &mut rng);
+        let bytes = build_batch(
+            conn,
+            first_id,
+            config.batch_size,
+            &config.key_mix,
+            config.ttl_ms,
+            &mut rng,
+        );
         let sent_at = Instant::now();
         if pool.send_to(conn, &bytes).await.is_err() {
             // Not delivered: this batch and every later one of the window
@@ -1280,6 +1348,31 @@ pub fn classify_full_rejection_and_partial_ack() {
     assert_eq!(stray.anomalies, 1);
 }
 
+/// A heartbeat `PONG` between a batch's send and its `OP_ACK` answers nothing
+/// and is no anomaly: the batch is settled by the `OP_ACK`, every op once.
+pub fn classify_pong_is_neither_answer_nor_anomaly() {
+    let pong = rmp_serde::to_vec_named(&Message::Pong(topgun_core::messages::PongData {
+        timestamp: 1,
+        server_time: 2,
+    }))
+    .expect("serialize PONG");
+    let mut answer = BatchAnswer::new(1, 3);
+    assert_eq!(answer.apply(Frame::decode(&pong)), Step::Continue);
+    assert_eq!(answer.counts().unanswered, 3, "a PONG settles no op");
+    assert_eq!(answer.apply(Frame::Ack { results: None }), Step::Terminal);
+    let counts = answer.counts();
+    assert_eq!(
+        (
+            counts.acked,
+            counts.permanent(),
+            counts.transient(),
+            counts.unanswered
+        ),
+        (3, 0, 0, 0)
+    );
+    assert_eq!(answer.anomalies, 0);
+}
+
 /// A batch reached before its instant counts from its actual send, so the
 /// generator's timer lag stays out of the ack latency; a batch reached after
 /// its instant counts from the scheduled instant.
@@ -1293,7 +1386,7 @@ pub fn latency_origin_early_from_send_late_from_schedule() {
 /// Runs every check, each isolated so that one failing check does not hide the
 /// others, and prints a libtest-shaped summary. Returns the exit code.
 pub fn run_self_tests() -> i32 {
-    let checks: [(&str, fn()); 3] = [
+    let checks: [(&str, fn()); 4] = [
         (
             "classify_partial_reject_then_error_counts_each_op_once",
             classify_partial_reject_then_error_counts_each_op_once,
@@ -1301,6 +1394,10 @@ pub fn run_self_tests() -> i32 {
         (
             "classify_full_rejection_and_partial_ack",
             classify_full_rejection_and_partial_ack,
+        ),
+        (
+            "classify_pong_is_neither_answer_nor_anomaly",
+            classify_pong_is_neither_answer_nor_anomaly,
         ),
         (
             "latency_origin_early_from_send_late_from_schedule",
