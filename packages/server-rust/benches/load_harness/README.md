@@ -69,6 +69,8 @@ All latency values are in **microseconds (µs)**.
 
 **ops/sec** is calculated as `total_ops / duration_secs` and printed below the table.
 
+**Under `cargo test`** (for example CI's debug `cargo test --all-targets`), where Cargo does not pass `--bench`, the defaults drop to 50 connections for 10 s: a functional smoke of the full server path, since the full load in a debug build measures the runner rather than the code. Throughput is gated in release by the perf-gate job. Explicit `--connections` / `--duration` flags still win.
+
 **Assertions:** After metrics are printed, the `ThroughputAssertion` runs two checks:
 
 1. **Acked ratio >= 80%** — At least 80% of sent operations must receive an `OP_ACK` within the test duration. If fewer than 80% are acknowledged, the assertion reports `FAIL` with the actual ratio.

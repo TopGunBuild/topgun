@@ -84,8 +84,12 @@ async fn main() {
     // --- CLI argument parsing ---
     let args: Vec<String> = std::env::args().collect();
     let mut scenario_name = "throughput".to_string();
-    let mut num_connections: usize = 200;
-    let mut duration_secs: u64 = 30;
+    // Cargo passes `--bench` only under `cargo bench`. Under `cargo test` (CI's debug
+    // `--all-targets` run) the harness is a functional smoke: the full load would measure
+    // the runner's hardware, not the code, and capacity is gated in release by perf-gate.
+    let under_cargo_bench = args.iter().any(|a| a == "--bench");
+    let mut num_connections: usize = if under_cargo_bench { 200 } else { 50 };
+    let mut duration_secs: u64 = if under_cargo_bench { 30 } else { 10 };
     let mut send_interval_ms: u64 = 50;
     let mut fire_and_forget = false;
     let mut json_output: Option<String> = None;
