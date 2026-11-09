@@ -1,0 +1,31 @@
+name: Diag harness after rocksdb tests (temporary)
+on:
+  pull_request:
+    paths: ['.github/workflows/diag-harness-ab.yml']
+jobs:
+  io:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - name: build
+        working-directory: packages/server-rust
+        run: cargo test --lib --benches --no-run --target-dir /tmp/t 2>&1 | tail -3
+      - name: harness before
+        working-directory: packages/server-rust
+        run: cargo test --bench load_harness --target-dir /tmp/t 2>&1 | grep -E 'ops/sec|acked ratio|PASS \[|FAIL \['
+      - name: rocksdb lib tests (timed) + disk stats
+        working-directory: packages/server-rust
+        run: |
+          df -h /tmp; cat /proc/diskstats | awk '$3 ~ /^(sda|sdb|nvme0n1|vda)$/'
+          time cargo test --lib --target-dir /tmp/t -- rocks r_a_ kv_crash 2>&1 | grep -E 'test result'
+          cat /proc/diskstats | awk '$3 ~ /^(sda|sdb|nvme0n1|vda)$/'
+      - name: harness right after
+        working-directory: packages/server-rust
+        run: cargo test --bench load_harness --target-dir /tmp/t 2>&1 | grep -E 'ops/sec|acked ratio|PASS \[|FAIL \['
+      - name: harness after 3 min idle
+        working-directory: packages/server-rust
+        run: |
+          sleep 180
+          cargo test --bench load_harness --target-dir /tmp/t 2>&1 | grep -E 'ops/sec|acked ratio|PASS \[|FAIL \['
