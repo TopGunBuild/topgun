@@ -1,0 +1,25 @@
+name: Diag harness main vs branch (temporary)
+on:
+  pull_request:
+    paths: ['.github/workflows/diag-harness-ab.yml']
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - run: rustup show
+      - name: main worktree
+        run: git worktree add /tmp/main 7692c380
+      - name: build both
+        run: |
+          (cd packages/server-rust && cargo test --bench load_harness --target-dir /tmp/t-br --no-run 2>&1 | tail -1)
+          (cd /tmp/main/packages/server-rust && cargo test --bench load_harness --target-dir /tmp/t-main --no-run 2>&1 | tail -1)
+          nproc; lscpu | grep -E 'Model name|^CPU\(s\)'
+      - name: alternate
+        run: |
+          for r in 1 2 3; do
+            (cd /tmp/main/packages/server-rust && cargo test --bench load_harness --target-dir /tmp/t-main 2>&1 | grep -E 'ops/sec|acked ratio|PASS \[|FAIL \[' | tr '\n' ' ' | sed "s/^/rep$r main: /"; echo)
+            (cd packages/server-rust && cargo test --bench load_harness --target-dir /tmp/t-br 2>&1 | grep -E 'ops/sec|acked ratio|PASS \[|FAIL \[' | tr '\n' ' ' | sed "s/^/rep$r branch: /"; echo)
+          done
