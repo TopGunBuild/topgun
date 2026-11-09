@@ -26,11 +26,12 @@
 //! acked may legitimately be absent.
 //!
 //! Every WAL / recovery / classification code path exercised is production code
-//! (`WalRecovery::run`, `WalWriter::unapplied` → `format::decode_all`); the only
-//! thing faked is the crash itself.
+//! (`WalRecovery::run`, `WalWriter::unapplied`); the only thing faked is the
+//! crash itself. The test reads segment files only through the log's own
+//! `segment::inspect` reader, never by their names or layout.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,7 +50,7 @@ use crate::storage::map_data_store::{
     LeafSink, MapDataStore, ScanBatch, ScanCursor, WatermarkKeeping,
 };
 use crate::storage::record::{OrMapEntry, RecordValue};
-use crate::storage::wal::segment::parse_segment_filename;
+use crate::storage::wal::segment::inspect;
 use crate::storage::wal::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
 
 // ---------------------------------------------------------------------------
@@ -344,29 +345,14 @@ async fn assert_only_the_wal_holds<'a>(
     }
 }
 
-/// The segments of `partition` in `wal_dir`, ascending by first sequence.
-fn segments_of(wal_dir: &Path, partition: u32) -> Vec<(u64, PathBuf)> {
-    let mut segments: Vec<(u64, PathBuf)> = std::fs::read_dir(wal_dir)
-        .unwrap()
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            parse_segment_filename(&name)
-                .and_then(|(p, first_seq)| (p == partition).then(|| (first_seq, e.path())))
-        })
-        .collect();
-    segments.sort_by_key(|(first_seq, _)| *first_seq);
-    segments
-}
-
-/// Whether no segment of `partition` holds a frame: every frame it held was
+/// Whether no frame of `partition` is left on disk: every frame it held was
 /// collected, and what is left is at most the empty active segment the last
 /// seal rotated in, which holds only its header.
 fn holds_no_frame(wal_dir: &Path, partition: u32) -> bool {
-    segments_of(wal_dir, partition).iter().all(|(_, path)| {
-        crate::storage::wal::format::decode_segment(&std::fs::read(path).unwrap()).frames == 0
-    })
+    !inspect::frames_on_disk(wal_dir)
+        .unwrap()
+        .iter()
+        .any(|frame| frame.partition == partition)
 }
 
 /// Final intended state of each key (last op wins) given a fully-acked sequence.
@@ -705,17 +691,9 @@ async fn ac2b_truncated_tail_tolerated() {
     .await;
 
     // Locate the single partition file and lop off its last few bytes.
-    let log_path = std::fs::read_dir(&wal_dir)
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| {
-            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-                n.strip_prefix("partition-")
-                    .and_then(|r| r.strip_suffix(".log"))
-                    .is_some()
-            })
-        })
+    let log_path = inspect::segment_paths(&wal_dir)
+        .into_iter()
+        .next()
         .expect("a partition log file must exist");
 
     let bytes = std::fs::read(&log_path).unwrap();
@@ -745,8 +723,6 @@ async fn ac2b_truncated_tail_tolerated() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ac2c_mid_file_corruption_is_fatal() {
-    use crate::storage::wal::format;
-
     let dir = tempfile::tempdir().unwrap();
     let wal_dir = dir.path().to_path_buf();
 
@@ -754,7 +730,8 @@ async fn ac2c_mid_file_corruption_is_fatal() {
     // byte in the FIRST frame so it is mid-file corruption (a complete-but-wrong
     // frame followed by a valid frame, not a truncated tail). Two writes to the
     // same key land in one partition file, so the first frame is genuinely
-    // mid-file. decode_all classifies this as Corruption ⇒ recovery must bail.
+    // mid-file. A complete frame whose CRC fails is corruption ⇒ recovery must
+    // bail.
     let key = "same_partition_key";
     let durable = kept_store();
     kill_after({
@@ -775,24 +752,20 @@ async fn ac2c_mid_file_corruption_is_fatal() {
     })
     .await;
 
-    let log_path = std::fs::read_dir(&wal_dir)
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| {
-            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-                n.strip_prefix("partition-")
-                    .and_then(|r| r.strip_suffix(".log"))
-                    .is_some()
-            })
-        })
+    let log_path = inspect::segment_paths(&wal_dir)
+        .into_iter()
+        .next()
         .expect("a partition log file must exist");
 
     let mut bytes = std::fs::read(&log_path).unwrap();
-    // Flip a byte in the first frame's payload (just past the frame header) so
-    // its stored CRC no longer matches — a complete-frame corruption mid-file.
-    let corrupt_at = format::FRAME_HEADER_LEN;
-    assert!(bytes.len() > corrupt_at, "log must hold a full first frame");
+    // Flip the last byte of the first frame's payload so its stored CRC no
+    // longer matches — a complete-frame corruption mid-file. The frames fill
+    // the file after its header, so the first one starts where their summed
+    // lengths end, counted back from the end of the file.
+    let frames = inspect::frames_on_disk(&wal_dir).unwrap();
+    assert_eq!(frames.len(), 2, "log must hold two full frames");
+    let first_at = bytes.len() - frames.iter().map(|f| f.encoded_len).sum::<usize>();
+    let corrupt_at = first_at + frames[0].encoded_len - 1;
     bytes[corrupt_at] ^= 0xFF;
     std::fs::write(&log_path, &bytes).unwrap();
 
@@ -895,7 +868,7 @@ async fn ac4_acked_writes_survive_multiple_restart_cycles() {
         holds_no_frame(&wal_dir, partition) && row > 0,
         "precondition (the compaction trap): k0's partition is collected to no frame \
          while its row stays, got segments {:?} and row {row}",
-        segments_of(&wal_dir, partition)
+        inspect::segment_paths(&wal_dir)
     );
     release(wal).await;
 
@@ -1016,7 +989,7 @@ async fn max_observed_sequence_reads_watermark_of_compacted_empty_partition() {
     assert!(
         holds_no_frame(&wal_dir, 3),
         "precondition: every frame of partition 3 is collected, got segments {:?}",
-        segments_of(&wal_dir, 3)
+        inspect::segment_paths(&wal_dir)
     );
     release(wal).await;
 
@@ -1279,15 +1252,16 @@ async fn crash_on_partial_active_segment_recovers_intact_prefix() {
     // truncate on disk (avoids racing an in-flight fsync timer).
     assert_only_the_wal_holds(&durable, keys.iter().chain(&tail_keys)).await;
 
-    // Identify the ACTIVE (highest-first_seq) segment of the partition and lop off
-    // its last few bytes to model a half-written final frame at SIGKILL time.
-    let segments = segments_of(&wal_dir, partition);
+    // Every write went to one partition, so the newest segment file is its
+    // ACTIVE segment: lop off its last few bytes to model a half-written final
+    // frame at SIGKILL time.
+    let segments = inspect::segment_paths(&wal_dir);
     assert!(
         segments.len() >= 2,
         "test must produce a multi-segment partition (sealed + active); got {}",
         segments.len()
     );
-    let (_active_first_seq, active_path) = segments.last().cloned().unwrap();
+    let active_path = segments.last().cloned().unwrap();
 
     let active_bytes = std::fs::read(&active_path).unwrap();
     assert!(

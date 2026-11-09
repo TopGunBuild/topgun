@@ -6465,35 +6465,15 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     async fn a_no_effect_or_write_frames_a_full_record_that_cannot_resurrect_it() {
         use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
-        use crate::storage::wal::format::{decode_all, FrameDecodeResult};
-        use crate::storage::wal::segment::parse_segment_filename;
+        use crate::storage::wal::segment::inspect;
         use crate::storage::wal::{Wal, WalEntry, WalFsyncPolicy, WalOp, WalWriter};
 
         fn frames(dir: &std::path::Path) -> Vec<WalEntry> {
-            let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            let mut out: Vec<WalEntry> = inspect::frames_on_disk(dir)
                 .unwrap()
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.is_file()
-                        && p.file_name()
-                            .and_then(|n| n.to_str())
-                            .and_then(parse_segment_filename)
-                            .is_some()
-                })
+                .into_iter()
+                .map(|frame| frame.entry)
                 .collect();
-            paths.sort();
-            let mut out = Vec::new();
-            for path in paths {
-                let bytes = std::fs::read(&path).unwrap();
-                let entries = match decode_all(&bytes) {
-                    FrameDecodeResult::Complete(entries) => entries,
-                    FrameDecodeResult::TruncatedTail { complete } => complete,
-                    FrameDecodeResult::CleanEof => Vec::new(),
-                    other => panic!("unexpected decode result: {other:?}"),
-                };
-                out.extend(entries);
-            }
             out.sort_by_key(|e| e.sequence);
             out
         }

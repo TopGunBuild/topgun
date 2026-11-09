@@ -8653,41 +8653,15 @@ mod tests {
         (wal as Arc<dyn Wal>, store)
     }
 
-    /// Every frame the log directory holds, read back off disk.
-    ///
-    /// Segments are selected by the log's OWN name parser rather than by
-    /// guessing an extension: the directory also holds the collected-up-to
-    /// record, which carries no frames.
+    /// Every frame the log directory holds, read back off disk through the
+    /// log's own reader, so the test does not depend on segment names or
+    /// layout.
     fn frames_on_disk(dir: &std::path::Path) -> Vec<WalEntry> {
-        use crate::storage::wal::format::{decode_all, FrameDecodeResult};
-        use crate::storage::wal::segment::parse_segment_filename;
-
-        let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        crate::storage::wal::segment::inspect::frames_on_disk(dir)
             .unwrap()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.is_file()
-                    && p.file_name()
-                        .and_then(|n| n.to_str())
-                        .and_then(parse_segment_filename)
-                        .is_some()
-            })
-            .collect();
-        paths.sort();
-
-        let mut out = Vec::new();
-        for path in paths {
-            let bytes = std::fs::read(&path).unwrap();
-            let entries = match decode_all(&bytes) {
-                FrameDecodeResult::Complete(entries) => entries,
-                FrameDecodeResult::TruncatedTail { complete } => complete,
-                FrameDecodeResult::CleanEof => Vec::new(),
-                other => panic!("unexpected decode result for {}: {other:?}", path.display()),
-            };
-            out.extend(entries);
-        }
-        out
+            .into_iter()
+            .map(|frame| frame.entry)
+            .collect()
     }
 
     /// The per-op OR frame is no larger than three times the mean full-record
