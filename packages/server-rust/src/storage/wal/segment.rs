@@ -327,19 +327,38 @@ impl StreamSegmentHeader {
     }
 }
 
-/// The highest sequence of every partition with a frame in one stream
-/// segment, read from the frame headers alone (partition and sequence are in
-/// the clear), so collection can judge a segment without decrypting it.
+/// Where one frame of a stream segment sits, so a partition's frames are read
+/// back without reading any other partition's. 32 bytes in memory per frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameLocation {
+    pub sequence: u64,
+    /// File offset of the frame's first byte.
+    pub offset: u64,
+    /// Position of the frame in its segment: the nonce of a sealed frame.
+    pub index: u64,
+    /// Bytes of the frame, header included.
+    pub len: u32,
+}
+
+/// What one stream segment holds, read from its frame headers alone
+/// (partition and sequence are in the clear), so collection judges a segment
+/// and recovery finds a partition's frames without decrypting a payload: the
+/// highest sequence of every partition with a frame there, and where each of
+/// its frames sits. The index costs 32 bytes per frame (`FrameLocation`) plus
+/// one map entry and one `Vec` per partition per segment.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SegmentSummary {
     pub max_seq: std::collections::BTreeMap<u32, u64>,
+    /// Every frame of each partition, in file order.
+    pub frames: std::collections::BTreeMap<u32, Vec<FrameLocation>>,
 }
 
 impl SegmentSummary {
-    /// Counts a frame of `partition` at `sequence`.
-    pub fn note(&mut self, partition: u32, sequence: u64) {
-        let max = self.max_seq.entry(partition).or_insert(sequence);
-        *max = (*max).max(sequence);
+    /// Counts the frame of `partition` at `location`.
+    pub fn note(&mut self, partition: u32, location: FrameLocation) {
+        let max = self.max_seq.entry(partition).or_insert(location.sequence);
+        *max = (*max).max(location.sequence);
+        self.frames.entry(partition).or_default().push(location);
     }
 }
 
@@ -483,13 +502,16 @@ pub fn format_stream_filename(stream_seq: u64) -> String {
     format!("{STREAM_FILE_PREFIX}{stream_seq:0pad$}{SEGMENT_FILE_SUFFIX}")
 }
 
-/// The `stream_seq` of a stream segment's filename; `None` for any other
-/// name.
+/// The `stream_seq` of a stream segment's filename, which carries it in
+/// exactly [`STREAM_SEQ_PAD`] digits; `None` for any other name, so two names
+/// can never denote one segment.
 #[must_use]
 pub fn parse_stream_filename(name: &str) -> Option<u64> {
     name.strip_prefix(STREAM_FILE_PREFIX)?
         .strip_suffix(SEGMENT_FILE_SUFFIX)
-        .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))?
+        .filter(|digits| {
+            digits.len() == STREAM_SEQ_PAD && digits.bytes().all(|b| b.is_ascii_digit())
+        })?
         .parse::<u64>()
         .ok()
 }
@@ -885,7 +907,7 @@ pub mod inspect {
                     }));
                 }
                 Listed::Stream(stream_seq) => {
-                    let (spans, entries) = WalWriter::read_stream_segment(
+                    let (_, spans, entries) = WalWriter::read_stream_segment(
                         path,
                         &data,
                         Some(*stream_seq) == newest_stream,
@@ -959,6 +981,8 @@ mod tests {
         );
         assert_eq!(parse_stream_filename("stream-+7.log"), None);
         assert_eq!(parse_stream_filename("stream-.log"), None);
+        assert_eq!(parse_stream_filename("stream-1.log"), None);
+        assert_eq!(parse_stream_filename("stream-00000000000000001.log"), None);
     }
 
     fn entry(map: &str, sequence: u64) -> crate::storage::wal::WalEntry {
@@ -1045,6 +1069,8 @@ mod tests {
             vec![Some((4, 7)), Some((270, 2)), Some((4, 8))]
         );
         assert_eq!(decoded.intact_len, data.len());
+        // The index the summary keeps costs what its doc states per frame.
+        assert_eq!(std::mem::size_of::<FrameLocation>(), 32);
         // The envelopes alone give the same addresses without reading a payload.
         let headers = decode_stream_segment(&data, None, false);
         assert_eq!(headers.spans, decoded.spans);

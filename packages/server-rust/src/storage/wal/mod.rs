@@ -652,10 +652,14 @@ fn write_wal_collected(wal_dir: &Path, collected: &[u64]) -> anyhow::Result<()> 
     fsync_dir(wal_dir)
 }
 
-/// A sealed stream segment: its file and what collection judges it by.
-#[derive(Debug, Clone)]
+/// A sealed stream segment: its file, its header (the key of a sealed one
+/// derives from it), and the summary collection judges it by and recovery
+/// finds a partition's frames with.
+#[derive(Debug)]
 struct StreamSegment {
     path: PathBuf,
+    /// `None` only for a file shorter than its header, which holds no frame.
+    header: Option<segment::StreamSegmentHeader>,
     summary: segment::SegmentSummary,
 }
 
@@ -723,7 +727,11 @@ pub struct WalWriter {
     /// highest sequence of every partition it holds a frame of. Built from
     /// the frame headers at open; only collection removes an entry, after its
     /// file is gone.
-    stream: std::sync::Mutex<BTreeMap<u64, StreamSegment>>,
+    stream: std::sync::Mutex<BTreeMap<u64, Arc<StreamSegment>>>,
+    /// Stream frames read back by their location, so a test can tell that a
+    /// partition's read touches no other partition's frame.
+    #[cfg(test)]
+    test_stream_frame_reads: std::sync::atomic::AtomicUsize,
     /// Added to the clock the collection tick reads a segment's age by, so a
     /// test can age a segment without waiting.
     #[cfg(test)]
@@ -1220,7 +1228,7 @@ impl WalWriter {
         keyring: Option<Arc<Keyring>>,
         durable: Box<[AtomicU64]>,
         collected: Box<[u64]>,
-        stream: BTreeMap<u64, StreamSegment>,
+        stream: BTreeMap<u64, Arc<StreamSegment>>,
     ) -> Arc<Self> {
         let (batch_flush_tx, batch_flush_rx) = tokio::sync::watch::channel(());
 
@@ -1241,6 +1249,8 @@ impl WalWriter {
                 task: std::sync::OnceLock::new(),
             },
             stream: std::sync::Mutex::new(stream),
+            #[cfg(test)]
+            test_stream_frame_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             test_clock_offset: std::sync::Mutex::new(std::time::Duration::ZERO),
             #[cfg(test)]
@@ -1412,32 +1422,63 @@ impl WalWriter {
         for entry in read_dir {
             let entry = entry
                 .map_err(|e| anyhow::anyhow!("Cannot read WAL dir {}: {e}", wal_dir.display()))?;
-            if let Some(stream_seq) =
-                segment::parse_stream_filename(&entry.file_name().to_string_lossy())
-            {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(stream_seq) = segment::parse_stream_filename(&name) {
                 found.push((stream_seq, entry.path()));
+            } else if name.starts_with(segment::STREAM_FILE_PREFIX)
+                && name.ends_with(segment::SEGMENT_FILE_SUFFIX)
+            {
+                // Read under another name, it could hide or shadow the
+                // segment its number names; it is never skipped silently.
+                anyhow::bail!(
+                    "WAL stream segment {} does not carry its number in {} digits; \
+                     refusing to start",
+                    entry.path().display(),
+                    segment::STREAM_SEQ_PAD
+                );
             }
         }
         found.sort_by_key(|(stream_seq, _)| *stream_seq);
         Ok(found)
     }
 
-    /// The summary of every stream segment of `wal_dir`, read from its frame
-    /// headers without opening a payload, so a sealed stream needs no key.
-    fn stream_summaries(wal_dir: &Path) -> anyhow::Result<BTreeMap<u64, StreamSegment>> {
+    /// The summary of every stream segment of `wal_dir` — each partition's
+    /// highest sequence and the location of each of its frames — read from
+    /// the frame headers without opening a payload, so a sealed stream needs
+    /// no key.
+    fn stream_summaries(wal_dir: &Path) -> anyhow::Result<BTreeMap<u64, Arc<StreamSegment>>> {
         let segments = Self::discover_stream_segments(wal_dir)?;
         let newest = segments.last().map(|(stream_seq, _)| *stream_seq);
         let mut summaries = BTreeMap::new();
         for (stream_seq, path) in segments {
             let data = std::fs::read(&path)
                 .map_err(|e| anyhow::anyhow!("Cannot read WAL segment {}: {e}", path.display()))?;
-            let (spans, _) =
+            let (header, spans, _) =
                 Self::read_stream_segment(&path, &data, Some(stream_seq) == newest, None, false)?;
             let mut summary = segment::SegmentSummary::default();
-            for (partition, sequence) in spans.iter().filter_map(|span| span.address) {
-                summary.note(partition, sequence);
+            for (index, span) in (0u64..).zip(&spans) {
+                let Some((partition, sequence)) = span.address else {
+                    continue;
+                };
+                summary.note(
+                    partition,
+                    segment::FrameLocation {
+                        sequence,
+                        offset: span.offset as u64,
+                        index,
+                        len: u32::try_from(span.len)?,
+                    },
+                );
             }
-            summaries.insert(stream_seq, StreamSegment { path, summary });
+            summaries.insert(
+                stream_seq,
+                Arc::new(StreamSegment {
+                    path,
+                    header,
+                    summary,
+                }),
+            );
         }
         Ok(summaries)
     }
@@ -1449,13 +1490,18 @@ impl WalWriter {
     /// corruption on any other, and a header whose `stream_seq` the file name
     /// does not carry is a refusal. Every reader of stream segments reads
     /// through this.
+    #[allow(clippy::type_complexity)]
     fn read_stream_segment(
         path: &Path,
         data: &[u8],
         newest: bool,
         keyring: Option<&Keyring>,
         read_payloads: bool,
-    ) -> anyhow::Result<(Vec<format::FrameSpan>, Vec<WalEntry>)> {
+    ) -> anyhow::Result<(
+        Option<segment::StreamSegmentHeader>,
+        Vec<format::FrameSpan>,
+        Vec<WalEntry>,
+    )> {
         let decoded = format::decode_stream_segment(data, keyring, read_payloads);
         if let Some(header) = &decoded.header {
             let named = path
@@ -1471,56 +1517,133 @@ impl WalWriter {
             }
         }
         let entries = Self::frames_or_refuse(path, decoded.result, newest)?;
-        Ok((decoded.spans, entries))
+        Self::check_stream_frames(path, &decoded.spans, read_payloads.then_some(&entries[..]))?;
+        Ok((decoded.header, decoded.spans, entries))
     }
 
-    /// The frames of every stream segment that holds one of `partitions`
-    /// above its unapplied floor, by partition, each segment read once.
-    async fn stream_frames(
-        &self,
-        partitions: &[u32],
-    ) -> anyhow::Result<HashMap<u32, Vec<WalEntry>>> {
-        let mut floors: HashMap<u32, u64> = HashMap::new();
-        for &partition in partitions {
-            floors.insert(partition, self.unapplied_floor(partition)?);
+    /// Refuses, naming the file and the offset, a stream frame whose header
+    /// names a partition outside the WAL's — it could never be replayed nor
+    /// let its segment be collected — or, given the frames' `entries`, one
+    /// whose header names another sequence than its entry: replaying it would
+    /// file the entry under a sequence it was not written at.
+    fn check_stream_frames(
+        path: &Path,
+        spans: &[format::FrameSpan],
+        entries: Option<&[WalEntry]>,
+    ) -> anyhow::Result<()> {
+        for (i, span) in spans.iter().enumerate() {
+            let Some((partition, sequence)) = span.address else {
+                continue;
+            };
+            if partition >= PARTITION_COUNT {
+                anyhow::bail!(
+                    "WAL stream segment {} has a frame at offset {} for partition {partition}, \
+                     outside 0..{PARTITION_COUNT}; refusing to start",
+                    path.display(),
+                    span.offset
+                );
+            }
+            if let Some(entry) = entries.and_then(|entries| entries.get(i)) {
+                if entry.sequence != sequence {
+                    anyhow::bail!(
+                        "WAL stream segment {} has a frame at offset {} whose header names \
+                         sequence {sequence} but whose entry is sequence {}; refusing to start",
+                        path.display(),
+                        span.offset,
+                        entry.sequence
+                    );
+                }
+            }
         }
-        let segments: Vec<(u64, StreamSegment)> = self
+        Ok(())
+    }
+
+    /// The frames of `partition` above `floor` in the stream segments, each
+    /// read back alone from the location the summary holds — no frame of
+    /// another partition is read or opened — and checked as at open: the frame
+    /// there must still be the partition's frame at that sequence.
+    async fn stream_frames_of(&self, partition: u32, floor: u64) -> anyhow::Result<Vec<WalEntry>> {
+        use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+        let segments: Vec<Arc<StreamSegment>> = self
             .stream
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .map(|(stream_seq, segment)| (*stream_seq, segment.clone()))
+            .values()
+            .cloned()
             .collect();
-        let newest = segments.last().map(|(stream_seq, _)| *stream_seq);
-        let mut frames: HashMap<u32, Vec<WalEntry>> = HashMap::new();
-        for (stream_seq, segment) in segments {
-            let wanted = segment.summary.max_seq.iter().any(|(partition, max_seq)| {
-                floors.get(partition).is_some_and(|floor| max_seq > floor)
-            });
-            if !wanted {
+        let mut frames = Vec::new();
+        for segment in segments {
+            let path = &segment.path;
+            let Some(locations) = segment.summary.frames.get(&partition) else {
+                continue;
+            };
+            let wanted: Vec<segment::FrameLocation> = locations
+                .iter()
+                .filter(|l| l.sequence > floor)
+                .copied()
+                .collect();
+            if wanted.is_empty() {
                 continue;
             }
-            let data = match tokio::fs::read(&segment.path).await {
-                Ok(data) => data,
-                // Collected between the snapshot and this read: every frame
-                // in it is at or below its partition's watermark, as for a
-                // per-partition segment (see `unapplied_with`).
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => anyhow::bail!("Cannot read WAL segment {}: {e}", segment.path.display()),
-            };
-            let (spans, entries) = Self::read_stream_segment(
-                &segment.path,
-                &data,
-                Some(stream_seq) == newest,
-                self.keyring.as_deref(),
-                true,
-            )?;
-            for (span, entry) in spans.iter().zip(entries) {
-                if let Some((partition, _)) = span.address {
-                    if floors.contains_key(&partition) {
-                        frames.entry(partition).or_default().push(entry);
-                    }
+            let key = match segment.header {
+                Some(header) if header.cipher == SegmentCipher::XChaCha20Poly1305 => {
+                    let keyring = self.keyring.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "WAL segment {} is sealed with data key {}, and the WAL holds no \
+                             keyring; refusing to start",
+                            path.display(),
+                            header.key_id
+                        )
+                    })?;
+                    Some(keyring.stream_segment_key(&header).map_err(|e| {
+                        anyhow::anyhow!(
+                            "WAL segment {} is sealed with data key {}: {e}; refusing to start",
+                            path.display(),
+                            header.key_id
+                        )
+                    })?)
                 }
+                _ => None,
+            };
+            let mut file = match tokio::fs::File::open(path).await {
+                Ok(file) => file,
+                // Collected after the snapshot: every frame in it is at or
+                // below its partition's watermark, as for a per-partition
+                // segment (see `unapplied`).
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => anyhow::bail!("Cannot read WAL segment {}: {e}", path.display()),
+            };
+            for location in wanted {
+                #[cfg(test)]
+                self.test_stream_frame_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut bytes = vec![0u8; location.len as usize];
+                file.seek(std::io::SeekFrom::Start(location.offset))
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Cannot read WAL segment {}: {e}", path.display())
+                    })?;
+                file.read_exact(&mut bytes).await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "Cannot read the frame at offset {} of WAL segment {}: {e}; refusing \
+                         to start",
+                        location.offset,
+                        path.display()
+                    )
+                })?;
+                let offset = usize::try_from(location.offset)?;
+                let (result, spans) =
+                    format::decode_stream_frame(&bytes, offset, location.index, key.as_ref());
+                let entries = Self::frames_or_refuse(path, result, false)?;
+                Self::check_stream_frames(path, &spans, Some(&entries))?;
+                if spans.len() != 1 || spans[0].address != Some((partition, location.sequence)) {
+                    anyhow::bail!(
+                        "WAL stream segment {} changed at offset {offset} after it was opened; \
+                         refusing to start",
+                        path.display()
+                    );
+                }
+                frames.extend(entries);
             }
         }
         Ok(frames)
@@ -1571,55 +1694,6 @@ impl WalWriter {
             .copied()
             .unwrap_or(applied_seq);
         Ok(applied_seq)
-    }
-
-    /// The un-applied frames of `partition`: those of its own segments and
-    /// `stream`, its frames already read from the stream segments, in
-    /// strictly ascending sequence order, each above the partition's floor.
-    async fn unapplied_with(
-        &self,
-        partition: u32,
-        stream: Vec<WalEntry>,
-    ) -> anyhow::Result<Vec<WalEntry>> {
-        let applied_seq = self.unapplied_floor(partition)?;
-        let segments = Self::discover_partition_segments(&self.wal_dir, partition)?;
-        let last_idx = segments.len().saturating_sub(1);
-        let mut all = stream;
-        for (idx, (_first_seq, path)) in segments.into_iter().enumerate() {
-            let data = match tokio::fs::read(&path).await {
-                Ok(data) => data,
-                // A concurrent GC can unlink a sealed segment between the directory
-                // scan above and this read. Skipping the vanished file is correct,
-                // not a lost frame — but the reason is the WATERMARK's rule, not
-                // the segment's: GC reclaims only segments covered by a
-                // prefix-complete, inclusive, cross-incarnation watermark, i.e. one
-                // that stops below the first frame any incarnation left un-applied.
-                // So an unlinked segment's frames are durable in the inner store,
-                // and the `retain(|e| e.sequence > applied_seq)` below would drop
-                // them regardless. Were the watermark merely the highest sequence
-                // that happened to be applied, this skip WOULD lose frames.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "Cannot read WAL segment {}: {e}",
-                        path.display()
-                    ));
-                }
-            };
-            // A truncated tail is tolerated ONLY on the active (last) segment; a
-            // torn tail on a sealed, non-last segment is corruption.
-            let tolerate_tail = idx == last_idx;
-            let (entries, _) = self.decode_segment_keyed(&path, &data, tolerate_tail)?;
-            all.extend(entries);
-        }
-
-        // A partition's frames sit in its own segments in ascending order, but
-        // in the stream they interleave with every other partition's and need
-        // not arrive in sequence order: replay is strictly ascending per
-        // partition whatever the position of a frame (TG-WAL-011).
-        all.sort_by_key(|e| e.sequence);
-        all.retain(|e| e.sequence > applied_seq);
-        Ok(all)
     }
 
     /// Creates the active segment of `partition` at `path`, starting at
@@ -2172,13 +2246,50 @@ impl Wal for WalWriter {
         Ok(())
     }
 
+    /// The un-applied frames of `partition` — those of its own segments and
+    /// its frames in the stream segments, read by location — in strictly
+    /// ascending sequence order, each above the partition's floor. Holds the
+    /// frames of this one partition only.
     async fn unapplied(&self, partition: u32) -> anyhow::Result<Vec<WalEntry>> {
-        let stream = self
-            .stream_frames(&[partition])
-            .await?
-            .remove(&partition)
-            .unwrap_or_default();
-        self.unapplied_with(partition, stream).await
+        let applied_seq = self.unapplied_floor(partition)?;
+        let segments = Self::discover_partition_segments(&self.wal_dir, partition)?;
+        let last_idx = segments.len().saturating_sub(1);
+        let mut all = self.stream_frames_of(partition, applied_seq).await?;
+        for (idx, (_first_seq, path)) in segments.into_iter().enumerate() {
+            let data = match tokio::fs::read(&path).await {
+                Ok(data) => data,
+                // A concurrent GC can unlink a sealed segment between the directory
+                // scan above and this read. Skipping the vanished file is correct,
+                // not a lost frame — but the reason is the WATERMARK's rule, not
+                // the segment's: GC reclaims only segments covered by a
+                // prefix-complete, inclusive, cross-incarnation watermark, i.e. one
+                // that stops below the first frame any incarnation left un-applied.
+                // So an unlinked segment's frames are durable in the inner store,
+                // and the `retain(|e| e.sequence > applied_seq)` below would drop
+                // them regardless. Were the watermark merely the highest sequence
+                // that happened to be applied, this skip WOULD lose frames.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Cannot read WAL segment {}: {e}",
+                        path.display()
+                    ));
+                }
+            };
+            // A truncated tail is tolerated ONLY on the active (last) segment; a
+            // torn tail on a sealed, non-last segment is corruption.
+            let tolerate_tail = idx == last_idx;
+            let (entries, _) = self.decode_segment_keyed(&path, &data, tolerate_tail)?;
+            all.extend(entries);
+        }
+
+        // A partition's frames sit in its own segments in ascending order, but
+        // in the stream they interleave with every other partition's and need
+        // not arrive in sequence order: replay is strictly ascending per
+        // partition whatever the position of a frame (TG-WAL-011).
+        all.sort_by_key(|e| e.sequence);
+        all.retain(|e| e.sequence > applied_seq);
+        Ok(all)
     }
 
     /// Fsyncs the active segment of every open partition that holds
@@ -2307,8 +2418,9 @@ impl WalWriter {
 
     /// Unlinks, at a `finish` that wrote rollback hints, every segment of
     /// every partition whose frames are all at or below the partition's
-    /// bound, and every stream segment whose every partition's frames are, — the lower of the durable watermark and a fresh read of the
-    /// store's — a segment with no frame included, active or not, and after
+    /// bound — the lower of the durable watermark and a fresh read of the
+    /// store's — and every stream segment whose frames of every partition
+    /// are; a segment with no frame included, active or not, and after
     /// `wal-collected` covering them is durable (`TG-WAL-003`). Nothing is
     /// unlinked when the store's watermarks cannot be read, the store gone
     /// included. Segments are read from the directory, so a partition this
@@ -2579,13 +2691,15 @@ impl WalWriter {
     }
 
     /// The stream segments collection may unlink: each whose every
-    /// partition's highest sequence is at or below that partition's bound,
-    /// `bounds` the lower of the durable and the store's watermark. Raises
+    /// partition's highest sequence is at or below that partition's bound —
+    /// the lower of the durable watermark this process holds and `from_store`,
+    /// the store's read for this collection — at a tick and at `finish`
+    /// alike. Raises
     /// `next` — the `wal-collected` to write before the unlink — to each such
     /// segment's highest sequence of every partition it holds, which stays at
     /// or below the bound (`TG-WAL-013`); partitions without a frame there
     /// keep theirs.
-    fn covered_stream_segments(&self, bounds: &[u64], next: &mut [u64]) -> Vec<(u64, PathBuf)> {
+    fn covered_stream_segments(&self, from_store: &[u64], next: &mut [u64]) -> Vec<(u64, PathBuf)> {
         let stream = self
             .stream
             .lock()
@@ -2593,8 +2707,13 @@ impl WalWriter {
         let mut covered = Vec::new();
         for (stream_seq, segment) in stream.iter() {
             let bound = |partition: u32| {
-                let stored = bounds.get(partition as usize).copied().unwrap_or(0);
-                self.collection_bound(partition, stored, stored)
+                let index = partition as usize;
+                let durable = self
+                    .durable
+                    .get(index)
+                    .map_or(0, |slot| slot.load(Ordering::Acquire));
+                let stored = from_store.get(index).copied().unwrap_or(0);
+                self.collection_bound(partition, durable, stored)
             };
             if !stream_segment_covered(&segment.summary, bound) {
                 continue;
@@ -2744,12 +2863,7 @@ impl WalWriter {
                 reclaim.push((handle, count));
             }
         }
-        let durable_bound: Vec<u64> = durable_now
-            .iter()
-            .zip(&from_store)
-            .map(|(durable, stored)| (*durable).min(*stored))
-            .collect();
-        let stream = self.covered_stream_segments(&durable_bound, &mut next);
+        let stream = self.covered_stream_segments(&from_store, &mut next);
 
         if !reclaim.is_empty() || !stream.is_empty() {
             // Durable before the first unlink: a start that finds a segment
@@ -3141,12 +3255,11 @@ impl WalRecovery {
         let store_watermarks = Self::store_watermarks(&inner_store)?;
         let mut frames = 0usize;
         let mut batches = 0usize;
-        // Each stream segment is read once for every partition it holds.
-        let mut stream = self.wal.stream_frames(&partitions).await?;
 
+        // One partition's frames at a time: a stream segment is read by the
+        // locations of that partition's frames only.
         for partition_id in partitions {
-            let from_stream = stream.remove(&partition_id).unwrap_or_default();
-            let entries = self.wal.unapplied_with(partition_id, from_stream).await?;
+            let entries = self.wal.unapplied(partition_id).await?;
 
             if entries.is_empty() {
                 continue;
@@ -3157,7 +3270,7 @@ impl WalRecovery {
                 .copied()
                 .unwrap_or(0);
 
-            // `entries` is strictly ascending by WAL sequence: `unapplied_with`
+            // `entries` is strictly ascending by WAL sequence: `unapplied`
             // sorts the partition's frames of both layouts (see its impl), and `replay_partition` replays in
             // that order. Both the contiguous-frontier watermark logic AND the gate-free
             // Remove-idempotency non-reachability argument (TG-WAL-009's premise
@@ -5661,7 +5774,9 @@ mod tests {
     #[tokio::test]
     async fn r_b_recovery_replays_each_partition_in_sequence_order() {
         let dir = tempfile::tempdir().unwrap();
-        write_stream_segment(dir.path(), 1, &[(1, 3), (2, 7), (1, 1), (1, 4), (1, 2)]);
+        // Frame 2 of partition 1 sits in the later segment, after 3 and 4.
+        write_stream_segment(dir.path(), 1, &[(1, 3), (2, 7), (1, 1), (1, 4)]);
+        write_stream_segment(dir.path(), 2, &[(1, 2), (2, 6)]);
         let (wal, store) = open_over(dir.path(), WalFsyncPolicy::None, MergeProbeStore::default());
         commit_applied(store.as_ref(), &wal, 1, 1).await;
 
@@ -5679,7 +5794,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store.replay_order.lock().await.clone(),
-            vec!["1-2", "1-3", "1-4", "2-7"],
+            vec!["1-2", "1-3", "1-4", "2-6", "2-7"],
             "each partition replays in ascending sequence order, its watermark's frames skipped"
         );
         assert_eq!(wal.max_observed_sequence().await.unwrap(), 7);
@@ -5748,6 +5863,111 @@ mod tests {
         assert!(!path.exists(), "every partition of the segment is covered");
         assert_eq!(collected()[1..3], [5, 9]);
         assert!(wal.stream.lock().unwrap().is_empty());
+    }
+
+    /// R5.5 at `finish` (`TG-WAL-003`): the shutdown collection judges a
+    /// stream segment by the same bound as a tick — the lower of the
+    /// in-memory and the store's watermark — so a segment the store does not
+    /// cover is kept even when the in-memory watermark does.
+    #[tokio::test]
+    async fn r_b_finish_keeps_a_stream_segment_the_store_does_not_cover() {
+        for (stored, unlinked) in [(4, false), (5, true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let (path, _) = write_stream_segment(dir.path(), 1, &[(1, 5)]);
+            let (wal, store) = open_over(dir.path(), WalFsyncPolicy::None, ReplayStore::default());
+            commit_applied(store.as_ref(), &wal, 1, stored).await;
+            wal.mark_applied(1, 5).await.unwrap();
+            wal.finish(true).await.unwrap();
+            assert_eq!(!path.exists(), unlinked, "store watermark {stored}");
+        }
+    }
+
+    /// A partition's stream frames are read back by their locations: a read
+    /// of one partition touches none of another partition's frames, nor its
+    /// own at or below the floor.
+    #[tokio::test]
+    async fn r_b_unapplied_reads_only_the_partitions_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        write_stream_segment(dir.path(), 1, &[(2, 1), (1, 1), (2, 2), (1, 2), (2, 3)]);
+        write_stream_segment(dir.path(), 2, &[(2, 4), (1, 3), (2, 5)]);
+        let (wal, store) = open_over(dir.path(), WalFsyncPolicy::None, ReplayStore::default());
+        let reads = || {
+            wal.test_stream_frame_reads
+                .swap(0, std::sync::atomic::Ordering::Relaxed)
+        };
+        let sequences =
+            |entries: Vec<WalEntry>| -> Vec<u64> { entries.iter().map(|e| e.sequence).collect() };
+
+        assert_eq!(sequences(wal.unapplied(1).await.unwrap()), vec![1, 2, 3]);
+        assert_eq!(reads(), 3, "only the three frames of partition 1 are read");
+        commit_applied(store.as_ref(), &wal, 1, 2).await;
+        assert_eq!(sequences(wal.unapplied(1).await.unwrap()), vec![3]);
+        assert_eq!(reads(), 1, "frames at or below the floor are not read");
+        assert_eq!(
+            sequences(wal.unapplied(2).await.unwrap()),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert_eq!(reads(), 5);
+    }
+
+    /// A stream frame naming a partition outside the WAL's, or a header
+    /// sequence its entry does not carry, is refused naming the file and the
+    /// offset; a stream name that does not carry its number in 16 digits is
+    /// refused at open naming the file, never skipped.
+    #[tokio::test]
+    async fn r_b_malformed_stream_frames_and_names_are_refused() {
+        let store =
+            || Arc::new(WatermarkKeeping::new(ReplayStore::default())) as Arc<dyn MapDataStore>;
+        let open = |dir: &Path| {
+            WalWriter::open_over_store(dir.to_path_buf(), WalFsyncPolicy::None, store())
+        };
+        let offset = segment::STREAM_HEADER_LEN;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = write_stream_segment(dir.path(), 1, &[(PARTITION_COUNT, 1)]);
+        let error = format!(
+            "{:#}",
+            open(dir.path()).err().expect("partition out of range")
+        );
+        assert!(
+            error.contains(&path.display().to_string())
+                && error.contains(&format!("offset {offset}"))
+                && error.contains(&format!("partition {PARTITION_COUNT}")),
+            "{error}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut data = segment::StreamSegmentHeader::new(1).encode().to_vec();
+        let payload = format::encode_v2_payload(&addressed_frame(1, 8), false).unwrap();
+        data.extend(format::frame_v3(1, 9, &payload, None).unwrap());
+        let path = dir.path().join(segment::format_stream_filename(1));
+        std::fs::write(&path, &data).unwrap();
+        let (wal, _store) = open_over(dir.path(), WalFsyncPolicy::None, ReplayStore::default());
+        let error = format!(
+            "{:#}",
+            wal.unapplied(1).await.expect_err("sequence mismatch")
+        );
+        assert!(
+            error.contains(&path.display().to_string())
+                && error.contains(&format!("offset {offset}"))
+                && error.contains("names sequence 9 but whose entry is sequence 8")
+                && !error.contains("CRC"),
+            "{error}"
+        );
+
+        for name in ["stream-1.log", "stream-00000000000000001.log"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join(name),
+                segment::StreamSegmentHeader::new(1).encode(),
+            )
+            .unwrap();
+            let error = format!("{:#}", open(dir.path()).err().expect(name));
+            assert!(
+                error.contains(name) && error.contains("16 digits"),
+                "{error}"
+            );
+        }
     }
 
     /// R5.4: a torn tail is tolerated on the newest stream segment and

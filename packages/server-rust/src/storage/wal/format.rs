@@ -460,7 +460,8 @@ pub fn decode_segment_with(data: &[u8], keyring: Option<&Keyring>) -> SegmentDec
             true,
         )
     } else {
-        let (result, intact_len, spans) = decode_frames(data, 0, FRAME_VERSION, &Payloads::Plain);
+        let (result, intact_len, spans) =
+            decode_frames(data, 0, FRAME_VERSION, &Payloads::Plain, Origin::FILE);
         Headed {
             header: None,
             result,
@@ -542,6 +543,47 @@ pub fn decode_stream_segment(
     }
 }
 
+/// Where a buffer of frames sits in its segment, so a frame read back on its
+/// own reports its file offset and opens under its own nonce.
+#[derive(Debug, Clone, Copy)]
+struct Origin {
+    /// File offset of the buffer's first byte.
+    offset: usize,
+    /// Index in its segment of the buffer's first frame.
+    index: u64,
+}
+
+impl Origin {
+    /// A buffer that is the whole file.
+    const FILE: Self = Self {
+        offset: 0,
+        index: 0,
+    };
+}
+
+/// Decodes the one v3 frame `frame`, read back from offset `offset` of a
+/// stream segment where it is the frame at `index`, opening its payload
+/// under `key` when the segment is sealed. Offsets in the classification and
+/// the span are file offsets. A frame cut short is `TruncatedTail`: the
+/// caller located it whole, so it refuses one.
+#[must_use]
+pub fn decode_stream_frame(
+    frame: &[u8],
+    offset: usize,
+    index: u64,
+    key: Option<&SegmentKey>,
+) -> (FrameDecodeResult, Vec<FrameSpan>) {
+    let payloads = key.map_or(Payloads::Plain, Payloads::Sealed);
+    let (result, _, spans) = decode_frames(
+        frame,
+        0,
+        FRAME_VERSION_V3,
+        &payloads,
+        Origin { offset, index },
+    );
+    (result, spans)
+}
+
 /// A file that starts with a header, decoded.
 struct Headed<H> {
     header: Option<H>,
@@ -588,7 +630,8 @@ fn decode_headed<H>(
         (true, SegmentCipher::None, _) => Payloads::Plain,
         (true, _, Some(key)) => Payloads::Sealed(key),
     };
-    let (mut result, intact_len, spans) = decode_frames(data, header_len, version, &payloads);
+    let (mut result, intact_len, spans) =
+        decode_frames(data, header_len, version, &payloads, Origin::FILE);
     if read_payloads
         && matches!(payloads, Payloads::Unread)
         && matches!(
@@ -621,17 +664,19 @@ enum Payloads<'k> {
 /// Decodes the frames of `data` from `start` on, each expected to carry
 /// `version`, treating each payload as `payloads` says. Returns the
 /// classification, the end offset of the intact prefix and the span of every
-/// intact frame. Offsets in the classification are from the start of `data`.
+/// intact frame. Offsets in the classification and the spans are file
+/// offsets: `origin` places `data` in its file, and the first frame of `data`
+/// is the frame at `origin.index` of its segment.
 ///
 /// A v3 frame carries its partition and sequence after the v2 envelope; the
-/// CRC covers them with the payload, and a payload whose entry names another
-/// sequence than its header is corruption.
+/// CRC covers them with the payload.
 #[allow(clippy::too_many_lines)]
 fn decode_frames(
     data: &[u8],
     start: usize,
     version: u8,
     payloads: &Payloads<'_>,
+    origin: Origin,
 ) -> (FrameDecodeResult, usize, Vec<FrameSpan>) {
     if data.is_empty() {
         return (FrameDecodeResult::CleanEof, 0, Vec::new());
@@ -645,10 +690,11 @@ fn decode_frames(
     let total_len = data.len();
 
     let result = loop {
-        let offset = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
+        let at = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
+        let offset = origin.offset + at;
 
         // --- Check for clean EOF on a frame boundary ---
-        if offset == total_len {
+        if at == total_len {
             break FrameDecodeResult::Complete(entries);
         }
 
@@ -742,7 +788,7 @@ fn decode_frames(
         let next_offset = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
 
         // --- Verify CRC32C over everything after the CRC field ---
-        let computed_crc = crc32c::crc32c(&data[offset + FRAME_HEADER_LEN..next_offset]);
+        let computed_crc = crc32c::crc32c(&data[at + FRAME_HEADER_LEN..next_offset]);
         if computed_crc != stored_crc {
             if next_offset >= total_len {
                 // CRC mismatch on the last frame — treat as truncated tail since
@@ -763,12 +809,11 @@ fn decode_frames(
             Payloads::Unread => None,
             Payloads::Plain => Some(payload),
             Payloads::Sealed(key) => {
-                let aad = frame_aad(&data[offset..head_end]);
-                match key.open_frame(
-                    u64::try_from(spans.len()).unwrap_or(u64::MAX),
-                    &aad,
-                    &payload,
-                ) {
+                let aad = frame_aad(&data[at..head_end]);
+                let index = origin
+                    .index
+                    .saturating_add(u64::try_from(spans.len()).unwrap_or(u64::MAX));
+                match key.open_frame(index, &aad, &payload) {
                     Ok(plaintext) => Some(plaintext),
                     // The CRC holds, so the bytes are as written: a tag
                     // that does not match is tampering or corruption, never
@@ -781,16 +826,6 @@ fn decode_frames(
         // --- Deserialize payload ---
         if let Some(payload) = payload {
             match rmp_serde::from_slice::<WalEntry>(&payload) {
-                // A v3 header that names another sequence than its entry is
-                // internally inconsistent: replaying it would file the entry
-                // under a sequence it was not written at.
-                Ok(entry) if address.is_some_and(|(_, sequence)| sequence != entry.sequence) => {
-                    break FrameDecodeResult::Corruption {
-                        offset,
-                        stored_crc,
-                        computed_crc,
-                    };
-                }
                 Ok(entry) => entries.push(entry),
                 // Deserialisation failure on a frame that passed CRC is still
                 // treated as corruption — the bytes are internally consistent but
@@ -810,7 +845,7 @@ fn decode_frames(
         intact = next_offset;
         spans.push(FrameSpan {
             offset,
-            len: next_offset - offset,
+            len: next_offset - at,
             address,
         });
     };
