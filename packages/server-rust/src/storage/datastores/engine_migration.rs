@@ -590,7 +590,79 @@ pub(crate) fn holds_no_key(snapshot: &dyn KvSnapshot) -> anyhow::Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use super::super::engine_store::{EngineMapDataStore, RecordOp};
+    use super::super::kv_crash::{CrashMode, CrashTarget, RocksTarget};
+    use super::super::redb::RedbDataStore;
     use super::*;
+
+    fn rows_of(engine: &dyn KvEngine) -> BTreeMap<Vec<u8>, Vec<u8>> {
+        let snapshot = engine.snapshot().unwrap();
+        let mark = meta_key(META_MIGRATION);
+        snapshot
+            .iter(KeyRange::default())
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|(key, _)| *key != mark)
+            .collect()
+    }
+
+    /// The copy killed at every engine write (409a's RocksDB crash target:
+    /// every batch whose write returned survives), then resumed from the mark
+    /// the crash left, verifies against the source: the mark rides in the
+    /// batch of the rows it vouches for.
+    #[test]
+    fn r_c_copy_resumes_after_a_kill_at_every_engine_write() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = RedbDataStore::new(dir.path()).unwrap();
+            let keys: Vec<String> = (0..95).map(|i| format!("k{i:03}")).collect();
+            let ops: Vec<RecordOp<'_>> = keys
+                .iter()
+                .map(|key| RecordOp::Put {
+                    map: "m",
+                    backup: false,
+                    key,
+                    bytes: key.as_bytes(),
+                })
+                .collect();
+            store
+                .write_records(&ops, WriteOptions { sync: true })
+                .unwrap();
+        }
+        let source = Source::open(dir.path()).unwrap();
+        let reference: BTreeMap<Vec<u8>, Vec<u8>> =
+            source.rows_from(&[]).unwrap().map(Result::unwrap).collect();
+        let io = MigrationIo {
+            batch_rows: 10,
+            ..MigrationIo::default()
+        };
+        let writes = {
+            let target = RocksTarget::fresh();
+            copy(&source, &*target.engine(), None, &io).unwrap();
+            target.ops_so_far()
+        };
+        assert!(writes >= 10, "{writes} writes");
+        for at in 0..writes {
+            let target = RocksTarget::fresh();
+            target.arm_death(at);
+            assert!(
+                copy(&source, &*target.engine(), None, &io).is_err(),
+                "killed at {at}"
+            );
+            let target = target.crash(CrashMode::DropUnsynced, 0);
+            let engine = target.engine();
+            let after = EngineMapDataStore::read_migration_mark(&*engine)
+                .unwrap()
+                .map(|bytes| EngineMark::decode(&bytes).unwrap())
+                .and_then(|mark| mark.after);
+            copy(&source, &*engine, after, &io).unwrap();
+            verify(&source, &*engine, dir.path())
+                .unwrap_or_else(|e| panic!("killed at write {at}: {e:#}"));
+            assert_eq!(rows_of(&*engine), reference, "killed at write {at}");
+        }
+    }
 
     #[test]
     fn r_c_mark_round_trips_and_refuses_garbage() {

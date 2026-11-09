@@ -1034,6 +1034,18 @@ mod tests {
             assert_eq!(served.by_partition, source.by_partition, "start {start}");
             assert!(served.imported && !served.import_pending);
             assert!(!dump(&*opened.engine).contains_key(&meta_key(META_WAL_IMPORT_PENDING)));
+            // The store's own commit guard holds the copied watermarks too: a
+            // commit below one is a regression, refused.
+            let regression = crate::storage::map_data_store::FlushCommit {
+                writes: Vec::new(),
+                applied: vec![(3, 10)],
+            };
+            let refused = rt.block_on(opened.store.commit(&regression));
+            let refused = refused.expect_err("a regression below a copied watermark is accepted");
+            assert!(
+                format!("{refused:#}").contains("applied watermark regression refused"),
+                "start {start}: {refused:#}"
+            );
             let store: Arc<dyn MapDataStore> = Arc::new(opened.store);
             rt.block_on(async {
                 let wal =
@@ -1704,5 +1716,81 @@ mod tests {
             "{logs}"
         );
         let _ = std::io::stdout().flush();
+    }
+
+    // -----------------------------------------------------------------------
+    // Diagnostic measurement, not a gate; run by hand with
+    // `MEASURE_OUT=<file> cargo test --release ... -- --ignored measure_engine_migration`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[ignore = "diagnostic measurement: about 1 GiB of values, minutes"]
+    fn measure_engine_migration() {
+        const MAPS: usize = 100;
+        const ROWS: usize = 10_000;
+        const VALUE: usize = 1024;
+        let out = std::env::var("MEASURE_OUT").expect("MEASURE_OUT names the JSON record");
+        let base = std::env::var_os("MEASURE_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
+        let dir = tempfile::tempdir_in(base).unwrap();
+        let root = Root::at(dir.path().to_path_buf(), dir);
+        {
+            let store = RedbDataStore::new(&root.d).unwrap();
+            let value = vec![0x5Au8; VALUE];
+            let keys: Vec<String> = (0..ROWS).map(|i| format!("k{i:06}")).collect();
+            for map in 0..MAPS {
+                let name = format!("map{map:03}");
+                for chunk in keys.chunks(2_000) {
+                    let ops: Vec<RecordOp<'_>> = chunk
+                        .iter()
+                        .map(|key| RecordOp::Put {
+                            map: &name,
+                            backup: false,
+                            key,
+                            bytes: &value,
+                        })
+                        .collect();
+                    store.write_records(&ops, SYNC).unwrap();
+                }
+            }
+        }
+        let redb_bytes = fs::metadata(root.redb()).unwrap().len();
+        let free_before = fs4::available_space(&root.d).unwrap();
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sampler = {
+            let (done, d) = (Arc::clone(&done), root.d.clone());
+            std::thread::spawn(move || {
+                let mut least = u64::MAX;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    least = least.min(fs4::available_space(&d).unwrap_or(u64::MAX));
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                least
+            })
+        };
+        let started = Instant::now();
+        let opened = open_rocks_location_sealed(
+            &root.location(),
+            &off(),
+            &RocksConfig::production(256 * MIB, -1),
+        )
+        .expect("the migration");
+        let elapsed = started.elapsed();
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let least_free = sampler.join().unwrap();
+        drop(opened);
+        let rocks_bytes: u64 = fs::read_dir(root.rocks())
+            .unwrap()
+            .map(|e| e.unwrap().metadata().unwrap().len())
+            .sum();
+        let rows = (MAPS * ROWS) as u64;
+        #[allow(clippy::cast_precision_loss)]
+        let record = format!(
+            "{{\"maps\":{MAPS},\"rows\":{rows},\"value_bytes\":{VALUE},\"elapsed_ms\":{},\"rows_per_s\":{:.0},\"redb_bytes\":{redb_bytes},\"rocksdb_bytes\":{rocks_bytes},\"size_ratio\":{:.3},\"peak_free_space_used_bytes\":{}}}\n",
+            elapsed.as_millis(),
+            rows as f64 / elapsed.as_secs_f64(),
+            rocks_bytes as f64 / redb_bytes as f64,
+            free_before.saturating_sub(least_free),
+        );
+        fs::write(out, record).unwrap();
     }
 }
