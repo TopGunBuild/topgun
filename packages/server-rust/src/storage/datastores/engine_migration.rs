@@ -237,8 +237,19 @@ struct Overlay {
 const BLOCK: u64 = 4096;
 
 impl ReadOnlyOverlay {
+    /// Opens `path` read-only under a shared lock, held until the overlay
+    /// drops: it conflicts with the exclusive lock redb takes, so a source
+    /// another redb process holds open is refused, and no redb process can
+    /// open it while it is read.
     fn open(path: &Path) -> std::io::Result<Self> {
         let file = fs::File::open(path)?;
+        file.try_lock_shared().map_err(|e| match e {
+            fs::TryLockError::WouldBlock => std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "another process holds it open",
+            ),
+            fs::TryLockError::Error(e) => e,
+        })?;
         let len = file.metadata()?.len();
         Ok(Self {
             file,
@@ -821,6 +832,30 @@ mod tests {
                 "dirty {dirty}: mtime"
             );
         }
+    }
+
+    /// A source another redb handle holds open is refused, and the file is
+    /// left as it was (flock is per open file description, so one process
+    /// shows the conflict).
+    #[test]
+    fn r_c_source_held_open_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(RedbDataStore::new(dir.path()).unwrap());
+        let path = dir.path().join(REDB_FILE);
+        let holder = super::super::redb_engine::RedbKvEngine::open(&path).unwrap();
+        let before = fs::read(&path).unwrap();
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        let refused = Source::open(dir.path())
+            .err()
+            .expect("a held source is refused");
+        assert!(
+            format!("{refused:#}").contains("store engine: cannot open"),
+            "{refused:#}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+        drop(holder);
+        assert!(Source::open(dir.path()).is_ok(), "the lock is free again");
     }
 
     /// The copy killed at every engine write (409a's RocksDB crash target:
