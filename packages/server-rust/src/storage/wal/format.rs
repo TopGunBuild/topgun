@@ -33,7 +33,8 @@ use std::io::{Cursor, Read};
 
 use crate::storage::sealing::{Keyring, SegmentKey, FRAME_TAG_LEN};
 use crate::storage::wal::segment::{
-    HeaderError, SegmentCipher, SegmentHeader, SEGMENT_HEADER_LEN, SEGMENT_MAGIC,
+    HeaderError, SegmentCipher, SegmentHeader, StreamSegmentHeader, SEGMENT_HEADER_LEN,
+    SEGMENT_MAGIC, STREAM_HEADER_LEN,
 };
 use crate::storage::wal::WalEntry;
 
@@ -142,8 +143,17 @@ pub const FRAME_VERSION: u8 = 1;
 /// frames, which this binary still reads and no longer writes.
 pub const FRAME_VERSION_V2: u8 = 2;
 
+/// Version byte of a frame in a stream segment (one that starts with a
+/// [`StreamSegmentHeader`]): the v2 envelope followed by the frame's
+/// `partition u32 BE ‖ sequence u64 BE`, which the CRC covers with the payload.
+pub const FRAME_VERSION_V3: u8 = 3;
+
 /// Total header bytes: 4 (magic) + 1 (version) + 4 (length) + 4 (crc32c).
 pub const FRAME_HEADER_LEN: usize = 13;
+
+/// Total header bytes of a v3 frame: [`FRAME_HEADER_LEN`] + 4 (partition) +
+/// 8 (sequence).
+pub const FRAME_HEADER_LEN_V3: usize = FRAME_HEADER_LEN + 12;
 
 /// Upper bound on a single frame's declared payload length.
 ///
@@ -265,12 +275,13 @@ pub fn encode_v2(entry: &WalEntry) -> anyhow::Result<Vec<u8>> {
 fn encode_frame(entry: &WalEntry, version: u8) -> anyhow::Result<Vec<u8>> {
     let payload = rmp_serde::to_vec_named(entry)
         .map_err(|e| anyhow::anyhow!("WAL encode: MsgPack serialization failed: {e}"))?;
-    frame_payload(&payload, version, None)
+    frame_payload(&payload, version, None, None)
 }
 
 /// The `MsgPack` payload of `entry` for a v2 frame, refused when the frame
 /// would exceed [`MAX_FRAME_PAYLOAD_LEN`] as written — the tag included
-/// when `sealed` — since recovery refuses such a frame.
+/// when `sealed` — since recovery refuses such a frame. A v3 frame carries
+/// the same payload.
 ///
 /// # Errors
 ///
@@ -296,27 +307,65 @@ pub fn encode_v2_payload(entry: &WalEntry, sealed: bool) -> anyhow::Result<Vec<u
 ///
 /// An over-long payload, or a seal failure.
 pub fn frame_v2(payload: &[u8], seal: Option<(&SegmentKey, u64)>) -> anyhow::Result<Vec<u8>> {
-    frame_payload(payload, FRAME_VERSION_V2, seal)
+    frame_payload(payload, FRAME_VERSION_V2, None, seal)
+}
+
+/// The v3 frame of `payload` — the frame of a stream segment — for the write
+/// of `sequence` in `partition`; with `seal`, the payload is sealed as the
+/// frame at that index under the stream segment's key, with its partition and
+/// sequence in the AAD beside its first 9 bytes, so a sealed frame cannot be
+/// replayed into another partition or at another sequence (`TG-ENC-003`).
+///
+/// # Errors
+///
+/// An over-long payload, or a seal failure.
+pub fn frame_v3(
+    partition: u32,
+    sequence: u64,
+    payload: &[u8],
+    seal: Option<(&SegmentKey, u64)>,
+) -> anyhow::Result<Vec<u8>> {
+    frame_payload(payload, FRAME_VERSION_V3, Some((partition, sequence)), seal)
+}
+
+/// The associated data a sealed frame is bound to, from its header `head`:
+/// magic, version and length, and for a v3 frame its partition and sequence.
+fn frame_aad(head: &[u8]) -> Vec<u8> {
+    let mut aad = head[..9].to_vec();
+    if head[4] == FRAME_VERSION_V3 {
+        aad.extend_from_slice(&head[FRAME_HEADER_LEN..FRAME_HEADER_LEN_V3]);
+    }
+    aad
 }
 
 fn frame_payload(
     payload: &[u8],
     version: u8,
+    address: Option<(u32, u64)>,
     seal: Option<(&SegmentKey, u64)>,
 ) -> anyhow::Result<Vec<u8>> {
     let written = payload.len() + if seal.is_some() { FRAME_TAG_LEN } else { 0 };
     let length = u32::try_from(written)
         .map_err(|_| anyhow::anyhow!("WAL encode: payload too large ({written} bytes)"))?;
 
-    let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + written);
+    let head_len = if address.is_some() {
+        FRAME_HEADER_LEN_V3
+    } else {
+        FRAME_HEADER_LEN
+    };
+    let mut frame = Vec::with_capacity(head_len + written);
     frame.extend_from_slice(&FRAME_MAGIC.to_be_bytes());
     frame.push(version);
     frame.extend_from_slice(&length.to_be_bytes());
     frame.extend_from_slice(&[0; 4]);
+    if let Some((partition, sequence)) = address {
+        frame.extend_from_slice(&partition.to_be_bytes());
+        frame.extend_from_slice(&sequence.to_be_bytes());
+    }
     frame.extend_from_slice(payload);
     if let Some((key, index)) = seal {
-        let (head, body) = frame.split_at_mut(FRAME_HEADER_LEN);
-        let tag = key.seal_frame(index, &head[..9], body)?;
+        let (head, body) = frame.split_at_mut(head_len);
+        let tag = key.seal_frame(index, &frame_aad(head), body)?;
         frame.extend_from_slice(&tag);
     }
     let crc = crc32c::crc32c(&frame[FRAME_HEADER_LEN..]);
@@ -347,6 +396,18 @@ pub fn decode_all(data: &[u8]) -> FrameDecodeResult {
     decode_segment(data).result
 }
 
+/// Where one intact frame sits in its file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameSpan {
+    /// Offset of the frame's first byte.
+    pub offset: usize,
+    /// Bytes of the frame, header included.
+    pub len: usize,
+    /// The partition and sequence a v3 frame carries in its header; `None`
+    /// for a v1 or v2 frame, whose partition its file names.
+    pub address: Option<(u32, u64)>,
+}
+
 /// What decoding one segment file found.
 #[derive(Debug)]
 pub struct SegmentDecode {
@@ -360,6 +421,8 @@ pub struct SegmentDecode {
     pub intact_len: usize,
     /// Intact frames in the file.
     pub frames: usize,
+    /// Every intact frame, in file order.
+    pub spans: Vec<FrameSpan>,
 }
 
 /// Decodes one segment file: a v2 file (it starts with [`SEGMENT_MAGIC`]) is a
@@ -379,62 +442,167 @@ pub fn decode_segment(data: &[u8]) -> SegmentDecode {
 /// CRC holds but whose tag does not is `AuthenticationFailed`.
 #[must_use]
 pub fn decode_segment_with(data: &[u8], keyring: Option<&Keyring>) -> SegmentDecode {
-    if !data.starts_with(&SEGMENT_MAGIC.to_be_bytes()) {
-        let (result, intact_len, frames) = decode_frames(data, 0, FRAME_VERSION, &Payloads::Plain);
-        return SegmentDecode {
+    let decoded = if data.starts_with(&SEGMENT_MAGIC.to_be_bytes()) {
+        decode_headed(
+            data,
+            SEGMENT_HEADER_LEN,
+            SegmentHeader::parse,
+            |header: &SegmentHeader| {
+                let key = match header.cipher {
+                    SegmentCipher::None => None,
+                    SegmentCipher::XChaCha20Poly1305 => {
+                        keyring.and_then(|k| k.segment_key(header).ok())
+                    }
+                };
+                (header.cipher, header.key_id, key)
+            },
+            FRAME_VERSION_V2,
+            true,
+        )
+    } else {
+        let (result, intact_len, spans) = decode_frames(data, 0, FRAME_VERSION, &Payloads::Plain);
+        Headed {
             header: None,
             result,
             intact_len,
-            frames,
+            spans,
+        }
+    };
+    SegmentDecode {
+        header: decoded.header,
+        result: decoded.result,
+        intact_len: decoded.intact_len,
+        frames: decoded.spans.len(),
+        spans: decoded.spans,
+    }
+}
+
+/// What decoding one stream segment file found.
+#[derive(Debug)]
+pub struct StreamDecode {
+    /// The file's header; `None` when it is short or refused.
+    pub header: Option<StreamSegmentHeader>,
+    /// The frames, classified as [`decode_all`] returns them; with
+    /// `read_payloads` off, `Complete` and `TruncatedTail` carry no entry.
+    pub result: FrameDecodeResult,
+    /// Bytes of the intact prefix: the header plus every intact frame.
+    pub intact_len: usize,
+    /// Every intact frame, in file order, each with its partition and
+    /// sequence; with `read_payloads` on, the i-th entry of `result` is the
+    /// payload of the i-th span.
+    pub spans: Vec<FrameSpan>,
+}
+
+/// Decodes one stream segment file: a [`StreamSegmentHeader`] followed by v3
+/// frames. A file that does not start with [`SEGMENT_MAGIC`] is refused as
+/// `BadMagic` at offset 0; one shorter than its header is a truncated tail
+/// with no intact frame.
+///
+/// With `read_payloads`, every payload is deserialized — a sealed file's
+/// opened under the key `keyring` derives from its header, reported `Sealed`
+/// when that key is not held, and `AuthenticationFailed` for a frame whose
+/// CRC holds but whose tag does not. Without it, only the frame envelopes and
+/// CRCs are checked: enough to learn each frame's partition and sequence, and
+/// no key is needed.
+#[must_use]
+pub fn decode_stream_segment(
+    data: &[u8],
+    keyring: Option<&Keyring>,
+    read_payloads: bool,
+) -> StreamDecode {
+    if !data.starts_with(&SEGMENT_MAGIC.to_be_bytes()) {
+        return StreamDecode {
+            header: None,
+            result: FrameDecodeResult::BadMagic { offset: 0 },
+            intact_len: 0,
+            spans: Vec::new(),
         };
     }
-    if data.len() < SEGMENT_HEADER_LEN {
-        return SegmentDecode {
+    let decoded = decode_headed(
+        data,
+        STREAM_HEADER_LEN,
+        StreamSegmentHeader::parse,
+        |header: &StreamSegmentHeader| {
+            let key = match header.cipher {
+                SegmentCipher::None => None,
+                SegmentCipher::XChaCha20Poly1305 => {
+                    keyring.and_then(|k| k.stream_segment_key(header).ok())
+                }
+            };
+            (header.cipher, header.key_id, key)
+        },
+        FRAME_VERSION_V3,
+        read_payloads,
+    );
+    StreamDecode {
+        header: decoded.header,
+        result: decoded.result,
+        intact_len: decoded.intact_len,
+        spans: decoded.spans,
+    }
+}
+
+/// A file that starts with a header, decoded.
+struct Headed<H> {
+    header: Option<H>,
+    result: FrameDecodeResult,
+    intact_len: usize,
+    spans: Vec<FrameSpan>,
+}
+
+/// Decodes a file whose `header_len`-byte header `parse` reads, followed by
+/// frames of `version`, their payloads protected as `protection` reads off
+/// the header: `(cipher, key_id, key)`.
+fn decode_headed<H>(
+    data: &[u8],
+    header_len: usize,
+    parse: impl Fn(&[u8]) -> Result<H, HeaderError>,
+    protection: impl Fn(&H) -> (SegmentCipher, u32, Option<SegmentKey>),
+    version: u8,
+    read_payloads: bool,
+) -> Headed<H> {
+    if data.len() < header_len {
+        return Headed {
             header: None,
             result: FrameDecodeResult::TruncatedTail {
                 complete: Vec::new(),
             },
             intact_len: 0,
-            frames: 0,
+            spans: Vec::new(),
         };
     }
-    let header = match SegmentHeader::parse(data) {
+    let header = match parse(data) {
         Ok(header) => header,
         Err(error) => {
-            return SegmentDecode {
+            return Headed {
                 header: None,
                 result: FrameDecodeResult::BadHeader(error),
                 intact_len: 0,
-                frames: 0,
+                spans: Vec::new(),
             };
         }
     };
-    let key = match header.cipher {
-        SegmentCipher::None => None,
-        SegmentCipher::XChaCha20Poly1305 => keyring.and_then(|k| k.segment_key(&header).ok()),
+    let (cipher, key_id, key) = protection(&header);
+    let payloads = match (read_payloads, cipher, &key) {
+        (false, _, _) | (_, SegmentCipher::XChaCha20Poly1305, None) => Payloads::Unread,
+        (true, SegmentCipher::None, _) => Payloads::Plain,
+        (true, _, Some(key)) => Payloads::Sealed(key),
     };
-    let payloads = match (header.cipher, &key) {
-        (SegmentCipher::None, _) => Payloads::Plain,
-        (_, Some(key)) => Payloads::Sealed(key),
-        (_, None) => Payloads::Unread,
-    };
-    let (mut result, intact_len, frames) =
-        decode_frames(data, SEGMENT_HEADER_LEN, FRAME_VERSION_V2, &payloads);
-    if matches!(payloads, Payloads::Unread)
+    let (mut result, intact_len, spans) = decode_frames(data, header_len, version, &payloads);
+    if read_payloads
+        && matches!(payloads, Payloads::Unread)
         && matches!(
             result,
             FrameDecodeResult::Complete(_) | FrameDecodeResult::TruncatedTail { .. }
         )
     {
-        result = FrameDecodeResult::Sealed {
-            key_id: header.key_id,
-        };
+        result = FrameDecodeResult::Sealed { key_id };
     }
-    SegmentDecode {
+    Headed {
         header: Some(header),
         result,
         intact_len,
-        frames,
+        spans,
     }
 }
 
@@ -445,29 +613,34 @@ enum Payloads<'k> {
     /// Opens it under the segment key at the frame's index, then
     /// deserializes it.
     Sealed(&'k SegmentKey),
-    /// Leaves it unread: the key is not held.
+    /// Leaves it unread: the key is not held, or only the envelopes are
+    /// wanted.
     Unread,
 }
 
 /// Decodes the frames of `data` from `start` on, each expected to carry
 /// `version`, treating each payload as `payloads` says. Returns the
-/// classification, the end offset of the intact prefix and the intact frame
-/// count. Offsets in the classification are from the start of `data`.
+/// classification, the end offset of the intact prefix and the span of every
+/// intact frame. Offsets in the classification are from the start of `data`.
+///
+/// A v3 frame carries its partition and sequence after the v2 envelope; the
+/// CRC covers them with the payload, and a payload whose entry names another
+/// sequence than its header is corruption.
 #[allow(clippy::too_many_lines)]
 fn decode_frames(
     data: &[u8],
     start: usize,
     version: u8,
     payloads: &Payloads<'_>,
-) -> (FrameDecodeResult, usize, usize) {
+) -> (FrameDecodeResult, usize, Vec<FrameSpan>) {
     if data.is_empty() {
-        return (FrameDecodeResult::CleanEof, 0, 0);
+        return (FrameDecodeResult::CleanEof, 0, Vec::new());
     }
 
     let mut cursor = Cursor::new(data);
     cursor.set_position(start as u64);
     let mut entries = Vec::new();
-    let mut frames = 0usize;
+    let mut spans: Vec<FrameSpan> = Vec::new();
     let mut intact = start;
     let total_len = data.len();
 
@@ -517,6 +690,19 @@ fn decode_frames(
         }
         let stored_crc = u32::from_be_bytes(crc_buf);
 
+        // --- Read a v3 frame's partition and sequence (12 bytes) ---
+        let mut address = None;
+        if version == FRAME_VERSION_V3 {
+            let mut address_buf = [0u8; 12];
+            if cursor.read_exact(&mut address_buf).is_err() {
+                break FrameDecodeResult::TruncatedTail { complete: entries };
+            }
+            address = Some((
+                u32::from_be_bytes(address_buf[..4].try_into().expect("4 bytes")),
+                u64::from_be_bytes(address_buf[4..].try_into().expect("8 bytes")),
+            ));
+        }
+
         // --- Bound the declared payload length BEFORE allocating ---
         // The length field is untrusted on-disk data; a corrupt/torn length must
         // never drive the allocation below. Two distinct rejections, ordered so a
@@ -555,8 +741,8 @@ fn decode_frames(
         }
         let next_offset = usize::try_from(cursor.position()).unwrap_or(usize::MAX);
 
-        // --- Verify CRC32C ---
-        let computed_crc = crc32c::crc32c(&payload);
+        // --- Verify CRC32C over everything after the CRC field ---
+        let computed_crc = crc32c::crc32c(&data[offset + FRAME_HEADER_LEN..next_offset]);
         if computed_crc != stored_crc {
             if next_offset >= total_len {
                 // CRC mismatch on the last frame — treat as truncated tail since
@@ -572,12 +758,17 @@ fn decode_frames(
         }
 
         // --- Open a sealed payload ---
+        let head_end = next_offset - payload_len;
         let payload = match payloads {
             Payloads::Unread => None,
             Payloads::Plain => Some(payload),
             Payloads::Sealed(key) => {
-                let aad = &data[offset..offset + 9];
-                match key.open_frame(u64::try_from(frames).unwrap_or(u64::MAX), aad, &payload) {
+                let aad = frame_aad(&data[offset..head_end]);
+                match key.open_frame(
+                    u64::try_from(spans.len()).unwrap_or(u64::MAX),
+                    &aad,
+                    &payload,
+                ) {
                     Ok(plaintext) => Some(plaintext),
                     // The CRC holds, so the bytes are as written: a tag
                     // that does not match is tampering or corruption, never
@@ -589,26 +780,41 @@ fn decode_frames(
 
         // --- Deserialize payload ---
         if let Some(payload) = payload {
-            if let Ok(entry) = rmp_serde::from_slice::<WalEntry>(&payload) {
-                entries.push(entry);
-            } else {
+            match rmp_serde::from_slice::<WalEntry>(&payload) {
+                // A v3 header that names another sequence than its entry is
+                // internally inconsistent: replaying it would file the entry
+                // under a sequence it was not written at.
+                Ok(entry) if address.is_some_and(|(_, sequence)| sequence != entry.sequence) => {
+                    break FrameDecodeResult::Corruption {
+                        offset,
+                        stored_crc,
+                        computed_crc,
+                    };
+                }
+                Ok(entry) => entries.push(entry),
                 // Deserialisation failure on a frame that passed CRC is still
                 // treated as corruption — the bytes are internally consistent but
                 // unreadable.
-                if next_offset >= total_len {
+                Err(_) if next_offset >= total_len => {
                     break FrameDecodeResult::TruncatedTail { complete: entries };
                 }
-                break FrameDecodeResult::Corruption {
-                    offset,
-                    stored_crc,
-                    computed_crc,
-                };
+                Err(_) => {
+                    break FrameDecodeResult::Corruption {
+                        offset,
+                        stored_crc,
+                        computed_crc,
+                    };
+                }
             }
         }
         intact = next_offset;
-        frames += 1;
+        spans.push(FrameSpan {
+            offset,
+            len: next_offset - offset,
+            address,
+        });
     };
-    (result, intact, frames)
+    (result, intact, spans)
 }
 
 // ===========================================================================
@@ -800,7 +1006,7 @@ mod tests {
                     without_key += 1;
                     let mut bytes = Vec::new();
                     rmpv::encode::write_value(&mut bytes, &payload).expect("msgpack");
-                    frame_payload(&bytes, FRAME_VERSION, None).expect("frame")
+                    frame_payload(&bytes, FRAME_VERSION, None, None).expect("frame")
                 }
                 _ => original.to_vec(),
             };

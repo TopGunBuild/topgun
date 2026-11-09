@@ -135,13 +135,14 @@ impl SegmentHeader {
     #[must_use]
     pub fn encode(&self) -> [u8; SEGMENT_HEADER_LEN] {
         let mut out = [0u8; SEGMENT_HEADER_LEN];
-        out[0..4].copy_from_slice(&SEGMENT_MAGIC.to_be_bytes());
-        out[4] = SEGMENT_HEADER_VERSION;
-        out[5] = self.layout as u8;
-        out[6..8].copy_from_slice(&(self.payload_schema as u16).to_be_bytes());
-        out[8] = self.cipher as u8;
-        out[9..13].copy_from_slice(&self.key_id.to_be_bytes());
-        out[13..45].copy_from_slice(&self.salt);
+        HeaderFields {
+            layout: self.layout,
+            payload_schema: self.payload_schema,
+            cipher: self.cipher,
+            key_id: self.key_id,
+            salt: self.salt,
+        }
+        .encode(SEGMENT_HEADER_VERSION, &mut out);
         out[45..49].copy_from_slice(&self.partition.to_be_bytes());
         out[49..57].copy_from_slice(&self.first_seq.to_be_bytes());
         let crc = crc32c::crc32c(&out[..SEGMENT_HEADER_BODY_LEN]);
@@ -162,14 +163,51 @@ impl SegmentHeader {
     /// Never for input of at least [`SEGMENT_HEADER_LEN`] bytes.
     pub fn parse(bytes: &[u8]) -> Result<Self, HeaderError> {
         let h = &bytes[..SEGMENT_HEADER_LEN];
-        let be32 =
-            |r: std::ops::Range<usize>| u32::from_be_bytes(h[r].try_into().expect("4 bytes"));
-        let stored = be32(SEGMENT_HEADER_BODY_LEN..SEGMENT_HEADER_LEN);
-        let computed = crc32c::crc32c(&h[..SEGMENT_HEADER_BODY_LEN]);
+        let fields = HeaderFields::parse(h, SEGMENT_HEADER_VERSION, SEGMENT_HEADER_BODY_LEN)?;
+        Ok(Self {
+            layout: fields.layout,
+            payload_schema: fields.payload_schema,
+            cipher: fields.cipher,
+            key_id: fields.key_id,
+            salt: fields.salt,
+            partition: u32::from_be_bytes(h[45..49].try_into().expect("4 bytes")),
+            first_seq: u64::from_be_bytes(h[49..57].try_into().expect("8 bytes")),
+        })
+    }
+}
+
+/// The fields every segment header version shares, at the same offsets:
+/// `MAGIC u32 ‖ header_version u8 ‖ layout u8 ‖ payload_schema u16 BE ‖
+/// cipher u8 ‖ key_id u32 BE ‖ salt [32]`, bytes 0..45.
+struct HeaderFields {
+    layout: SegmentLayout,
+    payload_schema: PayloadSchema,
+    cipher: SegmentCipher,
+    key_id: u32,
+    salt: [u8; 32],
+}
+
+impl HeaderFields {
+    /// Writes the shared fields of a header of `version` into `out[..45]`.
+    fn encode(&self, version: u8, out: &mut [u8]) {
+        out[0..4].copy_from_slice(&SEGMENT_MAGIC.to_be_bytes());
+        out[4] = version;
+        out[5] = self.layout as u8;
+        out[6..8].copy_from_slice(&(self.payload_schema as u16).to_be_bytes());
+        out[8] = self.cipher as u8;
+        out[9..13].copy_from_slice(&self.key_id.to_be_bytes());
+        out[13..45].copy_from_slice(&self.salt);
+    }
+
+    /// Checks the CRC32C of a header of `body_len` body bytes and its
+    /// version, and parses the shared fields.
+    fn parse(h: &[u8], version: u8, body_len: usize) -> Result<Self, HeaderError> {
+        let stored = u32::from_be_bytes(h[body_len..body_len + 4].try_into().expect("4 bytes"));
+        let computed = crc32c::crc32c(&h[..body_len]);
         if stored != computed {
             return Err(HeaderError::BadCrc { stored, computed });
         }
-        if h[4] != SEGMENT_HEADER_VERSION {
+        if h[4] != version {
             return Err(HeaderError::UnknownVersion(h[4]));
         }
         let layout = match h[5] {
@@ -185,7 +223,7 @@ impl SegmentHeader {
             1 => SegmentCipher::XChaCha20Poly1305,
             other => return Err(HeaderError::UnknownCipher(other)),
         };
-        let key_id = be32(9..13);
+        let key_id = u32::from_be_bytes(h[9..13].try_into().expect("4 bytes"));
         if (cipher == SegmentCipher::None) != (key_id == 0) {
             return Err(HeaderError::KeyIdMismatch { cipher, key_id });
         }
@@ -195,9 +233,113 @@ impl SegmentHeader {
             cipher,
             key_id,
             salt: h[13..45].try_into().expect("32 bytes"),
-            partition: be32(45..49),
-            first_seq: u64::from_be_bytes(h[49..57].try_into().expect("8 bytes")),
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stream segment header (v3)
+// ---------------------------------------------------------------------------
+
+/// Header version of a stream segment: one node-wide log whose frames carry
+/// their partition and sequence.
+pub const STREAM_HEADER_VERSION: u8 = 3;
+
+/// Stream header bytes the CRC32C covers: magic through `stream_seq`.
+pub const STREAM_HEADER_BODY_LEN: usize = 53;
+
+/// Total bytes of a stream segment header: its body and a CRC32C u32 BE.
+pub const STREAM_HEADER_LEN: usize = STREAM_HEADER_BODY_LEN + 4;
+
+/// The header every stream segment starts with:
+/// `MAGIC u32 ‖ header_version u8 (3) ‖ layout u8 ‖ payload_schema u16 BE ‖
+/// cipher u8 ‖ key_id u32 BE ‖ salt [32] ‖ stream_seq u64 BE ‖ CRC32C u32 BE`,
+/// 57 bytes. It names no partition: every frame carries its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamSegmentHeader {
+    pub layout: SegmentLayout,
+    pub payload_schema: PayloadSchema,
+    pub cipher: SegmentCipher,
+    /// The data key the segment is sealed with; 0 iff `cipher` is `None`.
+    pub key_id: u32,
+    /// Random per created file, so no two files share an identity.
+    pub salt: [u8; 32],
+    /// Position of the segment in the stream; also its file name.
+    pub stream_seq: u64,
+}
+
+impl StreamSegmentHeader {
+    /// An unsealed header for stream segment `stream_seq`, with a fresh random
+    /// salt.
+    #[must_use]
+    pub fn new(stream_seq: u64) -> Self {
+        Self {
+            layout: SegmentLayout::Fnv1aMod271,
+            payload_schema: PayloadSchema::WalEntryV1,
+            cipher: SegmentCipher::None,
+            key_id: 0,
+            salt: rand::random(),
+            stream_seq,
+        }
+    }
+
+    /// The header's 57 bytes.
+    #[must_use]
+    pub fn encode(&self) -> [u8; STREAM_HEADER_LEN] {
+        let mut out = [0u8; STREAM_HEADER_LEN];
+        HeaderFields {
+            layout: self.layout,
+            payload_schema: self.payload_schema,
+            cipher: self.cipher,
+            key_id: self.key_id,
+            salt: self.salt,
+        }
+        .encode(STREAM_HEADER_VERSION, &mut out);
+        out[45..53].copy_from_slice(&self.stream_seq.to_be_bytes());
+        let crc = crc32c::crc32c(&out[..STREAM_HEADER_BODY_LEN]);
+        out[STREAM_HEADER_BODY_LEN..].copy_from_slice(&crc.to_be_bytes());
+        out
+    }
+
+    /// Parses the stream header at the start of `bytes`, which must hold at
+    /// least [`STREAM_HEADER_LEN`] bytes and start with [`SEGMENT_MAGIC`]; the
+    /// caller classifies a shorter file.
+    ///
+    /// # Errors
+    ///
+    /// A CRC mismatch, a version other than [`STREAM_HEADER_VERSION`], or a
+    /// field value this binary does not know.
+    ///
+    /// # Panics
+    ///
+    /// Never for input of at least [`STREAM_HEADER_LEN`] bytes.
+    pub fn parse(bytes: &[u8]) -> Result<Self, HeaderError> {
+        let h = &bytes[..STREAM_HEADER_LEN];
+        let fields = HeaderFields::parse(h, STREAM_HEADER_VERSION, STREAM_HEADER_BODY_LEN)?;
+        Ok(Self {
+            layout: fields.layout,
+            payload_schema: fields.payload_schema,
+            cipher: fields.cipher,
+            key_id: fields.key_id,
+            salt: fields.salt,
+            stream_seq: u64::from_be_bytes(h[45..53].try_into().expect("8 bytes")),
+        })
+    }
+}
+
+/// The highest sequence of every partition with a frame in one stream
+/// segment, read from the frame headers alone (partition and sequence are in
+/// the clear), so collection can judge a segment without decrypting it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SegmentSummary {
+    pub max_seq: std::collections::BTreeMap<u32, u64>,
+}
+
+impl SegmentSummary {
+    /// Counts a frame of `partition` at `sequence`.
+    pub fn note(&mut self, partition: u32, sequence: u64) {
+        let max = self.max_seq.entry(partition).or_insert(sequence);
+        *max = (*max).max(sequence);
     }
 }
 
@@ -323,6 +465,33 @@ pub fn parse_segment_filename(name: &str) -> Option<(u32, u64)> {
         let partition = inner.parse::<u32>().ok()?;
         Some((partition, 0))
     }
+}
+
+/// Filename prefix of a stream segment. A stream file keeps the `.log` suffix,
+/// so tooling that sums `*.log` bytes counts it, while
+/// [`parse_segment_filename`] never takes it for a partition segment.
+pub const STREAM_FILE_PREFIX: &str = "stream-";
+
+/// Zero-padding width of `stream_seq` in a stream segment's filename, so the
+/// stream's files sort by name in stream order.
+pub const STREAM_SEQ_PAD: usize = 16;
+
+/// The filename of stream segment `stream_seq`: `stream-{stream_seq:016}.log`.
+#[must_use]
+pub fn format_stream_filename(stream_seq: u64) -> String {
+    let pad = STREAM_SEQ_PAD;
+    format!("{STREAM_FILE_PREFIX}{stream_seq:0pad$}{SEGMENT_FILE_SUFFIX}")
+}
+
+/// The `stream_seq` of a stream segment's filename; `None` for any other
+/// name.
+#[must_use]
+pub fn parse_stream_filename(name: &str) -> Option<u64> {
+    name.strip_prefix(STREAM_FILE_PREFIX)?
+        .strip_suffix(SEGMENT_FILE_SUFFIX)
+        .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))?
+        .parse::<u64>()
+        .ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -596,6 +765,151 @@ impl Segment {
     }
 }
 
+// ---------------------------------------------------------------------------
+// inspect — a reader for tests and reports
+// ---------------------------------------------------------------------------
+
+/// Reads the segment files of a WAL directory whatever their layout — v1 and
+/// v2 per-partition segments and v3 stream segments — for tests, benches and
+/// reports, so nothing outside the WAL module names a segment file or knows
+/// its layout. Not a recovery path: it holds no keyring, so a sealed segment
+/// is an error.
+#[doc(hidden)]
+pub mod inspect {
+    use std::path::{Path, PathBuf};
+
+    use super::{parse_segment_filename, parse_stream_filename};
+    use crate::storage::wal::{format, WalEntry, WalWriter};
+
+    /// One frame on disk.
+    #[derive(Debug, Clone)]
+    pub struct DiskFrame {
+        /// The partition the frame belongs to: its file's for a per-partition
+        /// segment, its own for a stream frame.
+        pub partition: u32,
+        pub sequence: u64,
+        pub entry: WalEntry,
+        /// Bytes the frame takes in its file, header included.
+        pub encoded_len: usize,
+    }
+
+    /// A segment file and where it sits in the order it is read in.
+    enum Listed {
+        /// A per-partition segment of the partition.
+        Partition(u32),
+        /// A stream segment: its `stream_seq`.
+        Stream(u64),
+    }
+
+    /// Every segment file of `wal_dir`: per-partition segments by partition
+    /// and first sequence, then stream segments in stream order.
+    fn listed(wal_dir: &Path) -> Vec<(Listed, PathBuf)> {
+        let Ok(read_dir) = std::fs::read_dir(wal_dir) else {
+            return Vec::new();
+        };
+        let mut partition = Vec::new();
+        let mut stream = Vec::new();
+        for entry in read_dir.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some((p, first_seq)) = parse_segment_filename(&name) {
+                partition.push(((p, first_seq), entry.path()));
+            } else if let Some(stream_seq) = parse_stream_filename(&name) {
+                stream.push((stream_seq, entry.path()));
+            }
+        }
+        partition.sort_by_key(|(at, _)| *at);
+        stream.sort_by_key(|(at, _)| *at);
+        partition
+            .into_iter()
+            .map(|((p, _), path)| (Listed::Partition(p), path))
+            .chain(
+                stream
+                    .into_iter()
+                    .map(|(stream_seq, path)| (Listed::Stream(stream_seq), path)),
+            )
+            .collect()
+    }
+
+    /// Every segment file of `wal_dir`, per-partition segments first; empty
+    /// when the directory cannot be read.
+    #[must_use]
+    pub fn segment_paths(wal_dir: &Path) -> Vec<PathBuf> {
+        listed(wal_dir).into_iter().map(|(_, path)| path).collect()
+    }
+
+    /// The summed size of every segment file of `wal_dir`; a file that
+    /// vanishes while it is measured counts 0.
+    #[must_use]
+    pub fn bytes_on_disk(wal_dir: &Path) -> u64 {
+        segment_paths(wal_dir)
+            .iter()
+            .map(|path| std::fs::metadata(path).map_or(0, |m| m.len()))
+            .sum()
+    }
+
+    /// Every frame of every plaintext segment file of `wal_dir`, in the order
+    /// of [`segment_paths`] and, within a file, in file order. A torn tail is
+    /// tolerated where recovery tolerates it — on the last segment of a
+    /// partition and on the newest stream segment — and is an error anywhere
+    /// else, as is any other corruption or a sealed segment.
+    ///
+    /// # Errors
+    ///
+    /// A file that cannot be read, or one recovery would refuse.
+    pub fn frames_on_disk(wal_dir: &Path) -> anyhow::Result<Vec<DiskFrame>> {
+        let files = listed(wal_dir);
+        let newest_stream = files.iter().rev().find_map(|(listed, _)| match listed {
+            Listed::Stream(stream_seq) => Some(*stream_seq),
+            Listed::Partition(_) => None,
+        });
+        let mut frames = Vec::new();
+        for (idx, (listed, path)) in files.iter().enumerate() {
+            let data = std::fs::read(path)
+                .map_err(|e| anyhow::anyhow!("Cannot read WAL segment {}: {e}", path.display()))?;
+            match listed {
+                Listed::Partition(partition) => {
+                    let last_of_partition = !matches!(
+                        files.get(idx + 1),
+                        Some((Listed::Partition(next), _)) if next == partition
+                    );
+                    let decoded = format::decode_segment(&data);
+                    let spans = decoded.spans.clone();
+                    let (entries, _) =
+                        WalWriter::entries_or_refuse(path, decoded, last_of_partition)?;
+                    frames.extend(spans.iter().zip(entries).map(|(span, entry)| DiskFrame {
+                        partition: *partition,
+                        sequence: entry.sequence,
+                        entry,
+                        encoded_len: span.len,
+                    }));
+                }
+                Listed::Stream(stream_seq) => {
+                    let (spans, entries) = WalWriter::read_stream_segment(
+                        path,
+                        &data,
+                        Some(*stream_seq) == newest_stream,
+                        None,
+                        true,
+                    )?;
+                    for (span, entry) in spans.iter().zip(entries) {
+                        let (partition, sequence) = span.address.ok_or_else(|| {
+                            anyhow::anyhow!("a frame of {} has no address", path.display())
+                        })?;
+                        frames.push(DiskFrame {
+                            partition,
+                            sequence,
+                            entry,
+                            encoded_len: span.len,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(frames)
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -631,5 +945,178 @@ mod tests {
     fn format_then_parse_round_trips() {
         let name = format_segment_filename(5, 42);
         assert_eq!(parse_segment_filename(&name), Some((5, 42)));
+    }
+
+    #[test]
+    fn a_stream_name_is_never_a_partition_segment() {
+        let name = format_stream_filename(7);
+        assert_eq!(name, "stream-0000000000000007.log");
+        assert_eq!(parse_stream_filename(&name), Some(7));
+        assert_eq!(parse_segment_filename(&name), None);
+        assert_eq!(
+            parse_stream_filename("partition-005-00000000000000000042.log"),
+            None
+        );
+        assert_eq!(parse_stream_filename("stream-+7.log"), None);
+        assert_eq!(parse_stream_filename("stream-.log"), None);
+    }
+
+    fn entry(map: &str, sequence: u64) -> crate::storage::wal::WalEntry {
+        crate::storage::wal::WalEntry {
+            map: map.to_string(),
+            key: format!("k{sequence}"),
+            op: crate::storage::wal::WalOp::Remove,
+            timestamp: None,
+            sequence,
+        }
+    }
+
+    /// A plaintext stream segment holding `frames` as `(partition, sequence)`.
+    pub(crate) fn stream_segment(stream_seq: u64, frames: &[(u32, u64)]) -> Vec<u8> {
+        let mut data = StreamSegmentHeader::new(stream_seq).encode().to_vec();
+        for &(partition, sequence) in frames {
+            let payload =
+                crate::storage::wal::format::encode_v2_payload(&entry("m", sequence), false)
+                    .unwrap();
+            data.extend(
+                crate::storage::wal::format::frame_v3(partition, sequence, &payload, None).unwrap(),
+            );
+        }
+        data
+    }
+
+    #[test]
+    fn r_b_stream_header_round_trips_and_refuses_unknown_fields_by_name() {
+        let mut header = StreamSegmentHeader::new(42);
+        header.cipher = SegmentCipher::XChaCha20Poly1305;
+        header.key_id = 3;
+        let bytes = header.encode();
+        assert_eq!(bytes.len(), STREAM_HEADER_LEN);
+        assert_eq!(StreamSegmentHeader::parse(&bytes), Ok(header));
+
+        // Each refused field is named, with its value, after a valid CRC.
+        let refused = |at: usize, value: u8| {
+            let mut changed = bytes;
+            changed[at] = value;
+            let crc = crc32c::crc32c(&changed[..STREAM_HEADER_BODY_LEN]);
+            changed[STREAM_HEADER_BODY_LEN..].copy_from_slice(&crc.to_be_bytes());
+            StreamSegmentHeader::parse(&changed)
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(refused(4, 2), "unknown header version 2");
+        assert_eq!(refused(5, 9), "unknown partition layout 9");
+        assert_eq!(refused(7, 9), "unknown payload schema 9");
+        assert_eq!(refused(8, 9), "unknown cipher 9");
+        // A per-partition (v2) header is not a stream header, nor the reverse.
+        let v2 = SegmentHeader::new_unsealed(1, 1).encode();
+        let mut as_stream = v2[..STREAM_HEADER_LEN].to_vec();
+        let crc = crc32c::crc32c(&as_stream[..STREAM_HEADER_BODY_LEN]);
+        as_stream[STREAM_HEADER_BODY_LEN..].copy_from_slice(&crc.to_be_bytes());
+        assert_eq!(
+            StreamSegmentHeader::parse(&as_stream),
+            Err(HeaderError::UnknownVersion(2))
+        );
+        let mut as_v2 = [0u8; SEGMENT_HEADER_LEN];
+        as_v2[..STREAM_HEADER_LEN].copy_from_slice(&bytes);
+        let crc = crc32c::crc32c(&as_v2[..SEGMENT_HEADER_BODY_LEN]);
+        as_v2[SEGMENT_HEADER_BODY_LEN..].copy_from_slice(&crc.to_be_bytes());
+        assert_eq!(
+            SegmentHeader::parse(&as_v2),
+            Err(HeaderError::UnknownVersion(STREAM_HEADER_VERSION))
+        );
+    }
+
+    #[test]
+    fn r_b_stream_frames_round_trip_with_their_partition_and_sequence() {
+        use crate::storage::wal::format::{decode_stream_segment, FrameDecodeResult};
+        let data = stream_segment(9, &[(4, 7), (270, 2), (4, 8)]);
+        let decoded = decode_stream_segment(&data, None, true);
+        assert_eq!(decoded.header.map(|h| h.stream_seq), Some(9));
+        let FrameDecodeResult::Complete(entries) = decoded.result else {
+            panic!("{:?}", decoded.result);
+        };
+        assert_eq!(
+            entries.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+            vec![7, 2, 8]
+        );
+        assert_eq!(
+            decoded.spans.iter().map(|s| s.address).collect::<Vec<_>>(),
+            vec![Some((4, 7)), Some((270, 2)), Some((4, 8))]
+        );
+        assert_eq!(decoded.intact_len, data.len());
+        // The envelopes alone give the same addresses without reading a payload.
+        let headers = decode_stream_segment(&data, None, false);
+        assert_eq!(headers.spans, decoded.spans);
+
+        // The CRC covers the partition: a changed one is corruption, not a
+        // frame of another partition.
+        let mut changed = data.clone();
+        changed[STREAM_HEADER_LEN + 13] ^= 0x01;
+        assert!(matches!(
+            decode_stream_segment(&changed, None, false).result,
+            FrameDecodeResult::Corruption { offset, .. } if offset == STREAM_HEADER_LEN
+        ));
+    }
+
+    #[test]
+    fn r_b_inspect_reads_every_layout() {
+        use crate::storage::wal::format;
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path();
+        // v1: a headerless legacy file of partition 7.
+        let v1_path = wal_dir.join("partition-007.log");
+        let mut v1 = format::encode(&entry("a", 1)).unwrap();
+        v1.extend(format::encode(&entry("a", 2)).unwrap());
+        std::fs::write(&v1_path, &v1).unwrap();
+        // v2: a headed segment of partition 7 from sequence 3.
+        let v2_path = wal_dir.join(format_segment_filename(7, 3));
+        let mut v2 = SegmentHeader::new_unsealed(7, 3).encode().to_vec();
+        v2.extend(format::encode_v2(&entry("a", 3)).unwrap());
+        std::fs::write(&v2_path, &v2).unwrap();
+        // v3: a stream segment with frames of two partitions.
+        let v3_path = wal_dir.join(format_stream_filename(1));
+        let v3 = stream_segment(1, &[(9, 5), (7, 4)]);
+        std::fs::write(&v3_path, &v3).unwrap();
+        std::fs::write(wal_dir.join("wal-collected"), b"not a segment").unwrap();
+
+        assert_eq!(
+            inspect::segment_paths(wal_dir),
+            vec![v1_path.clone(), v2_path.clone(), v3_path.clone()]
+        );
+        assert_eq!(
+            inspect::bytes_on_disk(wal_dir),
+            (v1.len() + v2.len() + v3.len()) as u64
+        );
+        let frames = inspect::frames_on_disk(wal_dir).unwrap();
+        assert_eq!(
+            frames
+                .iter()
+                .map(|f| (f.partition, f.sequence, f.entry.sequence))
+                .collect::<Vec<_>>(),
+            vec![(7, 1, 1), (7, 2, 2), (7, 3, 3), (9, 5, 5), (7, 4, 4)]
+        );
+        assert_eq!(
+            frames.iter().map(|f| f.encoded_len).sum::<usize>(),
+            v1.len() + (v2.len() - SEGMENT_HEADER_LEN) + (v3.len() - STREAM_HEADER_LEN)
+        );
+
+        // A torn tail on the newest stream segment is tolerated.
+        std::fs::write(&v3_path, &v3[..v3.len() - 3]).unwrap();
+        let frames = inspect::frames_on_disk(wal_dir).unwrap();
+        assert_eq!(frames.last().map(|f| f.sequence), Some(5));
+
+        // On an older segment it is an error: the v1 file is followed by the
+        // v2 segment of its partition, and an older stream segment by a newer.
+        std::fs::write(&v1_path, &v1[..v1.len() - 3]).unwrap();
+        assert!(inspect::frames_on_disk(wal_dir).is_err());
+        std::fs::write(&v1_path, &v1).unwrap();
+        std::fs::write(
+            wal_dir.join(format_stream_filename(2)),
+            stream_segment(2, &[(9, 6)]),
+        )
+        .unwrap();
+        let err = inspect::frames_on_disk(wal_dir).unwrap_err().to_string();
+        assert!(err.contains(&v3_path.display().to_string()), "{err}");
     }
 }
