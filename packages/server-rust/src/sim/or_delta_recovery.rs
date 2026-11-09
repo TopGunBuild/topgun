@@ -70,7 +70,7 @@ mod tests {
     use crate::storage::impls::StorageConfig;
     use crate::storage::map_data_store::MapDataStore;
     use crate::storage::record::RecordValue;
-    use crate::storage::wal::segment::parse_segment_filename;
+    use crate::storage::wal::segment::inspect;
     use crate::storage::wal::{Wal, WalEntry, WalFsyncPolicy, WalRecovery, WalWriter};
 
     const MAP: &str = "ormap";
@@ -338,12 +338,7 @@ mod tests {
     /// per-op framing is what lands on disk, so measuring it directly is
     /// stronger than recognising a discriminant.
     fn wal_bytes_on_disk(dir: &std::path::Path) -> u64 {
-        std::fs::read_dir(dir)
-            .expect("the wal directory must be readable")
-            .flatten()
-            .filter(|entry| parse_segment_filename(&entry.file_name().to_string_lossy()).is_some())
-            .map(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
-            .sum()
+        inspect::bytes_on_disk(dir)
     }
 
     /// Fault B — node failure. The same churn is applied through the real CRDT
