@@ -31,6 +31,8 @@ mod null;
 mod redb;
 #[cfg(feature = "redb")]
 mod redb_engine;
+#[cfg(feature = "rocksdb")]
+pub mod rocks_engine;
 mod write_behind;
 
 pub use engine_store::EngineMapDataStore;

@@ -64,7 +64,10 @@ jobs:
     # runners (clippy ~3 min + debug `cargo test --all-targets` ~10 min), so a 15-minute
     # budget cancels a job whose every step already passed and skips Simulation Tests.
     # 40, not 30: runs now reach ~27 min, leaving too little room for runner noise and a cold cache.
-    timeout-minutes: 40
+    # 60, not 40: a cache without RocksDB (any Cargo.lock change that misses the exact key) compiles
+    # its C++ for clippy and again for the tests, ~17 min more, and reaches ~47 min. actions/cache
+    # saves only on success, so a cancelled cold run would leave every rerun just as cold.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -96,6 +99,9 @@ jobs:
       # crates.io crate by anything but the committed patch.
       - name: Check the vendored redb
         run: ./scripts/check-redb-vendor.sh
+
+      - name: Check RocksDB is built with F_FULLFSYNC on macOS
+        run: ./scripts/check-rocksdb-fullfsync.sh
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
