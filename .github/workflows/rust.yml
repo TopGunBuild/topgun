@@ -383,7 +383,11 @@ jobs:
     name: Simulation Tests
     needs: [check]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 40, not 20: since RocksDB joined the build, a run with a cache hit takes ~18 min, and a
+    # cold cache compiles the RocksDB C++ for the ci-sim profile (~15 min) before the ~5 min
+    # lib build, so 20 cancels a run whose tests all pass. actions/cache saves only on success,
+    # so a cancelled cold run would leave every rerun just as cold.
+    timeout-minutes: 40
     # No longer informational: distributed-correctness verification should
     # block merges. If a test flakes, fix it; don't paper over with
     # continue-on-error. (P11 H1)
