@@ -1,0 +1,24 @@
+name: Diag harness A/B (temporary)
+on:
+  pull_request:
+    paths: ['.github/workflows/diag-harness-ab.yml']
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - name: build both
+        working-directory: packages/server-rust
+        run: |
+          cargo test --bench load_harness --target-dir /tmp/t-on --no-run
+          cargo test --bench load_harness --target-dir /tmp/t-off --no-default-features --features redb --no-run
+          nproc
+      - name: alternate runs
+        working-directory: packages/server-rust
+        run: |
+          for r in 1 2 3; do for v in on off; do
+            if [ $v = on ]; then a=""; t=/tmp/t-on; else a="--no-default-features --features redb"; t=/tmp/t-off; fi
+            cargo test --bench load_harness --target-dir $t $a 2>&1 | grep -E 'ops/sec|acked ratio|PASS \[|FAIL \[' | tr '\n' ' ' | sed "s/^/rep$r $v: /"; echo
+          done; done
