@@ -1485,20 +1485,28 @@ mod tests {
         assert_all(&root, true);
     }
 
-    const RESUME_REFUSAL_TEST: &str =
-        "storage::datastores::rocks_store::tests::r_c_resume_refusals_change_nothing";
+    const FREE_SPACE_RESUME_TEST: &str =
+        "storage::datastores::rocks_store::tests::r_c_resume_free_space_refusal_changes_nothing";
+    const GONE_RESUME_TEST: &str =
+        "storage::datastores::rocks_store::tests::r_c_resume_without_the_source_changes_nothing";
 
-    /// A resume's refusals (free space, `engine.redb` gone) come before the
-    /// writable open of the target, so the target's files stay as they were.
+    /// A root whose migration was killed after its second copy batch.
+    fn killed_in_copying(test: &str) -> Root {
+        let root = Root::new();
+        redb_source(&root, 200);
+        run_child(test, &root.root, "102:2");
+        root
+    }
+
+    /// A resume's free-space refusal comes before the writable open of the
+    /// target, so the target's files stay as they were.
     #[test]
-    fn r_c_resume_refusals_change_nothing() {
+    fn r_c_resume_free_space_refusal_changes_nothing() {
         if let Ok(spec) = std::env::var(CHILD_ENV) {
             child(&spec);
             return;
         }
-        let root = Root::new();
-        redb_source(&root, 200);
-        run_child(RESUME_REFUSAL_TEST, &root.root, "102:2");
+        let root = killed_in_copying(FREE_SPACE_RESUME_TEST);
         let mut full = io();
         full.available_space = Box::new(|_| Ok(1024));
         assert_refused(
@@ -1506,6 +1514,17 @@ mod tests {
             "store engine: refusing to migrate: 1024 bytes are free",
             || open(&root, &full, &off()),
         );
+    }
+
+    /// A resume in `copying` without `engine.redb` is refused before the
+    /// writable open of the target.
+    #[test]
+    fn r_c_resume_without_the_source_changes_nothing() {
+        if let Ok(spec) = std::env::var(CHILD_ENV) {
+            child(&spec);
+            return;
+        }
+        let root = killed_in_copying(GONE_RESUME_TEST);
         fs::rename(root.redb(), root.root.join("moved-away.redb")).unwrap();
         assert_refused(&root, "is gone; restore the data directory", || {
             open(&root, &io(), &off())
