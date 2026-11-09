@@ -733,6 +733,10 @@ pub fn open_value<'v>(
 
 /// HKDF info prefix of a WAL segment key; the header's first 57 bytes follow.
 const WAL_SEGMENT_INFO: &[u8] = b"topgun/wal-segment/1";
+/// HKDF info prefix of a WAL stream segment key; the stream header's first 53
+/// bytes follow. Its own prefix keeps a stream key apart from every
+/// per-partition segment key.
+const WAL_STREAM_INFO: &[u8] = b"topgun/wal-stream/1";
 /// The first 4 bytes of every frame nonce.
 const FRAME_NONCE_PREFIX: &[u8; 4] = b"WALF";
 /// Bytes a sealed frame payload adds to its plaintext: the tag.
@@ -772,7 +776,8 @@ fn frame_nonce(index: u64) -> [u8; NONCE_LEN] {
 
 impl SegmentKey {
     /// Seals `payload` in place as the frame at `index` of its segment, with
-    /// `aad` the frame's first 9 bytes, and returns the tag. The nonce is the
+    /// `aad` the frame's first 9 bytes — and, for a stream (v3) frame, its
+    /// partition and sequence after them — and returns the tag. The nonce is the
     /// index, so the caller hands out each index of a segment once
     /// (`TG-ENC-005`).
     ///
@@ -797,7 +802,7 @@ impl SegmentKey {
     }
 
     /// The plaintext of `sealed` (`ciphertext ‖ tag`), the frame at `index`
-    /// with first 9 bytes `aad`.
+    /// whose associated data is `aad`, as [`Self::seal_frame`] took it.
     ///
     /// # Errors
     ///
@@ -866,16 +871,46 @@ impl Keyring {
         Ok(derive_segment_key(
             dek,
             &header.salt,
+            WAL_SEGMENT_INFO,
             &header.encode()[..SEGMENT_HEADER_BODY_LEN],
+        ))
+    }
+
+    /// The key of the sealed stream segment whose header is `header`:
+    /// HKDF-SHA256 with IKM the DEK the header names, salt the header's salt
+    /// and info `"topgun/wal-stream/1" ‖` the header's first 53 bytes. Its
+    /// frames bind their partition and sequence in the AAD (`TG-ENC-003`).
+    ///
+    /// # Errors
+    ///
+    /// The header's key id is not in the keyring.
+    pub fn stream_segment_key(
+        &self,
+        header: &crate::storage::wal::segment::StreamSegmentHeader,
+    ) -> Result<SegmentKey, UnknownSegmentKey> {
+        let dek = self
+            .deks
+            .get(&header.key_id)
+            .ok_or(UnknownSegmentKey(header.key_id))?;
+        Ok(derive_segment_key(
+            dek,
+            &header.salt,
+            WAL_STREAM_INFO,
+            &header.encode()[..crate::storage::wal::segment::STREAM_HEADER_BODY_LEN],
         ))
     }
 }
 
-/// HKDF-SHA256 of `dek` with `salt`, info `"topgun/wal-segment/1" ‖ header_body`.
-fn derive_segment_key(dek: &[u8; KEY_LEN], salt: &[u8], header_body: &[u8]) -> SegmentKey {
+/// HKDF-SHA256 of `dek` with `salt`, info `info ‖ header_body`.
+fn derive_segment_key(
+    dek: &[u8; KEY_LEN],
+    salt: &[u8],
+    info: &[u8],
+    header_body: &[u8],
+) -> SegmentKey {
     let mut key = Zeroizing::new([0u8; KEY_LEN]);
     hkdf::Hkdf::<Sha256>::new(Some(salt), dek)
-        .expand_multi_info(&[WAL_SEGMENT_INFO, header_body], &mut key[..])
+        .expand_multi_info(&[info, header_body], &mut key[..])
         .expect("32 bytes is a valid HKDF-SHA256 output length");
     SegmentKey(key)
 }
@@ -1200,7 +1235,7 @@ mod tests {
         let dek = &keyring.deks[&id];
         let body = header.encode();
         let body = &body[..SEGMENT_HEADER_BODY_LEN];
-        let same = derive_segment_key(dek, &header.salt, body);
+        let same = derive_segment_key(dek, &header.salt, WAL_SEGMENT_INFO, body);
         assert_eq!(
             same.open_frame(5, aad, &sealed).map(|p| p.len()),
             Ok(sealed.len() - 16)
@@ -1211,7 +1246,7 @@ mod tests {
             let mut changed = body.to_vec();
             changed[at] ^= 0x01;
             let salt = &changed[13..45];
-            let key = derive_segment_key(dek, salt, &changed);
+            let key = derive_segment_key(dek, salt, WAL_SEGMENT_INFO, &changed);
             assert_eq!(
                 key.open_frame(5, aad, &sealed),
                 Err(FrameAuthFailed),
