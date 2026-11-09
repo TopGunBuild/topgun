@@ -212,13 +212,138 @@ pub(crate) fn check_free_space(data_dir: &Path, io: &MigrationIo) -> anyhow::Res
     Ok(())
 }
 
+/// The bytes redb writes while it opens and closes the source: a header with
+/// its recovery flag, a region tracker, a repair after a kill. They are kept
+/// in memory, block by block, over the file opened read-only, so redb sees a
+/// writable file while the file itself is never written.
+#[derive(Debug)]
+struct ReadOnlyOverlay {
+    file: fs::File,
+    state: std::sync::Mutex<Overlay>,
+}
+
+#[derive(Debug)]
+struct Overlay {
+    /// The length redb sees.
+    len: u64,
+    /// File bytes at or past this offset read as zero: the least length the
+    /// storage was ever cut to.
+    file_visible: u64,
+    /// Blocks redb wrote, by block index.
+    blocks: std::collections::HashMap<u64, Box<[u8]>>,
+}
+
+/// The overlay's block size.
+const BLOCK: u64 = 4096;
+
+impl ReadOnlyOverlay {
+    fn open(path: &Path) -> std::io::Result<Self> {
+        let file = fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        Ok(Self {
+            file,
+            state: std::sync::Mutex::new(Overlay {
+                len,
+                file_visible: len,
+                blocks: std::collections::HashMap::new(),
+            }),
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Overlay> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl Overlay {
+    /// Block `index` as redb last left it.
+    fn block(&self, file: &fs::File, index: u64) -> std::io::Result<Vec<u8>> {
+        use std::os::unix::fs::FileExt as _;
+        if let Some(block) = self.blocks.get(&index) {
+            return Ok(block.to_vec());
+        }
+        let start = index * BLOCK;
+        let mut out = vec![0u8; usize::try_from(BLOCK).unwrap_or(4096)];
+        let visible = self.file_visible.saturating_sub(start).min(BLOCK);
+        if visible > 0 {
+            file.read_exact_at(&mut out[..usize::try_from(visible).unwrap_or(0)], start)?;
+        }
+        Ok(out)
+    }
+}
+
+impl redb::StorageBackend for ReadOnlyOverlay {
+    fn len(&self) -> std::io::Result<u64> {
+        Ok(self.lock().len)
+    }
+
+    fn read(&self, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        let state = self.lock();
+        let end = offset + len as u64;
+        if end > state.len {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        }
+        let mut out = Vec::with_capacity(len);
+        let mut at = offset;
+        while at < end {
+            let index = at / BLOCK;
+            let within = usize::try_from(at % BLOCK).unwrap_or(0);
+            let take = usize::try_from((BLOCK - at % BLOCK).min(end - at)).unwrap_or(0);
+            out.extend_from_slice(&state.block(&self.file, index)?[within..within + take]);
+            at += take as u64;
+        }
+        Ok(out)
+    }
+
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        let mut state = self.lock();
+        if len < state.len {
+            // Bytes past the cut read as zero if the storage grows again.
+            state.file_visible = state.file_visible.min(len);
+            state.blocks.retain(|index, _| index * BLOCK < len);
+            let cut = len / BLOCK;
+            if !len.is_multiple_of(BLOCK) {
+                let mut block = state.block(&self.file, cut)?;
+                block[usize::try_from(len % BLOCK).unwrap_or(0)..].fill(0);
+                state.blocks.insert(cut, block.into_boxed_slice());
+            }
+        }
+        state.len = len;
+        Ok(())
+    }
+
+    fn sync_data(&self, _eventual: bool) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+        let mut state = self.lock();
+        let mut at = offset;
+        let end = offset + data.len() as u64;
+        while at < end {
+            let index = at / BLOCK;
+            let within = usize::try_from(at % BLOCK).unwrap_or(0);
+            let take = usize::try_from((BLOCK - at % BLOCK).min(end - at)).unwrap_or(0);
+            let mut block = state.block(&self.file, index)?;
+            let from = usize::try_from(at - offset).unwrap_or(0);
+            block[within..within + take].copy_from_slice(&data[from..from + take]);
+            state.blocks.insert(index, block.into_boxed_slice());
+            at += take as u64;
+        }
+        state.len = state.len.max(end);
+        Ok(())
+    }
+}
+
 /// The source `engine.redb`, read in one read transaction of redb itself.
 ///
 /// It is opened directly, never through the redb location rules (which could
-/// run a seal or unseal pass on it mid-copy), and never through the redb
-/// engine, whose open commits a write transaction: the source becomes the
-/// kept rollback copy, so the migration never writes it.
-struct Source {
+/// run a seal or unseal pass on it mid-copy), and over [`ReadOnlyOverlay`]:
+/// the source becomes the kept rollback copy, so the migration never writes
+/// it, also when a kill left it open.
+pub(crate) struct Source {
     /// Declared before the database, so it is dropped first.
     table: redb::ReadOnlyTable<&'static [u8], &'static [u8]>,
     _db: redb::Database,
@@ -232,7 +357,10 @@ impl Source {
         let path = data_dir.join(REDB_FILE);
         let cannot =
             |e: anyhow::Error| anyhow!("store engine: cannot open {}: {e}", path.display());
-        let db = redb::Database::open(&path).map_err(|e| cannot(e.into()))?;
+        let db = ReadOnlyOverlay::open(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|overlay| Ok(redb::Builder::new().create_with_backend(overlay)?))
+            .map_err(cannot)?;
         let table = db
             .begin_read()
             .map_err(anyhow::Error::from)
@@ -300,7 +428,50 @@ pub(crate) fn start(
     Ok(target)
 }
 
-/// Resumes a migration from `mark` on the target engine already open.
+/// What a resume needs, checked before the target is opened writable, so a
+/// refusal here leaves `engine.rocksdb` as it was: the source for a resume
+/// in `copying`, nothing for one at `verified`.
+pub(crate) struct Prepared(Option<Source>);
+
+/// The checks of a resume from `mark`: in `copying`, `engine.redb` present,
+/// the free space and the source's open; at `verified`, the redb store the
+/// copy was taken from, under one of its two names.
+///
+/// # Errors
+///
+/// A refusal, or the file system's error.
+pub(crate) fn prepare_resume(
+    data_dir: &Path,
+    mark: &EngineMark,
+    io: &MigrationIo,
+) -> anyhow::Result<Prepared> {
+    let (source, kept) = (data_dir.join(REDB_FILE), data_dir.join(KEPT_FILE));
+    match mark.phase {
+        EnginePhase::Verified if !exists(&source)? && !exists(&kept)? => Err(refuse(
+            "resume-verified",
+            format!(
+                "store engine: refusing to resume the migration: neither {} nor {} holds the redb store the verified copy was taken from",
+                source.display(),
+                kept.display()
+            ),
+        )),
+        EnginePhase::Verified => Ok(Prepared(None)),
+        EnginePhase::Copying if !exists(&source)? => Err(refuse(
+            "resume-copying",
+            format!(
+                "store engine: refusing to resume the migration: {} is gone; restore the data directory from a backup",
+                source.display()
+            ),
+        )),
+        EnginePhase::Copying => {
+            check_free_space(data_dir, io)?;
+            Ok(Prepared(Some(Source::open(data_dir)?)))
+        }
+    }
+}
+
+/// Resumes a migration from `mark` on the target engine, opened after
+/// [`prepare_resume`] passed.
 ///
 /// # Errors
 ///
@@ -309,32 +480,20 @@ pub(crate) fn resume(
     data_dir: &Path,
     target: &RocksKvEngine,
     mark: &EngineMark,
+    prepared: Prepared,
     io: &MigrationIo,
 ) -> anyhow::Result<()> {
-    match mark.phase {
-        EnginePhase::Verified => {
+    match prepared.0 {
+        None => {
             tracing::info!("store engine: resuming at the verification");
             switch(data_dir, target, Instant::now(), None, io)
         }
-        EnginePhase::Copying => {
-            if !exists(&data_dir.join(REDB_FILE))? {
-                return Err(refuse(
-                    "resume",
-                    format!(
-                        "store engine: refusing to resume the migration: {} is gone; restore the data directory from a backup",
-                        data_dir.join(REDB_FILE).display()
-                    ),
-                ));
-            }
-            check_free_space(data_dir, io)?;
-            let source = Source::open(data_dir)?;
+        Some(source) => {
             if let Some(key) = &mark.after {
                 tracing::info!(
                     "store engine: resuming after {}",
                     String::from_utf8_lossy(key)
                 );
-            } else {
-                tracing::info!("store engine: resuming after the first key");
             }
             copy_verify_switch(data_dir, source, target, mark.after.clone(), io)
         }
@@ -534,15 +693,6 @@ fn switch(
         }
         fs::rename(&source, &kept)?;
         sync_dir(data_dir)?;
-    } else if !exists(&kept)? {
-        return Err(refuse(
-            "resume",
-            format!(
-                "store engine: refusing to resume the migration: neither {} nor {} holds the redb store the verified copy was taken from",
-                source.display(),
-                kept.display()
-            ),
-        ));
     }
     step_done(io, step::RENAMED);
     let mut clear = WriteBatch::new();
@@ -606,6 +756,71 @@ mod tests {
             .map(Result::unwrap)
             .filter(|(key, _)| *key != mark)
             .collect()
+    }
+
+    const OVERLAY_TEST: &str =
+        "storage::datastores::engine_migration::tests::r_c_source_is_never_written";
+    const DIRTY_ENV: &str = "TOPGUN_TEST_ENGINE_MIGRATION_DIRTY";
+
+    /// The source is read over a read-only overlay: a clean file and a file a
+    /// kill left open (redb's recovery flag set, so the open repairs it) keep
+    /// their bytes and their mtime through an open, a full read and a close.
+    #[test]
+    fn r_c_source_is_never_written() {
+        if let Ok(path) = std::env::var(DIRTY_ENV) {
+            let _engine = super::super::redb_engine::RedbKvEngine::open(Path::new(&path)).unwrap();
+            std::process::abort();
+        }
+        for dirty in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let rows = {
+                let store = RedbDataStore::new(dir.path()).unwrap();
+                let keys: Vec<String> = (0..300).map(|i| format!("k{i:03}")).collect();
+                let ops: Vec<RecordOp<'_>> = keys
+                    .iter()
+                    .map(|key| RecordOp::Put {
+                        map: "m",
+                        backup: false,
+                        key,
+                        bytes: key.as_bytes(),
+                    })
+                    .collect();
+                store
+                    .write_records(&ops, WriteOptions { sync: true })
+                    .unwrap();
+                ops.len()
+            };
+            let path = dir.path().join(REDB_FILE);
+            let clean = fs::read(&path).unwrap();
+            if dirty {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([OVERLAY_TEST, "--exact", "--test-threads", "1"])
+                    .env(DIRTY_ENV, &path)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap();
+                assert!(!status.success(), "the child aborts with redb open");
+            }
+            let before = fs::read(&path).unwrap();
+            assert_eq!(
+                before != clean,
+                dirty,
+                "the kill leaves the file marked for repair"
+            );
+            let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+            {
+                let source = Source::open(dir.path()).unwrap();
+                let read = source.rows_from(&[]).unwrap().map(Result::unwrap).count();
+                assert!(read > rows, "dirty {dirty}: {read} rows");
+            }
+            assert_eq!(fs::read(&path).unwrap(), before, "dirty {dirty}: bytes");
+            assert_eq!(
+                fs::metadata(&path).unwrap().modified().unwrap(),
+                mtime,
+                "dirty {dirty}: mtime"
+            );
+        }
     }
 
     /// The copy killed at every engine write (409a's RocksDB crash target:

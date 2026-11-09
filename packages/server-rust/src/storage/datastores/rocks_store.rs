@@ -59,8 +59,12 @@ pub(crate) enum RocksRow {
     MigResume,
     /// `engine.rocksdb/` with no mark beside `engine.redb`: refused.
     Two,
-    /// `engine.rocksdb/` with no mark: served (with the L-path checks).
-    Rock,
+    /// A store in `D` with no mark and a legacy file at `L`: refused (two stores).
+    L4a,
+    /// A store in `D` with no mark and a zero-length file at `L`: refused.
+    L4b,
+    /// The engine does not open (a `LOCK` held by another engine included).
+    Open,
     /// `engine.redb.pre-rocksdb` and neither store: refused.
     KeptOnly,
 }
@@ -310,6 +314,8 @@ fn open_present(
 ) -> anyhow::Result<Option<RocksOpened>> {
     let (d, rocks) = (&paths.data_dir, paths.rocks());
     let mark = match inspect(&rocks, config)? {
+        // The contract is one process per data directory: the removal holds no
+        // `LOCK`, so it is not safe against a second server on the same `D`.
         Inspected::Empty => {
             tracing::warn!(
                 "store engine: removing {}: it holds no row (a start was interrupted before its first write)",
@@ -346,9 +352,15 @@ fn open_present(
         None => None,
     };
     check_legacy_path(paths)?;
+    // Every check of a resume runs before the writable open, which replays
+    // and flushes the engine WAL: a refusal must leave the target as it was.
+    let prepared = match &mark {
+        Some(mark) => Some(engine_migration::prepare_resume(d, mark, io)?),
+        None => None,
+    };
     let engine = open_engine(&rocks, OpenMode::Existing, config)?;
-    if let Some(mark) = mark {
-        engine_migration::resume(d, &engine, &mark, io)?;
+    if let (Some(mark), Some(prepared)) = (mark, prepared) {
+        engine_migration::resume(d, &engine, &mark, prepared, io)?;
     }
     serve(engine, paths, encryption).map(Some)
 }
@@ -358,7 +370,7 @@ fn check_legacy_path(paths: &Paths) -> anyhow::Result<()> {
     let (d, l) = (paths.data_dir.display(), paths.legacy_path.display());
     if is_legacy_file(&paths.legacy_path)? {
         return Err(refuse(
-            RocksRow::Rock,
+            RocksRow::L4a,
             format!(
                 "store location: two stores found: {d} holds a store in the data-directory format and {l} is a table-per-map store file; the server serves only one. Move one of them aside: rename {l} to keep the data-directory store, or move {d} away to migrate {l} again"
             ),
@@ -366,7 +378,7 @@ fn check_legacy_path(paths: &Paths) -> anyhow::Result<()> {
     }
     if fs::symlink_metadata(&paths.legacy_path).is_ok_and(|m| m.is_file() && m.len() == 0) {
         return Err(refuse(
-            RocksRow::Rock,
+            RocksRow::L4b,
             format!(
                 "store location: {l} is an empty file; an older binary would open it as an empty store. Delete it, and this server writes the marker file there"
             ),
@@ -398,10 +410,21 @@ fn open_absent(
         ));
     }
     if !redb_present && is_blank(d)? && !exists(&paths.legacy_path)? && !exists(&paths.kept_path)? {
+        let created = !exists(d)?;
         fs::create_dir_all(d)
             .with_context(|| format!("store location: cannot create {}", d.display()))?;
         sync_dir(d.parent().unwrap_or(Path::new("/")))?;
-        let engine = open_engine(&paths.rocks(), OpenMode::CreateNew, config)?;
+        let engine = match open_engine(&paths.rocks(), OpenMode::CreateNew, config) {
+            Ok(engine) => engine,
+            Err(e) => {
+                // A refusal leaves nothing it created; a `D` that existed
+                // before this start is never removed.
+                if created {
+                    let _ = fs::remove_dir_all(d);
+                }
+                return Err(e);
+            }
+        };
         sync_dir(d)?;
         return serve(engine, paths, encryption);
     }
@@ -432,7 +455,7 @@ fn open_engine(
 ) -> anyhow::Result<RocksKvEngine> {
     RocksKvEngine::open(rocks, mode, config).map_err(|e| {
         refuse(
-            RocksRow::Rock,
+            RocksRow::Open,
             format!("store engine: cannot open {}: {e}", rocks.display()),
         )
     })
@@ -1447,15 +1470,46 @@ mod tests {
         let root = Root::new();
         redb_source(&root, 200);
         run_child(RESUME_TEST, &root.root, "102:2");
-        // Compared by rows: redb has no read-only open, and the killed start
-        // left the source open, so the next open repairs its header.
-        let before = dump_redb(&root.redb());
-        assert!(record_values(&before).iter().all(|v| v[0] != SEALED_MARK));
+        let before = fs::read(root.redb()).unwrap();
+        assert!(record_values(&dump_redb(&root.redb()))
+            .iter()
+            .all(|v| v[0] != SEALED_MARK));
         let key = provider();
         let opened = open(&root, &io(), &on(&key)).expect("resumed with encryption on");
-        assert_eq!(dump_redb(&root.kept()), before, "the source was changed");
+        assert_eq!(
+            fs::read(root.kept()).unwrap(),
+            before,
+            "the source was changed"
+        );
         drop(opened);
         assert_all(&root, true);
+    }
+
+    const RESUME_REFUSAL_TEST: &str =
+        "storage::datastores::rocks_store::tests::r_c_resume_refusals_change_nothing";
+
+    /// A resume's refusals (free space, `engine.redb` gone) come before the
+    /// writable open of the target, so the target's files stay as they were.
+    #[test]
+    fn r_c_resume_refusals_change_nothing() {
+        if let Ok(spec) = std::env::var(CHILD_ENV) {
+            child(&spec);
+            return;
+        }
+        let root = Root::new();
+        redb_source(&root, 200);
+        run_child(RESUME_REFUSAL_TEST, &root.root, "102:2");
+        let mut full = io();
+        full.available_space = Box::new(|_| Ok(1024));
+        assert_refused(
+            &root,
+            "store engine: refusing to migrate: 1024 bytes are free",
+            || open(&root, &full, &off()),
+        );
+        fs::rename(root.redb(), root.root.join("moved-away.redb")).unwrap();
+        assert_refused(&root, "is gone; restore the data directory", || {
+            open(&root, &io(), &off())
+        });
     }
 
     // -----------------------------------------------------------------------
