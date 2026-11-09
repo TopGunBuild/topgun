@@ -4,6 +4,8 @@
 //! Includes [`NullDataStore`] for testing and ephemeral data,
 //! and [`RedbDataStore`] for embedded zero-config persistence (default).
 
+#[cfg(all(feature = "redb", feature = "rocksdb"))]
+pub mod engine_migration;
 pub mod engine_store;
 // The main tests are frozen once committed, so the style lints they trip are
 // allowed here, by name, instead of edited away in the file.
@@ -33,6 +35,8 @@ mod redb;
 mod redb_engine;
 #[cfg(feature = "rocksdb")]
 pub mod rocks_engine;
+#[cfg(all(feature = "redb", feature = "rocksdb"))]
+pub mod rocks_store;
 mod write_behind;
 
 pub use engine_store::EngineMapDataStore;
