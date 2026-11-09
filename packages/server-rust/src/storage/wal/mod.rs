@@ -1471,6 +1471,11 @@ impl WalWriter {
                     },
                 );
             }
+            // The index stays resident for the life of the segment: keep it
+            // at the 32 bytes per frame its doc states.
+            for locations in summary.frames.values_mut() {
+                locations.shrink_to_fit();
+            }
             summaries.insert(
                 stream_seq,
                 Arc::new(StreamSegment {
@@ -1634,14 +1639,30 @@ impl WalWriter {
                 let offset = usize::try_from(location.offset)?;
                 let (result, spans) =
                     format::decode_stream_frame(&bytes, offset, location.index, key.as_ref());
-                let entries = Self::frames_or_refuse(path, result, false)?;
-                Self::check_stream_frames(path, &spans, Some(&entries))?;
-                if spans.len() != 1 || spans[0].address != Some((partition, location.sequence)) {
-                    anyhow::bail!(
+                let changed = || {
+                    anyhow::anyhow!(
                         "WAL stream segment {} changed at offset {offset} after it was opened; \
                          refusing to start",
                         path.display()
-                    );
+                    )
+                };
+                // The bytes at the location are not one whole frame: the file is
+                // not what the open read, whatever the decoder makes of them.
+                // A whole frame that fails its CRC or its tag keeps its own
+                // refusal below.
+                let whole = match &result {
+                    format::FrameDecodeResult::TruncatedTail { .. }
+                    | format::FrameDecodeResult::BadMagic { .. }
+                    | format::FrameDecodeResult::UnknownVersion { .. } => false,
+                    _ => spans.iter().all(|span| span.len == bytes.len()),
+                };
+                if !whole {
+                    return Err(changed());
+                }
+                let entries = Self::frames_or_refuse(path, result, false)?;
+                Self::check_stream_frames(path, &spans, Some(&entries))?;
+                if spans.len() != 1 || spans[0].address != Some((partition, location.sequence)) {
+                    return Err(changed());
                 }
                 frames.extend(entries);
             }
@@ -5908,6 +5929,43 @@ mod tests {
             vec![1, 2, 3, 4, 5]
         );
         assert_eq!(reads(), 5);
+    }
+
+    /// A frame read back by a location that no longer matches the file — one
+    /// byte short or one byte long — is refused as a segment changed after
+    /// the open, naming the file and the offset, not as a torn tail.
+    #[tokio::test]
+    async fn r_b_a_frame_off_its_location_is_refused_as_changed() {
+        for delta in [-1i64, 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let (path, _) = write_stream_segment(dir.path(), 1, &[(1, 1), (1, 2)]);
+            let (wal, _store) = open_over(dir.path(), WalFsyncPolicy::None, ReplayStore::default());
+            let offset = {
+                let mut stream = wal.stream.lock().unwrap();
+                let segment = stream.get(&1).unwrap();
+                let mut summary = segment.summary.clone();
+                let first = &mut summary.frames.get_mut(&1).unwrap()[0];
+                first.len = u32::try_from(i64::from(first.len) + delta).unwrap();
+                let offset = first.offset;
+                let changed = Arc::new(StreamSegment {
+                    path: segment.path.clone(),
+                    header: segment.header,
+                    summary,
+                });
+                stream.insert(1, changed);
+                offset
+            };
+            let error = format!(
+                "{:#}",
+                wal.unapplied(1).await.expect_err("off its location")
+            );
+            assert!(
+                error.contains(&path.display().to_string())
+                    && error.contains(&format!("changed at offset {offset} after it was opened"))
+                    && !error.contains("truncated"),
+                "len {delta:+}: {error}"
+            );
+        }
     }
 
     /// A stream frame naming a partition outside the WAL's, or a header

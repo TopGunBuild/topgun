@@ -344,7 +344,8 @@ pub struct FrameLocation {
 /// (partition and sequence are in the clear), so collection judges a segment
 /// and recovery finds a partition's frames without decrypting a payload: the
 /// highest sequence of every partition with a frame there, and where each of
-/// its frames sits. The index costs 32 bytes per frame (`FrameLocation`) plus
+/// its frames sits. The index costs 32 bytes per frame (`FrameLocation`; each
+/// partition's `Vec` is shrunk to fit once the open has read the segment) plus
 /// one map entry and one `Vec` per partition per segment.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SegmentSummary {
