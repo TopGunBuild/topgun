@@ -1555,7 +1555,9 @@ impl WalWriter {
                 Ok(file) => file,
                 // Collected after the snapshot: every frame in it is at or
                 // below its partition's watermark, as for a per-partition
-                // segment (see `unapplied`).
+                // segment (see `unapplied`). Or a segment not sealed yet that
+                // is still under its temporary name: none of its frames is
+                // acknowledged before its rename publishes it open.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => anyhow::bail!("Cannot read WAL segment {}: {e}", path.display()),
             };
@@ -2013,8 +2015,10 @@ impl Wal for WalWriter {
         Ok(all)
     }
 
-    /// Resolves once everything appended before the call is durable,
-    /// whatever the fsync policy has deferred.
+    /// Resolves once everything appended before the call is durable under
+    /// `per_op` and `batched`, whatever the batched window has deferred.
+    /// Under `none` it makes nothing durable: `none` never fsyncs, a sync
+    /// included, and it resolves at once.
     ///
     /// # Errors
     ///
