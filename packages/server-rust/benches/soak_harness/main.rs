@@ -3140,20 +3140,33 @@ fn open_census_store(data_dir: &Path) -> Result<CensusStore, CensusFailure> {
             .map_err(open_failed);
     }
     let rocks = store_dir.join("engine.rocksdb");
-    // `Existing` never creates a store; where it refuses for want of one, the
-    // failure is the missing store's.
+    // `ReadOnly` neither creates a store nor writes a file of one: the
+    // terminal census reads the server's own directory, and a read-write open
+    // would replay the engine's WAL and write a MANIFEST, OPTIONS and LOG — it
+    // would change the evidence it reads. Where the open refuses for want of
+    // a store (no `CURRENT`), the failure is the missing store's; a `CURRENT`
+    // that cannot be looked at is an open failure, not an absent store.
     let engine = RocksKvEngine::open(
         &rocks,
-        OpenMode::Existing,
+        OpenMode::ReadOnly,
         &RocksConfig::production(CENSUS_ENGINE_CACHE_BYTES, -1),
     )
-    .map_err(|e| CensusFailure {
-        step: if rocks.join("CURRENT").is_file() {
-            CensusFailStep::Open
-        } else {
-            CensusFailStep::EngineMissing
-        },
-        error: format!("{}: {e:#}", rocks.display()),
+    .map_err(|e| {
+        let current = rocks.join("CURRENT");
+        match std::fs::symlink_metadata(&current) {
+            Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => CensusFailure {
+                step: CensusFailStep::EngineMissing,
+                error: format!("{}: {e:#}", rocks.display()),
+            },
+            Err(unreadable) => CensusFailure {
+                step: CensusFailStep::Open,
+                error: format!("{}: {unreadable}", current.display()),
+            },
+            Ok(_) => CensusFailure {
+                step: CensusFailStep::Open,
+                error: format!("{}: {e:#}", rocks.display()),
+            },
+        }
     })?;
     EngineMapDataStore::open(std::sync::Arc::new(engine))
         .map(CensusStore::Rocks)
@@ -5322,7 +5335,11 @@ mod tests {
     /// panics fails alone and the rest still run; the summary line has
     /// libtest's shape, and a failure makes the exit code non-zero.
     pub(super) fn run_all() -> i32 {
-        let tests: [(&str, fn()); 15] = [
+        let tests: [(&str, fn()); 16] = [
+            (
+                "the_census_leaves_a_rocksdb_store_untouched",
+                the_census_leaves_a_rocksdb_store_untouched,
+            ),
             (
                 "the_census_reads_either_engine_alike",
                 the_census_reads_either_engine_alike,
@@ -5452,6 +5469,50 @@ mod tests {
                 store.add("other_map", "lww-1", &lww, 0).await
             })
             .expect("write rows");
+    }
+
+    /// The census of a RocksDB store — the terminal one reads the server's own
+    /// directory — writes no file of it: every file under `engine.rocksdb/`
+    /// keeps its name, length and modification time.
+    fn the_census_leaves_a_rocksdb_store_untouched() {
+        fn snapshot(dir: &Path) -> Vec<(std::path::PathBuf, u64, std::time::SystemTime)> {
+            let mut files = Vec::new();
+            for entry in std::fs::read_dir(dir).expect("list") {
+                let entry = entry.expect("entry");
+                let meta = entry.metadata().expect("meta");
+                if meta.is_dir() {
+                    files.extend(snapshot(&entry.path()));
+                } else {
+                    files.push((entry.path(), meta.len(), meta.modified().expect("mtime")));
+                }
+            }
+            files.sort();
+            files
+        }
+
+        let root = tempfile::tempdir().expect("root");
+        let data = root.path().join("rocks");
+        write_or_fixture_rocks(&data);
+        let rocks = data.join(STORE_DIR).join("engine.rocksdb");
+        let before = snapshot(&rocks);
+        // A modification time written by the census would land within the
+        // filesystem's timestamp granularity of the fixture's own writes.
+        std::thread::sleep(Duration::from_millis(20));
+
+        let census = scan_redb_tombstone_corpus(&data, OR_MAP).expect("census");
+        assert_eq!(census.or_map_keys, 1, "the census read the fixture");
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                open_census_store(&data)
+                    .expect("open")
+                    .live_sum_over_all_maps()
+                    .await
+                    .expect("live sum")
+            });
+
+        assert_eq!(snapshot(&rocks), before);
     }
 
     /// The census reads a RocksDB store as it reads a redb one: the same rows
