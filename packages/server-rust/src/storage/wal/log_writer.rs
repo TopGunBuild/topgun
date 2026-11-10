@@ -283,6 +283,39 @@ impl Shared {
         wal_fail_stop(tier, ctx)
     }
 
+    /// Counts `old` sealed: adds it, with the summary the writer kept, to
+    /// the sealed segments, and only then drops it from the live ones, so a
+    /// reader that copies the live map before the sealed one never misses it.
+    fn seal(&self, old: OldSegment) {
+        let mut summary = self
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&old.stream_seq)
+            .map(|live| live.summary.clone())
+            .unwrap_or_default();
+        for locations in summary.frames.values_mut() {
+            locations.shrink_to_fit();
+        }
+        self.sealed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                old.stream_seq,
+                Arc::new(StreamSegment {
+                    path: old.path,
+                    header: Some(old.header),
+                    summary,
+                    refusal: None,
+                }),
+            );
+        // Only once it is in `sealed`: a reader never misses it.
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&old.stream_seq);
+    }
+
     /// fsyncs `file`'s data, the one way the stream's files are fsynced, so a
     /// test sees each fsync and the thread it ran on.
     fn fsync(&self, file: &std::fs::File, kind: SyncKind, stream_seq: u64, offset: u64) {
@@ -1196,35 +1229,7 @@ impl Syncer {
                 );
             }
             self.current = None;
-            let mut summary = shared
-                .live
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&old.stream_seq)
-                .map(|live| live.summary.clone())
-                .unwrap_or_default();
-            for locations in summary.frames.values_mut() {
-                locations.shrink_to_fit();
-            }
-            shared
-                .sealed
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(
-                    old.stream_seq,
-                    Arc::new(StreamSegment {
-                        path: old.path,
-                        header: Some(old.header),
-                        summary,
-                        refusal: None,
-                    }),
-                );
-            // Only once it is in `sealed`: a reader never misses it.
-            shared
-                .live
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&old.stream_seq);
+            shared.seal(old);
             #[cfg(test)]
             shared.hooks.crash_image();
         }

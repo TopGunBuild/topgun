@@ -1617,6 +1617,8 @@ impl WalWriter {
     /// twice yields the partition's frames once after the caller's dedup.
     /// With `partition`, a segment not sealed yet holds only that partition's
     /// frame locations.
+    // Async for the test park between the two copies.
+    #[cfg_attr(not(test), allow(clippy::unused_async))]
     async fn stream_snapshot(&self, partition: Option<u32>) -> Vec<Arc<StreamSegment>> {
         let mut segments = self.log.live_snapshot(partition);
         #[cfg(test)]
