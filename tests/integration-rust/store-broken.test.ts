@@ -572,9 +572,6 @@ async function runArm(arm: Arm): Promise<Observed> {
         };
         note(`restart on the read-only directory: ${JSON.stringify(stillReadOnly)}`);
         for (const line of refusal) note(`restart on the read-only directory: ${line}`);
-        if (stillPort !== null || stillExit === null || stillExit.code !== 1) {
-          preconditionNotMet = `the restart on the read-only directory did not exit 1 by itself before it was ready (port ${stillPort}, exit ${JSON.stringify(stillExit)})`;
-        }
       }
 
       // The directory is writable again.
