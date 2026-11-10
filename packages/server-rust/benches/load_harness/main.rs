@@ -335,24 +335,36 @@ async fn main() {
         eprintln!("{reason}");
         std::process::exit(1);
     });
-    if scenario_name == "vector_search" && store != StoreArm::Null {
-        eprintln!("--store applies only to scenarios that run the server (throughput, open_loop)");
-        std::process::exit(1);
-    }
     let arm_names: Vec<String> = arms_list.map_or_else(
         || vec![store.as_str().to_string()],
         |list| list.split(',').map(str::to_string).collect(),
     );
+    // Every arm is checked whatever the run shape, and a single `--arms`
+    // value is the arm the run uses: an arm named there is never silently
+    // replaced by the `--store` default.
+    let mut parsed = Vec::with_capacity(arm_names.len());
+    for arm in &arm_names {
+        match StoreArm::parse(arm) {
+            Ok(arm) => parsed.push(arm),
+            Err(reason) => {
+                eprintln!("{reason}");
+                std::process::exit(1);
+            }
+        }
+    }
+    let store = if let [only] = parsed.as_slice() {
+        *only
+    } else {
+        store
+    };
+    if scenario_name == "vector_search" && store != StoreArm::Null {
+        eprintln!("--store applies only to scenarios that run the server (throughput, open_loop)");
+        std::process::exit(1);
+    }
     if repeat > 1 || arm_names.len() > 1 {
         if scenario_name != "open_loop" {
             eprintln!("--arms and --repeat apply only to --scenario open_loop");
             std::process::exit(1);
-        }
-        for arm in &arm_names {
-            if let Err(reason) = StoreArm::parse(arm) {
-                eprintln!("{reason}");
-                std::process::exit(1);
-            }
         }
         std::process::exit(run_series(
             &args,
