@@ -3880,6 +3880,9 @@ impl WalWriter {
 
     /// The paths of the sealed stream segments that hold a frame of
     /// `partition`, oldest first.
+    // Async as it was when it opened a partition's handle: its callers keep
+    // their signature.
+    #[allow(clippy::unused_async)]
     pub(crate) async fn test_sealed_paths(&self, partition: u32) -> Vec<PathBuf> {
         self.stream
             .lock()

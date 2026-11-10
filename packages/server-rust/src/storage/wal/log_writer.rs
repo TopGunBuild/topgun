@@ -240,6 +240,7 @@ impl Shared {
     }
 
     /// The clock group ages are read by; a test can drive it.
+    #[cfg_attr(not(test), allow(clippy::unused_self))]
     fn now(&self) -> Instant {
         #[cfg(test)]
         if let Some(now) = *self
@@ -568,44 +569,7 @@ impl LogWriter {
                 }
                 let _ = done.send(due);
             }
-            Command::Sync { done } => match &self.active {
-                Some(active) => {
-                    let at = DurablePosition {
-                        stream_seq: active.stream_seq,
-                        offset: active.end,
-                    };
-                    let mut state = self.shared.lock();
-                    if self.shared.failed.load(Ordering::Acquire) {
-                        return;
-                    }
-                    if state.durable >= Some(at) {
-                        // Already durable: no fsync would come to resolve it.
-                        drop(state);
-                        let _ = done.send(());
-                        return;
-                    }
-                    state.waiters.push_back((at, done));
-                    drop(state);
-                    self.shared.wake.notify_all();
-                }
-                None => {
-                    // No active segment: nothing was written, or the WAL was
-                    // closed, and a close fsyncs the last segment to its end.
-                    let mut state = self.shared.lock();
-                    match state.written {
-                        _ if self.shared.failed.load(Ordering::Acquire) => {}
-                        Some(written) if state.durable < Some(written) => {
-                            state.waiters.push_back((written, done));
-                            drop(state);
-                            self.shared.wake.notify_all();
-                        }
-                        _ => {
-                            drop(state);
-                            let _ = done.send(());
-                        }
-                    }
-                }
-            },
+            Command::Sync { done } => self.sync(done),
             Command::Close { done } => {
                 self.closed = true;
                 if self.active.is_some() {
@@ -619,37 +583,42 @@ impl LogWriter {
         }
     }
 
-    /// Frames, seals and writes `group` with one vectored write, then hands
-    /// each append its resolution.
-    fn write_group(&mut self, group: Vec<Submission>) {
-        if group.is_empty() {
+    /// Resolves `done` once everything written so far is durable: at once
+    /// when it already is, else from the syncer. With no active segment the
+    /// WAL is fresh or closed, and a close fsyncs its last segment to its end.
+    fn sync(&self, done: oneshot::Sender<()>) {
+        let at = self.active.as_ref().map(|active| DurablePosition {
+            stream_seq: active.stream_seq,
+            offset: active.end,
+        });
+        let mut state = self.shared.lock();
+        if self.shared.failed.load(Ordering::Acquire) {
             return;
         }
-        if self.closed || self.shared.failed.load(Ordering::Acquire) {
-            // Dropping the senders refuses the appends: a closed WAL frames
-            // nothing more, and a failed one resolves nothing.
-            return;
+        match at.or(state.written) {
+            Some(at) if state.durable < Some(at) => {
+                state.waiters.push_back((at, done));
+                drop(state);
+                self.shared.wake.notify_all();
+            }
+            // Already durable: no fsync would come to resolve it.
+            _ => {
+                drop(state);
+                let _ = done.send(());
+            }
         }
-        if self.active.is_none() {
-            self.rotate(true, None);
-        }
-        #[cfg(test)]
-        if self.sealed_for_test {
-            let active = self.active.as_ref().expect("an active segment");
-            self.shared.fail_stop(
-                WalFailStopTier::P,
-                &format!(
-                    "append targeted a sealed segment: path={}",
-                    active.path.display()
-                ),
-            );
-        }
-        let shared = Arc::clone(&self.shared);
+    }
+
+    /// The frames of `group` for the active segment, each sealed at the next
+    /// index (`TG-ENC-005`) and noted in the segment's summary, and the end
+    /// offset of each.
+    fn frame(&mut self, group: &[Submission]) -> (Vec<Vec<u8>>, Vec<u64>) {
+        let shared = &self.shared;
         let active = self.active.as_mut().expect("an active segment");
         let mut frames = Vec::with_capacity(group.len());
         let mut ends = Vec::with_capacity(group.len());
         let mut offset = active.end;
-        for submission in &group {
+        for submission in group {
             let index = active.next_index;
             let frame = format::frame_v3(
                 submission.partition,
@@ -687,6 +656,38 @@ impl LogWriter {
             ends.push(offset);
             frames.push(frame);
         }
+        (frames, ends)
+    }
+
+    /// Frames, seals and writes `group` with one vectored write, then hands
+    /// each append its resolution.
+    fn write_group(&mut self, group: Vec<Submission>) {
+        if group.is_empty() {
+            return;
+        }
+        if self.closed || self.shared.failed.load(Ordering::Acquire) {
+            // Dropping the senders refuses the appends: a closed WAL frames
+            // nothing more, and a failed one resolves nothing.
+            return;
+        }
+        if self.active.is_none() {
+            self.rotate(true, None);
+        }
+        #[cfg(test)]
+        if self.sealed_for_test {
+            let active = self.active.as_ref().expect("an active segment");
+            self.shared.fail_stop(
+                WalFailStopTier::P,
+                &format!(
+                    "append targeted a sealed segment: path={}",
+                    active.path.display()
+                ),
+            );
+        }
+        let shared = Arc::clone(&self.shared);
+        let (frames, ends) = self.frame(&group);
+        let active = self.active.as_mut().expect("an active segment");
+        let offset = ends.last().copied().unwrap_or(active.end);
         if let Err(e) = write_all_vectored(&mut active.file, &frames) {
             shared.fail_stop(
                 WalFailStopTier::B,
@@ -1469,7 +1470,7 @@ mod tests {
         }
     }
 
-    /// AC1: with the syncer's fsync parked, 64 `per_op` appends over 64
+    /// `AC1`: with the syncer's fsync parked, 64 `per_op` appends over 64
     /// partitions are written and none resolves; released, all resolve, made
     /// durable by at most two fsyncs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1503,7 +1504,7 @@ mod tests {
         no_fsync_on_the_writer(&log);
     }
 
-    /// AC2: with an fsync parked, new `batched` appends still resolve: the
+    /// `AC2`: with an fsync parked, new `batched` appends still resolve: the
     /// writer does not wait for the syncer.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn r_e_writer_writes_while_fsync_runs() {
@@ -1535,7 +1536,7 @@ mod tests {
         no_fsync_on_the_writer(&log);
     }
 
-    /// AC3: 10 000 `batched` appends over 271 partitions take at most one
+    /// `AC3`: 10 000 `batched` appends over 271 partitions take at most one
     /// fsync per 10 ms window plus one per 100 frames, plus one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn r_e_batched_fsync_rate_is_independent_of_partitions() {
@@ -1575,7 +1576,7 @@ mod tests {
         );
     }
 
-    /// AC4: a rotated segment is not eligible for collection before the
+    /// `AC4`: a rotated segment is not eligible for collection before the
     /// syncer reports it durable to its end.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn r_e_rotation_seals_only_after_sync() {
@@ -1613,7 +1614,7 @@ mod tests {
         );
     }
 
-    /// AC5: a writer parked longer than its (shortened) progress bound while
+    /// `AC5`: a writer parked longer than its (shortened) progress bound while
     /// a submission waits is a tier (B) fail-stop.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn r_e_no_progress_fail_stops() {
@@ -1648,7 +1649,7 @@ mod tests {
         let _ = sync.await;
     }
 
-    /// AC5a, `batched`: with the old tail's fsync parked the writer rotates and
+    /// `AC5a`, `batched`: with the old tail's fsync parked the writer rotates and
     /// keeps writing into the new segment, no frame of which resolves before
     /// the syncer has, in order, fsynced the old tail and the new header,
     /// renamed the new segment and fsynced the directory.
@@ -1710,7 +1711,7 @@ mod tests {
         wal.test_hold_batched_fsync(false);
     }
 
-    /// AC5a, `per_op`: a frame written into the old segment after its last
+    /// `AC5a`, `per_op`: a frame written into the old segment after its last
     /// regular fsync resolves exactly when the old tail's fsync returns,
     /// and the durable position is then the old segment's end.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1760,7 +1761,7 @@ mod tests {
         log.test_park_fsyncs(false);
     }
 
-    /// AC5a, `none`: a rotation runs no fsync of any kind, and the new
+    /// `AC5a`, `none`: a rotation runs no fsync of any kind, and the new
     /// segment's frames resolve once its rename is published open.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn r_e_rotation_under_none_runs_no_fsync() {
@@ -1778,7 +1779,7 @@ mod tests {
         assert_eq!(kinds, vec![SyncKind::Rename, SyncKind::Rename]);
     }
 
-    /// AC5a, crash image: a crash between the old tail's fsync and the new
+    /// `AC5a`, crash image: a crash between the old tail's fsync and the new
     /// header's leaves the old segment newest and the new segment's temporary
     /// file with frames in it; neither `inspect` nor recovery reads it, and
     /// the next open deletes it before recovery.
@@ -1855,7 +1856,7 @@ mod tests {
         );
     }
 
-    /// AC6a: a failed fsync of the syncer is a tier (B) fail-stop under
+    /// `AC6a`: a failed fsync of the syncer is a tier (B) fail-stop under
     /// `batched` and under `per_op`, and no append resolves `Ok` after it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn r_e_batched_fsync_error_fail_stops() {
@@ -1891,7 +1892,7 @@ mod tests {
         }
     }
 
-    /// AC6b: under `batched`, with the syncer's clock held, 100 unsynced
+    /// `AC6b`: under `batched`, with the syncer's clock held, 100 unsynced
     /// frames start an fsync without the clock moving, and one unsynced frame
     /// is fsynced once it is 10 ms old and not before; its durable position
     /// is published only once that fsync returned.
