@@ -1093,8 +1093,14 @@ impl WalWriter {
                 continue;
             }
             let path = entry.path();
-            std::fs::remove_file(&path)
-                .map_err(|e| anyhow::anyhow!("Cannot delete {}: {e}", path.display()))?;
+            match std::fs::remove_file(&path) {
+                // Gone since the listing: a writer of this directory that is
+                // still being dropped renamed or removed it.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                result => {
+                    result.map_err(|e| anyhow::anyhow!("Cannot delete {}: {e}", path.display()))?
+                }
+            }
             if !deleted {
                 #[cfg(test)]
                 test_abort_if_armed(TestAbortPoint::OpenInsideSidecarDelete);
@@ -1870,7 +1876,7 @@ impl Wal for WalWriter {
                 enqueued: std::time::Instant::now(),
             }))
             .await?;
-        resolved.await.map_err(|_| {
+        log_writer::resolution(resolved).await.map_err(|_| {
             anyhow::anyhow!(
                 "WAL append not acknowledged: the log writer refused or stopped; \
                  partition={partition}, sequence={}",
@@ -1957,7 +1963,7 @@ impl Wal for WalWriter {
     async fn sync(&self) -> anyhow::Result<()> {
         let (done, synced) = tokio::sync::oneshot::channel();
         self.log.send(log_writer::Command::Sync { done }).await?;
-        synced
+        log_writer::resolution(synced)
             .await
             .map_err(|_| anyhow::anyhow!("WAL sync not completed: the log writer stopped"))
     }
@@ -2039,7 +2045,7 @@ impl WalWriter {
         self.appends_closed.store(true, Ordering::Release);
         let (done, closed) = tokio::sync::oneshot::channel();
         self.log.send(log_writer::Command::Close { done }).await?;
-        closed
+        log_writer::resolution(closed)
             .await
             .map_err(|_| anyhow::anyhow!("the WAL was not closed: the log writer stopped"))
     }
@@ -2459,7 +2465,7 @@ impl WalWriter {
         {
             return;
         }
-        let Ok(Some(stream_seq)) = rotated.await else {
+        let Ok(Some(stream_seq)) = log_writer::resolution(rotated).await else {
             return;
         };
         let _ = sealed
@@ -3712,7 +3718,7 @@ impl WalWriter {
             .send(log_writer::Command::Rotate { now, done })
             .await
             .ok()?;
-        rotated.await.ok().flatten()
+        log_writer::resolution(rotated).await.ok().flatten()
     }
 
     /// Waits until the syncer has sealed stream segment `stream_seq`.

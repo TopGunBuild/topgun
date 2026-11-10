@@ -219,6 +219,9 @@ pub(super) struct Shared {
     sealed_through: watch::Sender<Option<u64>>,
     /// A fail-stop fired: nothing resolves from now on.
     failed: AtomicBool,
+    /// The stream is being dropped: nothing more is written, created or
+    /// renamed.
+    stopping: AtomicBool,
     /// Commands sent and not yet taken by the writer.
     depth: AtomicU64,
     epoch: Instant,
@@ -371,6 +374,7 @@ impl LogStream {
             sealed,
             sealed_through: watch::Sender::new(None),
             failed: AtomicBool::new(false),
+            stopping: AtomicBool::new(false),
             depth: AtomicU64::new(0),
             epoch: Instant::now(),
             nonempty_since_ms: AtomicU64::new(0),
@@ -448,9 +452,14 @@ impl LogStream {
 
 impl Drop for LogStream {
     fn drop(&mut self) {
-        // The writer ends once its channel is closed and drained; the syncer
-        // once the writer is gone. Joined, so a WAL opened on the same
-        // directory next never meets a thread of this one.
+        // Nothing more is written, created or renamed: a WAL opened on the
+        // same directory next — which may happen as soon as the last handle
+        // of this one is gone, before this drop has joined its threads — never
+        // meets a file of this one appearing. The writer ends once its channel
+        // is closed and drained; the syncer once the writer is gone.
+        self.shared.stopping.store(true, Ordering::Release);
+        self.shared.lock().stopped = true;
+        self.shared.wake.notify_all();
         drop(self.tx.take());
         // A test that ends while it parks either thread must not hang here.
         #[cfg(test)]
@@ -665,9 +674,12 @@ impl LogWriter {
         if group.is_empty() {
             return;
         }
-        if self.closed || self.shared.failed.load(Ordering::Acquire) {
-            // Dropping the senders refuses the appends: a closed WAL frames
-            // nothing more, and a failed one resolves nothing.
+        if self.closed
+            || self.shared.failed.load(Ordering::Acquire)
+            || self.shared.stopping.load(Ordering::Acquire)
+        {
+            // Dropping the senders refuses the appends: a closed or dropped
+            // WAL frames nothing more, and a failed one resolves nothing.
             return;
         }
         if self.active.is_none() {
@@ -826,6 +838,24 @@ impl LogWriter {
             file: syncer_file,
         }
     }
+}
+
+/// Waits for a resolution the writer or the syncer sends from its own thread.
+///
+/// Under a test runtime with a paused clock, time jumps ahead whenever no task
+/// can run, and a wait on another OS thread is invisible to it: timers would
+/// fire that the WAL's I/O, as blocking-pool work, used to hold back. A test
+/// build therefore waits on the blocking pool, which the paused clock sees as
+/// work in flight; the result is the same.
+pub(super) async fn resolution<T: Send + 'static>(
+    rx: oneshot::Receiver<T>,
+) -> Result<T, oneshot::error::RecvError> {
+    #[cfg(test)]
+    return tokio::task::spawn_blocking(move || rx.blocking_recv())
+        .await
+        .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()));
+    #[cfg(not(test))]
+    rx.await
 }
 
 /// The temporary name `path` is written under until its rename.
@@ -1097,6 +1127,10 @@ impl Syncer {
             }
             #[cfg(test)]
             super::test_abort_if_armed(super::TestAbortPoint::CreateBeforeRename);
+            if shared.stopping.load(Ordering::Acquire) {
+                // Abandoned with the stream: its frames resolved nothing.
+                return;
+            }
             if let Err(e) = std::fs::rename(&new.tmp, &new.path) {
                 shared.fail_stop(
                     WalFailStopTier::B,
