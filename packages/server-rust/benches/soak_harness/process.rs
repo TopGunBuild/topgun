@@ -324,7 +324,6 @@ impl ServerSupervisor {
         cmd.env_remove("DATABASE_URL");
         cmd.arg("--port")
             .arg(self.config.port.to_string())
-            .env("STORAGE_BACKEND", "redb")
             .env("TOPGUN_REDB_PATH", self.config.data_dir.join("topgun.redb"))
             .env("TOPGUN_WAL_DIR", self.config.data_dir.join("wal"))
             .env("TOPGUN_WAL_FSYNC_POLICY", &self.config.wal_fsync_policy)

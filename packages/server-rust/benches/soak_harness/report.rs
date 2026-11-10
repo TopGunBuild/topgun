@@ -22,7 +22,7 @@ use crate::monitor::{
     CensusFailStep, CorpusLevelDisposition, FailStep, FailuresByStep, GaugeFailStep, LoopEndReason,
     Reconcile, ReconcileReason, TombstoneClauseDisposition,
 };
-use topgun_server::storage::wal::format::{self, FrameDecodeResult};
+use topgun_server::storage::wal::segment::inspect;
 use topgun_server::storage::wal::{WalOp, WalStorePayload};
 
 /// Memory section of the final report.
@@ -630,16 +630,17 @@ pub fn classify_frame(op: &WalOp) -> FrameKind {
     }
 }
 
-/// Scan every `*.log` WAL segment under `wal_dir`, decode intact frames, and
-/// aggregate per-op-kind frame sizes. Read-only and best-effort: a torn active
-/// tail decodes as its intact prefix (`TruncatedTail`), a corrupt/foreign file
-/// is skipped, and an exact on-disk frame size is recovered by re-encoding each
-/// decoded entry through the deterministic codec (the same trick WAL recovery
-/// uses to measure a segment's intact-prefix length). Returns `None` only if the
-/// directory cannot be read at all.
+/// Read every WAL segment under `wal_dir` through the log's own reader and
+/// aggregate per-op-kind frame sizes, each frame's size being the bytes it
+/// takes on disk. Read-only: a torn tail is read as its intact prefix where
+/// recovery reads it so. Returns `None` when the directory cannot be read, or
+/// when a segment is one the reader cannot decode (sealed, or one recovery
+/// would refuse) — a census that left such a segment out would undercount.
 #[must_use]
 pub fn scan_wal_frame_sizes(wal_dir: &Path) -> Option<WalFrameStats> {
-    let read_dir = std::fs::read_dir(wal_dir).ok()?;
+    std::fs::read_dir(wal_dir).ok()?;
+    let disk_frames = inspect::frames_on_disk(wal_dir).ok()?;
+    let segment_files = inspect::segment_paths(wal_dir).len();
     // (sequence, frame_bytes) for every OR frame of EITHER kind, plus the same
     // pairs split per kind, and running LWW/Remove tallies.
     let mut or_frames: Vec<(u64, u64)> = Vec::new();
@@ -649,47 +650,26 @@ pub fn scan_wal_frame_sizes(wal_dir: &Path) -> Option<WalFrameStats> {
     let mut lww_bytes_max: u64 = 0;
     let mut lww_frames: usize = 0;
     let mut remove_frames: usize = 0;
-    let mut segment_files: usize = 0;
     let mut max_seq: u64 = 0;
 
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("log") {
-            continue;
-        }
-        let Ok(data) = std::fs::read(&path) else {
-            continue;
-        };
-        segment_files += 1;
-        // A corrupt/foreign/empty file contributes no frames — skip it rather than
-        // abort the whole scan (this is a report-only instrument).
-        let (FrameDecodeResult::Complete(entries)
-        | FrameDecodeResult::TruncatedTail { complete: entries }) = format::decode_all(&data)
-        else {
-            continue;
-        };
-        for wal_entry in &entries {
-            let Ok(frame) = format::encode(wal_entry) else {
-                continue;
-            };
-            let bytes = frame.len() as u64;
-            max_seq = max_seq.max(wal_entry.sequence);
-            match classify_frame(&wal_entry.op) {
-                FrameKind::OrDelta => {
-                    or_frames.push((wal_entry.sequence, bytes));
-                    or_delta_bytes.push(bytes);
-                }
-                FrameKind::OrSnapshot => {
-                    or_frames.push((wal_entry.sequence, bytes));
-                    or_snapshot_bytes.push(bytes);
-                }
-                FrameKind::Lww => {
-                    lww_frames += 1;
-                    lww_bytes_total += bytes;
-                    lww_bytes_max = lww_bytes_max.max(bytes);
-                }
-                FrameKind::Remove => remove_frames += 1,
+    for frame in &disk_frames {
+        let bytes = frame.encoded_len as u64;
+        max_seq = max_seq.max(frame.sequence);
+        match classify_frame(&frame.entry.op) {
+            FrameKind::OrDelta => {
+                or_frames.push((frame.sequence, bytes));
+                or_delta_bytes.push(bytes);
             }
+            FrameKind::OrSnapshot => {
+                or_frames.push((frame.sequence, bytes));
+                or_snapshot_bytes.push(bytes);
+            }
+            FrameKind::Lww => {
+                lww_frames += 1;
+                lww_bytes_total += bytes;
+                lww_bytes_max = lww_bytes_max.max(bytes);
+            }
+            FrameKind::Remove => remove_frames += 1,
         }
     }
 

@@ -144,7 +144,8 @@ fn remove_entry(sequence: u64) -> WalEntry {
 /// Write the entries as one real WAL segment and return each frame's on-disk
 /// byte length, in the order written.
 fn write_segment(dir: &Path, entries: &[WalEntry]) -> Vec<u64> {
-    let mut file = std::fs::File::create(dir.join("000001.log")).expect("create segment");
+    let mut file = std::fs::File::create(dir.join("partition-000-00000000000000000001.log"))
+        .expect("create segment");
     let mut sizes = Vec::new();
     for entry in entries {
         let frame = format::encode(entry).expect("encode frame");
