@@ -702,6 +702,10 @@ pub struct WalWriter {
     /// Parks the next append to a partition at the entry of `append`.
     #[cfg(test)]
     test_append_park: std::sync::Mutex<Option<TestAppendPark>>,
+    /// Parks the next read of the stream between its two copies.
+    #[cfg(test)]
+    test_snapshot_park:
+        std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// While set, the timer's ticks do nothing: only a test's own tick runs.
     #[cfg(test)]
     test_hold_collection_task: AtomicBool,
@@ -1253,6 +1257,8 @@ impl WalWriter {
             test_append_park: std::sync::Mutex::new(None),
             #[cfg(test)]
             test_hold_collection_task: AtomicBool::new(false),
+            #[cfg(test)]
+            test_snapshot_park: std::sync::Mutex::new(None),
         }))
     }
 
@@ -1510,13 +1516,7 @@ impl WalWriter {
     async fn stream_frames_of(&self, partition: u32, floor: u64) -> anyhow::Result<Vec<WalEntry>> {
         use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
         self.refuse_unreadable_stream()?;
-        let segments: Vec<Arc<StreamSegment>> = self
-            .stream
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .cloned()
-            .collect();
+        let segments = self.stream_snapshot(Some(partition)).await;
         let mut frames = Vec::new();
         for segment in segments {
             let path = &segment.path;
@@ -1611,28 +1611,24 @@ impl WalWriter {
         Ok(frames)
     }
 
-    /// The `(partition, sequence)` of every frame of the stream segments on
-    /// disk that are not sealed yet, read from the frame headers.
-    fn unsealed_stream_addresses(&self) -> anyhow::Result<Vec<(u32, u64)>> {
-        let mut addresses = Vec::new();
-        for (stream_seq, path) in Self::discover_stream_segments(&self.wal_dir)? {
-            let sealed = self
-                .stream
+    /// Every stream segment, the ones not sealed yet first and then the
+    /// sealed ones, each copied at once (see `LogStream::live_snapshot`): a
+    /// segment sealed between the two copies is in the first, and one copied
+    /// twice yields the partition's frames once after the caller's dedup.
+    /// With `partition`, a segment not sealed yet holds only that partition's
+    /// frame locations.
+    async fn stream_snapshot(&self, partition: Option<u32>) -> Vec<Arc<StreamSegment>> {
+        let mut segments = self.log.live_snapshot(partition);
+        #[cfg(test)]
+        self.test_park_between_snapshots().await;
+        segments.extend(
+            self.stream
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains_key(&stream_seq);
-            if sealed {
-                continue;
-            }
-            let data = match std::fs::read(&path) {
-                Ok(data) => data,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => anyhow::bail!("Cannot read WAL segment {}: {e}", path.display()),
-            };
-            let (_, spans, _) = Self::read_stream_segment(&path, &data, true, None, false)?;
-            addresses.extend(spans.iter().filter_map(|span| span.address));
-        }
-        Ok(addresses)
+                .values()
+                .cloned(),
+        );
+        segments
     }
 
     /// Refuses, with the first refusal the open recorded, when a stream
@@ -1649,21 +1645,15 @@ impl WalWriter {
     }
 
     /// Every partition with a frame in a segment of either layout, ascending.
-    fn wal_partitions(&self) -> anyhow::Result<Vec<u32>> {
+    async fn wal_partitions(&self) -> anyhow::Result<Vec<u32>> {
         self.refuse_unreadable_stream()?;
         let mut partitions: BTreeSet<u32> = WalRecovery::discover_partitions(&self.wal_dir)?
             .into_iter()
             .collect();
         partitions.extend(
-            self.unsealed_stream_addresses()?
-                .into_iter()
-                .map(|(partition, _)| partition),
-        );
-        partitions.extend(
-            self.stream
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .values()
+            self.stream_snapshot(None)
+                .await
+                .iter()
                 .flat_map(|segment| segment.summary.max_seq.keys().copied()),
         );
         Ok(partitions.into_iter().collect())
@@ -1981,10 +1971,6 @@ impl Wal for WalWriter {
         let segments = Self::discover_partition_segments(&self.wal_dir, partition)?;
         let last_idx = segments.len().saturating_sub(1);
         let mut all = self.stream_frames_of(partition, applied_seq).await?;
-        all.extend(
-            self.unsealed_stream_frames_of(partition, applied_seq)
-                .await?,
-        );
         for (idx, (_first_seq, path)) in segments.into_iter().enumerate() {
             let data = match tokio::fs::read(&path).await {
                 Ok(data) => data,
@@ -2119,45 +2105,6 @@ impl WalWriter {
         log_writer::resolution(closed)
             .await
             .map_err(|_| anyhow::anyhow!("the WAL was not closed: the log writer stopped"))
-    }
-
-    /// The frames of `partition` above `floor` in the stream segments on disk
-    /// that are not sealed yet — the active one, and one being rotated —
-    /// each read whole, a torn tail tolerated, since the writer may be
-    /// writing it.
-    async fn unsealed_stream_frames_of(
-        &self,
-        partition: u32,
-        floor: u64,
-    ) -> anyhow::Result<Vec<WalEntry>> {
-        let mut frames = Vec::new();
-        for (stream_seq, path) in Self::discover_stream_segments(&self.wal_dir)? {
-            let sealed = self
-                .stream
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains_key(&stream_seq);
-            if sealed {
-                continue;
-            }
-            let data = match tokio::fs::read(&path).await {
-                Ok(data) => data,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => anyhow::bail!("Cannot read WAL segment {}: {e}", path.display()),
-            };
-            let (_, spans, entries) =
-                Self::read_stream_segment(&path, &data, true, self.keyring.as_deref(), true)?;
-            frames.extend(
-                spans
-                    .iter()
-                    .zip(entries)
-                    .filter(|(span, entry)| {
-                        span.address.is_some_and(|(p, _)| p == partition) && entry.sequence > floor
-                    })
-                    .map(|(_, entry)| entry),
-            );
-        }
-        Ok(frames)
     }
 
     /// Unlinks, at a `finish` that wrote rollback hints, every segment a tick
@@ -2615,16 +2562,8 @@ impl WalWriter {
         for partition in WalRecovery::discover_partitions(&self.wal_dir)? {
             global = global.max(self.max_log_sequence(partition).await?);
         }
-        for segment in self
-            .stream
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-        {
+        for segment in self.stream_snapshot(None).await {
             global = global.max(segment.summary.max_seq.values().copied().max().unwrap_or(0));
-        }
-        for (_, sequence) in self.unsealed_stream_addresses()? {
-            global = global.max(sequence);
         }
         Ok(global)
     }
@@ -2942,7 +2881,7 @@ impl WalRecovery {
     pub async fn run(&self, inner_store: Arc<dyn MapDataStore>) -> anyhow::Result<()> {
         let started = std::time::Instant::now();
         let partitions = if self.partitions.is_empty() {
-            self.wal.wal_partitions()?
+            self.wal.wal_partitions().await?
         } else {
             self.partitions.clone()
         };
@@ -3842,6 +3781,33 @@ impl WalWriter {
             Some(value) => overrides.insert(partition, value),
             None => overrides.remove(&partition),
         };
+    }
+
+    /// Parks the next read of the stream between its copy of the segments not
+    /// sealed yet and its copy of the sealed ones: `reached` is notified when
+    /// it arrives, and it goes on once `release` is notified.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn test_park_next_snapshot(
+        &self,
+        reached: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) {
+        *self
+            .test_snapshot_park
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((reached, release));
+    }
+
+    async fn test_park_between_snapshots(&self) {
+        let park = self
+            .test_snapshot_park
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some((reached, release)) = park {
+            reached.notify_one();
+            release.notified().await;
+        }
     }
 
     /// Makes the collection tick task skip its ticks while `hold` is set, so
@@ -5655,7 +5621,9 @@ mod tests {
         let (wal, _kept) = open_over(dir.path(), WalFsyncPolicy::None, ReplayStore::default());
         let error = format!(
             "{:#}",
-            wal.wal_partitions().expect_err("partition out of range")
+            wal.wal_partitions()
+                .await
+                .expect_err("partition out of range")
         );
         // Until recovery refuses, nothing is written: no append, no new
         // segment, no collection or cut of the one it cannot read.

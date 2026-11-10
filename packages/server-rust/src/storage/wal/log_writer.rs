@@ -165,7 +165,6 @@ struct OldSegment {
     stream_seq: u64,
     path: PathBuf,
     header: StreamSegmentHeader,
-    summary: SegmentSummary,
     /// Its final offset.
     end: u64,
     /// Frames written to the stream up to its end.
@@ -215,6 +214,12 @@ pub(super) struct Shared {
     /// The sealed stream segments, by `stream_seq`; the syncer adds a segment
     /// once it is fsynced to its end.
     sealed: Arc<Mutex<BTreeMap<u64, Arc<StreamSegment>>>>,
+    /// The segments the writer has created and the syncer has not sealed yet,
+    /// by `stream_seq`, each with the location of every frame written to it
+    /// (noted once the write returned). The syncer moves a segment from here
+    /// to `sealed` by inserting it there first, so a reader that copies this
+    /// map before `sealed` finds every segment in at least one of them.
+    live: Mutex<BTreeMap<u64, StreamSegment>>,
     /// The newest segment sealed by this process.
     sealed_through: watch::Sender<Option<u64>>,
     /// A fail-stop fired: nothing resolves from now on.
@@ -374,6 +379,7 @@ impl LogStream {
             state: Mutex::new(SyncState::default()),
             wake: Condvar::new(),
             sealed,
+            live: Mutex::new(BTreeMap::new()),
             sealed_through: watch::Sender::new(None),
             failed: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
@@ -401,7 +407,7 @@ impl LogStream {
         };
         let writer = std::thread::Builder::new()
             .name(WRITER_THREAD.to_string())
-            .spawn(move || writer.run())
+            .spawn(guarded(Arc::clone(&shared), move || writer.run()))
             .map_err(|e| anyhow::anyhow!("Cannot start the WAL writer thread: {e}"))?;
         let syncer = Syncer {
             shared: Arc::clone(&shared),
@@ -409,7 +415,7 @@ impl LogStream {
         };
         let syncer = std::thread::Builder::new()
             .name(SYNCER_THREAD.to_string())
-            .spawn(move || syncer.run())
+            .spawn(guarded(Arc::clone(&shared), move || syncer.run()))
             .map_err(|e| anyhow::anyhow!("Cannot start the WAL syncer thread: {e}"))?;
         Ok(Self {
             tx: Some(tx),
@@ -429,16 +435,50 @@ impl LogStream {
             .tx
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("the WAL writer is stopped"))?;
+        // Counted only once the command has its place: a send cancelled
+        // while it waits for room leaves the depth as it was, so the writer's
+        // progress check never sees a submission that is not there.
+        let permit = tx
+            .reserve()
+            .await
+            .map_err(|_| anyhow::anyhow!("the WAL writer is stopped"))?;
         if self.shared.depth.fetch_add(1, Ordering::AcqRel) == 0 {
             self.shared
                 .nonempty_since_ms
                 .store(self.shared.millis(), Ordering::Release);
         }
-        if tx.send(command).await.is_err() {
-            self.shared.depth.fetch_sub(1, Ordering::AcqRel);
-            anyhow::bail!("the WAL writer is stopped");
-        }
+        permit.send(command);
         Ok(())
+    }
+
+    /// A copy of the segments not sealed yet: with `partition`, each with the
+    /// locations of that partition's frames only; every one with the highest
+    /// sequence of each partition. Copied before the sealed map, so a segment
+    /// sealed in between is in one of the two copies.
+    pub(super) fn live_snapshot(&self, partition: Option<u32>) -> Vec<Arc<StreamSegment>> {
+        self.shared
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(|live| {
+                let mut summary = SegmentSummary {
+                    max_seq: live.summary.max_seq.clone(),
+                    frames: BTreeMap::new(),
+                };
+                if let Some(locations) = partition.and_then(|p| live.summary.frames.get(&p)) {
+                    summary
+                        .frames
+                        .insert(partition.expect("checked"), locations.clone());
+                }
+                Arc::new(StreamSegment {
+                    path: live.path.clone(),
+                    header: live.header,
+                    summary,
+                    refusal: None,
+                })
+            })
+            .collect()
     }
 
     /// The newest segment this process has sealed.
@@ -498,7 +538,6 @@ struct Active {
     end: u64,
     /// The index of the next frame: the nonce of its seal (`TG-ENC-005`).
     next_index: u64,
-    summary: SegmentSummary,
     first_frame_at: Option<Instant>,
 }
 
@@ -598,6 +637,11 @@ impl LogWriter {
     /// when it already is, else from the syncer. With no active segment the
     /// WAL is fresh or closed, and a close fsyncs its last segment to its end.
     fn sync(&self, done: oneshot::Sender<()>) {
+        // `none` never fsyncs, a sync included: it makes nothing durable.
+        if self.shared.policy == WalFsyncPolicy::None {
+            let _ = done.send(());
+            return;
+        }
         let at = self.active.as_ref().map(|active| DurablePosition {
             stream_seq: active.stream_seq,
             offset: active.end,
@@ -623,11 +667,16 @@ impl LogWriter {
     /// The frames of `group` for the active segment, each sealed at the next
     /// index (`TG-ENC-005`) and noted in the segment's summary, and the end
     /// offset of each.
-    fn frame(&mut self, group: &[Submission]) -> (Vec<Vec<u8>>, Vec<u64>) {
+    #[allow(clippy::type_complexity)]
+    fn frame(
+        &mut self,
+        group: &[Submission],
+    ) -> (Vec<Vec<u8>>, Vec<u64>, Vec<(u32, FrameLocation)>) {
         let shared = &self.shared;
         let active = self.active.as_mut().expect("an active segment");
         let mut frames = Vec::with_capacity(group.len());
         let mut ends = Vec::with_capacity(group.len());
+        let mut notes = Vec::with_capacity(group.len());
         let mut offset = active.end;
         for submission in group {
             let index = active.next_index;
@@ -648,7 +697,7 @@ impl LogWriter {
             });
             active.next_index += 1;
             let len = u32::try_from(frame.len()).expect("a frame is at most 64 MiB");
-            active.summary.note(
+            notes.push((
                 submission.partition,
                 FrameLocation {
                     sequence: submission.sequence,
@@ -656,7 +705,7 @@ impl LogWriter {
                     index,
                     len,
                 },
-            );
+            ));
             #[cfg(test)]
             shared.hooks.observe(super::WalTestEvent::Framed {
                 salt: active.header.salt,
@@ -667,7 +716,7 @@ impl LogWriter {
             ends.push(offset);
             frames.push(frame);
         }
-        (frames, ends)
+        (frames, ends, notes)
     }
 
     /// Frames, seals and writes `group` with one vectored write, then hands
@@ -676,6 +725,11 @@ impl LogWriter {
         if group.is_empty() {
             return;
         }
+        #[cfg(test)]
+        assert!(
+            !self.shared.hooks.panic_writer.swap(false, Ordering::AcqRel),
+            "injected: the WAL writer panicked"
+        );
         if self.closed
             || self.shared.failed.load(Ordering::Acquire)
             || self.shared.stopping.load(Ordering::Acquire)
@@ -699,7 +753,7 @@ impl LogWriter {
             );
         }
         let shared = Arc::clone(&self.shared);
-        let (frames, ends) = self.frame(&group);
+        let (frames, ends, notes) = self.frame(&group);
         let active = self.active.as_mut().expect("an active segment");
         let offset = ends.last().copied().unwrap_or(active.end);
         if let Err(e) = write_all_vectored(&mut active.file, &frames) {
@@ -712,6 +766,18 @@ impl LogWriter {
             );
         }
         active.end = offset;
+        // Readable by location once written: a reader finds the frame where
+        // the writer put it.
+        if let Some(live) = shared
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&active.stream_seq)
+        {
+            for (partition, location) in notes {
+                live.summary.note(partition, location);
+            }
+        }
         let now = shared.now();
         active.first_frame_at.get_or_insert(now);
         self.frames_written += group.len() as u64;
@@ -727,7 +793,10 @@ impl LogWriter {
             }
             state.written = Some(DurablePosition { stream_seq, offset });
             state.frames_written = self.frames_written;
-            state.groups.push_back((self.frames_written, now));
+            // Only the batched window reads the groups' ages.
+            if shared.policy == WalFsyncPolicy::Batched {
+                state.groups.push_back((self.frames_written, now));
+            }
             let open = state.open == Some(stream_seq);
             for (submission, end) in group.into_iter().zip(ends) {
                 if shared.policy == WalFsyncPolicy::PerOp {
@@ -761,7 +830,6 @@ impl LogWriter {
             stream_seq: active.stream_seq,
             path: active.path,
             header: active.header,
-            summary: active.summary,
             end: active.end,
             frames_end: self.frames_written,
         });
@@ -822,6 +890,19 @@ impl LogWriter {
             path: path.clone(),
             salt: header.salt,
         });
+        self.shared
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                stream_seq,
+                StreamSegment {
+                    path: path.clone(),
+                    header: Some(header),
+                    summary: SegmentSummary::default(),
+                    refusal: None,
+                },
+            );
         self.active = Some(Active {
             stream_seq,
             path: path.clone(),
@@ -830,7 +911,6 @@ impl LogWriter {
             file,
             end: STREAM_HEADER_LEN as u64,
             next_index: 0,
-            summary: SegmentSummary::default(),
             first_frame_at: None,
         });
         NewSegment {
@@ -838,6 +918,32 @@ impl LogWriter {
             tmp,
             path,
             file: syncer_file,
+        }
+    }
+}
+
+/// `body`, as the body of the writer's or the syncer's thread: a panic there
+/// is a tier (B) fail-stop like a failed fsync, never the quiet end of one
+/// thread while the node runs on with a WAL that resolves nothing. A panic
+/// that is a test build's fail-stop is left as it is.
+fn guarded(shared: Arc<Shared>, body: impl FnOnce() + Send + 'static) -> impl FnOnce() + Send {
+    move || {
+        if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+            if shared.failed.load(Ordering::Acquire) {
+                return;
+            }
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(ToString::to_string)
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            shared.fail_stop(
+                WalFailStopTier::B,
+                &format!(
+                    "WAL {} thread panicked: {message}",
+                    std::thread::current().name().unwrap_or("log")
+                ),
+            );
         }
     }
 }
@@ -1070,17 +1176,13 @@ impl Syncer {
     /// Handles one rotation, in this order: fsync the old segment to its end
     /// and publish that durable → fsync the new segment's header → rename it
     /// into place → fsync the directory → publish it open. Under `none`, only
-    /// the rename and the publication (no fsync), unless a sync waits or the
-    /// rotation is a close.
+    /// the rename and the publication: `none` never fsyncs.
     fn rotate(&mut self, rotation: Rotation) {
         let shared = Arc::clone(&self.shared);
         let fsyncs = shared.policy != WalFsyncPolicy::None;
         let rotated = rotation.old.as_ref().map(|old| old.stream_seq);
         if let Some(old) = rotation.old {
-            // Under `none`, a sync that waits makes the old tail durable too:
-            // a sync covers everything written before it.
-            let waited = !shared.lock().waiters.is_empty();
-            if fsyncs || waited || rotation.done.is_some() {
+            if fsyncs {
                 let (_, file) = self.current.as_ref().expect("the old segment's handle");
                 shared.fsync(file, SyncKind::OldTail, old.stream_seq, old.end);
                 #[cfg(test)]
@@ -1094,7 +1196,13 @@ impl Syncer {
                 );
             }
             self.current = None;
-            let mut summary = old.summary;
+            let mut summary = shared
+                .live
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&old.stream_seq)
+                .map(|live| live.summary.clone())
+                .unwrap_or_default();
             for locations in summary.frames.values_mut() {
                 locations.shrink_to_fit();
             }
@@ -1111,6 +1219,12 @@ impl Syncer {
                         refusal: None,
                     }),
                 );
+            // Only once it is in `sealed`: a reader never misses it.
+            shared
+                .live
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&old.stream_seq);
             #[cfg(test)]
             shared.hooks.crash_image();
         }
@@ -1225,6 +1339,8 @@ pub(super) struct TestHooks {
     fail_next_fsync: AtomicBool,
     pub(super) fail_next_dir_fsync: AtomicBool,
     pub(super) hold_batched: AtomicBool,
+    /// Makes the writer panic at its next group.
+    pub(super) panic_writer: AtomicBool,
     pub(super) clock: Mutex<Option<Instant>>,
     events: Mutex<Vec<SyncEvent>>,
     pub(super) fsync_observer: Mutex<Option<Arc<dyn Fn(&Path, u64) + Send + Sync>>>,
@@ -1408,6 +1524,21 @@ impl Shared {
             Ordering::Release,
         );
         self.wake.notify_all();
+    }
+
+    /// Commands sent and not yet taken by the writer.
+    pub(super) fn test_depth(&self) -> u64 {
+        self.depth.load(Ordering::Acquire)
+    }
+
+    /// Groups whose age the batched window tracks.
+    pub(super) fn test_groups(&self) -> usize {
+        self.lock().groups.len()
+    }
+
+    /// Makes the writer panic at its next group.
+    pub(super) fn test_panic_writer(&self) {
+        self.hooks.panic_writer.store(true, Ordering::Release);
     }
 
     /// Wakes the syncer to look at the clock again.
@@ -1987,5 +2118,147 @@ mod tests {
         assert_eq!(data_fsyncs(&log), 1, "an fsync below 100 unsynced frames");
         wal.append(1, &entry(101)).await.unwrap();
         until("the 100-frame fsync", || data_fsyncs(&log) == 2).await;
+    }
+
+    /// Fix: a send cancelled while it waits for room in a full channel leaves
+    /// the depth as it was, so the progress check never fail-stops a healthy
+    /// writer for a submission that is not there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn r_e_a_cancelled_send_leaves_no_depth() {
+        let _guard = FAIL_STOP_TEST_LOCK.lock().await;
+        let observed = WalWriter::test_fail_stop_observations().len();
+        let dir = tempfile::tempdir().unwrap();
+        let wal = open(dir.path(), WalFsyncPolicy::Batched);
+        let log = Arc::clone(log(&wal));
+        log.test_park_writer(true);
+        let sync = {
+            let wal = Arc::clone(&wal);
+            tokio::spawn(async move { wal.sync().await })
+        };
+        until("the writer parked", || log.test_writer_parked()).await;
+        // One more than the channel holds: it is full whether or not the
+        // writer took the sync before it parked.
+        let full: Vec<_> = (1..=super::WAL_QUEUE_FRAMES as u64)
+            .map(|s| spawn_append(&wal, u32::try_from(s % 271).unwrap(), s))
+            .collect();
+        until("the channel full", || {
+            log.test_depth() >= super::WAL_QUEUE_FRAMES as u64
+        })
+        .await;
+        let cancelled = spawn_append(&wal, 0, 1_000_000);
+        quiet(50).await;
+        cancelled.abort();
+        let _ = cancelled.await;
+        log.test_park_writer(false);
+        for append in full {
+            append.await.unwrap().expect("append");
+        }
+        let _ = sync.await;
+        assert_eq!(log.test_depth(), 0, "a cancelled send left a count behind");
+        log.test_set_no_progress_bound(Duration::from_millis(200));
+        quiet(1000).await;
+        assert_eq!(
+            WalWriter::test_fail_stop_observations().len(),
+            observed,
+            "a healthy writer was fail-stopped"
+        );
+    }
+
+    /// Fix: a segment sealed between a read's copy of the segments not sealed
+    /// yet and its copy of the sealed ones is read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn r_e_unapplied_reads_a_segment_sealed_between_its_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = open(dir.path(), WalFsyncPolicy::Batched);
+        wal.append(3, &entry(1)).await.unwrap();
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        wal.test_park_next_snapshot(Arc::clone(&reached), Arc::clone(&release));
+        let read = {
+            let wal = Arc::clone(&wal);
+            tokio::spawn(async move { wal.unapplied(3).await })
+        };
+        reached.notified().await;
+        let rotated = wal.test_rotate_now().await.expect("a rotation");
+        wal.test_wait_sealed(rotated).await;
+        release.notify_one();
+        let frames: Vec<u64> = read
+            .await
+            .unwrap()
+            .unwrap()
+            .iter()
+            .map(|e| e.sequence)
+            .collect();
+        assert_eq!(frames, vec![1], "the frame of the segment sealed mid-read");
+    }
+
+    /// Fix: a read of one partition reads the segment not sealed yet by the
+    /// locations of that partition's frames, not the whole file.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn r_e_unapplied_reads_the_active_segment_by_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = open(dir.path(), WalFsyncPolicy::Batched);
+        for sequence in 1..=30u64 {
+            wal.append(u32::try_from(sequence % 3).unwrap(), &entry(sequence))
+                .await
+                .unwrap();
+        }
+        let before = wal
+            .test_stream_frame_reads
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let frames = wal.unapplied(1).await.unwrap();
+        let reads = wal
+            .test_stream_frame_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
+            - before;
+        assert_eq!(frames.len(), 10);
+        assert_eq!(reads, 10, "the partition's frames, each by its location");
+    }
+
+    /// Fix: under `none` no group age is kept: nothing reads it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn r_e_none_keeps_no_group_ages() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = open(dir.path(), WalFsyncPolicy::None);
+        for sequence in 1..=50 {
+            wal.append(0, &entry(sequence)).await.unwrap();
+        }
+        assert_eq!(log(&wal).test_groups(), 0);
+    }
+
+    /// Fix: `none` never fsyncs, a sync included; the sync still resolves.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn r_e_sync_under_none_fsyncs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = open(dir.path(), WalFsyncPolicy::None);
+        wal.append(0, &entry(1)).await.unwrap();
+        wal.sync().await.unwrap();
+        let old = wal.test_rotate_now().await.expect("a rotation");
+        wal.append(0, &entry(2)).await.unwrap();
+        wal.sync().await.unwrap();
+        wal.test_wait_sealed(old).await;
+        assert_eq!(log(&wal).test_fsyncs(), 0, "an fsync ran under none");
+    }
+
+    /// Fix: a panic of the writer thread is a tier (B) fail-stop, and no
+    /// append resolves after it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn r_e_a_panicked_writer_fail_stops() {
+        let _guard = FAIL_STOP_TEST_LOCK.lock().await;
+        let observed = WalWriter::test_fail_stop_observations().len();
+        let dir = tempfile::tempdir().unwrap();
+        let wal = open(dir.path(), WalFsyncPolicy::Batched);
+        wal.append(0, &entry(1)).await.unwrap();
+        log(&wal).test_panic_writer();
+        assert!(wal.append(0, &entry(2)).await.is_err());
+        until("the fail-stop", || {
+            WalWriter::test_fail_stop_observations().len() > observed
+        })
+        .await;
+        assert_eq!(
+            WalWriter::test_fail_stop_observations().get(observed),
+            Some(&WalFailStopTier::B)
+        );
+        assert!(wal.append(0, &entry(3)).await.is_err());
     }
 }
