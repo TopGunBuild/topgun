@@ -86,8 +86,13 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 /** Written and flushed while the store is healthy. */
 const EARLY_MAP = 'store_broken_early';
 const EARLY_KEYS = ['early-0', 'early-1', 'early-2', 'early-3', 'early-4'];
-/** The late writes, one of whose flushes meets the I/O error. */
-const LATE_MAP = 'store_broken_late';
+/**
+ * The late writes, one of whose flushes meets the I/O error. Each late key
+ * has a map of its own, so the read-back of one is a small snapshot: all of
+ * them together are tens of MiB.
+ */
+const LATE_MAP_PREFIX = 'store_broken_late_';
+const lateMap = (key: string) => `${LATE_MAP_PREFIX}${key}`;
 /** Each late value: large, so few writes fill a memtable. */
 const LATE_PAD = 'x'.repeat(64 * 1024);
 /**
@@ -229,9 +234,9 @@ function chmodTree(dir: string, mode: number): void {
 function treeDigest(dir: string): string {
   const hash = crypto.createHash('sha256');
   const walk = (at: string) => {
-    for (const entry of fs.readdirSync(at, { withFileTypes: true }).sort((a, b) =>
-      a.name.localeCompare(b.name),
-    )) {
+    for (const entry of fs
+      .readdirSync(at, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name))) {
       const entryPath = path.join(at, entry.name);
       hash.update(path.relative(dir, entryPath));
       if (entry.isDirectory()) walk(entryPath);
@@ -390,7 +395,9 @@ async function runArm(arm: Arm): Promise<Observed> {
     const sha256Before = launched.sha256;
     const abort = (reason: string): never => {
       summary = `store-broken arm=${arm} sha256=${sha256Before} commit=${env.commit} aborted=${reason}`;
-      throw new Error(`${reason}\n--- stdout ---\n${launched.stdout()}\n--- stderr ---\n${launched.stderr()}`);
+      throw new Error(
+        `${reason}\n--- stdout ---\n${launched.stdout()}\n--- stderr ---\n${launched.stderr()}`,
+      );
     };
     summary = `store-broken arm=${arm} sha256=${sha256Before} commit=${env.commit} aborted=the run did not reach its end`;
     if (launched.port === null) abort('the server did not print PORT=');
@@ -452,12 +459,24 @@ async function runArm(arm: Arm): Promise<Observed> {
     // Readiness, probed until the process is gone; only probes started after
     // the binary's line count, since the 503 follows that line.
     const readinessAfterBroken = new Set<string>();
+    // The broken-store counter, from scrapes started after the store's line
+    // that were answered; `null` while none was.
+    let brokenCounter: number | null = null;
     let probing = true;
     const prober = (async () => {
       while (probing) {
-        const brokenSeen = linesWith(launched.stdout(), BINARY_BROKEN_TEXT).length > 0;
+        const binaryLineSeen = linesWith(launched.stdout(), BINARY_BROKEN_TEXT).length > 0;
+        const storeLineSeen = linesWith(launched.stdout(), STORE_BROKEN_TEXT).length > 0;
         const answer = await readiness(port);
-        if (brokenSeen) readinessAfterBroken.add(answer);
+        if (binaryLineSeen) readinessAfterBroken.add(answer);
+        if (storeLineSeen) {
+          try {
+            const value = await within(scrapeGauge(port, BROKEN_COUNTER), SCRAPE_WAIT_MS, 'scrape');
+            if (value !== null) brokenCounter = Math.max(brokenCounter ?? 0, value);
+          } catch {
+            // Nothing answers once the listener has closed.
+          }
+        }
         await sleep(READY_POLL_MS);
       }
     })();
@@ -466,7 +485,6 @@ async function runArm(arm: Arm): Promise<Observed> {
     // written before its ack; a flush to RocksDB is what meets the error.
     const lateAnswers: Array<[string, string]> = [];
     let lateBytesSent = 0;
-    let brokenCounter: number | null = null;
     const brokenSeen = () => linesWith(launched.stdout(), STORE_BROKEN_TEXT).length > 0;
     if (preconditionNotMet === null) {
       let i = 0;
@@ -482,10 +500,10 @@ async function runArm(arm: Arm): Promise<Observed> {
         i += 1;
         const key = `late-${String(i).padStart(4, '0')}`;
         const value = { late: i, pad: LATE_PAD };
-        const answer = await writeAndSee(writer, key, LATE_MAP, key, value);
+        const answer = await writeAndSee(writer, key, lateMap(key), key, value);
         lateAnswers.push([key, answer]);
         lateBytesSent += LATE_PAD.length;
-        if (answer === 'OP_ACK') (acked[LATE_MAP] ??= {})[key] = value;
+        if (answer === 'OP_ACK') acked[lateMap(key)] = { [key]: value };
         else break;
       }
       // One write after the store said it is broken, which it must refuse
@@ -494,20 +512,9 @@ async function runArm(arm: Arm): Promise<Observed> {
         i += 1;
         const key = `late-${String(i).padStart(4, '0')}`;
         const value = { late: i, pad: LATE_PAD };
-        const answer = await writeAndSee(writer, key, LATE_MAP, key, value);
+        const answer = await writeAndSee(writer, key, lateMap(key), key, value);
         lateAnswers.push([key, answer]);
-        if (answer === 'OP_ACK') (acked[LATE_MAP] ??= {})[key] = value;
-      }
-      if (brokenSeen()) {
-        try {
-          brokenCounter = await within(
-            scrapeGauge(port, BROKEN_COUNTER),
-            SCRAPE_WAIT_MS,
-            'scrape of the broken-store counter',
-          );
-        } catch {
-          brokenCounter = null;
-        }
+        if (answer === 'OP_ACK') acked[lateMap(key)] = { [key]: value };
       }
       note(
         `step 4: ${lateAnswers.length} late writes, ${lateBytesSent} bytes; answers ${JSON.stringify(
@@ -523,7 +530,9 @@ async function runArm(arm: Arm): Promise<Observed> {
     await prober;
     const exitAt = Date.now();
     const exitAfterReadOnlyMs = exit !== null ? exitAt - readOnlyAt : null;
-    note(`step 5: exit ${JSON.stringify(exit)} ${exitAfterReadOnlyMs} ms after the directory became read-only`);
+    note(
+      `step 5: exit ${JSON.stringify(exit)} ${exitAfterReadOnlyMs} ms after the directory became read-only`,
+    );
     if (exit === null) await launched.stop('SIGKILL', 5_000);
 
     const out = launched.stdout();
@@ -577,7 +586,9 @@ async function runArm(arm: Arm): Promise<Observed> {
         try {
           reader = await connectWithin(healed.port, 'store-broken-reader', CONNECT_WAIT_MS);
           const read: Record<string, Record<string, unknown>> = {};
-          for (const mapName of [EARLY_MAP, LATE_MAP]) {
+          // Every map written to, acknowledged or not: a map of a key that was
+          // not acknowledged must read back empty.
+          for (const mapName of [EARLY_MAP, ...lateAnswers.map(([key]) => lateMap(key))]) {
             read[mapName] = await readMap(reader, mapName);
           }
           readBack = read;
@@ -599,9 +610,11 @@ async function runArm(arm: Arm): Promise<Observed> {
     }
 
     const sha256After = sha256OfFile(env.binary);
-    const expectedRead = { [EARLY_MAP]: acked[EARLY_MAP] ?? {}, [LATE_MAP]: acked[LATE_MAP] ?? {} };
     const readBackOk =
-      typeof readBack !== 'string' && JSON.stringify(readBack) === JSON.stringify(expectedRead);
+      typeof readBack !== 'string' &&
+      JSON.stringify(lateReadBack({ readBack, lateAnswers })) ===
+        JSON.stringify(lateAcked({ acked })) &&
+      JSON.stringify(readBack[EARLY_MAP]) === JSON.stringify(acked[EARLY_MAP]);
     summary =
       `store-broken arm=${arm} sha256_before=${sha256Before} sha256_after=${sha256After} commit=${env.commit} ` +
       `precondition=${preconditionNotMet === null ? 'met' : 'NOT MET'} flushed_after_ms=${flushedAfterMs} ` +
@@ -678,6 +691,25 @@ function requireExitByItself(o: Observed): void {
   }
 }
 
+/** Every late key acknowledged, with its value. */
+function lateAcked(o: Pick<Observed, 'acked'>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [mapName, rows] of Object.entries(o.acked)) {
+    if (mapName.startsWith(LATE_MAP_PREFIX)) Object.assign(out, rows);
+  }
+  return out;
+}
+
+/** Every late key the healed restart served, with its value, over the maps of every late write sent. */
+function lateReadBack(
+  o: Pick<Observed, 'readBack' | 'lateAnswers'>,
+): Record<string, unknown> | string {
+  if (typeof o.readBack === 'string') return o.readBack;
+  const out: Record<string, unknown> = {};
+  for (const [key] of o.lateAnswers) Object.assign(out, o.readBack[lateMap(key)] ?? {});
+  return out;
+}
+
 /** The late keys answered with a refusal: the server turned them away before the WAL. */
 function refusedLateKeys(o: Observed): string[] {
   return o.lateAnswers
@@ -687,7 +719,7 @@ function refusedLateKeys(o: Observed): string[] {
 
 /** What both arms assert about the first process and the healed read-back. */
 function observed(o: Observed) {
-  const lateRead = typeof o.readBack === 'string' ? o.readBack : o.readBack[LATE_MAP];
+  const lateRead = lateReadBack(o);
   const earlyRead = typeof o.readBack === 'string' ? o.readBack : o.readBack[EARLY_MAP];
   const refused = refusedLateKeys(o);
   return {
@@ -699,19 +731,20 @@ function observed(o: Observed) {
       (line) => line.includes('cause="io"') && line.includes('io_kind="Other"'),
     ).length,
     drainStoppedLines: o.drainStoppedLines.length,
-    drainStoppedLineNamesItsCause: o.drainStoppedLines.filter((line) =>
-      /\bcause="\w+"/.test(line),
-    ).length,
+    drainStoppedLineNamesItsCause: o.drainStoppedLines.filter((line) => /\bcause="\w+"/.test(line))
+      .length,
     binaryBrokenLines: o.binaryBrokenLines.length,
     binaryBrokenLinesWithExitCode72: o.binaryBrokenLines.filter(
       (line) => /\bexit_code=72\b/.test(line) && line.includes('cause="io"'),
     ).length,
     panicLines: o.panicLines,
-    brokenCounter: o.brokenCounter,
-    readinessNeverReadyAfterBroken:
-      o.readinessAfterBroken.length > 0 && !o.readinessAfterBroken.includes('200'),
+    // The listener closes as the node starts its stop, so a scrape after the
+    // store's line may find nothing to answer; one that answers must count
+    // the cause.
+    brokenCounterWhenScraped: o.brokenCounter === null ? 'not answered' : o.brokenCounter,
+    readinessNeverReadyAfterBroken: !o.readinessAfterBroken.includes('200'),
     // (i) at least one late key was acknowledged.
-    someLateKeyAcked: Object.keys(o.acked[LATE_MAP] ?? {}).length > 0,
+    someLateKeyAcked: Object.keys(lateAcked(o)).length > 0,
     // (iv) every early key is served, with its value.
     earlyReadBack: earlyRead,
     // (ii) the late map served is exactly the acknowledged late keys with
@@ -735,11 +768,11 @@ function expected(o: Observed) {
     binaryBrokenLines: 1,
     binaryBrokenLinesWithExitCode72: 1,
     panicLines: 0,
-    brokenCounter: 1,
+    brokenCounterWhenScraped: o.brokenCounter === null ? 'not answered' : 1,
     readinessNeverReadyAfterBroken: true,
     someLateKeyAcked: true,
     earlyReadBack: o.acked[EARLY_MAP],
-    lateReadBack: o.acked[LATE_MAP] ?? {},
+    lateReadBack: lateAcked(o),
     refusedLateKeysServed: [],
     healedExitOnSigterm: { code: 0, signal: null },
     sha256BeforeEqualsAfter: true,
