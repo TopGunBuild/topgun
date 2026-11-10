@@ -3005,9 +3005,17 @@ pub fn sample_redb_bytes(data_dir: &Path) -> Option<u64> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => return None,
     };
-    let rocks = match std::fs::symlink_metadata(store_dir.join("engine.rocksdb")) {
-        Ok(meta) if meta.is_dir() => Some(regular_file_bytes(&store_dir.join("engine.rocksdb"))?),
-        Ok(_) => None,
+    let rocks_dir = store_dir.join("engine.rocksdb");
+    // A directory that vanishes between the two calls (renamed away by a
+    // migration) is a store that is not there, as an absent one is.
+    let rocks = match std::fs::symlink_metadata(&rocks_dir).and_then(|meta| {
+        if meta.is_dir() {
+            regular_file_bytes(&rocks_dir).map(Some)
+        } else {
+            Ok(None)
+        }
+    }) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => return None,
     };
@@ -3018,19 +3026,35 @@ pub fn sample_redb_bytes(data_dir: &Path) -> Option<u64> {
 }
 
 /// The summed length of every regular file under `dir`, recursively, symlinks
-/// not followed; `None` when any entry cannot be read.
-fn regular_file_bytes(dir: &Path) -> Option<u64> {
+/// not followed. An error on any entry other than its having vanished fails
+/// the whole sum.
+fn regular_file_bytes(dir: &Path) -> std::io::Result<u64> {
     let mut total = 0;
-    for entry in std::fs::read_dir(dir).ok()? {
-        let entry = entry.ok()?;
-        let kind = entry.file_type().ok()?;
-        if kind.is_dir() {
-            total += regular_file_bytes(&entry.path())?;
-        } else if kind.is_file() {
-            total += entry.metadata().ok()?.len();
-        }
+    for entry in std::fs::read_dir(dir)? {
+        total += entry_bytes_or_vanished(&entry?)?;
     }
-    Some(total)
+    Ok(total)
+}
+
+/// The bytes one listed entry holds; 0 when it vanished after it was listed.
+/// RocksDB deletes SST, log and MANIFEST files on every flush and compaction,
+/// so on a live store a listed file is often gone a moment later, and it then
+/// holds no bytes of the store — failing the whole sample on it would leave a
+/// hole in the series on every loaded run.
+fn entry_bytes_or_vanished(entry: &std::fs::DirEntry) -> std::io::Result<u64> {
+    let bytes = entry.file_type().and_then(|kind| {
+        if kind.is_dir() {
+            regular_file_bytes(&entry.path())
+        } else if kind.is_file() {
+            entry.metadata().map(|meta| meta.len())
+        } else {
+            Ok(0)
+        }
+    });
+    match bytes {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        other => other,
+    }
 }
 
 /// WAL retention: the summed apparent size and the count of the retained `.log`
@@ -5991,6 +6015,32 @@ topgun_x{a=\"3\"} NaN
         let neither = store_dir("neither");
         write(neither.join("engine.redb.pre-rocksdb"), 777);
         assert_eq!(sample_redb_bytes(neither.parent().expect("data dir")), None);
+    }
+
+    /// A file or a subdirectory that vanishes between the listing and its read
+    /// — RocksDB deleting an SST during a compaction — counts 0 bytes; the
+    /// entries still there are summed and the sample does not fail.
+    #[test]
+    fn a_store_file_that_vanishes_after_listing_counts_zero() {
+        let root = tempfile::tempdir().expect("root");
+        let dir = root.path().join("engine.rocksdb");
+        std::fs::create_dir_all(dir.join("sub")).expect("dirs");
+        std::fs::write(dir.join("kept.sst"), vec![0u8; 300]).expect("kept");
+        std::fs::write(dir.join("gone.sst"), vec![0u8; 5_000]).expect("gone");
+        std::fs::write(dir.join("sub").join("gone.log"), vec![0u8; 7_000]).expect("sub");
+
+        let entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&dir)
+            .expect("list")
+            .map(|e| e.expect("entry"))
+            .collect();
+        std::fs::remove_file(dir.join("gone.sst")).expect("remove file");
+        std::fs::remove_dir_all(dir.join("sub")).expect("remove dir");
+
+        let total: u64 = entries
+            .iter()
+            .map(|e| entry_bytes_or_vanished(e).expect("a vanished entry is not an error"))
+            .sum();
+        assert_eq!(total, 300);
     }
 
     // ---------------------------------------------------------------------
