@@ -148,8 +148,10 @@ use report::{
     CensusCounts, ConfirmApplyReport, DiskReport, LiveCensusReport, LiveCountsReport, MemoryReport,
     ProgressSnapshot, SoakReport, TombstoneCorpusReport, TombstoneReport, WalFrameStats,
 };
+use topgun_server::storage::datastores::kv_engine::KvEngine;
+use topgun_server::storage::datastores::rocks_engine::{OpenMode, RocksConfig, RocksKvEngine};
 use topgun_server::storage::record::RecordValue;
-use topgun_server::storage::{MapDataStore, RedbDataStore};
+use topgun_server::storage::{EngineMapDataStore, MapDataStore, RedbDataStore};
 
 /// Subject index used by the orchestrator's verifier connections. Far above the
 /// churn-client range so it never owns keys or collides with churn auth.
@@ -351,7 +353,7 @@ struct DurableObservations {
     /// stream so the durable reading and the memory gate provably read the
     /// SAME series on the SAME cadence.
     rss_kib: Mutex<Vec<SeriesPoint>>,
-    /// Apparent size of the store file, in bytes.
+    /// Bytes of the store, whichever engine holds it (the name is frozen).
     redb_bytes: Mutex<Vec<SeriesPoint>>,
     /// Sum of the retained WAL segments' apparent sizes, in bytes.
     wal_bytes: Mutex<Vec<SeriesPoint>>,
@@ -1143,7 +1145,7 @@ async fn run_soak(config: &Config) -> i32 {
     };
 
     // The TERMINAL corpus scan: the server process has just been reaped, so its
-    // redb handle is released and this scan can safely open the same file
+    // store handle is released and this scan can safely open the same store
     // directly — no copy, because nothing boots after it. It contributes the
     // final sample of the durable-corpus series, which feeds the instrument,
     // level and ceiling clauses rendered below. Its cross-check against the
@@ -1158,10 +1160,10 @@ async fn run_soak(config: &Config) -> i32 {
     let redb_tombstone_census = terminal_store
         .as_ref()
         .map_err(Clone::clone)
-        .and_then(|store| census_of_map(store, OR_MAP));
+        .and_then(|store| store.census_of_map(OR_MAP));
     if let Some(end) = &live_end {
         let terminal_sum = match &terminal_store {
-            Ok(store) => live_sum_over_all_maps(store).await,
+            Ok(store) => store.live_sum_over_all_maps().await,
             Err(failure) => Err(failure.clone()),
         };
         corpus_sampler.reconcile_with_terminal(end, &terminal_sum);
@@ -2997,7 +2999,7 @@ fn copy_and_scan_census(
         }
     })?;
 
-    // The scan owns and drops its redb handle inside its own body, so the
+    // The scan owns and drops its store handle inside its own body, so the
     // handle is released before the delete below and before the caller
     // restarts the server. No handle may be hoisted out of it.
     let scanned = scan_redb_tombstone_corpus(&copy_dir, OR_MAP);
@@ -3051,7 +3053,7 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
 /// lives in the fold functions, so this site only decodes and dispatches.
 ///
 /// Opens the server's own store directly (`{data_dir}/topgun-data`, through
-/// `RedbDataStore`, visiting the records of `map`, msgpack-encoded
+/// whichever engine holds it, visiting the records of `map`, msgpack-encoded
 /// `RecordValue` values) and sums the UTF-8 byte length of every tombstoned
 /// tag across BOTH tombstone-carrying shapes: the live `RecordValue::OrMap`'s
 /// `tombstones` field, and the legacy `RecordValue::OrTombstones` blob a
@@ -3095,30 +3097,78 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
 /// rather than failing the run. An honest empty census from a never-written
 /// table stays distinguishable from it.
 fn scan_redb_tombstone_corpus(data_dir: &Path, map: &str) -> Result<DurableCensus, CensusFailure> {
-    census_of_map(&open_census_store(data_dir)?, map)
+    open_census_store(data_dir)?.census_of_map(map)
+}
+
+/// The store a census reads: the one the server left on disk, whichever engine
+/// holds it.
+enum CensusStore {
+    Redb(RedbDataStore),
+    Rocks(EngineMapDataStore<RocksKvEngine>),
+}
+
+impl CensusStore {
+    fn census_of_map(&self, map: &str) -> Result<DurableCensus, CensusFailure> {
+        match self {
+            Self::Redb(store) => census_of_map(store, map),
+            Self::Rocks(store) => census_of_map(store, map),
+        }
+    }
+
+    async fn live_sum_over_all_maps(&self) -> Result<LiveGauges, CensusFailure> {
+        match self {
+            Self::Redb(store) => live_sum_over_all_maps(store).await,
+            Self::Rocks(store) => live_sum_over_all_maps(store).await,
+        }
+    }
 }
 
 /// Open the store under `data_dir` for a census, or say at which step that
-/// failed.
-fn open_census_store(data_dir: &Path) -> Result<RedbDataStore, CensusFailure> {
+/// failed. While an engine migration is unfinished both stores are there and
+/// `engine.redb` is the whole of the data, so it is the one read.
+fn open_census_store(data_dir: &Path) -> Result<CensusStore, CensusFailure> {
     let store_dir = data_dir.join(STORE_DIR);
-    // Opening creates a missing store, so the engine file is checked first: a
-    // store that is not there is a failed scan, never an empty one.
-    let engine = store_dir.join("engine.redb");
-    if !engine.exists() {
-        return Err(CensusFailure {
-            step: CensusFailStep::EngineMissing,
-            error: engine.display().to_string(),
-        });
-    }
-    RedbDataStore::new(&store_dir).map_err(|e| CensusFailure {
+    let open_failed = |e: anyhow::Error| CensusFailure {
         step: CensusFailStep::Open,
         error: format!("{e:#}"),
-    })
+    };
+    // Opening redb creates a missing store, so the engine file is checked
+    // first: a store that is not there is a failed scan, never an empty one.
+    if store_dir.join("engine.redb").exists() {
+        return RedbDataStore::new(&store_dir)
+            .map(CensusStore::Redb)
+            .map_err(open_failed);
+    }
+    let rocks = store_dir.join("engine.rocksdb");
+    // `Existing` never creates a store; where it refuses for want of one, the
+    // failure is the missing store's.
+    let engine = RocksKvEngine::open(
+        &rocks,
+        OpenMode::Existing,
+        &RocksConfig::production(CENSUS_ENGINE_CACHE_BYTES, -1),
+    )
+    .map_err(|e| CensusFailure {
+        step: if rocks.join("CURRENT").is_file() {
+            CensusFailStep::Open
+        } else {
+            CensusFailStep::EngineMissing
+        },
+        error: format!("{}: {e:#}", rocks.display()),
+    })?;
+    EngineMapDataStore::open(std::sync::Arc::new(engine))
+        .map(CensusStore::Rocks)
+        .map_err(open_failed)
 }
 
+/// The block cache of a census's RocksDB open: one pass over the records needs
+/// no more, and the harness shares the machine with the server it measures.
+const CENSUS_ENGINE_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
 /// The census of one map of an open store.
-fn census_of_map(store: &RedbDataStore, map: &str) -> Result<DurableCensus, CensusFailure> {
+fn census_of_map<E: KvEngine>(
+    store: &EngineMapDataStore<E>,
+    map: &str,
+) -> Result<DurableCensus, CensusFailure> {
     // A never-written map (e.g. no OR-Map write ever landed) is visited zero
     // times and contributes an EMPTY census — a real, honest answer, not a
     // scan failure.
@@ -3164,7 +3214,9 @@ fn census_of_map(store: &RedbDataStore, map: &str) -> Result<DurableCensus, Cens
 /// The live entries and their tag bytes summed over EVERY map of an open
 /// store — the maps the server's own boot walk seeds its live census from —
 /// so the two sides of the reconciliation count the same set of maps.
-async fn live_sum_over_all_maps(store: &RedbDataStore) -> Result<LiveGauges, CensusFailure> {
+async fn live_sum_over_all_maps<E: KvEngine>(
+    store: &EngineMapDataStore<E>,
+) -> Result<LiveGauges, CensusFailure> {
     let maps = store.list_maps().await.map_err(|e| CensusFailure {
         step: CensusFailStep::ListMaps,
         error: format!("{e:#}"),
@@ -5254,6 +5306,10 @@ mod tests {
         LoopEndReason, ReconcileReason, ReconcileStatus, RecordValue, RedbDataStore, ServerExit,
         OR_MAP, STORE_DIR,
     };
+    use super::{
+        open_census_store, scan_redb_tombstone_corpus, DurableCensus, EngineMapDataStore, OpenMode,
+        RocksKvEngine,
+    };
     use topgun_core::hlc::Timestamp;
     use topgun_core::types::Value;
     use topgun_server::storage::record::OrMapEntry;
@@ -5266,7 +5322,11 @@ mod tests {
     /// panics fails alone and the rest still run; the summary line has
     /// libtest's shape, and a failure makes the exit code non-zero.
     pub(super) fn run_all() -> i32 {
-        let tests: [(&str, fn()); 14] = [
+        let tests: [(&str, fn()); 15] = [
+            (
+                "the_census_reads_either_engine_alike",
+                the_census_reads_either_engine_alike,
+            ),
             (
                 "live_gauge_readings_never_contaminate_the_corpus_tally",
                 live_gauge_readings_never_contaminate_the_corpus_tally,
@@ -5343,9 +5403,25 @@ mod tests {
     /// and encoding the scan reads. A real store rather than a stub, so the
     /// path under test is the whole path: copy, open, visit, fold.
     fn write_or_fixture(dir: &Path) {
-        use topgun_server::storage::MapDataStore;
+        write_or_rows(&RedbDataStore::new(dir.join(STORE_DIR)).expect("create store"));
+    }
 
-        let store = RedbDataStore::new(dir.join(STORE_DIR)).expect("create store");
+    /// The same rows as [`write_or_fixture`], in a RocksDB store under `dir`
+    /// where the server keeps it.
+    fn write_or_fixture_rocks(dir: &Path) {
+        let engine = RocksKvEngine::open(
+            &dir.join(STORE_DIR).join("engine.rocksdb"),
+            OpenMode::CreateNew,
+            &super::RocksConfig::production(16 * 1024 * 1024, -1),
+        )
+        .expect("create engine");
+        write_or_rows(&EngineMapDataStore::open(Arc::new(engine)).expect("open store"));
+    }
+
+    /// One OR-Map row with live entries and tombstones, and one LWW row in
+    /// another map, so a census that read another map or folded the two kinds
+    /// together would not come out equal.
+    fn write_or_rows(store: &impl topgun_server::storage::MapDataStore) {
         let value = RecordValue::OrMap {
             records: vec![OrMapEntry {
                 value: Value::String("alive".to_string()),
@@ -5362,8 +5438,91 @@ mod tests {
         tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime")
-            .block_on(store.add(OR_MAP, "ork-1", &value, 0))
-            .expect("write row");
+            .block_on(async {
+                store.add(OR_MAP, "ork-1", &value, 0).await?;
+                let lww = RecordValue::Lww {
+                    value: Value::String("other".to_string()),
+                    timestamp: Timestamp {
+                        millis: 2,
+                        counter: 0,
+                        node_id: "live-census-fixture".to_string(),
+                    },
+                    ttl_ms: None,
+                };
+                store.add("other_map", "lww-1", &lww, 0).await
+            })
+            .expect("write rows");
+    }
+
+    /// The census reads a RocksDB store as it reads a redb one: the same rows
+    /// give the same census and the same live sum over all maps. While both
+    /// stores are there (an unfinished engine migration) `engine.redb` is the
+    /// one read, and a store directory holding neither — an empty
+    /// `engine.rocksdb/` included — is a failed scan that creates no store.
+    fn the_census_reads_either_engine_alike() {
+        let root = tempfile::tempdir().expect("root");
+        let redb = root.path().join("redb");
+        write_or_fixture(&redb);
+        let rocks = root.path().join("rocks");
+        write_or_fixture_rocks(&rocks);
+
+        let on_redb = scan_redb_tombstone_corpus(&redb, OR_MAP).expect("redb census");
+        let on_rocks = scan_redb_tombstone_corpus(&rocks, OR_MAP).expect("rocks census");
+        assert_eq!(on_rocks, on_redb);
+        assert_eq!(
+            (
+                on_redb.or_map_keys,
+                on_redb.live_entries,
+                on_redb.tombstone_entries
+            ),
+            (1, 1, 2),
+            "the fixture's OR row is what both censuses counted"
+        );
+        let sums = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let redb_sum = open_census_store(&redb)
+                    .expect("open redb")
+                    .live_sum_over_all_maps()
+                    .await
+                    .expect("redb sum");
+                let rocks_sum = open_census_store(&rocks)
+                    .expect("open rocks")
+                    .live_sum_over_all_maps()
+                    .await
+                    .expect("rocks sum");
+                (redb_sum, rocks_sum)
+            });
+        assert_eq!(sums.1, sums.0);
+
+        // Both stores present: the redb one is read, and it holds no row of
+        // the RocksDB one.
+        let both = root.path().join("both");
+        drop(RedbDataStore::new(both.join(STORE_DIR)).expect("create redb store"));
+        write_or_fixture_rocks(&both);
+        let census = scan_redb_tombstone_corpus(&both, OR_MAP).expect("census of both");
+        assert_eq!(
+            census,
+            DurableCensus::default(),
+            "engine.redb is the one read"
+        );
+
+        for (case, store_dir_holds_rocks_dir) in [("neither", false), ("empty_rocks_dir", true)] {
+            let dir = root.path().join(case);
+            let rocks_dir = dir.join(STORE_DIR).join("engine.rocksdb");
+            if store_dir_holds_rocks_dir {
+                std::fs::create_dir_all(&rocks_dir).expect("rocks dir");
+            } else {
+                std::fs::create_dir_all(dir.join(STORE_DIR)).expect("store dir");
+            }
+            let failure = scan_redb_tombstone_corpus(&dir, OR_MAP).expect_err(case);
+            assert_eq!(failure.step, CensusFailStep::EngineMissing, "{case}");
+            assert!(
+                !rocks_dir.join("CURRENT").exists(),
+                "{case}: the census created a store"
+            );
+        }
     }
 
     const INTERVAL: Duration = Duration::from_secs(60);
