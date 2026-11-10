@@ -5,7 +5,8 @@
 # Run:    docker run -p 80:80 topgun-sync-lab
 
 # ── Stage 1: Build Rust server ──────────────────────────────────────
-FROM rust:1.88-bookworm AS rust-builder
+# The same Rust as rust-toolchain.toml, so the image builds what CI tests.
+FROM rust:1.93.1-bookworm AS rust-builder
 
 WORKDIR /app
 
