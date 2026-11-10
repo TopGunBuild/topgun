@@ -1537,7 +1537,8 @@ pub enum CensusFailStep {
     ScratchDir,
     /// The store directory could not be copied into it.
     Copy,
-    /// The directory scanned holds no `engine.redb`.
+    /// The directory scanned holds no store: neither `engine.redb` nor a
+    /// RocksDB store under `engine.rocksdb/`.
     EngineMissing,
     /// The store could not be opened.
     Open,
@@ -1883,6 +1884,11 @@ pub struct SeriesShapeReading {
 /// durable consequence is already carried by the two WAL series, and under a
 /// peak rule a single late stall would decide the whole run. It is recorded,
 /// rendered and serialized as an observation column instead.
+///
+/// `redb_bytes` is the bytes of the store, whichever engine holds it
+/// ([`sample_redb_bytes`]). The name is kept from when redb was the only
+/// engine: it is frozen in reports and committed evidence manifests, and a
+/// new name would break comparison with every earlier run.
 pub const DECIDING_SERIES: [&str; 4] = ["rss_kib", "redb_bytes", "wal_bytes", "wal_segment_files"];
 
 /// The reading over all four deciding series, evaluated in declaration order.
@@ -2981,17 +2987,50 @@ fn is_exposition_timestamp(token: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The embedded store file's apparent size in bytes, from filesystem METADATA
-/// only — the file is never opened, so sampling cannot perturb the process
-/// being measured. The store is the engine file inside the server's data
-/// directory (`{data_dir}/topgun-data/engine.redb`); the size of that
-/// directory's own entry would say nothing about how much the store holds.
-/// `None` on any failure, mirroring [`sample_rss_mb`]'s `None`-on-failure
-/// contract.
+/// The bytes of the store, whichever engine holds it, from filesystem
+/// METADATA only — no store file is opened, so sampling cannot perturb the
+/// process being measured. The store lives in the server's data directory
+/// (`{data_dir}/topgun-data`): the length of the regular file `engine.redb`,
+/// or the summed length of every regular file under `engine.rocksdb/`
+/// (recursive, symlinks not followed); both while an engine migration is in
+/// flight, since both occupy the disk then. The kept rollback copy
+/// `engine.redb.pre-rocksdb` is not the store and is not counted, nor is the
+/// size of a directory's own entry. `None` when neither store is there or a
+/// read fails, mirroring [`sample_rss_mb`]'s `None`-on-failure contract.
 #[must_use]
 pub fn sample_redb_bytes(data_dir: &Path) -> Option<u64> {
-    let meta = std::fs::metadata(data_dir.join("topgun-data").join("engine.redb")).ok()?;
-    meta.is_file().then_some(meta.len())
+    let store_dir = data_dir.join("topgun-data");
+    let redb = match std::fs::symlink_metadata(store_dir.join("engine.redb")) {
+        Ok(meta) => meta.is_file().then_some(meta.len()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return None,
+    };
+    let rocks = match std::fs::symlink_metadata(store_dir.join("engine.rocksdb")) {
+        Ok(meta) if meta.is_dir() => Some(regular_file_bytes(&store_dir.join("engine.rocksdb"))?),
+        Ok(_) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return None,
+    };
+    match (redb, rocks) {
+        (None, None) => None,
+        (redb, rocks) => Some(redb.unwrap_or(0) + rocks.unwrap_or(0)),
+    }
+}
+
+/// The summed length of every regular file under `dir`, recursively, symlinks
+/// not followed; `None` when any entry cannot be read.
+fn regular_file_bytes(dir: &Path) -> Option<u64> {
+    let mut total = 0;
+    for entry in std::fs::read_dir(dir).ok()? {
+        let entry = entry.ok()?;
+        let kind = entry.file_type().ok()?;
+        if kind.is_dir() {
+            total += regular_file_bytes(&entry.path())?;
+        } else if kind.is_file() {
+            total += entry.metadata().ok()?.len();
+        }
+    }
+    Some(total)
 }
 
 /// WAL retention: the summed apparent size and the count of the retained `.log`
@@ -5895,6 +5934,63 @@ topgun_x{a=\"3\"} NaN
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The store sampler reads whichever engine holds the store: the
+    /// `engine.redb` file, the regular files under `engine.rocksdb/` at any
+    /// depth, or both while a migration is in flight. The kept rollback copy
+    /// is not the store, and a symlink under the RocksDB directory is not
+    /// followed.
+    #[test]
+    fn sample_store_bytes_reads_either_engine() {
+        let root = tempfile::tempdir().expect("root");
+        let store_dir = |case: &str| {
+            let dir = root.path().join(case).join("topgun-data");
+            std::fs::create_dir_all(&dir).expect("store dir");
+            dir
+        };
+        let write = |path: std::path::PathBuf, len: usize| {
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("parent dir");
+            std::fs::write(path, vec![0u8; len]).expect("file");
+        };
+        let rocks_files = |dir: &Path| {
+            let rocks = dir.join("engine.rocksdb");
+            write(rocks.join("CURRENT"), 16);
+            write(rocks.join("000007.sst"), 4_096);
+            write(rocks.join("archive").join("deep").join("000003.log"), 1_000);
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(rocks.join("000007.sst"), rocks.join("link.sst"))
+                .expect("symlink");
+            16 + 4_096 + 1_000
+        };
+
+        let only_redb = store_dir("only_redb");
+        write(only_redb.join("engine.redb"), 12_345);
+        write(only_redb.join("engine.redb.pre-rocksdb"), 777);
+        assert_eq!(
+            sample_redb_bytes(only_redb.parent().expect("data dir")),
+            Some(12_345)
+        );
+
+        let only_rocks = store_dir("only_rocks");
+        let rocks_len = rocks_files(&only_rocks);
+        write(only_rocks.join("engine.redb.pre-rocksdb"), 777);
+        assert_eq!(
+            sample_redb_bytes(only_rocks.parent().expect("data dir")),
+            Some(rocks_len)
+        );
+
+        let both = store_dir("both");
+        write(both.join("engine.redb"), 12_345);
+        let rocks_len = rocks_files(&both);
+        assert_eq!(
+            sample_redb_bytes(both.parent().expect("data dir")),
+            Some(12_345 + rocks_len)
+        );
+
+        let neither = store_dir("neither");
+        write(neither.join("engine.redb.pre-rocksdb"), 777);
+        assert_eq!(sample_redb_bytes(neither.parent().expect("data dir")), None);
     }
 
     // ---------------------------------------------------------------------
