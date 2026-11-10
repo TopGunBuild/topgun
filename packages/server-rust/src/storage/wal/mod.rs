@@ -964,8 +964,14 @@ impl WalWriter {
                 let Some(writer) = writer.upgrade() else {
                     return;
                 };
+                // A held task still ends when an unheld one would.
                 #[cfg(test)]
                 if writer.test_hold_collection_task.load(Ordering::Acquire) {
+                    if writer.collection.closed.load(Ordering::Acquire)
+                        || writer.store.strong_count() == 0
+                    {
+                        return;
+                    }
                     continue;
                 }
                 if !writer.collect().await {
@@ -1117,7 +1123,7 @@ impl WalWriter {
                 // still being dropped renamed or removed it.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 result => {
-                    result.map_err(|e| anyhow::anyhow!("Cannot delete {}: {e}", path.display()))?
+                    result.map_err(|e| anyhow::anyhow!("Cannot delete {}: {e}", path.display()))?;
                 }
             }
             if !deleted {
@@ -5649,7 +5655,7 @@ mod tests {
         let (wal, _kept) = open_over(dir.path(), WalFsyncPolicy::None, ReplayStore::default());
         let error = format!(
             "{:#}",
-            wal.wal_partitions().err().expect("partition out of range")
+            wal.wal_partitions().expect_err("partition out of range")
         );
         // Until recovery refuses, nothing is written: no append, no new
         // segment, no collection or cut of the one it cannot read.
@@ -5751,8 +5757,7 @@ mod tests {
             "{:#}",
             wal.unapplied(1)
                 .await
-                .err()
-                .expect("a torn older stream segment is refused")
+                .expect_err("a torn older stream segment is refused")
         );
         assert!(
             error.contains(&older.display().to_string()) && error.contains("truncated tail"),

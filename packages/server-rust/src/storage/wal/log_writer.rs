@@ -273,6 +273,8 @@ impl Shared {
             state.rotations.clear();
         }
         self.wake.notify_all();
+        // Nothing more is sealed: a tick waiting for a rotation goes on.
+        self.sealed_through.send_replace(Some(u64::MAX));
         wal_fail_stop(tier, ctx)
     }
 
@@ -1073,6 +1075,7 @@ impl Syncer {
     fn rotate(&mut self, rotation: Rotation) {
         let shared = Arc::clone(&self.shared);
         let fsyncs = shared.policy != WalFsyncPolicy::None;
+        let rotated = rotation.old.as_ref().map(|old| old.stream_seq);
         if let Some(old) = rotation.old {
             // Under `none`, a sync that waits makes the old tail durable too:
             // a sync covers everything written before it.
@@ -1108,7 +1111,6 @@ impl Syncer {
                         refusal: None,
                     }),
                 );
-            shared.sealed_through.send_replace(Some(old.stream_seq));
             #[cfg(test)]
             shared.hooks.crash_image();
         }
@@ -1163,6 +1165,12 @@ impl Syncer {
             for ack in resolved {
                 let _ = ack.send(());
             }
+        }
+        // Published once the whole rotation is done — the next segment
+        // renamed into place too — so a tick that waits on it sees the
+        // directory at rest.
+        if let Some(stream_seq) = rotated {
+            shared.sealed_through.send_replace(Some(stream_seq));
         }
         if let Some(done) = rotation.done {
             let _ = done.send(());

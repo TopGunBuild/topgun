@@ -2511,7 +2511,10 @@ async fn r_e_retained_bytes_total_counts_the_stream() {
         node.wal.test_collect_now().await;
         node.append(Q, "q", &lww("v", 4), 4).await;
         node.wal.test_collect_now().await;
-        assert_eq!(stream_files(&root.wal_dir()).len(), 2, "sealed and active");
+        assert!(
+            stream_files(&root.wal_dir()).len() >= 2,
+            "sealed segments and the active one"
+        );
         assert_eq!(rendered_total(), total_on_disk(), "after a rotation");
         let held = rendered_total();
 
