@@ -374,7 +374,10 @@ async fn main() {
     // the null arm never reads them, as before.
     let durable_env = store.is_durable().then(|| {
         store_arm::warn_ignored_env();
-        DurableEnv::from_env()
+        DurableEnv::from_env().unwrap_or_else(|reason| {
+            eprintln!("{reason}");
+            std::process::exit(1);
+        })
     });
     let sweep_config = sweep_config_from_env();
     let eviction = durable_env
@@ -782,15 +785,20 @@ async fn build_store(
     spec: &ServerSpec,
 ) -> Result<(Arc<dyn MapDataStore>, Option<store_arm::FailureWatch>), String> {
     match (spec.store, &spec.durable_env, &spec.dirs) {
-        #[cfg(feature = "redb")]
-        (StoreArm::Redb, Some(env), Some(dirs)) => {
+        #[cfg(feature = "rocksdb")]
+        (StoreArm::Rocksdb, Some(env), Some(dirs)) => {
+            use topgun_server::storage::datastores::rocks_engine::{OpenMode, RocksKvEngine};
             let mut config = env.write_behind.clone();
             config.wal_dir.clone_from(&dirs.wal_dir);
-            let engine = topgun_server::storage::datastores::RedbKvEngine::open(
-                &dirs.data_dir.join("engine.redb"),
+            let engine = RocksKvEngine::open(
+                &dirs.data_dir.join("engine.rocksdb"),
+                OpenMode::CreateNew,
+                &env.rocks,
             )
-            .map_err(|e| format!("cannot open the redb engine: {e}"))?;
-            let store = store_arm::build_durable_store(Arc::new(engine), config)
+            .map_err(|e| format!("cannot open the RocksDB engine: {e}"))?;
+            let engine = Arc::new(engine);
+            spawn_engine_peaks(Arc::clone(&engine));
+            let store = store_arm::build_durable_store(engine, config)
                 .await
                 .map_err(|e| format!("cannot build the durable store: {e}"))?;
             let failure = store.background_failure();
@@ -798,6 +806,55 @@ async fn build_store(
         }
         _ => Ok((Arc::new(NullDataStore), None)),
     }
+}
+
+/// Samples the engine's debt every second and prints its peaks as one
+/// `engine_peaks` line on stderr when the server runtime drops the task at
+/// the end of the run, so a run's log carries its compaction diagnostics.
+#[cfg(feature = "rocksdb")]
+fn spawn_engine_peaks(
+    engine: Arc<topgun_server::storage::datastores::rocks_engine::RocksKvEngine>,
+) {
+    #[derive(Default)]
+    struct Peaks {
+        l0_files: u64,
+        pending_compaction_bytes: u64,
+        write_stopped_samples: u64,
+        delayed_write_rate: u64,
+        block_cache_usage: u64,
+        samples: u64,
+    }
+    impl Drop for Peaks {
+        fn drop(&mut self) {
+            eprintln!(
+                "engine_peaks l0_files={} pending_compaction_bytes={} write_stopped_samples={} delayed_write_rate={} block_cache_usage={} samples={}",
+                self.l0_files,
+                self.pending_compaction_bytes,
+                self.write_stopped_samples,
+                self.delayed_write_rate,
+                self.block_cache_usage,
+                self.samples
+            );
+        }
+    }
+    tokio::spawn(async move {
+        let mut peaks = Peaks::default();
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tick.tick().await;
+            let Ok(stats) = engine.stats() else { break };
+            peaks.l0_files = peaks.l0_files.max(stats.l0_files);
+            peaks.pending_compaction_bytes = peaks
+                .pending_compaction_bytes
+                .max(stats.pending_compaction_bytes);
+            peaks.write_stopped_samples += u64::from(stats.write_stopped);
+            peaks.delayed_write_rate = peaks
+                .delayed_write_rate
+                .max(stats.actual_delayed_write_rate);
+            peaks.block_cache_usage = peaks.block_cache_usage.max(stats.block_cache_usage);
+            peaks.samples += 1;
+        }
+    });
 }
 
 /// The server thread's whole life on its runtime: the binary's single-node

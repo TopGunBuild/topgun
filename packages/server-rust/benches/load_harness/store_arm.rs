@@ -14,6 +14,10 @@ use serde::Serialize;
 use tokio::sync::watch;
 
 use topgun_server::storage::datastores::kv_engine::KvEngine;
+#[cfg(feature = "rocksdb")]
+use topgun_server::storage::datastores::rocks_engine::{
+    max_open_files_for, raise_nofile_limit, RocksConfig, DEFAULT_ENGINE_CACHE_MB,
+};
 use topgun_server::storage::datastores::{
     BackgroundFailure, EngineMapDataStore, WalBootstrap, WriteBehindConfig, WriteBehindDataStore,
 };
@@ -26,9 +30,9 @@ use topgun_server::storage::wal::WalFsyncPolicy;
 pub enum StoreArm {
     /// `NullDataStore`: nothing is persisted, no write-behind, no WAL.
     Null,
-    /// The shipped single-node path over the embedded redb engine.
-    #[cfg(feature = "redb")]
-    Redb,
+    /// The shipped single-node path over the embedded RocksDB engine.
+    #[cfg(feature = "rocksdb")]
+    Rocksdb,
 }
 
 impl StoreArm {
@@ -36,8 +40,8 @@ impl StoreArm {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Null => "null",
-            #[cfg(feature = "redb")]
-            Self::Redb => "redb",
+            #[cfg(feature = "rocksdb")]
+            Self::Rocksdb => "rocksdb",
         }
     }
 
@@ -45,11 +49,13 @@ impl StoreArm {
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
             "null" => Ok(Self::Null),
-            #[cfg(feature = "redb")]
-            "redb" => Ok(Self::Redb),
-            #[cfg(not(feature = "redb"))]
-            "redb" => Err("--store redb requires the redb feature".to_string()),
-            other => Err(format!("Unknown store arm: {other}. Available: null, redb")),
+            #[cfg(feature = "rocksdb")]
+            "rocksdb" => Ok(Self::Rocksdb),
+            #[cfg(not(feature = "rocksdb"))]
+            "rocksdb" => Err("--store rocksdb requires the rocksdb feature".to_string()),
+            other => Err(format!(
+                "Unknown store arm: {other}. Available: null, rocksdb"
+            )),
         }
     }
 
@@ -61,11 +67,12 @@ impl StoreArm {
 
 /// The variables the binary reads to place its store, which the harness
 /// replaces with its own per-run directory.
-const IGNORED_ENV: [&str; 4] = [
+const IGNORED_ENV: [&str; 5] = [
     "TOPGUN_WAL_DIR",
     "TOPGUN_DATA_DIR",
     "TOPGUN_REDB_PATH",
     "STORAGE_BACKEND",
+    "TOPGUN_ENGINE_CACHE_MB",
 ];
 
 /// Refuses a run the operator asked to measure with encryption at rest: the
@@ -103,16 +110,29 @@ pub fn warn_ignored_env() {
 pub struct DurableEnv {
     pub write_behind: WriteBehindConfig,
     pub eviction: EvictionConfig,
+    /// The engine as the binary sizes it at its defaults.
+    #[cfg(feature = "rocksdb")]
+    pub rocks: RocksConfig,
 }
 
 impl DurableEnv {
     /// Reads both configurations with the binary's parse rules (including its
-    /// fatal ones).
-    pub fn from_env() -> Self {
-        Self {
+    /// fatal ones), and sizes the engine as the binary does when
+    /// `TOPGUN_ENGINE_CACHE_MB` is unset: the default budget, and
+    /// `max_open_files` from the soft descriptor limit after the same raise.
+    pub fn from_env() -> Result<Self, String> {
+        Ok(Self {
             write_behind: WriteBehindConfig::from_env(),
             eviction: EvictionConfig::from_env(),
-        }
+            #[cfg(feature = "rocksdb")]
+            rocks: RocksConfig::production(
+                DEFAULT_ENGINE_CACHE_MB * 1024 * 1024,
+                max_open_files_for(
+                    raise_nofile_limit()
+                        .map_err(|e| format!("cannot raise the descriptor limit: {e}"))?,
+                ),
+            ),
+        })
     }
 }
 
@@ -254,6 +274,10 @@ pub struct EffectiveStoreConfig {
     pub eviction: EvictionRecord,
     pub encryption_at_rest: &'static str,
     pub durable_merkle_index: bool,
+    /// The engine's memory budget; `null` for an arm without an engine.
+    pub engine_budget_bytes: Option<usize>,
+    /// RocksDB's `max_open_files`; `null` for an arm without RocksDB.
+    pub rocksdb_max_open_files: Option<i32>,
 }
 
 impl EffectiveStoreConfig {
@@ -286,6 +310,15 @@ impl EffectiveStoreConfig {
             },
             encryption_at_rest: "off",
             durable_merkle_index: true,
+            #[cfg(feature = "rocksdb")]
+            engine_budget_bytes: (arm == StoreArm::Rocksdb)
+                .then_some(env.rocks.memory_budget_bytes),
+            #[cfg(feature = "rocksdb")]
+            rocksdb_max_open_files: (arm == StoreArm::Rocksdb).then_some(env.rocks.max_open_files),
+            #[cfg(not(feature = "rocksdb"))]
+            engine_budget_bytes: None,
+            #[cfg(not(feature = "rocksdb"))]
+            rocksdb_max_open_files: None,
         }
     }
 }

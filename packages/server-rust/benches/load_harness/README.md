@@ -17,7 +17,7 @@ In-process load testing harness for TopGun's Rust server. It boots a full server
 | `--vector-dim` | u16 | 384 | Embedding dimensionality (384 = sentence-transformer default) |
 | `--vector-k` | usize | 10 | Top-k nearest neighbours for query mode |
 | `--vector-query-tasks` | usize | num_cpus | Concurrent query tasks in query mode (printed at run start) |
-| `--store` | string | `null` | Store arm the server runs on: `null` or `redb` (see [Store arms](#store-arms)) |
+| `--store` | string | `null` | Store arm the server runs on: `null` or `rocksdb` (see [Store arms](#store-arms)) |
 | `--data-dir` | path | OS temp dir | Root under which a durable arm creates its fresh run directory |
 | `--rate` | u64 | 10000 | `open_loop`: aggregate target writes/s |
 | `--batch-size` | usize | 10 | `open_loop`: ops per `OP_BATCH` |
@@ -29,7 +29,7 @@ In-process load testing harness for TopGun's Rust server. It boots a full server
 | `--sample-ms` | u64 | 1000 | `open_loop`: timeline interval |
 | `--ack-timeout-ms` | u64 | 10000 | `open_loop`: wait for a batch's answer before abandoning its connection |
 | `--max-wake-lag-ms` | u64 | 5 | `open_loop`: generator-validity bound on wake lag p99.9 |
-| `--arms` | list | the `--store` value | `open_loop` series: comma-separated arms, e.g. `null,redb` |
+| `--arms` | list | the `--store` value | `open_loop` series: comma-separated arms, e.g. `null,rocksdb` |
 | `--repeat` | u64 | 1 | `open_loop` series: repetitions of the arm list |
 
 ## Scenarios
@@ -156,15 +156,15 @@ On first ever run (placeholder zeros in baseline), the assertion emits `[no base
 `--store` selects the data store the in-process server runs on.
 
 - **`null`** (default) — `NullDataStore`. Nothing is persisted: no WAL, no write-behind buffer, no durable engine, no durable Merkle index. The eviction orchestrator runs over the in-memory record stores, as in the binary. The figure it gives (the ~37k acked writes/s in [Baseline Numbers](#baseline-numbers)) answers "what do network, dispatcher, CRDT merge and observers cost", not "what does a node sustain". CI runs only this arm.
-- **`redb`** — the path the shipped binary runs on every write: the WAL (`batched` fsync by default), the write-behind buffer, the embedded redb engine (`EngineMapDataStore<RedbKvEngine>`), the eviction orchestrator and the durable Merkle index. The WAL bootstrap (open, recovery, sequence seed) is the same library function the binary calls (`WalBootstrap::open_over_store`).
+- **`rocksdb`** — the path the shipped binary runs on every write: the WAL (`batched` fsync by default), the write-behind buffer, the embedded RocksDB engine (`EngineMapDataStore<RocksKvEngine>`), the eviction orchestrator and the durable Merkle index. The engine is sized as the binary sizes it at its defaults: a 256 MiB budget and `max_open_files = min(40 960, soft RLIMIT_NOFILE / 2)` after the same raise of the soft limit; the run's JSON records both as `config.engine_budget_bytes` and `config.rocksdb_max_open_files`, and the run's stderr ends with one `engine_peaks` line (level-0 files, pending-compaction bytes, samples with writes stopped, delayed write rate, block-cache usage, sampled every second). The arm that measured the earlier redb engine is gone: `--store redb` is refused as an unknown arm. The WAL bootstrap (open, recovery, sequence seed) is the same library function the binary calls (`WalBootstrap::open_over_store`).
 
-**Environment.** A durable arm reads the binary's variables with the binary's parse rules, fatal ones included: `TOPGUN_WAL_FSYNC_POLICY`, `TOPGUN_WRITEBEHIND_CAPACITY`, `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`, `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`, `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS`, `TOPGUN_OR_DELTA_WAL`, `TOPGUN_MAX_RAM_MB`, `TOPGUN_EVICTION_HIGH_PCT`, `TOPGUN_EVICTION_LOW_PCT`, `TOPGUN_EVICTION_INTERVAL_MS`. Every arm reads `TOPGUN_EXPIRY_SWEEP_INTERVAL_MS`, `TOPGUN_EXPIRY_SWEEP_ROWS_PER_SEC` and `TOPGUN_JOURNAL_ENABLED`, as before. All of them are parsed before anything is created, so a bad value exits with no directory left behind. The harness places the store itself and ignores `TOPGUN_WAL_DIR`, `TOPGUN_DATA_DIR`, `TOPGUN_REDB_PATH` and `STORAGE_BACKEND`; when any of them is set it prints one stderr line naming them.
+**Environment.** A durable arm reads the binary's variables with the binary's parse rules, fatal ones included: `TOPGUN_WAL_FSYNC_POLICY`, `TOPGUN_WRITEBEHIND_CAPACITY`, `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`, `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`, `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS`, `TOPGUN_OR_DELTA_WAL`, `TOPGUN_MAX_RAM_MB`, `TOPGUN_EVICTION_HIGH_PCT`, `TOPGUN_EVICTION_LOW_PCT`, `TOPGUN_EVICTION_INTERVAL_MS`. Every arm reads `TOPGUN_EXPIRY_SWEEP_INTERVAL_MS`, `TOPGUN_EXPIRY_SWEEP_ROWS_PER_SEC` and `TOPGUN_JOURNAL_ENABLED`, as before. All of them are parsed before anything is created, so a bad value exits with no directory left behind. The harness places the store itself and ignores `TOPGUN_WAL_DIR`, `TOPGUN_DATA_DIR`, `TOPGUN_REDB_PATH`, `STORAGE_BACKEND` and `TOPGUN_ENGINE_CACHE_MB`; when any of them is set it prints one stderr line naming them.
 
 **Run directory.** A durable arm creates a fresh `topgun-harness-*` directory under `--data-dir` (default: the OS temp dir; the root must exist), with `data/` and `wal/` inside, and removes it at the end of the run whatever the exit code.
 
 **Encryption is off.** The harness measures encryption at rest off. `TOPGUN_ENCRYPTION_AT_REST` set to anything but `off` exits 1 with `the harness measures encryption off; unset TOPGUN_ENCRYPTION_AT_REST`, on every arm.
 
-**Closed loop on a durable arm.** `--scenario throughput --store redb` prints one extra line `store: redb` and adds `store` and `config` (the effective configuration, below) to the throughput JSON; its throughput assertion is unchanged.
+**Closed loop on a durable arm.** `--scenario throughput --store rocksdb` prints one extra line `store: rocksdb` and adds `store` and `config` (the effective configuration, below) to the throughput JSON; its throughput assertion is unchanged.
 
 ## Open loop
 
@@ -233,11 +233,11 @@ Stdout prints a short summary: arm, target, achieved, ack p50/p99/p99.9/max, ref
 
 ```bash
 # A/A: five runs of the same arm — the noise floor
-cargo bench --bench load_harness -- --scenario open_loop --arms redb --repeat 5 \
+cargo bench --bench load_harness -- --scenario open_loop --arms rocksdb --repeat 5 \
   --rate 10000 --connections 500 --duration 600 --data-dir /mnt/nvme --json-output aa.json
 
-# ABAB: null, redb, null, redb, null, redb — interleaved so host drift spreads over both arms
-cargo bench --bench load_harness -- --scenario open_loop --arms null,redb --repeat 3 \
+# ABAB: null, rocksdb, null, rocksdb, null, rocksdb — interleaved so host drift spreads over both arms
+cargo bench --bench load_harness -- --scenario open_loop --arms null,rocksdb --repeat 3 \
   --rate 10000 --connections 500 --duration 300 --json-output abab.json
 ```
 
@@ -249,7 +249,7 @@ Series mode is active when `--repeat > 1` or `--arms` names more than one arm, a
 {
   schema_version: 1,
   kind: "open_loop_series",
-  order: ["redb", "redb", ...],
+  order: ["rocksdb", "rocksdb", ...],
   runs: [ <open-loop report> | { store, run_index, error } ],
   spread: { "<arm>": { runs, acked_ops_per_sec, ack_p50_us, ack_p99_us, ack_p999_us, ack_max_us, depth_max } },
   valid
@@ -267,7 +267,7 @@ Each spread figure is `{ min, max, mean, relative_spread }` over the arm's runs 
 - The harness installs the binary's Prometheus recorder (`init_observability`), so every metric costs what it costs in production. At the end of each run it prints the recorder's `topgun_expiry_*` and `topgun_reclamation_*` lines to stdout; they are not in the JSON report.
 - The server is the binary's single-node wiring, built by the same `topgun_server::bootstrap` functions. Differences that remain: the policy store is in memory for both arms (the binary keeps policies durable; with no policies configured both stores take the same per-operation path); a record's TTL is set by the generator on every record it sends (`--ttl-ms`), as a client asks for it; and a stop is reported as `teardown`, not as the binary's exit codes 70/71/72. A PUT-only LWW load creates no OR tombstones, so the prune task is wired but has no work.
 - Every connection sends the client's `PING` every 5 s, as the shipped client does; without it the connection reaper closes connections after 60 s. The ping shares the connection's send lock with the batches, so a batch send can wait for one small `PING` write every 5 s.
-- On macOS a WAL fsync is a full `F_FULLFSYNC` device barrier, so `redb` figures from a Mac are far slower on fsync-bound passes than on Linux and are not comparable to a Linux target host.
+- On macOS a WAL fsync is a full `F_FULLFSYNC` device barrier, so `rocksdb` figures from a Mac are far slower on fsync-bound passes than on Linux and are not comparable to a Linux target host.
 - Subscriber deliveries are not measured: every connection only writes.
 - At 10 000 writes/s the server's eviction tick sets the `null` arm's tail. Every second the tick scans every resident record. In 3 runs of 60 s on an M1 Max, ack p99 / p99.9 averaged 31.2 / 71.9 ms as shipped and 5.5 / 12.1 ms with `TOPGUN_EVICTION_INTERVAL_MS=3600000`. This is a server cost, not a harness one, and it is open as TODO-941.
 
@@ -281,19 +281,19 @@ Described here; nothing in CI or in this repository requires it. Target host: 8 
 4. Mount the NVMe and use it as `--data-dir` (e.g. `/mnt/nvme`); `ulimit -n 65536` (or higher) in the shell that runs the harness; set the CPU governor to `performance` where the host exposes one (`cpupower frequency-set -g performance`).
 5. A/A series first, to measure the noise floor of this host:
    ```bash
-   cargo bench --bench load_harness -- --scenario open_loop --arms redb --repeat 5 --duration 600 \
+   cargo bench --bench load_harness -- --scenario open_loop --arms rocksdb --repeat 5 --duration 600 \
      --rate 10000 --connections 1000 --data-dir /mnt/nvme --json-output aa.json
    ```
 6. Latency at the operating points:
    ```bash
-   cargo bench --bench load_harness -- --scenario open_loop --store redb --rate 10000 --connections 1000 \
+   cargo bench --bench load_harness -- --scenario open_loop --store rocksdb --rate 10000 --connections 1000 \
      --duration 600 --data-dir /mnt/nvme --json-output t2.json
-   cargo bench --bench load_harness -- --scenario open_loop --store redb --rate 20000 --connections 1000 \
+   cargo bench --bench load_harness -- --scenario open_loop --store rocksdb --rate 20000 --connections 1000 \
      --duration 600 --data-dir /mnt/nvme --json-output t3.json
    ```
 7. Sustained rate (≥ 4 h), with the timeline used for the plateau check of depth, WAL bytes and store bytes:
    ```bash
-   cargo bench --bench load_harness -- --scenario open_loop --store redb --rate 20000 --connections 1000 \
+   cargo bench --bench load_harness -- --scenario open_loop --store rocksdb --rate 20000 --connections 1000 \
      --duration 14400 --data-dir /mnt/nvme --json-output t1.json
    ```
 8. Locate the write-behind wall: repeat step 6 with `TOPGUN_WRITEBEHIND_CAPACITY` varied (e.g. `1000`, `10000`, `100000`) and with `--new-key-fraction` varied (`1.0`, `0.5`, `0.1`, with `--hot-keys` sized to the key set of interest).
