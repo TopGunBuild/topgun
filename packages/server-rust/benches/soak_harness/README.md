@@ -90,9 +90,10 @@ Exit code: `0` pass, `1` an assertion failed (convergence/recovery/memory/panic)
 `2` setup error, `3` a negative control failed to detect its injected fault.
 
 The WAL frame census of the report (`scan_wal_frame_sizes` in `report.rs`) reads segments
-without keys: a segment sealed under encryption at rest (`TOPGUN_ENCRYPTION_AT_REST=on`) counts
-as a segment file but as not decodable, so it contributes no frames. Run the harness with
-encryption off when the census matters.
+through the WAL's own `segment::inspect` reader, which holds no keys: when a segment is sealed
+under encryption at rest (`TOPGUN_ENCRYPTION_AT_REST=on`), or is one recovery would refuse, the
+report carries no census at all rather than one that leaves that segment out. Run the harness
+with encryption off when the census matters.
 
 ## CI coverage: a fast smoke gate + a loaded convergence gate
 
