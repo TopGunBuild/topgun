@@ -27,8 +27,8 @@ use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 use topgun_core::{fnv1a_hash, PARTITION_COUNT};
 
-use super::format::{decode_segment, FrameDecodeResult};
-use super::segment::{parse_segment_filename, SegmentHeader};
+use super::format::{decode_stream_segment, FrameDecodeResult};
+use super::segment::{inspect, parse_stream_filename, SegmentHeader, StreamSegmentHeader};
 use super::{
     decode_wal_collected, TestAbortPoint, Wal, WalEntry, WalFsyncPolicy, WalOp, WalRecovery,
     WalStorePayload, WalTestEvent, WalWriter, TEST_ABORT_AT_ENV, WAL_COLLECTED_FILE,
@@ -534,32 +534,45 @@ pub(super) fn fingerprint(dir: &Path) -> BTreeMap<String, String> {
     files
 }
 
-/// The segment files of `partition` in `wal_dir`, by first sequence.
-pub(super) fn segment_files(wal_dir: &Path, partition: u32) -> BTreeMap<u64, PathBuf> {
+/// Every stream segment file of `wal_dir`, by `stream_seq`.
+pub(super) fn stream_files(wal_dir: &Path) -> BTreeMap<u64, PathBuf> {
     let mut files = BTreeMap::new();
     for entry in std::fs::read_dir(wal_dir).expect("read the WAL dir") {
         let entry = entry.expect("dir entry");
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some((p, first_seq)) = parse_segment_filename(&name) {
-            if p == partition {
-                files.insert(first_seq, entry.path());
-            }
+        if let Some(stream_seq) = parse_stream_filename(&entry.file_name().to_string_lossy()) {
+            files.insert(stream_seq, entry.path());
         }
     }
     files
 }
 
-/// The frame sequences each segment file of `partition` holds, by the
-/// segment's first sequence, decoded from the files themselves.
+/// The sequences of the frames of `partition` each stream segment file of
+/// `wal_dir` holds, by `stream_seq`, read from the frame headers; a segment
+/// without a frame of `partition` is left out.
 pub(super) fn frames_in(wal_dir: &Path, partition: u32) -> BTreeMap<u64, Vec<u64>> {
-    segment_files(wal_dir, partition)
+    stream_files(wal_dir)
         .into_iter()
-        .map(|(first_seq, path)| {
+        .filter_map(|(stream_seq, path)| {
             let data = std::fs::read(&path).expect("read segment");
-            let (entries, _) =
-                WalWriter::decode_segment_or_refuse(&path, &data, true).expect("decode segment");
-            (first_seq, entries.iter().map(|e| e.sequence).collect())
+            let sequences: Vec<u64> = decode_stream_segment(&data, None, false)
+                .spans
+                .iter()
+                .filter_map(|span| span.address)
+                .filter(|(p, _)| *p == partition)
+                .map(|(_, sequence)| sequence)
+                .collect();
+            (!sequences.is_empty()).then_some((stream_seq, sequences))
         })
+        .collect()
+}
+
+/// The stream segment files of `wal_dir` that hold a frame of `partition`,
+/// by `stream_seq`.
+pub(super) fn segment_files(wal_dir: &Path, partition: u32) -> BTreeMap<u64, PathBuf> {
+    let files = stream_files(wal_dir);
+    frames_in(wal_dir, partition)
+        .into_keys()
+        .map(|stream_seq| (stream_seq, files[&stream_seq].clone()))
         .collect()
 }
 
@@ -1445,7 +1458,7 @@ async fn a07_segments_are_sealed_by_size_or_age_not_per_commit() {
     assert_eq!(
         segment_files(&root.wal_dir(), P).len(),
         2,
-        "8 MiB appended: sealed at the next tick, a new segment started"
+        "8 MiB appended: the writer rotated, a new segment started"
     );
 
     wb.add(MAP, &keys[209], &lww("small", 2_000), 0)
@@ -1458,11 +1471,12 @@ async fn a07_segments_are_sealed_by_size_or_age_not_per_commit() {
         2,
         "a young small segment is not sealed"
     );
+    assert_eq!(node.wal.test_sealed_paths(P).await.len(), 1);
     node.wal.test_advance_clock(SEAL_AGE);
     node.wal.test_collect_now().await;
     assert_eq!(
-        segment_files(&root.wal_dir(), P).len(),
-        3,
+        node.wal.test_sealed_paths(P).await.len(),
+        2,
         "a segment whose first frame is past its seal age is sealed"
     );
 
@@ -2033,21 +2047,11 @@ async fn a13_a_frame_at_or_below_the_engine_watermark_refuses_recovery() {
 
 /// The partitions that have at least one segment file in `wal_dir`.
 fn segment_partitions(wal_dir: &Path) -> BTreeSet<u32> {
-    std::fs::read_dir(wal_dir)
+    inspect::frames_on_disk(wal_dir)
         .expect("read the WAL dir")
-        .filter_map(|e| {
-            let name = e.expect("dir entry").file_name();
-            parse_segment_filename(&name.to_string_lossy()).map(|(p, _)| p)
-        })
+        .iter()
+        .map(|frame| frame.partition)
         .collect()
-}
-
-/// The size of every segment file of `partition`, summed.
-fn segment_bytes(wal_dir: &Path, partition: u32) -> u64 {
-    segment_files(wal_dir, partition)
-        .values()
-        .map(|path| std::fs::metadata(path).expect("segment metadata").len())
-        .sum()
 }
 
 /// The value of the series `series` (name and labels, as rendered) on a
@@ -2057,10 +2061,6 @@ fn series_value(rendered: &str, series: &str) -> Option<f64> {
         let (name, value) = line.rsplit_once(' ')?;
         (name == series).then(|| value.parse::<f64>().expect("a numeric sample"))
     })
-}
-
-fn retained_series(partition: u32) -> String {
-    format!("topgun_wal_retained_bytes{{partition=\"{partition}\"}}")
 }
 
 const RETAINED_TOTAL: &str = "topgun_wal_retained_bytes_total";
@@ -2439,12 +2439,16 @@ async fn a15_the_engine_refuses_malformed_partition_metadata() {
     );
 }
 
+/// AC7: the log writer's metrics and the retained-bytes total render from
+/// the first scrape, at zero; the total is the summed size of the stream
+/// segments on disk, sealed and active, after appends and a rotation, and it
+/// does not fall while a partition's watermark is held below a sealed
+/// segment's highest sequence of it.
 #[tokio::test(flavor = "multi_thread")]
 // The gauges hold byte counts, integers far below 2^53: exact as f64.
 #[allow(clippy::float_cmp)]
-async fn a16_the_retained_wal_bytes_gauges_render_from_the_first_scrape_and_follow_the_tick() {
-    const TEST: &str =
-        "a16_the_retained_wal_bytes_gauges_render_from_the_first_scrape_and_follow_the_tick";
+async fn r_e_retained_bytes_total_counts_the_stream() {
+    const TEST: &str = "r_e_retained_bytes_total_counts_the_stream";
     if let Some((scenario, root)) = child_spec() {
         // A process of its own: the gauges are process-wide, and no other
         // WAL may have set them before this one's first scrape.
@@ -2453,14 +2457,42 @@ async fn a16_the_retained_wal_bytes_gauges_render_from_the_first_scrape_and_foll
         let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
 
         let first = observability.render_metrics();
-        for p in 0..PARTITION_COUNT {
+        for series in [
+            RETAINED_TOTAL,
+            "topgun_wal_fsyncs_total",
+            "topgun_wal_queue_depth",
+            "topgun_wal_queue_head_age_seconds",
+            "topgun_wal_unsynced_frames",
+        ] {
             assert_eq!(
-                series_value(&first, &retained_series(p)),
+                series_value(&first, series),
                 Some(0.0),
-                "partition {p} on the first scrape"
+                "{series} on the first scrape"
             );
         }
-        assert_eq!(series_value(&first, RETAINED_TOTAL), Some(0.0));
+        for histogram in ["topgun_wal_fsync_seconds", "topgun_wal_group_frames"] {
+            assert!(
+                first.contains(&format!("# TYPE {histogram} ")),
+                "{histogram} is rendered on the first scrape:\n{first}"
+            );
+        }
+        assert!(
+            !first.contains("topgun_wal_retained_bytes{"),
+            "no per-partition retained-bytes series is rendered"
+        );
+
+        let total_on_disk = || {
+            #[allow(clippy::cast_precision_loss)]
+            let bytes = stream_files(&root.wal_dir())
+                .values()
+                .map(|path| std::fs::metadata(path).expect("segment metadata").len())
+                .sum::<u64>() as f64;
+            bytes
+        };
+        let rendered_total = || {
+            series_value(&observability.render_metrics(), RETAINED_TOTAL)
+                .expect("the total is rendered")
+        };
 
         let records: Vec<(String, RecordValue)> = keys_in(P, 3)
             .into_iter()
@@ -2470,43 +2502,33 @@ async fn a16_the_retained_wal_bytes_gauges_render_from_the_first_scrape_and_foll
         for (i, (key, value)) in records.iter().enumerate() {
             node.append(P, key, value, i as u64 + 1).await;
         }
-        let assert_follows = |what: &str| {
-            let scrape = observability.render_metrics();
-            let mut sum = 0.0;
-            for p in 0..PARTITION_COUNT {
-                let value = series_value(&scrape, &retained_series(p))
-                    .unwrap_or_else(|| panic!("{what}: partition {p} is rendered"));
-                #[allow(clippy::cast_precision_loss)]
-                let on_disk = segment_bytes(&root.wal_dir(), p) as f64;
-                assert_eq!(value, on_disk, "{what}: partition {p}");
-                sum += value;
-            }
-            assert_eq!(
-                series_value(&scrape, RETAINED_TOTAL),
-                Some(sum),
-                "{what}: the total"
-            );
-            series_value(&scrape, &retained_series(P)).unwrap_or_default()
-        };
-
         node.wal.test_collect_now().await;
-        assert!(
-            assert_follows("after a tick over appended frames") > 0.0,
-            "the appended frames are retained"
-        );
+        assert!(rendered_total() > 0.0, "the appended frames are retained");
+        assert_eq!(rendered_total(), total_on_disk(), "after appends");
 
+        // A rotation: the sealed segment and, after one more frame, the active.
         node.wal.test_advance_clock(SEAL_AGE);
         node.wal.test_collect_now().await;
-        assert!(assert_follows("after the seal") > 0.0);
-
-        node.commit(&records, &[(P, 3)]).await.expect("commit");
+        node.append(Q, "q", &lww("v", 4), 4).await;
         node.wal.test_collect_now().await;
-        // Only the empty active segment the seal rotated in is left: its header.
-        assert_eq!(
-            assert_follows("after the collection"),
-            61.0,
-            "nothing of P but the active segment's header is retained once collected"
+        assert_eq!(stream_files(&root.wal_dir()).len(), 2, "sealed and active");
+        assert_eq!(rendered_total(), total_on_disk(), "after a rotation");
+        let held = rendered_total();
+
+        // P's frames are stored, but its watermark is held below them.
+        node.commit(&records, &[(P, 3)]).await.expect("commit");
+        node.wal.test_force_tick_watermark(P, Some(2));
+        node.wal.test_collect_now().await;
+        assert!(
+            rendered_total() >= held,
+            "the total fell under a held watermark"
         );
+        assert_eq!(rendered_total(), total_on_disk(), "under a held watermark");
+
+        node.wal.test_force_tick_watermark(P, None);
+        node.wal.test_collect_now().await;
+        assert!(rendered_total() < held, "the covered segment is collected");
+        assert_eq!(rendered_total(), total_on_disk(), "after the collection");
         node.close().await;
         println!("{CHILD_RETURNED}");
         return;
@@ -3247,17 +3269,13 @@ impl Recorder {
         self.0.lock().clone()
     }
 
-    /// The salts of the segments created for `partition`, in order.
-    fn created(&self, partition: u32) -> Vec<(PathBuf, [u8; 32])> {
+    /// The stream segments created, with their salts, in order.
+    fn created(&self) -> Vec<(PathBuf, [u8; 32])> {
         self.events()
             .into_iter()
             .filter_map(|e| match e {
-                WalTestEvent::Created {
-                    partition: p,
-                    path,
-                    salt,
-                } if p == partition => Some((path, salt)),
-                _ => None,
+                WalTestEvent::Created { path, salt } => Some((path, salt)),
+                WalTestEvent::Framed { .. } => None,
             })
             .collect()
     }
@@ -3269,13 +3287,10 @@ impl Recorder {
     /// below the cut are they checked.
     fn assert_positions(&self, wal_dir: &Path, cut: &[[u8; 32]]) {
         let mut on_disk: BTreeMap<[u8; 32], Vec<u64>> = BTreeMap::new();
-        for entry in std::fs::read_dir(wal_dir).expect("WAL dir") {
-            let path = entry.expect("entry").path();
+        for path in stream_files(wal_dir).into_values() {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
-            if parse_segment_filename(&name).is_none() {
-                continue;
-            }
-            let decoded = decode_segment(&std::fs::read(&path).expect("segment"));
+            let decoded =
+                decode_stream_segment(&std::fs::read(&path).expect("segment"), None, true);
             let Some(header) = decoded.header else {
                 continue;
             };
@@ -3320,11 +3335,11 @@ impl Recorder {
     }
 }
 
-/// The header of the segment file at `path`.
-fn header_of(path: &Path) -> SegmentHeader {
-    decode_segment(&std::fs::read(path).expect("segment"))
+/// The header of the stream segment file at `path`.
+fn header_of(path: &Path) -> StreamSegmentHeader {
+    decode_stream_segment(&std::fs::read(path).expect("segment"), None, false)
         .header
-        .expect("a v2 segment")
+        .expect("a stream segment")
 }
 
 /// Appends a frame of sequence `seq` to `partition`, returning the length of
@@ -3395,42 +3410,6 @@ async fn c01_concurrent_appends_to_one_partition_take_each_frame_index_once_in_o
     node.close().await;
 }
 
-/// AC8: the first opens of a partition by an append and by the collection
-/// tick race past the installed-map miss together. The open mutex lets one
-/// create the partition's new segment; the other finds it installed.
-#[tokio::test(flavor = "multi_thread")]
-async fn c02_racing_first_opens_create_one_segment_and_lose_no_frame() {
-    let root = Root::new();
-    let recorder = Recorder::default();
-    let node = reopen(&root, &recorder);
-    append_and_len(&node, P, 1).await;
-    node.close().await;
-
-    let node = reopen(&root, &recorder);
-    let before = recorder.created(P).len();
-    node.wal
-        .test_set_open_barrier(Some(Arc::new(tokio::sync::Barrier::new(2))));
-    let wal = Arc::clone(&node.wal);
-    let append =
-        tokio::spawn(async move { wal.append(P, &store_frame("k2", &lww("v", 2), 2)).await });
-    let wal = Arc::clone(&node.wal);
-    let tick = tokio::spawn(async move { wal.test_collect_now().await });
-    append.await.expect("append task").expect("append");
-    tick.await.expect("tick task");
-    node.wal.test_set_open_barrier(None);
-    assert_eq!(
-        recorder.created(P).len() - before,
-        1,
-        "the racing opens created more than one segment"
-    );
-    assert_eq!(unapplied_seqs(&node, P).await, vec![1, 2]);
-    recorder.assert_positions(&root.wal_dir(), &[]);
-    node.close().await;
-    let node = reopen(&root, &recorder);
-    assert_eq!(unapplied_seqs(&node, P).await, vec![1, 2]);
-    node.close().await;
-}
-
 /// AC8: a segment cut at a frame boundary below its last fsync, or in the
 /// middle of a frame, is never appended to after the restart; recovery reads
 /// every frame the cut left intact and every frame appended after.
@@ -3479,76 +3458,61 @@ async fn c03_a_cut_segment_is_never_appended_to_and_no_frame_index_repeats() {
     }
 }
 
-/// AC8: a rotation whose directory fsync fails leaves its new segment behind
-/// with no frame; the next rotation of the same name replaces it, one of
-/// another name leaves it in the middle of the partition, valid and empty.
+/// AC8: a failed directory fsync after a rotation's rename is a tier (B)
+/// fail-stop, as every failed fsync of the stream is: the frames of the new
+/// segment are never acknowledged, and a restart recovers every frame that
+/// was, with no frame index of a segment taken twice.
 #[tokio::test(flavor = "multi_thread")]
-async fn c04_a_rotation_with_a_failed_directory_fsync_then_the_next_rotation() {
+async fn c04_a_rotation_with_a_failed_directory_fsync_fail_stops() {
+    let _guard = super::FAIL_STOP_TEST_LOCK.lock().await;
     let root = Root::new();
     let recorder = Recorder::default();
     let node = reopen(&root, &recorder);
-    let rotate = |fail: bool| {
-        let wal = Arc::clone(&node.wal);
-        async move {
-            if fail {
-                wal.test_fail_next_rotation_dir_fsync();
-            }
-            wal.test_advance_clock(SEAL_AGE);
-            wal.test_collect_now().await;
-        }
-    };
-
     append_and_len(&node, P, 1).await;
-    rotate(true).await;
-    let left = recorder.created(P);
-    assert_eq!(left.len(), 2, "the failed rotation created its segment");
-    assert_eq!(segment_files(&root.wal_dir(), P).len(), 2);
-    // No frame since: the next rotation targets the same name and replaces it.
-    rotate(false).await;
-    let created = recorder.created(P);
-    assert_eq!(created.len(), 3);
-    assert_eq!(created[2].0, left[1].0);
-    assert_ne!(created[2].1, left[1].1, "the replacement has a fresh salt");
-    // The rotation failed before the swap, so frame 2 goes to the first
-    // segment; this one must not be the one appended to.
-    append_and_len(&node, P, 2).await;
-    rotate(true).await;
-    append_and_len(&node, P, 3).await;
-    rotate(false).await;
-    append_and_len(&node, P, 4).await;
+    let observed = WalWriter::test_fail_stop_observations().len();
+    node.wal.test_fail_next_rotation_dir_fsync();
+    node.wal.test_advance_clock(SEAL_AGE);
+    let wal = Arc::clone(&node.wal);
+    let tick = tokio::spawn(async move { wal.test_collect_now().await });
+    wait_for("the fail-stop", || {
+        WalWriter::test_fail_stop_observations().len() > observed
+    })
+    .await;
+    assert_eq!(
+        WalWriter::test_fail_stop_observations().get(observed),
+        Some(&super::WalFailStopTier::B)
+    );
+    let refused = node
+        .wal
+        .append(P, &store_frame("k2", &lww("v", 2), 2))
+        .await;
+    assert!(refused.is_err(), "an append resolved after the fail-stop");
+    tick.await.expect("the tick");
     node.close().await;
 
-    let files = segment_files(&root.wal_dir(), P);
-    let empty: Vec<_> = files
-        .values()
-        .filter(|path| decode_segment(&std::fs::read(path).unwrap()).frames == 0)
-        .collect();
-    assert!(
-        !empty.is_empty(),
-        "a failed rotation of another name left an empty segment: {files:?}"
-    );
     let node = reopen(&root, &recorder);
-    assert_eq!(unapplied_seqs(&node, P).await, vec![1, 2, 3, 4]);
+    assert_eq!(unapplied_seqs(&node, P).await, vec![1]);
     recorder.assert_positions(&root.wal_dir(), &[]);
     node.close().await;
 }
 
-/// AC9: a last segment that holds no intact frame — cut to 0 bytes, a
-/// header only, a torn first frame — is replaced under its name with a new
-/// salt, and its replacement starts with its header and takes frames.
+/// AC9: a newest stream segment that holds no intact frame — cut inside its
+/// header, to its header, or inside its first frame — is never appended to:
+/// one shorter than its header is removed and its number reused with a fresh
+/// salt, the others are cut to their header and a new segment follows them.
 #[tokio::test(flavor = "multi_thread")]
-async fn c05_a_last_segment_without_an_intact_frame_is_replaced_under_its_name() {
-    for case in ["empty", "header only", "torn first frame"] {
+async fn c05_a_newest_segment_without_an_intact_frame_is_not_appended_to() {
+    for case in ["short header", "header only", "torn first frame"] {
         let root = Root::new();
         let recorder = Recorder::default();
         let node = reopen(&root, &recorder);
-        let header_only = append_and_len(&node, P, 1).await;
+        let one_frame = append_and_len(&node, P, 1).await;
         node.close().await;
-        let (path, salt) = recorder.created(P).remove(0);
+        let (path, salt) = recorder.created().remove(0);
         let len = match case {
-            "empty" => 0,
-            "header only" => 61,
-            _ => header_only - 3,
+            "short header" => 20,
+            "header only" => super::segment::STREAM_HEADER_LEN as u64,
+            _ => one_frame - 3,
         };
         std::fs::OpenOptions::new()
             .write(true)
@@ -3560,15 +3524,25 @@ async fn c05_a_last_segment_without_an_intact_frame_is_replaced_under_its_name()
         let node = reopen(&root, &recorder);
         append_and_len(&node, P, 2).await;
         node.close().await;
-        let created = recorder.created(P);
+        let created = recorder.created();
         assert_eq!(created.len(), 2, "{case}");
-        assert_eq!(created[1].0, path, "{case}: replaced under its name");
         assert_ne!(created[1].1, salt, "{case}: with a fresh salt");
-        assert_eq!(segment_files(&root.wal_dir(), P).len(), 1, "{case}");
-        let decoded = decode_segment(&std::fs::read(&path).unwrap());
+        if case == "short header" {
+            assert_eq!(created[1].0, path, "{case}: its number reused");
+            assert_eq!(stream_files(&root.wal_dir()).len(), 1, "{case}");
+        } else {
+            assert_ne!(created[1].0, path, "{case}: never appended to");
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                super::segment::STREAM_HEADER_LEN as u64,
+                "{case}: cut to its header"
+            );
+        }
+        let decoded = decode_stream_segment(&std::fs::read(&created[1].0).unwrap(), None, false);
         assert_eq!(decoded.header.map(|h| h.salt), Some(created[1].1), "{case}");
         assert_eq!(
-            decoded.frames, 1,
+            decoded.spans.len(),
+            1,
             "{case}: the header comes before the first frame"
         );
         let node = reopen(&root, &recorder);
@@ -3596,8 +3570,8 @@ fn c06_a_crash_before_the_rename_of_a_created_segment_leaves_an_openable_directo
     for existing in [false, true] {
         let root = Root::new();
         if existing {
-            // A previous process left a header-only last segment: the child's
-            // open replaces it.
+            // A previous process left a header-only newest segment: the
+            // child's first segment follows it.
             block_on(async {
                 let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
                 append_and_len(&node, P, 1).await;
@@ -3611,7 +3585,7 @@ fn c06_a_crash_before_the_rename_of_a_created_segment_leaves_an_openable_directo
                 .write(true)
                 .open(&path)
                 .unwrap()
-                .set_len(61)
+                .set_len(super::segment::STREAM_HEADER_LEN as u64)
                 .unwrap();
         }
         std::fs::create_dir_all(root.wal_dir()).unwrap();
@@ -3653,9 +3627,10 @@ fn c06_a_crash_before_the_rename_of_a_created_segment_leaves_an_openable_directo
 
 /// AC11: a WAL directory of v1 segments (headerless, legacy single file
 /// included) with un-applied frames is replayed; every segment created
-/// afterwards is v2; collection removes the v1 segments once covered.
+/// afterwards is a stream segment; collection removes the v1 segments once
+/// covered.
 #[tokio::test(flavor = "multi_thread")]
-async fn c07_v1_segments_are_replayed_and_collected_and_only_v2_segments_are_created() {
+async fn c07_v1_segments_are_replayed_and_collected_and_only_stream_segments_are_created() {
     let root = Root::new();
     std::fs::create_dir_all(root.wal_dir()).unwrap();
     let keys = keys_in(P, 3);
@@ -3706,18 +3681,24 @@ async fn c07_v1_segments_are_replayed_and_collected_and_only_v2_segments_are_cre
         node.wal.test_advance_clock(SEAL_AGE);
         node.wal.test_collect_now().await;
     }
-    let after: BTreeSet<PathBuf> = std::fs::read_dir(root.wal_dir())
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| parse_segment_filename(&p.file_name().unwrap().to_string_lossy()).is_some())
+    let after: BTreeSet<PathBuf> = inspect::segment_paths(&root.wal_dir())
+        .into_iter()
         .collect();
     assert!(
         after.is_disjoint(&v1_files),
         "a covered v1 segment remains: {after:?}"
     );
+    assert!(!after.is_empty(), "the new writes are on disk");
     for path in &after {
-        let bytes = std::fs::read(path).unwrap();
-        assert!(bytes.starts_with(b"TGWS"), "{} is not v2", path.display());
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            parse_stream_filename(&name).is_some(),
+            "{name} is not a stream segment"
+        );
+        assert!(
+            header_of(path).stream_seq == parse_stream_filename(&name).unwrap(),
+            "{name} starts with its stream header"
+        );
     }
     stop_write_behind(wb).await;
     node.close().await;
@@ -3827,7 +3808,7 @@ async fn c09_a_drained_stop_unlinks_every_covered_segment_and_keeps_one_above_th
     let rows = rows_of(&node.engine.dump());
     node.close().await;
     assert!(
-        segment_partitions(&root.wal_dir()).is_empty(),
+        inspect::segment_paths(&root.wal_dir()).is_empty(),
         "a segment was left: {:?}",
         std::fs::read_dir(root.wal_dir())
             .unwrap()
@@ -3852,13 +3833,16 @@ async fn c09_a_drained_stop_unlinks_every_covered_segment_and_keeps_one_above_th
     // A frame above the watermark: its segment stays; the covered ones go.
     let root = Root::new();
     let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
-    node.append(P, "k", &lww("v", 1), 1).await;
-    node.append(Q, "k", &lww("v", 2), 2).await;
-    node.commit(&[], &[(Q, 2)]).await.expect("commit");
+    node.append(Q, "k", &lww("v", 1), 1).await;
+    node.wal.test_advance_clock(SEAL_AGE);
+    node.wal.test_collect_now().await;
+    node.append(P, "k", &lww("v", 2), 2).await;
+    node.commit(&[], &[(Q, 1)]).await.expect("commit");
     assert_eq!(node.wal.finish(true).await.expect("finish"), 2);
     node.close().await;
-    assert_eq!(frames_on_disk(&root.wal_dir(), P), BTreeSet::from([1]));
+    assert_eq!(frames_on_disk(&root.wal_dir(), P), BTreeSet::from([2]));
     assert!(segment_files(&root.wal_dir(), Q).is_empty());
+    assert_eq!(stream_files(&root.wal_dir()).len(), 1);
 }
 
 /// AC18: a write parked between its lifecycle check and its WAL append while
@@ -3909,8 +3893,8 @@ async fn c10_an_append_after_finish_is_refused_and_touches_no_file() {
 
 /// R4.2 at the edges: a 0-byte segment anywhere is an empty segment; a
 /// non-last file of 1–3 bytes or a non-last v2 file shorter than its header
-/// is refused by name; a last one is a segment with no intact frame,
-/// replaced under its name.
+/// is refused by name; a last one is a segment with no intact frame, read as
+/// empty and never written again — new frames go to the stream.
 #[tokio::test(flavor = "multi_thread")]
 async fn c11_short_segment_files_by_position() {
     use super::segment::format_segment_filename;
@@ -3961,7 +3945,8 @@ async fn c11_short_segment_files_by_position() {
         assert!(error.contains(&name), "{case}: {error}");
         node.close().await;
 
-        // Last: replaced under its name, and takes frames.
+        // Last: tolerated, never written again; the next frame is a stream
+        // frame.
         let root = Root::new();
         std::fs::create_dir_all(root.wal_dir()).unwrap();
         let path = root.wal_dir().join(&name);
@@ -3969,12 +3954,13 @@ async fn c11_short_segment_files_by_position() {
         let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
         node.recover().await.expect(case);
         append_and_len(&node, P, 2).await;
-        assert_eq!(segment_files(&root.wal_dir(), P).len(), 1, "{case}");
-        let decoded = decode_segment(&std::fs::read(&path).unwrap());
-        assert!(
-            decoded.header.is_some() && decoded.frames == 1,
-            "{case}: replaced"
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "{case}: never written"
         );
+        assert_eq!(segment_files(&root.wal_dir(), P).len(), 1, "{case}");
+        assert_eq!(unapplied_seqs(&node, P).await, vec![2], "{case}");
         node.close().await;
     }
 }
@@ -4009,6 +3995,8 @@ async fn c12_finish_unlinks_below_the_store_read_and_keeps_what_it_cannot_unlink
     let root = Root::new();
     let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode open");
     node.append(P, "k", &lww("v", 1), 1).await;
+    node.wal.test_advance_clock(SEAL_AGE);
+    node.wal.test_collect_now().await;
     node.append(Q, "k", &lww("v", 2), 2).await;
     node.commit(&[], &[(P, 1), (Q, 2)]).await.expect("commit");
     let refused = segment_files(&root.wal_dir(), P)

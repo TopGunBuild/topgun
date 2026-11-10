@@ -3,18 +3,21 @@
 //! Defines the frozen contract and implements the production file-backed
 //! writer (`WalWriter`) and startup recovery (`WalRecovery`).
 //!
-//! The WAL keeps a sequence per partition. This writer appends to per-partition
-//! segment files under a configured `wal_dir`; recovery and collection also
-//! read stream segments (`stream-{stream_seq:016}.log`), one node-wide log whose
-//! frames carry their partition and sequence. `WalWriter` implements the `Wal`
-//! trait; `WalRecovery` replays un-applied entries through the inner store on
-//! startup.
+//! The WAL keeps a sequence per partition, and writes the frames of every
+//! partition into one node-wide log: stream segments
+//! (`stream-{stream_seq:016}.log`) under a configured `wal_dir`, whose frames
+//! carry their partition and sequence, written by one log-writer thread and
+//! fsynced by one syncer thread (see `log_writer`). Recovery and collection
+//! also read the per-partition segments of earlier versions, which nothing
+//! writes any more. `WalWriter` implements the `Wal` trait; `WalRecovery`
+//! replays un-applied entries through the inner store on startup.
 //!
 //! A WAL is opened over a store (`WalWriter::open_over_store`) that keeps the
 //! applied watermark, committed with the data it covers. The `.applied` files
 //! are only the rollback hints a clean stop writes for an older binary.
 
 pub mod format;
+pub(crate) mod log_writer;
 pub mod segment;
 
 use std::collections::BTreeMap;
@@ -44,14 +47,16 @@ use crate::storage::sealing::Keyring;
 /// Controls how aggressively the WAL writer calls `fsync` after writing frames.
 ///
 /// Choosing the right policy is a crash-safety vs. throughput tradeoff:
-/// - `PerOp` fsyncs every frame *before* the write acks, so an acked write is
-///   durable across an unclean `kill -9` (acked == durable). Highest per-write
-///   latency: on macOS `sync_data` is a full `F_FULLFSYNC` device barrier.
-/// - `Batched` (the default) acks after the frame is appended but fsyncs only on
-///   a ~10ms group-commit timer or a 100-frame flush. Acked writes inside that
-///   window are NOT durable under an unclean `kill -9`. This is the
-///   throughput-favouring default for the single-node demo tier; set `PerOp`
-///   when acked-implies-durable is required.
+/// - `PerOp` acks a write only once an fsync that covers its frame returned,
+///   so an acked write is durable across an unclean `kill -9` (acked ==
+///   durable). Every frame written before an fsync starts shares it, so
+///   concurrent writes share one fsync. Highest per-write latency: on macOS
+///   `sync_data` is a full `F_FULLFSYNC` device barrier.
+/// - `Batched` (the default) acks after the frame is written but fsyncs only
+///   once the oldest unsynced frame is ~10 ms old or 100 frames are unsynced,
+///   for the whole node. Acked writes inside that window are NOT durable under
+///   an unclean `kill -9`. This is the throughput-favouring default for the
+///   single-node demo tier; set `PerOp` when acked-implies-durable is required.
 /// - `None` skips fsync entirely — useful for tests and throughput benchmarks
 ///   where crash-safety is not required.
 ///
@@ -63,8 +68,8 @@ pub enum WalFsyncPolicy {
     /// Call `fsync` after every appended frame, before the write acks. Acked ==
     /// durable under `kill -9`. Highest latency.
     PerOp,
-    /// Default. Ack after append; fsync on a ~10ms group-commit timer / 100-frame
-    /// flush. Highest throughput, but acked writes in the group-commit window are
+    /// Default. Ack after append; fsync once the oldest unsynced frame is ~10 ms
+    /// old or 100 frames are unsynced. Highest throughput, but acked writes in the group-commit window are
     /// NOT durable under an unclean shutdown.
     #[default]
     Batched,
@@ -419,8 +424,7 @@ pub trait Wal: Send + Sync {
     /// Appends a `WalEntry` to the log for the given partition.
     ///
     /// The implementation is responsible for encoding the entry, writing it to
-    /// the appropriate per-partition file, and fsyncing according to the
-    /// configured `WalFsyncPolicy`. Returns an error if the write or fsync
+    /// the log, and fsyncing according to the configured `WalFsyncPolicy`. Returns an error if the write or fsync
     /// fails; the caller should NOT ack the client until this returns `Ok`.
     async fn append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()>;
 
@@ -485,69 +489,18 @@ pub trait Wal: Send + Sync {
 // WalWriter — production file-backed implementation
 // ===========================================================================
 
-use crate::storage::wal::segment::{Segment, SegmentCipher, SegmentHeader};
+use crate::storage::wal::segment::SegmentCipher;
 
-/// All segments of one partition, with the active segment and the sealed set
-/// guarded by **separate** locks.
-///
-/// Split-locking is the structural guard for the lock-discipline invariant:
-/// `append` takes only `active`, GC takes only `sealed`, so deletion of a sealed
-/// segment never blocks an in-flight append to the active segment. Rotation is
-/// the only operation that briefly holds both (active for the fsync-old →
-/// create-new → fsync-dir → swap, sealed only for the push of the frozen segment).
-struct PartitionHandle {
-    /// The append-target segment. Appends mutate only this, under this lock.
-    active: AsyncMutex<Segment>,
-    /// Sealed, immutable segments in ascending `first_seq` order (oldest at the
-    /// front). GC reclaims a watermark-covered prefix from the front.
-    sealed: AsyncMutex<Vec<Segment>>,
-    /// Bytes appended to the active segment, so the collection tick can seal
-    /// it by size. Changed only under the `active` lock.
-    active_bytes: AtomicU64,
-    /// When the first frame of the active segment was appended, so the
-    /// collection tick can seal it by age. Changed only under the `active`
-    /// lock.
-    active_first_append: std::sync::Mutex<Option<std::time::Instant>>,
-    /// The key of the sealed active segment, with the header it was derived
-    /// from, so an append derives it once per segment. Used only under the
-    /// `active` lock.
-    active_key: std::sync::Mutex<Option<(SegmentHeader, crate::storage::sealing::SegmentKey)>>,
-}
-
-impl PartitionHandle {
-    /// Counts a frame of `len` bytes appended to the active segment. Called
-    /// under the `active` lock.
-    fn note_append(&self, len: usize) {
-        if self.active_bytes.fetch_add(len as u64, Ordering::Relaxed) == 0 {
-            *self
-                .active_first_append
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                Some(std::time::Instant::now());
-        }
-    }
-
-    /// Forgets the counts of a segment that was just sealed. Called under the
-    /// `active` lock.
-    fn note_rotation(&self) {
-        self.active_bytes.store(0, Ordering::Relaxed);
-        *self
-            .active_first_append
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    }
-}
-
-/// The collection tick of a WAL: the only code that seals or unlinks a
-/// segment.
+/// The collection tick of a WAL: the only code that unlinks a segment, and
+/// the one that asks the writer to rotate a segment by age.
 struct Collection {
     /// The collected-up-to value of every partition, as `wal-collected`
     /// holds it. Its lock is the collection lock: a tick runs under it, so
     /// two ticks never interleave, and `finish` takes it to wait for a
     /// running tick to end.
     collected: AsyncMutex<Box<[u64]>>,
-    /// Set by `finish`: no tick seals, writes or unlinks anything afterwards,
-    /// and the task ends at its next wake.
+    /// Set by `finish`: no tick rotates, writes or unlinks anything
+    /// afterwards, and the task ends at its next wake.
     closed: AtomicBool,
     /// Wakes the tick task before its interval has passed.
     wake: Arc<tokio::sync::Notify>,
@@ -557,21 +510,6 @@ struct Collection {
 
 /// How often the collection tick runs.
 const COLLECTION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-/// Bytes appended to an active segment that make the tick seal it.
-const SEAL_BYTES: u64 = 8 * 1024 * 1024;
-/// Age of an active segment's first frame that makes the tick seal it, before
-/// the partition's offset (see `seal_age`).
-const SEAL_AGE: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Age of `partition`'s first frame that makes the tick seal it: `SEAL_AGE`
-/// plus an offset that spreads the partitions evenly over one more `SEAL_AGE`,
-/// so every partition seals between 30 and 60 s. Partitions whose first frames
-/// arrive together would otherwise all seal in one tick, and each seal fsyncs
-/// under the partition's append lock: on a device whose fsync flushes its whole
-/// cache, that is hundreds of flushes back to back while appends wait.
-fn seal_age(partition: u32) -> std::time::Duration {
-    SEAL_AGE + SEAL_AGE * partition / PARTITION_COUNT
-}
 
 /// File name of the collected-up-to record of a store-mode WAL directory.
 pub(crate) const WAL_COLLECTED_FILE: &str = "wal-collected";
@@ -675,41 +613,41 @@ fn stream_segment_covered(summary: &segment::SegmentSummary, bound: impl Fn(u32)
 
 /// Production append-only WAL writer.
 ///
-/// Each partition's log is split into a sequence of segment files named
-/// `partition-{id:03}-{first_seq:020}.log` (see `segment`): appends always target
-/// the single active segment. It is opened over a store
+/// Every partition's frames go into one node-wide log stream: stream segment
+/// files named `stream-{stream_seq:016}.log` (see `segment`), written by one
+/// log-writer thread that owns the active segment and fsynced by one syncer
+/// thread (see `log_writer`); an append encodes its entry and hands it to the
+/// writer over a bounded channel. It is opened over a store
 /// ([`WalWriter::open_over_store`]) that keeps the applied watermark: the
 /// watermark of each partition is a row of that store, committed in the same
 /// durable batch as the records it covers, so it can never be durable without
 /// them. `mark_applied` only notes in memory that such a commit returned;
-/// sealing and collection belong to the collection tick. The WAL directory
-/// holds no watermark of its own, only `wal-collected`, the highest sequence of
-/// each partition whose segments were unlinked — the check at open that the
-/// data directory is not older than the WAL directory. The `.applied` files are
+/// collection belongs to the collection tick. The WAL directory holds no
+/// watermark of its own, only `wal-collected`, the highest sequence of each
+/// partition whose segments were unlinked — the check at open that the data
+/// directory is not older than the WAL directory. The `.applied` files are
 /// rollback hints for older binaries, written at a stop that exits 0; this
-/// binary reads one only when the open imports the sidecars of an older binary,
-/// and deletes them at every open.
+/// binary reads one only when the open imports the sidecars of an older
+/// binary, and deletes them at every open.
 ///
-/// Thread safety: each partition is guarded by its own `PartitionHandle` (split
-/// active/sealed locks) so concurrent appends to different partitions do not block
-/// each other and GC never serializes against appends.
+/// The per-partition segments of earlier versions
+/// (`partition-{id:03}-{first_seq:020}.log`) are read and collected, never
+/// written.
+///
+/// Thread safety: no append takes a lock the writer holds; collection takes
+/// only the stream's summaries, which the syncer extends.
 pub struct WalWriter {
     wal_dir: PathBuf,
-    policy: WalFsyncPolicy,
-    /// Per-partition segment handles, lazily opened on first append/discovery.
-    partitions: AsyncMutex<HashMap<u32, Arc<PartitionHandle>>>,
-    /// Serializes the slow path of `handle`: one open per partition creates
-    /// files, every later one finds its handle installed (`TG-ENC-005`). Lock
-    /// order: the collection lock, then this, then a partition's active lock.
-    open: AsyncMutex<()>,
-    /// Set by a `finish` that writes rollback hints, under the open mutex and
-    /// every installed active lock: from then on an append is refused before
-    /// it frames anything, and no partition is opened. Separate from
+    /// Set by a `finish` that writes rollback hints: from then on an append
+    /// is refused before it frames anything. Separate from
     /// `collection.closed`, which every `finish` sets.
     appends_closed: AtomicBool,
-    /// Batched-commit group-commit timer: shared notifier woken every ~10 ms.
-    /// When `policy == Batched`, the writer also fsyncs after every 100 ops.
-    batch_flush_tx: tokio::sync::watch::Sender<()>,
+    /// Whether the payloads are sealed, i.e. the keyring has an active key:
+    /// fixed for the life of the process, so the payload limit an append
+    /// checks is the one the writer frames under.
+    sealed_payloads: bool,
+    /// The log writer and the syncer.
+    log: log_writer::LogStream,
     /// The store that holds the watermark. Weak, so the WAL never keeps the
     /// store alive.
     store: std::sync::Weak<dyn MapDataStore>,
@@ -725,9 +663,13 @@ pub struct WalWriter {
     collection: Collection,
     /// The sealed stream segments on disk, by `stream_seq`, each with the
     /// highest sequence of every partition it holds a frame of. Built from
-    /// the frame headers at open; only collection removes an entry, after its
-    /// file is gone.
-    stream: std::sync::Mutex<BTreeMap<u64, Arc<StreamSegment>>>,
+    /// the frame headers at open and extended by the syncer as it seals a
+    /// segment; only collection removes an entry, after its file is gone.
+    stream: Arc<std::sync::Mutex<BTreeMap<u64, Arc<StreamSegment>>>>,
+    /// The highest sequence of every per-partition segment collection has
+    /// read, by path. Such a segment is never written again, so it is read
+    /// once.
+    legacy_max_seq: std::sync::Mutex<HashMap<PathBuf, u64>>,
     /// Stream frames read back by their location, so a test can tell that a
     /// partition's read touches no other partition's frame.
     #[cfg(test)]
@@ -744,31 +686,9 @@ pub struct WalWriter {
     /// watermark, so a test can hand recovery a frame at or below it.
     #[cfg(test)]
     test_unapplied_floor_override: std::sync::Mutex<HashMap<u32, u64>>,
-    /// Called with `(path, length)` after every successful fsync of an active
-    /// segment, still under that segment's lock, so a crash test learns the
-    /// last length of each file that a power loss would keep.
-    #[cfg(test)]
-    #[allow(clippy::type_complexity)]
-    test_fsync_observer: std::sync::Mutex<Option<Arc<dyn Fn(&Path, u64) + Send + Sync>>>,
-    /// While set, the batched policy fsyncs no frame: the group-commit timer
-    /// skips its round and the 100-frame fsync does not fire.
-    #[cfg(test)]
-    test_hold_batched_fsync: AtomicBool,
-    /// Sealed segments the collection tick fails to unlink.
+    /// Segments the collection tick fails to unlink.
     #[cfg(test)]
     test_refused_unlinks: std::sync::Mutex<HashSet<PathBuf>>,
-    /// Told of every segment created and every frame framed.
-    #[cfg(test)]
-    #[allow(clippy::type_complexity)]
-    test_observer: std::sync::Mutex<Option<Arc<dyn Fn(WalTestEvent) + Send + Sync>>>,
-    /// Waited on by every open that missed the installed map, before it takes
-    /// the open mutex.
-    #[cfg(test)]
-    test_open_barrier: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Makes the next rotation fail as if the directory fsync after the new
-    /// segment's rename had failed.
-    #[cfg(test)]
-    test_fail_rotation_dir_fsync: AtomicBool,
     /// Parks the next append to a partition at the entry of `append`.
     #[cfg(test)]
     test_append_park: std::sync::Mutex<Option<TestAppendPark>>,
@@ -823,41 +743,28 @@ pub(crate) const WAL_WATERMARK_LAG_GAUGE: &str = "topgun_wal_applied_watermark_l
 /// Sealed WAL segments retained rather than reclaimed, by reason.
 pub(crate) const WAL_GC_SKIPPED_COUNTER: &str = "topgun_wal_gc_skipped_total";
 
-/// Bytes of WAL segments a partition retains, by `partition`.
-pub(crate) const WAL_RETAINED_BYTES_GAUGE: &str = "topgun_wal_retained_bytes";
-
-/// Bytes of WAL segments all partitions retain.
+/// Bytes of WAL segments the node retains: the sealed stream segments, the
+/// active one, and every per-partition segment not yet collected.
 pub(crate) const WAL_RETAINED_BYTES_TOTAL_GAUGE: &str = "topgun_wal_retained_bytes_total";
 
 /// Why a collection tick collected nothing, as the `reason` label on the
 /// skipped-GC counter: the store's watermarks could not be read.
 const GC_SKIP_REASON_READ_FAILED: &str = "watermark_read_failed";
 
-/// Sets the retained-bytes gauge of every partition, 0 where `by_partition`
-/// has none, and their total.
+/// Sets the retained-bytes gauge to the bytes of every segment file of
+/// `wal_dir`, read from the directory.
 ///
-/// Every partition is set, so each series renders from the first scrape on
-/// rather than appearing only once its partition holds a segment.
-fn set_retained_gauges(by_partition: &BTreeMap<u32, u64>) {
-    metrics::describe_gauge!(
-        WAL_RETAINED_BYTES_GAUGE,
-        "Bytes of WAL segments a partition retains: its sealed segments and its active one"
-    );
+/// Bytes belong to segments, not partitions: a stream segment holds the
+/// frames of many, so the node-wide total is the one figure.
+fn set_retained_gauge(wal_dir: &Path) {
     metrics::describe_gauge!(
         WAL_RETAINED_BYTES_TOTAL_GAUGE,
-        "Bytes of WAL segments all partitions retain"
+        "Bytes of WAL segments the node retains"
     );
-    let mut total = 0u64;
-    for partition in 0..PARTITION_COUNT {
-        let bytes = by_partition.get(&partition).copied().unwrap_or(0);
-        total = total.saturating_add(bytes);
-        // Precision loss only past 2^53 bytes, far beyond any disk.
-        #[allow(clippy::cast_precision_loss)]
-        metrics::gauge!(WAL_RETAINED_BYTES_GAUGE, "partition" => partition.to_string())
-            .set(bytes as f64);
-    }
+    // Precision loss only past 2^53 bytes, far beyond any disk.
     #[allow(clippy::cast_precision_loss)]
-    metrics::gauge!(WAL_RETAINED_BYTES_TOTAL_GAUGE).set(total as f64);
+    metrics::gauge!(WAL_RETAINED_BYTES_TOTAL_GAUGE)
+        .set(segment::inspect::bytes_on_disk(wal_dir) as f64);
 }
 
 /// Registers HELP/TYPE metadata for the two WAL-watermark metrics.
@@ -919,9 +826,10 @@ impl WalWriter {
     /// 5. import the sidecar values, with the marker, in one durable batch;
     /// 6. create `wal-collected`, all zero, when absent;
     /// 7. delete every sidecar, sidecar temporary file and segment temporary
-    ///    file;
-    /// 8. hold the watermarks in memory, set the retained-bytes gauges and
-    ///    start the collection tick.
+    ///    file, and cut a torn tail off the newest stream segment, which the
+    ///    next segment makes non-newest;
+    /// 8. hold the watermarks in memory, start the log writer and its syncer,
+    ///    set the retained-bytes gauge and start the collection tick.
     ///
     /// Every refusal returns before anything is written to the store or to
     /// the WAL directory.
@@ -989,7 +897,7 @@ impl WalWriter {
             vec![0; PARTITION_COUNT as usize]
         };
         Self::refuse_collected_above_watermark(&wal_dir, &effective, &collected)?;
-        let stream = Self::stream_summaries(&wal_dir)?;
+        let mut stream = Self::stream_summaries(&wal_dir)?;
 
         if !watermarks.imported {
             let rows: Vec<(u32, u64)> = (0..PARTITION_COUNT)
@@ -1006,6 +914,7 @@ impl WalWriter {
         }
 
         Self::delete_sidecars(&wal_dir)?;
+        Self::cut_torn_stream_tail(&wal_dir, &mut stream)?;
 
         let durable: Box<[AtomicU64]> = effective.into_iter().map(AtomicU64::new).collect();
         let writer = Self::build(
@@ -1016,20 +925,19 @@ impl WalWriter {
             durable,
             collected.into_boxed_slice(),
             stream,
-        );
-        writer.start_collection()?;
+        )?;
+        writer.start_collection();
         Ok(writer)
     }
 
-    /// Sets the retained-bytes gauges of every partition and starts the
-    /// collection tick.
+    /// Sets the retained-bytes gauge and starts the collection tick.
     ///
-    /// The task holds only weak references, as the batched timer does: the
-    /// WAL and the store it reaches through the WAL stay droppable, and the
-    /// task ends at its first wake after either is gone. Its first tick runs
-    /// one interval after the open, not at once.
-    fn start_collection(self: &Arc<Self>) -> anyhow::Result<()> {
-        set_retained_gauges(&Self::segment_bytes_by_partition(&self.wal_dir)?);
+    /// The task holds only weak references: the WAL and the store it reaches
+    /// through the WAL stay droppable, and the task ends at its first wake
+    /// after either is gone. Its first tick runs one interval after the open,
+    /// not at once.
+    fn start_collection(self: &Arc<Self>) {
+        set_retained_gauge(&self.wal_dir);
         let writer = Arc::downgrade(self);
         let wake = Arc::clone(&self.collection.wake);
         let task = tokio::spawn(async move {
@@ -1049,31 +957,6 @@ impl WalWriter {
         // Set once: this is the only place that spawns the task, and it runs
         // once per writer.
         let _ = self.collection.task.set(task);
-        Ok(())
-    }
-
-    /// The summed size of every segment file of each partition that has one.
-    ///
-    /// Read from the directory, so a partition whose segments this process
-    /// has not opened yet — after a restart — is counted and collected too.
-    fn segment_bytes_by_partition(wal_dir: &Path) -> anyhow::Result<BTreeMap<u32, u64>> {
-        let mut bytes: BTreeMap<u32, u64> = BTreeMap::new();
-        let read_dir = std::fs::read_dir(wal_dir)
-            .map_err(|e| anyhow::anyhow!("Cannot read WAL dir {}: {e}", wal_dir.display()))?;
-        for entry in read_dir {
-            let entry = entry
-                .map_err(|e| anyhow::anyhow!("Cannot read WAL dir {}: {e}", wal_dir.display()))?;
-            let Some((partition, _)) =
-                segment::parse_segment_filename(&entry.file_name().to_string_lossy())
-            else {
-                continue;
-            };
-            // A segment unlinked between the listing and this read retains
-            // nothing.
-            let len = entry.metadata().map_or(0, |m| m.len());
-            *bytes.entry(partition).or_default() += len;
-        }
-        Ok(bytes)
     }
 
     /// Creates `wal_dir` if it does not exist.
@@ -1181,10 +1064,11 @@ impl WalWriter {
     /// Deletes every `.applied` sidecar, sidecar temporary file and segment
     /// temporary file of `wal_dir`, then makes the deletions durable.
     ///
-    /// Run at every store-mode open, also once the import marker is present:
-    /// a crash between the import and this step leaves them behind, and a
-    /// sidecar left in place would be read by an older binary after a
-    /// rollback as a watermark this binary no longer keeps.
+    /// Run at every store-mode open, also once the import marker is present,
+    /// before recovery reads any segment: a crash between the import and this
+    /// step leaves them behind, and a sidecar left in place would be read by
+    /// an older binary after a rollback as a watermark this binary no longer
+    /// keeps.
     fn delete_sidecars(wal_dir: &Path) -> anyhow::Result<()> {
         let read_dir = std::fs::read_dir(wal_dir)
             .map_err(|e| anyhow::anyhow!("Cannot read WAL dir {}: {e}", wal_dir.display()))?;
@@ -1194,14 +1078,18 @@ impl WalWriter {
                 .map_err(|e| anyhow::anyhow!("Cannot read WAL dir {}: {e}", wal_dir.display()))?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            // A `.log.tmp` is a segment whose creation a crash cut before its
-            // rename: it never held a frame, and deleting it before any
-            // partition is opened keeps it from being taken for a segment.
-            if !(name.starts_with("partition-")
+            // A `.log.tmp` is a segment a crash cut before its rename. A
+            // stream one may hold frames — the writer writes into the next
+            // segment before the syncer renames it — but none of them was
+            // acknowledged: no frame resolves before its segment is published
+            // open, which follows the rename. Its frames are not the log's.
+            let sidecar = name.starts_with("partition-")
                 && (name.ends_with(".applied")
                     || name.ends_with(".applied.tmp")
-                    || name.ends_with(".log.tmp")))
-            {
+                    || name.ends_with(".log.tmp"));
+            let stream_tmp = name.starts_with(segment::STREAM_FILE_PREFIX)
+                && name.ends_with(log_writer::STREAM_TMP_SUFFIX);
+            if !(sidecar || stream_tmp) {
                 continue;
             }
             let path = entry.path();
@@ -1219,8 +1107,65 @@ impl WalWriter {
         Ok(())
     }
 
-    /// Constructs the writer and, under the batched policy, its group-commit
-    /// timer.
+    /// Cuts the newest stream segment to its intact prefix, durably, or
+    /// removes it when it is shorter than its header.
+    ///
+    /// A torn tail is tolerated only on the newest stream segment, and this
+    /// process's first segment makes it non-newest: left in place, the torn
+    /// bytes would be corruption that refuses the next start.
+    fn cut_torn_stream_tail(
+        wal_dir: &Path,
+        stream: &mut BTreeMap<u64, Arc<StreamSegment>>,
+    ) -> anyhow::Result<()> {
+        let Some((&stream_seq, newest)) = stream.iter().next_back() else {
+            return Ok(());
+        };
+        let path = newest.path.clone();
+        let len = std::fs::metadata(&path)
+            .map_err(|e| anyhow::anyhow!("Cannot read WAL segment {}: {e}", path.display()))?
+            .len();
+        if newest.header.is_none() {
+            tracing::warn!(path = ?path, len, "WAL newest stream segment holds no header; removing it");
+            std::fs::remove_file(&path)
+                .map_err(|e| anyhow::anyhow!("Cannot delete {}: {e}", path.display()))?;
+            stream.remove(&stream_seq);
+            return fsync_dir(wal_dir);
+        }
+        let intact = newest
+            .summary
+            .frames
+            .values()
+            .flatten()
+            .map(|location| location.offset + u64::from(location.len))
+            .max()
+            .unwrap_or(segment::STREAM_HEADER_LEN as u64);
+        if intact < len {
+            tracing::warn!(
+                path = ?path,
+                file_len = len,
+                intact_len = intact,
+                "WAL newest stream segment has a torn tail; truncating to intact prefix"
+            );
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Cannot open WAL segment {} for truncation: {e}",
+                        path.display()
+                    )
+                })?;
+            file.set_len(intact).map_err(|e| {
+                anyhow::anyhow!("Cannot truncate torn WAL segment {}: {e}", path.display())
+            })?;
+            file.sync_all().map_err(|e| {
+                anyhow::anyhow!("Cannot fsync truncated WAL segment {}: {e}", path.display())
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Constructs the writer and starts its log writer and syncer.
     fn build(
         wal_dir: PathBuf,
         policy: WalFsyncPolicy,
@@ -1229,16 +1174,23 @@ impl WalWriter {
         durable: Box<[AtomicU64]>,
         collected: Box<[u64]>,
         stream: BTreeMap<u64, Arc<StreamSegment>>,
-    ) -> Arc<Self> {
-        let (batch_flush_tx, batch_flush_rx) = tokio::sync::watch::channel(());
-
-        let writer = Arc::new(Self {
-            wal_dir,
+    ) -> anyhow::Result<Arc<Self>> {
+        // A process never appends to a segment it did not create
+        // (`TG-ENC-005`): its first segment follows every one on disk.
+        let next_stream_seq = stream.keys().next_back().map_or(0, |last| last + 1);
+        let stream = Arc::new(std::sync::Mutex::new(stream));
+        let log = log_writer::LogStream::start(
+            wal_dir.clone(),
             policy,
-            partitions: AsyncMutex::new(HashMap::new()),
-            open: AsyncMutex::new(()),
+            keyring.clone(),
+            next_stream_seq,
+            Arc::clone(&stream),
+        )?;
+        Ok(Arc::new(Self {
+            wal_dir,
             appends_closed: AtomicBool::new(false),
-            batch_flush_tx,
+            sealed_payloads: keyring.as_deref().and_then(Keyring::active_id).is_some(),
+            log,
             store,
             keyring,
             durable,
@@ -1248,7 +1200,8 @@ impl WalWriter {
                 wake: Arc::new(tokio::sync::Notify::new()),
                 task: std::sync::OnceLock::new(),
             },
-            stream: std::sync::Mutex::new(stream),
+            stream,
+            legacy_max_seq: std::sync::Mutex::new(HashMap::new()),
             #[cfg(test)]
             test_stream_frame_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -1258,76 +1211,10 @@ impl WalWriter {
             #[cfg(test)]
             test_unapplied_floor_override: std::sync::Mutex::new(HashMap::new()),
             #[cfg(test)]
-            test_fsync_observer: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            test_hold_batched_fsync: AtomicBool::new(false),
-            #[cfg(test)]
             test_refused_unlinks: std::sync::Mutex::new(HashSet::new()),
             #[cfg(test)]
-            test_observer: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            test_open_barrier: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            test_fail_rotation_dir_fsync: AtomicBool::new(false),
-            #[cfg(test)]
             test_append_park: std::sync::Mutex::new(None),
-        });
-
-        // For the Batched policy, spawn a background task that fsyncs every open
-        // active segment every ~10 ms so group-commit amortises fsync cost. Only
-        // the active segment is ever appended to, so only it can have un-fsynced
-        // frames; sealed segments were already fsynced at seal time.
-        if policy == WalFsyncPolicy::Batched {
-            let writer_weak = Arc::downgrade(&writer);
-            tokio::spawn(async move {
-                let mut rx = batch_flush_rx;
-                let interval = tokio::time::Duration::from_millis(10);
-                loop {
-                    tokio::select! {
-                        () = tokio::time::sleep(interval) => {}
-                        result = rx.changed() => {
-                            if result.is_err() {
-                                return; // sender dropped — writer gone
-                            }
-                        }
-                    }
-                    let Some(w) = writer_weak.upgrade() else {
-                        return;
-                    };
-                    #[cfg(test)]
-                    if w.test_hold_batched_fsync.load(Ordering::Acquire) {
-                        continue;
-                    }
-                    // Snapshot the handle list under the map lock, then fsync each
-                    // active segment under its own lock so the timer never blocks
-                    // appends to other partitions.
-                    let handles: Vec<Arc<PartitionHandle>> =
-                        { w.partitions.lock().await.values().cloned().collect() };
-                    for handle in handles {
-                        let mut active = handle.active.lock().await;
-                        if active.unfsynced_count() > 0 {
-                            // Surface batch-fsync failures: swallowing the error
-                            // would leave acked frames non-durable under Batched
-                            // with no operator signal that durability is
-                            // compromised.
-                            match active.sync_data().await {
-                                Ok(()) => {
-                                    #[cfg(test)]
-                                    w.test_observe_fsync(&active);
-                                }
-                                Err(e) => tracing::error!(
-                                    segment = ?active.path(),
-                                    error = %e,
-                                    "WAL batch fsync failed; acked frames may not be durable"
-                                ),
-                            }
-                        }
-                    }
-                }
-            });
-        }
-
-        writer
+        }))
     }
 
     /// The durable watermark slot of `partition`.
@@ -1335,12 +1222,6 @@ impl WalWriter {
         durable.get(partition as usize).ok_or_else(|| {
             anyhow::anyhow!("WAL partition {partition} is outside 0..{PARTITION_COUNT}")
         })
-    }
-
-    /// Path of the active segment for a fresh partition (seeded at `first_seq`).
-    fn first_segment_path(&self, partition: u32) -> PathBuf {
-        self.wal_dir
-            .join(segment::format_segment_filename(partition, 0))
     }
 
     /// Path of the rollback hint that records a partition's applied watermark
@@ -1670,11 +1551,40 @@ impl WalWriter {
         Ok(frames)
     }
 
+    /// The `(partition, sequence)` of every frame of the stream segments on
+    /// disk that are not sealed yet, read from the frame headers.
+    fn unsealed_stream_addresses(&self) -> anyhow::Result<Vec<(u32, u64)>> {
+        let mut addresses = Vec::new();
+        for (stream_seq, path) in Self::discover_stream_segments(&self.wal_dir)? {
+            let sealed = self
+                .stream
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&stream_seq);
+            if sealed {
+                continue;
+            }
+            let data = match std::fs::read(&path) {
+                Ok(data) => data,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => anyhow::bail!("Cannot read WAL segment {}: {e}", path.display()),
+            };
+            let (_, spans, _) = Self::read_stream_segment(&path, &data, true, None, false)?;
+            addresses.extend(spans.iter().filter_map(|span| span.address));
+        }
+        Ok(addresses)
+    }
+
     /// Every partition with a frame in a segment of either layout, ascending.
     fn wal_partitions(&self) -> anyhow::Result<Vec<u32>> {
         let mut partitions: BTreeSet<u32> = WalRecovery::discover_partitions(&self.wal_dir)?
             .into_iter()
             .collect();
+        partitions.extend(
+            self.unsealed_stream_addresses()?
+                .into_iter()
+                .map(|(partition, _)| partition),
+        );
         partitions.extend(
             self.stream
                 .lock()
@@ -1717,148 +1627,6 @@ impl WalWriter {
         Ok(applied_seq)
     }
 
-    /// Creates the active segment of `partition` at `path`, starting at
-    /// `first_seq`, with a fresh header (`TG-ENC-003`): sealed under the
-    /// keyring's active key when it has one, else unsealed.
-    fn create_active(
-        &self,
-        path: PathBuf,
-        partition: u32,
-        first_seq: u64,
-    ) -> anyhow::Result<Segment> {
-        let mut header = SegmentHeader::new_unsealed(partition, first_seq);
-        if let Some(key_id) = self.keyring.as_deref().and_then(Keyring::active_id) {
-            header.cipher = SegmentCipher::XChaCha20Poly1305;
-            header.key_id = key_id;
-        }
-        let file = segment::create_segment_file(&path, &header)?;
-        #[cfg(test)]
-        self.test_observe(WalTestEvent::Created {
-            partition,
-            path: path.clone(),
-            salt: header.salt,
-        });
-        Ok(Segment::new_active(
-            path,
-            header,
-            tokio::fs::File::from_std(file),
-        ))
-    }
-
-    /// Returns the live `PartitionHandle`, opening it from disk on first use.
-    ///
-    /// The open never appends to a file it did not create (`TG-ENC-005`): a
-    /// frame written by an earlier process may sit past the persisted end of
-    /// its file, and a reissued sequence may follow it, so a position of an
-    /// earlier file is never written again. The partition's segment files are
-    /// discovered by filename (ascending `first_seq`) and all kept as sealed,
-    /// except a last file that holds no intact frame, which is replaced by a
-    /// new file under its name. A last file with frames is first cut to its
-    /// intact prefix, since it becomes non-last; a new active segment then
-    /// starts at its highest sequence plus one. A partition with no segment
-    /// starts at `first_seq = 0`.
-    ///
-    /// Opens are serialized by the open mutex and re-check the installed map
-    /// under it, so exactly one handle is installed per partition and no file
-    /// of a partition with an installed handle is created, cut or replaced.
-    async fn handle(&self, partition: u32) -> anyhow::Result<Arc<PartitionHandle>> {
-        if let Some(h) = self.partitions.lock().await.get(&partition) {
-            return Ok(Arc::clone(h));
-        }
-        #[cfg(test)]
-        self.test_wait_open_barrier().await;
-        let _open = self.open.lock().await;
-        if self.appends_closed.load(Ordering::Acquire) {
-            anyhow::bail!("WAL partition {partition} not opened: the WAL is closed");
-        }
-        if let Some(h) = self.partitions.lock().await.get(&partition) {
-            return Ok(Arc::clone(h));
-        }
-
-        let mut segments = Self::discover_partition_segments(&self.wal_dir, partition)?;
-        let mut sealed: Vec<Segment> = Vec::new();
-        let active = if let Some((last_first_seq, last_path)) = segments.pop() {
-            for (first_seq, path) in segments {
-                let max_seq = self.decode_segment_max_seq(&path).await?;
-                sealed.push(Segment::sealed_existing(path, first_seq, max_seq));
-            }
-            let data = tokio::fs::read(&last_path).await.map_err(|e| {
-                anyhow::anyhow!("Cannot read WAL segment {}: {e}", last_path.display())
-            })?;
-            let (entries, intact_len) = self.decode_segment_keyed(&last_path, &data, true)?;
-            if let Some(max_seq) = entries.iter().map(|e| e.sequence).max() {
-                // Cut a torn tail durably before the file becomes non-last:
-                // left in place, the torn bytes would be mid-partition
-                // corruption that refuses the next recovery.
-                if intact_len < data.len() {
-                    tracing::warn!(
-                        path = ?last_path,
-                        file_len = data.len(),
-                        intact_len,
-                        "WAL last segment has a torn tail; truncating to intact prefix"
-                    );
-                    let file = std::fs::OpenOptions::new()
-                        .write(true)
-                        .open(&last_path)
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "Cannot open WAL segment {} for truncation: {e}",
-                                last_path.display()
-                            )
-                        })?;
-                    file.set_len(intact_len as u64).map_err(|e| {
-                        anyhow::anyhow!(
-                            "Cannot truncate torn WAL segment {}: {e}",
-                            last_path.display()
-                        )
-                    })?;
-                    file.sync_all().map_err(|e| {
-                        anyhow::anyhow!(
-                            "Cannot fsync truncated WAL segment {}: {e}",
-                            last_path.display()
-                        )
-                    })?;
-                }
-                sealed.push(Segment::sealed_existing(last_path, last_first_seq, max_seq));
-                let first_seq = max_seq.saturating_add(1);
-                let path = self
-                    .wal_dir
-                    .join(segment::format_segment_filename(partition, first_seq));
-                self.create_active(path, partition, first_seq)?
-            } else {
-                self.create_active(last_path, partition, last_first_seq)?
-            }
-        } else {
-            self.create_active(self.first_segment_path(partition), partition, 0)?
-        };
-
-        let handle = Arc::new(PartitionHandle {
-            active: AsyncMutex::new(active),
-            sealed: AsyncMutex::new(sealed),
-            active_bytes: AtomicU64::new(0),
-            active_first_append: std::sync::Mutex::new(None),
-            active_key: std::sync::Mutex::new(None),
-        });
-        self.partitions
-            .lock()
-            .await
-            .insert(partition, Arc::clone(&handle));
-        Ok(handle)
-    }
-
-    /// Decodes the highest sequence number present in a segment file, tolerating a
-    /// truncated tail on the file (returns the intact prefix's max) and refusing on
-    /// mid-file corruption. Returns the file's `first_seq` floor when it is empty —
-    /// the caller distinguishes empty from a genuine single-frame segment via the
-    /// frame count, not this value.
-    async fn decode_segment_max_seq(&self, path: &Path) -> anyhow::Result<u64> {
-        let data = tokio::fs::read(path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Cannot read WAL segment {}: {e}", path.display()))?;
-        let (entries, _) = self.decode_segment_keyed(path, &data, true)?;
-        Ok(entries.iter().map(|e| e.sequence).max().unwrap_or(0))
-    }
-
     /// Decodes every frame in one segment's bytes, applying the shared corruption
     /// taxonomy, and returns them with the length of the intact prefix.
     /// `tolerate_truncated_tail` controls whether a truncated tail is a
@@ -1880,17 +1648,6 @@ impl WalWriter {
             format::decode_segment_with(data, self.keyring.as_deref()),
             tolerate_truncated_tail,
         )
-    }
-
-    /// As [`Self::decode_segment_keyed`] with no keyring: a sealed segment is
-    /// refused.
-    #[cfg(test)]
-    fn decode_segment_or_refuse(
-        path: &Path,
-        data: &[u8],
-        tolerate_truncated_tail: bool,
-    ) -> anyhow::Result<(Vec<WalEntry>, usize)> {
-        Self::entries_or_refuse(path, format::decode_segment(data), tolerate_truncated_tail)
     }
 
     fn entries_or_refuse(
@@ -1993,74 +1750,6 @@ impl WalWriter {
     }
 }
 
-impl WalWriter {
-    /// The frame of `entry` for `partition`'s active segment `active`, and
-    /// its index. Called under the active-append lock: the frame is encoded
-    /// and sealed there, and its index taken only once the payload has
-    /// encoded within the frame limit, so the index is always the frame's
-    /// position in the segment, is the nonce of its seal and is never handed
-    /// out twice (`TG-ENC-005`).
-    ///
-    /// # Errors
-    ///
-    /// An entry that does not encode within the frame limit; no index is
-    /// taken then. Every later failure stops the process (`TG-WAL-007`).
-    fn frame_under_lock(
-        &self,
-        partition: u32,
-        handle: &PartitionHandle,
-        active: &mut Segment,
-        entry: &WalEntry,
-    ) -> anyhow::Result<(Vec<u8>, u64)> {
-        let sealed_header = active
-            .header()
-            .filter(|header| header.cipher != SegmentCipher::None)
-            .copied();
-        let mut active_key = handle
-            .active_key
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let key = sealed_header.map(|header| {
-            if active_key.as_ref().map(|(of, _)| of) != Some(&header) {
-                let key = self
-                    .keyring
-                    .as_deref()
-                    .ok_or(crate::storage::sealing::UnknownSegmentKey(header.key_id))
-                    .and_then(|keyring| keyring.segment_key(&header))
-                    .unwrap_or_else(|e| {
-                        wal_fail_stop(
-                            WalFailStopTier::P,
-                            &format!(
-                                "the active segment of partition={partition} is sealed with {e}"
-                            ),
-                        )
-                    });
-                *active_key = Some((header, key));
-            }
-            &active_key.as_ref().expect("set above").1
-        });
-        let payload = format::encode_v2_payload(entry, key.is_some())?;
-        let index = active.take_frame_index().unwrap_or_else(|e| {
-            wal_fail_stop(
-                WalFailStopTier::P,
-                &format!("partition={partition}, sequence={}: {e}", entry.sequence),
-            )
-        });
-        // The index is spent: a failure from here on is past the frame
-        // (`TG-WAL-007` tier (B)).
-        let frame = format::frame_v2(&payload, key.map(|key| (key, index))).unwrap_or_else(|e| {
-            wal_fail_stop(
-                WalFailStopTier::B,
-                &format!(
-                    "WAL frame seal failed: partition={partition}, sequence={}: {e}",
-                    entry.sequence
-                ),
-            )
-        });
-        Ok((frame, index))
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Fail-stop
 // ---------------------------------------------------------------------------
@@ -2136,20 +1825,33 @@ pub(crate) fn wal_fail_stop(tier: WalFailStopTier, ctx: &str) -> ! {
 
 #[async_trait]
 impl Wal for WalWriter {
+    /// Encodes `entry` here, outside anything the writer holds, hands the
+    /// frame to the log writer and waits for its resolution: under `per_op`
+    /// an fsync covering it returned, else it was written; under every policy
+    /// its segment is published open (see `log_writer`).
+    ///
+    /// # Errors
+    ///
+    /// A partition outside the WAL's, a WAL closed for shutdown, an entry
+    /// that does not encode within the frame limit — each before anything is
+    /// written — or a writer that stopped before resolving it.
     async fn append(&self, partition: u32, entry: &WalEntry) -> anyhow::Result<()> {
         #[cfg(test)]
         self.test_park_append(partition).await;
 
-        let handle = self.handle(partition).await?;
-        // Take ONLY the active-append lock. GC of sealed segments runs under a
-        // distinct lock and never blocks this path; rotation briefly takes this
-        // same lock, which is correct — an append and a rotate on the same
-        // partition must serialize so a seal never freezes a half-written frame.
-        let mut active = handle.active.lock().await;
-
-        // A `finish` that wrote rollback hints may unlink this partition's
-        // active segment, so nothing may be framed after it: the write is
-        // refused before a byte or an index is spent (`TG-WAL-007` tier (A)).
+        // A frame of a partition outside the WAL's could never be replayed
+        // nor let its segment be collected: recovery refuses it.
+        if partition >= PARTITION_COUNT {
+            anyhow::bail!(
+                "WAL append refused: partition {partition} is outside 0..{PARTITION_COUNT}; \
+                 sequence={}",
+                entry.sequence
+            );
+        }
+        // A `finish` that wrote rollback hints may unlink the active segment,
+        // so nothing may be framed after it: the write is refused before a
+        // byte or an index is spent (`TG-WAL-007` tier (A)). The writer
+        // refuses one that passed this check while the WAL closed.
         if self.appends_closed.load(Ordering::Acquire) {
             anyhow::bail!(
                 "WAL append refused: the WAL is closed for shutdown; partition={partition}, \
@@ -2157,106 +1859,31 @@ impl Wal for WalWriter {
                 entry.sequence
             );
         }
-
-        // A sealed append target means the WAL's own rotation bookkeeping is
-        // inconsistent — a programming bug that no runtime disposition can repair
-        // and that a rollback would only paper over, leaving the process running
-        // on a broken WAL. Checked structurally, under the guard the append
-        // already holds, so no byte of this entry can have been framed yet.
-        if active.is_sealed() {
-            wal_fail_stop(
-                WalFailStopTier::P,
-                &format!(
-                    "append targeted a sealed segment: partition={partition}, sequence={}, path={}",
-                    entry.sequence,
-                    active.path().display()
-                ),
-            );
-        }
-
-        // Encoded, sealed and indexed under this lock (`TG-ENC-005`).
-        let (frame, index) = self.frame_under_lock(partition, &handle, &mut active, entry)?;
-        #[cfg(test)]
-        if let Some(header) = active.header() {
-            self.test_observe(WalTestEvent::Framed {
-                salt: header.salt,
-                index,
+        let payload = format::encode_v2_payload(entry, self.sealed_payloads)?;
+        let (ack, resolved) = tokio::sync::oneshot::channel();
+        self.log
+            .send(log_writer::Command::Append(log_writer::Submission {
+                partition,
                 sequence: entry.sequence,
-            });
-        }
-        #[cfg(not(test))]
-        let _ = index;
-
-        // Every residual failure below is tier (B) BY CONSTRUCTION: the pre-check
-        // has already excluded (P), so no error content needs inspecting. A frame
-        // may already be in the segment and its durability is unknown, so the
-        // process stops and recovery re-derives state from durable frames — a
-        // retried fsync can report success for bytes the OS has already dropped.
-        let count = active
-            .append_frame(&frame, entry.sequence)
-            .await
-            .unwrap_or_else(|e| {
-                wal_fail_stop(
-                    WalFailStopTier::B,
-                    &format!(
-                        "WAL frame append failed: partition={partition}, sequence={}: {e}",
-                        entry.sequence
-                    ),
-                )
-            });
-        handle.note_append(frame.len());
-
-        match self.policy {
-            WalFsyncPolicy::PerOp => {
-                active.sync_data().await.unwrap_or_else(|e| {
-                    wal_fail_stop(
-                        WalFailStopTier::B,
-                        &format!(
-                            "WAL fsync failed: partition={partition}, sequence={}: {e}",
-                            entry.sequence
-                        ),
-                    )
-                });
-                #[cfg(test)]
-                self.test_observe_fsync(&active);
-            }
-            WalFsyncPolicy::Batched => {
-                #[cfg(test)]
-                let held = self.test_hold_batched_fsync.load(Ordering::Acquire);
-                #[cfg(not(test))]
-                let held = false;
-                // Flush immediately when the batch threshold is reached so
-                // high-throughput bursts don't wait for the timer task.
-                if count >= 100 && !held {
-                    active.sync_data().await.unwrap_or_else(|e| {
-                        wal_fail_stop(
-                            WalFailStopTier::B,
-                            &format!(
-                                "WAL batched fsync failed: partition={partition}, sequence={}: {e}",
-                                entry.sequence
-                            ),
-                        )
-                    });
-                    #[cfg(test)]
-                    self.test_observe_fsync(&active);
-                    // Notify the background timer that we just fsynced so it
-                    // resets its internal cooldown.
-                    let _ = self.batch_flush_tx.send(());
-                }
-            }
-            WalFsyncPolicy::None => {
-                // OS-buffered only; no fsync call.
-            }
-        }
-
-        Ok(())
+                payload,
+                ack,
+                enqueued: std::time::Instant::now(),
+            }))
+            .await?;
+        resolved.await.map_err(|_| {
+            anyhow::anyhow!(
+                "WAL append not acknowledged: the log writer refused or stopped; \
+                 partition={partition}, sequence={}",
+                entry.sequence
+            )
+        })
     }
 
     /// Records that `sequence` is durable in the store as the partition's
     /// watermark: a commit carrying that row returned `Ok`.
     ///
-    /// The in-memory copy moves to `max(current, sequence)` — no I/O, no seal,
-    /// no GC; sealing and collection belong to the collection tick, which
+    /// The in-memory copy moves to `max(current, sequence)` — no I/O, no
+    /// rotation, no GC; collection belongs to the collection tick, which
     /// reads the store's rows itself.
     ///
     /// # Errors
@@ -2268,7 +1895,8 @@ impl Wal for WalWriter {
     }
 
     /// The un-applied frames of `partition` — those of its own segments and
-    /// its frames in the stream segments, read by location — in strictly
+    /// its frames in the stream segments, read by location from a sealed one
+    /// and from the decoded file of one not sealed yet — in strictly
     /// ascending sequence order, each above the partition's floor. Holds the
     /// frames of this one partition only.
     async fn unapplied(&self, partition: u32) -> anyhow::Result<Vec<WalEntry>> {
@@ -2276,6 +1904,10 @@ impl Wal for WalWriter {
         let segments = Self::discover_partition_segments(&self.wal_dir, partition)?;
         let last_idx = segments.len().saturating_sub(1);
         let mut all = self.stream_frames_of(partition, applied_seq).await?;
+        all.extend(
+            self.unsealed_stream_frames_of(partition, applied_seq)
+                .await?,
+        );
         for (idx, (_first_seq, path)) in segments.into_iter().enumerate() {
             let data = match tokio::fs::read(&path).await {
                 Ok(data) => data,
@@ -2297,8 +1929,8 @@ impl Wal for WalWriter {
                     ));
                 }
             };
-            // A truncated tail is tolerated ONLY on the active (last) segment; a
-            // torn tail on a sealed, non-last segment is corruption.
+            // A truncated tail is tolerated ONLY on the last segment of the
+            // partition; a torn tail on any earlier one is corruption.
             let tolerate_tail = idx == last_idx;
             let (entries, _) = self.decode_segment_keyed(&path, &data, tolerate_tail)?;
             all.extend(entries);
@@ -2307,40 +1939,27 @@ impl Wal for WalWriter {
         // A partition's frames sit in its own segments in ascending order, but
         // in the stream they interleave with every other partition's and need
         // not arrive in sequence order: replay is strictly ascending per
-        // partition whatever the position of a frame (TG-WAL-011).
+        // partition whatever the position of a frame (TG-WAL-011). A segment
+        // sealed while this read ran is read both ways; a sequence is the
+        // partition's once.
         all.sort_by_key(|e| e.sequence);
+        all.dedup_by_key(|e| e.sequence);
         all.retain(|e| e.sequence > applied_seq);
         Ok(all)
     }
 
-    /// Fsyncs the active segment of every open partition that holds
-    /// un-fsynced frames.
+    /// Resolves once everything appended before the call is durable,
+    /// whatever the fsync policy has deferred.
     ///
-    /// Only an active segment can hold one: a sealed segment was fsynced
-    /// before it was frozen. Each segment is synced under its own lock, taken
-    /// after the map lock is released, so an append to another partition is
-    /// never held up. A failure does not end the pass — the other partitions
-    /// are still worth making durable — and the first one is what is returned.
+    /// # Errors
+    ///
+    /// The log writer stopped before it was durable.
     async fn sync(&self) -> anyhow::Result<()> {
-        let handles: Vec<Arc<PartitionHandle>> =
-            { self.partitions.lock().await.values().cloned().collect() };
-        let mut first_error = None;
-        for handle in handles {
-            let mut active = handle.active.lock().await;
-            if active.unfsynced_count() == 0 {
-                continue;
-            }
-            match active.sync_data().await {
-                Ok(()) => {
-                    #[cfg(test)]
-                    self.test_observe_fsync(&active);
-                }
-                Err(e) => {
-                    first_error.get_or_insert(e);
-                }
-            }
-        }
-        first_error.map_or(Ok(()), Err)
+        let (done, synced) = tokio::sync::oneshot::channel();
+        self.log.send(log_writer::Command::Sync { done }).await?;
+        synced
+            .await
+            .map_err(|_| anyhow::anyhow!("WAL sync not completed: the log writer stopped"))
     }
 
     fn durable_applied(&self, partition: u32) -> Option<u64> {
@@ -2360,9 +1979,9 @@ impl Wal for WalWriter {
     /// segment, or a non-zero watermark;
     /// each a synced temporary file renamed into place, the directory synced
     /// once after the last. The segments are then collected as by a tick
-    /// (`TG-WAL-003`), active ones included, so a directory with nothing
-    /// above the watermark is left with no segment an older binary could not
-    /// read.
+    /// (`TG-WAL-003`), the closed active one included, so a directory with
+    /// nothing above the watermark is left with no segment an older binary
+    /// could not read.
     async fn finish(&self, write_hints: bool) -> anyhow::Result<usize> {
         let collection = &self.collection;
         collection.closed.store(true, Ordering::Release);
@@ -2373,8 +1992,8 @@ impl Wal for WalWriter {
             return Ok(0);
         }
         self.close_to_appends().await?;
-        let mut with_segments: BTreeSet<u32> = Self::segment_bytes_by_partition(&self.wal_dir)?
-            .into_keys()
+        let mut with_segments: BTreeSet<u32> = WalRecovery::discover_partitions(&self.wal_dir)?
+            .into_iter()
             .collect();
         with_segments.extend(
             self.stream
@@ -2410,43 +2029,66 @@ impl Wal for WalWriter {
 impl WalWriter {
     /// Closes the WAL to appends for a `finish` that writes rollback hints.
     ///
-    /// Taken under the open mutex and every installed partition's active
-    /// lock, so no append is between its closed check and its write, and no
-    /// partition opens afterwards. An append that arrived after the write
-    /// path's last WAL sync is then fsynced here: the segment it is in may be
-    /// kept, and its write was acknowledged. A failed fsync fails the
-    /// `finish`, which then writes no hint and unlinks nothing, and the WAL
-    /// stays closed: the frame's durability is unknown, so the stop must not
-    /// look clean to a rollback.
+    /// From the flag on, an append is refused before it is sent; the writer
+    /// refuses one that was sent before it saw the close. The writer then
+    /// seals its active segment: fsynced to its end — an append that arrived
+    /// after the write path's last WAL sync is made durable here, since the
+    /// segment it is in may be kept and its write was acknowledged — and
+    /// counted sealed, so `finish` collects it as it does any other.
     async fn close_to_appends(&self) -> anyhow::Result<()> {
-        let _open = self.open.lock().await;
-        let handles: Vec<Arc<PartitionHandle>> =
-            { self.partitions.lock().await.values().cloned().collect() };
-        let mut actives = Vec::with_capacity(handles.len());
-        for handle in &handles {
-            actives.push(handle.active.lock().await);
-        }
         self.appends_closed.store(true, Ordering::Release);
-        for active in &mut actives {
-            if active.unfsynced_count() > 0 {
-                active.sync_data().await?;
-                #[cfg(test)]
-                self.test_observe_fsync(active);
-            }
-        }
-        Ok(())
+        let (done, closed) = tokio::sync::oneshot::channel();
+        self.log.send(log_writer::Command::Close { done }).await?;
+        closed
+            .await
+            .map_err(|_| anyhow::anyhow!("the WAL was not closed: the log writer stopped"))
     }
 
-    /// Unlinks, at a `finish` that wrote rollback hints, every segment of
-    /// every partition whose frames are all at or below the partition's
-    /// bound — the lower of the durable watermark and a fresh read of the
-    /// store's — and every stream segment whose frames of every partition
-    /// are; a segment with no frame included, active or not, and after
-    /// `wal-collected` covering them is durable (`TG-WAL-003`). Nothing is
-    /// unlinked when the store's watermarks cannot be read, the store gone
-    /// included. Segments are read from the directory, so a partition this
-    /// process never opened is collected too. A segment that cannot be read
-    /// or unlinked stays, logged by name.
+    /// The frames of `partition` above `floor` in the stream segments on disk
+    /// that are not sealed yet — the active one, and one being rotated —
+    /// each read whole, a torn tail tolerated, since the writer may be
+    /// writing it.
+    async fn unsealed_stream_frames_of(
+        &self,
+        partition: u32,
+        floor: u64,
+    ) -> anyhow::Result<Vec<WalEntry>> {
+        let mut frames = Vec::new();
+        for (stream_seq, path) in Self::discover_stream_segments(&self.wal_dir)? {
+            let sealed = self
+                .stream
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&stream_seq);
+            if sealed {
+                continue;
+            }
+            let data = match tokio::fs::read(&path).await {
+                Ok(data) => data,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => anyhow::bail!("Cannot read WAL segment {}: {e}", path.display()),
+            };
+            let (_, spans, entries) =
+                Self::read_stream_segment(&path, &data, true, self.keyring.as_deref(), true)?;
+            frames.extend(
+                spans
+                    .iter()
+                    .zip(entries)
+                    .filter(|(span, entry)| {
+                        span.address.is_some_and(|(p, _)| p == partition) && entry.sequence > floor
+                    })
+                    .map(|(_, entry)| entry),
+            );
+        }
+        Ok(frames)
+    }
+
+    /// Unlinks, at a `finish` that wrote rollback hints, every segment a tick
+    /// would: those whose frames of every partition are at or below the
+    /// partition's bound — the lower of the durable watermark and a fresh
+    /// read of the store's — after `wal-collected` covering them is durable
+    /// (`TG-WAL-003`). Nothing is unlinked when the store's watermarks cannot
+    /// be read, the store gone included.
     async fn collect_covered_at_finish(&self, collected: &mut Box<[u64]>) {
         let Some(store) = self.store.upgrade() else {
             tracing::warn!(
@@ -2455,162 +2097,73 @@ impl WalWriter {
             );
             return;
         };
+        let durable_now = self.durable_now();
         let from_store = Self::tick_watermarks(store.as_ref());
         drop(store);
         let Some(from_store) = from_store else {
             return;
         };
-        let partitions = match WalRecovery::discover_partitions(&self.wal_dir) {
-            Ok(partitions) => partitions,
-            Err(e) => {
-                tracing::warn!(error = %e, "WAL segments kept at shutdown: the WAL directory could not be read");
+        self.collect_covered(collected, &durable_now, &from_store)
+            .await;
+    }
+
+    /// The durable watermark of every partition, as this process holds it.
+    fn durable_now(&self) -> Vec<u64> {
+        self.durable
+            .iter()
+            .map(|w| w.load(Ordering::Acquire))
+            .collect()
+    }
+
+    /// Selects every covered segment of either layout, writes
+    /// `wal-collected` covering them and only then unlinks them, then sets
+    /// the retained-bytes gauge.
+    async fn collect_covered(
+        &self,
+        collected: &mut Box<[u64]>,
+        durable_now: &[u64],
+        from_store: &[u64],
+    ) {
+        let mut next: Box<[u64]> = collected.clone();
+        let legacy = self.covered_legacy_segments(durable_now, from_store, &mut next);
+        let stream = self.covered_stream_segments(from_store, &mut next);
+        if !legacy.is_empty() || !stream.is_empty() {
+            // Durable before the first unlink: a start that finds a segment
+            // gone must find the mark that covers it, so it can refuse a data
+            // directory older than what was unlinked.
+            if let Err(e) = write_wal_collected(&self.wal_dir, &next) {
+                tracing::error!(
+                    error = %e,
+                    "WAL collection unlinked nothing: wal-collected could not be written"
+                );
                 return;
             }
-        };
-        let mut next: Box<[u64]> = collected.clone();
-        let mut covered: Vec<PathBuf> = Vec::new();
-        for partition in partitions {
-            let index = partition as usize;
-            let (Some(durable), Some(stored)) = (self.durable.get(index), from_store.get(index))
-            else {
-                continue;
-            };
-            let bound = self.collection_bound(partition, durable.load(Ordering::Acquire), *stored);
-            let segments = match Self::discover_partition_segments(&self.wal_dir, partition) {
-                Ok(segments) => segments,
-                Err(e) => {
-                    tracing::warn!(partition, error = %e, "WAL segments kept at shutdown");
-                    continue;
-                }
-            };
-            let last_idx = segments.len().saturating_sub(1);
-            for (idx, (_, path)) in segments.into_iter().enumerate() {
-                let decoded = std::fs::read(&path)
-                    .map_err(|e| anyhow::anyhow!("Cannot read WAL segment {}: {e}", path.display()))
-                    .and_then(|data| self.decode_segment_keyed(&path, &data, idx == last_idx));
-                let entries = match decoded {
-                    Ok((entries, _)) => entries,
-                    Err(e) => {
-                        tracing::error!(segment = %path.display(), error = %e, "WAL segment kept at shutdown: it could not be read");
-                        continue;
-                    }
-                };
-                let max_seq = entries.iter().map(|e| e.sequence).max().unwrap_or(0);
-                if max_seq <= bound {
-                    next[index] = next[index].max(max_seq);
-                    covered.push(path);
-                }
-            }
+            *collected = next;
+            #[cfg(test)]
+            test_abort_if_armed(TestAbortPoint::CollectAfterMark);
+            self.unlink_covered(legacy, &stream).await;
         }
-        let stream = self.covered_stream_segments(&from_store, &mut next);
-        covered.extend(stream.iter().map(|(_, path)| path.clone()));
-        if covered.is_empty() {
-            return;
-        }
-        if let Err(e) = write_wal_collected(&self.wal_dir, &next) {
-            tracing::error!(
-                error = %e,
-                "WAL segments kept at shutdown: wal-collected could not be written"
-            );
-            return;
-        }
-        *collected = next;
-        for path in &covered {
-            if let Err(e) = self.unlink_segment(path).await {
-                tracing::error!(
-                    segment = %path.display(),
-                    error = %e,
-                    "WAL segment kept at shutdown: it could not be unlinked"
-                );
-            }
-        }
-        self.forget_unlinked_stream_segments(&stream);
-        if let Err(e) = fsync_dir(&self.wal_dir) {
-            tracing::error!(error = %e, "WAL shutdown could not fsync the WAL directory");
-        }
-        match Self::segment_bytes_by_partition(&self.wal_dir) {
-            Ok(retained) => set_retained_gauges(&retained),
-            Err(e) => tracing::warn!(error = %e, "WAL retained bytes not updated"),
-        }
+        set_retained_gauge(&self.wal_dir);
     }
 
-    /// Seals the active segment and rotates a fresh one in, if the active
-    /// segment actually holds frames.
-    ///
-    /// Sealing an empty active segment would leave a zero-length sealed file
-    /// the next append could never reach and GC would have to special-case,
-    /// so this is a no-op when the active segment is empty.
-    async fn seal_and_rotate_if_needed(
-        &self,
-        partition: u32,
-        handle: &Arc<PartitionHandle>,
-    ) -> anyhow::Result<()> {
-        let mut active = handle.active.lock().await;
-        if active.has_frames() {
-            // Durably fsync the current active's data FIRST, before any swap or
-            // new-file creation. A sealed segment is non-last in the live
-            // ordering, and a torn tail on a non-last segment is fatal during
-            // recovery — so its data must be synced before it is frozen. Doing
-            // the only fallible fsync here (while the old active is still
-            // installed and no new file exists yet) means a failure leaves no
-            // orphan: returning early keeps the old active in place with no
-            // dangling new segment.
-            active.sync_data().await?;
-            #[cfg(test)]
-            self.test_observe_fsync(&active);
-
-            let next_first_seq = active.max_seq().saturating_add(1);
-            let new_path = self
-                .wal_dir
-                .join(segment::format_segment_filename(partition, next_first_seq));
-            // The new segment's header and directory entry are durable BEFORE
-            // any append is acked to it (before this lock is released). A
-            // failure after its rename leaves it behind with no frame: valid,
-            // read as empty, replaced by a later creation of the same name.
-            let new_active = self.create_active(new_path, partition, next_first_seq)?;
-            #[cfg(test)]
-            if self
-                .test_fail_rotation_dir_fsync
-                .swap(false, Ordering::AcqRel)
-            {
-                anyhow::bail!("injected: the WAL directory fsync after a rotation failed");
-            }
-
-            // Swap in the fresh active, take the old one out to freeze it. The
-            // old segment's data was already fsynced above, so the freeze is
-            // the infallible `into_sealed` — no fallible fsync runs AFTER the
-            // swap, which guarantees the old active can never be dropped
-            // (orphaned) by a failing fsync after it has been replaced.
-            let old_active = std::mem::replace(&mut *active, new_active);
-            let frozen = old_active.into_sealed();
-            handle.note_rotation();
-            // The sealed-set lock is taken only for the push, never held across
-            // the append-lock release, so appenders are not serialized by GC.
-            handle.sealed.lock().await.push(frozen);
-            // Active-append lock released here.
-        }
-        Ok(())
-    }
-
-    /// How many sealed segments, from the front of `sealed`, `watermark`
-    /// covers and `revalidated` confirms. A segment `watermark` covers but
+    /// How many segments, from the front of `max_seqs` (one partition's
+    /// segments, oldest first, by highest sequence), `watermark` covers and
+    /// `revalidated` confirms. A segment `watermark` covers but
     /// `revalidated` does not is retained, counted and logged.
     fn reclaimable_prefix(
         partition: u32,
-        sealed: &[Segment],
+        max_seqs: &[(PathBuf, u64)],
         watermark: u64,
         revalidated: u64,
     ) -> usize {
-        // Reclaimable sealed segments are a prefix of the ascending-ordered set
+        // Reclaimable segments are a prefix of the ascending-ordered set
         // (oldest first), valid because sequences are monotonic and gap-free.
         // The prefix stops at the FIRST segment the re-read does not cover:
         // beyond it every segment is higher still, so nothing reclaimable is
         // lost by stopping, and GC resumes on the next call.
         let mut reclaim = 0usize;
-        for segment in sealed.iter().take_while(|s| s.max_seq() <= watermark) {
-            if let Err(err) =
-                Self::revalidate_before_unlink(partition, segment.max_seq(), revalidated)
-            {
+        for (path, max_seq) in max_seqs.iter().take_while(|(_, m)| *m <= watermark) {
+            if let Err(err) = Self::revalidate_before_unlink(partition, *max_seq, revalidated) {
                 describe_wal_watermark_metrics();
                 metrics::counter!(
                     WAL_GC_SKIPPED_COUNTER,
@@ -2620,7 +2173,7 @@ impl WalWriter {
                 tracing::error!(
                     target: "topgun_server::storage::wal_watermark",
                     partition,
-                    segment = %segment.path().display(),
+                    segment = %path.display(),
                     "{err}"
                 );
                 break;
@@ -2630,19 +2183,81 @@ impl WalWriter {
         reclaim
     }
 
-    /// Whether the tick seals `partition`'s active segment at `now`: it holds
-    /// frames, and either enough bytes were appended to it or its first frame
-    /// is old enough. Bounds the size of a segment and the time a frame waits
-    /// before collection can reach it, without a seal per commit.
-    fn seal_due(partition: u32, handle: &PartitionHandle, now: std::time::Instant) -> bool {
-        if handle.active_bytes.load(Ordering::Relaxed) >= SEAL_BYTES {
-            return true;
+    /// The per-partition segments of an earlier version collection may
+    /// unlink, each partition's oldest first: the prefix of its segments at
+    /// or below its durable watermark and confirmed by the store's. Raises
+    /// `next` to the highest sequence of each partition's prefix. A segment
+    /// that cannot be read ends its partition's prefix, logged.
+    fn covered_legacy_segments(
+        &self,
+        durable_now: &[u64],
+        from_store: &[u64],
+        next: &mut [u64],
+    ) -> Vec<Vec<PathBuf>> {
+        let partitions = match WalRecovery::discover_partitions(&self.wal_dir) {
+            Ok(partitions) => partitions,
+            Err(e) => {
+                tracing::warn!(error = %e, "WAL collection skipped the per-partition segments: the WAL directory could not be read");
+                return Vec::new();
+            }
+        };
+        let mut covered = Vec::new();
+        for partition in partitions {
+            let index = partition as usize;
+            let (Some(&durable), Some(&stored)) = (durable_now.get(index), from_store.get(index))
+            else {
+                continue;
+            };
+            let segments = match Self::discover_partition_segments(&self.wal_dir, partition) {
+                Ok(segments) => segments,
+                Err(e) => {
+                    tracing::warn!(partition, error = %e, "WAL collection skipped a partition");
+                    continue;
+                }
+            };
+            let last_idx = segments.len().saturating_sub(1);
+            let mut max_seqs = Vec::with_capacity(segments.len());
+            for (idx, (_, path)) in segments.into_iter().enumerate() {
+                match self.legacy_max_seq(&path, idx == last_idx) {
+                    Ok(max_seq) => max_seqs.push((path, max_seq)),
+                    Err(e) => {
+                        tracing::error!(segment = %path.display(), error = %e, "WAL segment kept: it could not be read");
+                        break;
+                    }
+                }
+            }
+            let limit = self.collection_bound(partition, stored, stored);
+            let count = Self::reclaimable_prefix(partition, &max_seqs, durable, limit);
+            if count > 0 {
+                next[index] = next[index].max(max_seqs[count - 1].1);
+                max_seqs.truncate(count);
+                covered.push(max_seqs.into_iter().map(|(path, _)| path).collect());
+            }
         }
-        let first = *handle
-            .active_first_append
+        covered
+    }
+
+    /// The highest sequence of the per-partition segment at `path`, read once
+    /// — nothing writes such a segment any more — tolerating a torn tail on
+    /// the `last` segment of its partition.
+    fn legacy_max_seq(&self, path: &Path, last: bool) -> anyhow::Result<u64> {
+        if let Some(max_seq) = self
+            .legacy_max_seq
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        first.is_some_and(|first| now.saturating_duration_since(first) >= seal_age(partition))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(path)
+        {
+            return Ok(*max_seq);
+        }
+        let data = std::fs::read(path)
+            .map_err(|e| anyhow::anyhow!("Cannot read WAL segment {}: {e}", path.display()))?;
+        let (entries, _) = self.decode_segment_keyed(path, &data, last)?;
+        let max_seq = entries.iter().map(|e| e.sequence).max().unwrap_or(0);
+        self.legacy_max_seq
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(path.to_path_buf(), max_seq);
+        Ok(max_seq)
     }
 
     /// The store's watermark of every WAL partition, read once for a tick, or
@@ -2670,38 +2285,56 @@ impl WalWriter {
         None
     }
 
-    /// Unlinks the `count` oldest sealed segments of each handle, then fsyncs
-    /// the directory once. Called only once `wal-collected` covers them.
+    /// Unlinks the covered per-partition segments, each partition's oldest
+    /// first, and the covered stream segments, then fsyncs the directory
+    /// once. Called only once `wal-collected` covers them.
     ///
-    /// A segment leaves the sealed set only once its file is gone, so the set,
-    /// the disk and the retained-bytes gauge agree. A segment that cannot be
-    /// unlinked ends its partition's unlinking — the segments after it stay
-    /// too, so the set keeps a contiguous run of frames — and the other
-    /// partitions are still collected. A later tick unlinks what is left: its
-    /// frames are at or below `wal-collected`, and a start filters them.
-    async fn unlink_collected(&self, reclaim: Vec<(&Arc<PartitionHandle>, usize)>) {
+    /// A per-partition segment that cannot be unlinked ends its partition's
+    /// unlinking — the segments after it stay too, so a partition keeps a
+    /// contiguous run of frames — and a stream segment that cannot be
+    /// unlinked stays; a later tick unlinks what is left: its frames are at
+    /// or below `wal-collected`, and a start filters them. A stream segment
+    /// leaves the summaries only once its file is gone, so the summaries and
+    /// the disk agree.
+    async fn unlink_covered(&self, legacy: Vec<Vec<PathBuf>>, stream: &[(u64, PathBuf)]) {
         let mut unlinked = 0usize;
-        for (handle, count) in reclaim {
-            let mut sealed = handle.sealed.lock().await;
-            let mut removed = 0usize;
-            for segment in sealed.iter().take(count) {
-                if let Err(e) = self.unlink_segment(segment.path()).await {
+        // Each partition's own segments are a run that stops at a failed
+        // unlink; the stream segments are not.
+        let runs = legacy
+            .into_iter()
+            .map(|paths| (paths, true))
+            .chain(std::iter::once((
+                stream
+                    .iter()
+                    .map(|(_, path)| path.clone())
+                    .collect::<Vec<_>>(),
+                false,
+            )));
+        for (paths, prefix) in runs {
+            for path in &paths {
+                if let Err(e) = self.unlink_segment(path).await {
                     tracing::error!(
-                        segment = %segment.path().display(),
+                        segment = %path.display(),
                         error = %e,
-                        "WAL collection could not unlink a sealed segment"
+                        "WAL collection could not unlink a segment"
                     );
-                    break;
+                    if prefix {
+                        break;
+                    }
+                    continue;
                 }
-                removed += 1;
+                self.legacy_max_seq
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(path);
                 unlinked += 1;
                 #[cfg(test)]
                 if unlinked == 1 {
                     test_abort_if_armed(TestAbortPoint::CollectInsideUnlink);
                 }
             }
-            sealed.drain(..removed);
         }
+        self.forget_unlinked_stream_segments(stream);
         if unlinked > 0 {
             #[cfg(test)]
             test_abort_if_armed(TestAbortPoint::CollectAfterUnlink);
@@ -2711,11 +2344,12 @@ impl WalWriter {
         }
     }
 
-    /// The stream segments collection may unlink: each whose every
-    /// partition's highest sequence is at or below that partition's bound —
-    /// the lower of the durable watermark this process holds and `from_store`,
-    /// the store's read for this collection — at a tick and at `finish`
-    /// alike. Raises
+    /// The stream segments collection may unlink: each sealed one whose
+    /// every partition's highest sequence is at or below that partition's
+    /// bound — the lower of the durable watermark this process holds and
+    /// `from_store`, the store's read for this collection — at a tick and at
+    /// `finish` alike. A segment is sealed only once the syncer fsynced it to
+    /// its end. Raises
     /// `next` — the `wal-collected` to write before the unlink — to each such
     /// segment's highest sequence of every partition it holds, which stays at
     /// or below the bound (`TG-WAL-013`); partitions without a frame there
@@ -2737,6 +2371,31 @@ impl WalWriter {
                 self.collection_bound(partition, durable, stored)
             };
             if !stream_segment_covered(&segment.summary, bound) {
+                // Licensed by the durable watermark this process holds but
+                // not confirmed by the store's read: retained, counted and
+                // logged, as a per-partition segment is.
+                let durable = |partition: u32| {
+                    self.durable
+                        .get(partition as usize)
+                        .map_or(0, |slot| slot.load(Ordering::Acquire))
+                };
+                if stream_segment_covered(&segment.summary, durable) {
+                    if let Some(err) = segment.summary.max_seq.iter().find_map(|(&p, &max)| {
+                        Self::revalidate_before_unlink(p, max, bound(p)).err()
+                    }) {
+                        describe_wal_watermark_metrics();
+                        metrics::counter!(
+                            WAL_GC_SKIPPED_COUNTER,
+                            "reason" => GC_SKIP_REASON_WATERMARK
+                        )
+                        .increment(1);
+                        tracing::error!(
+                            target: "topgun_server::storage::wal_watermark",
+                            segment = %segment.path.display(),
+                            "{err}"
+                        );
+                    }
+                }
                 continue;
             }
             for (&partition, &max_seq) in &segment.summary.max_seq {
@@ -2747,28 +2406,6 @@ impl WalWriter {
             covered.push((*stream_seq, segment.path.clone()));
         }
         covered
-    }
-
-    /// Unlinks the stream segments `covered`, once `wal-collected` covers
-    /// them, then fsyncs the directory. A segment that cannot be unlinked
-    /// stays, logged, and a later collection tries again.
-    async fn unlink_stream_segments(&self, covered: &[(u64, PathBuf)]) {
-        if covered.is_empty() {
-            return;
-        }
-        for (_, path) in covered {
-            if let Err(e) = self.unlink_segment(path).await {
-                tracing::error!(
-                    segment = %path.display(),
-                    error = %e,
-                    "WAL collection could not unlink a stream segment"
-                );
-            }
-        }
-        self.forget_unlinked_stream_segments(covered);
-        if let Err(e) = fsync_dir(&self.wal_dir) {
-            tracing::error!(error = %e, "WAL collection could not fsync the WAL directory");
-        }
     }
 
     /// Drops from the stream summaries every segment of `covered` whose file
@@ -2799,17 +2436,49 @@ impl WalWriter {
         tokio::fs::remove_file(path).await
     }
 
+    /// Asks the writer to rotate the active stream segment once its first
+    /// frame is old enough, and waits until the syncer has sealed it, so
+    /// this tick can collect it. Bounds the time a frame waits before
+    /// collection can reach it, without a rotation per commit; a segment is
+    /// rotated by size by the writer itself.
+    async fn rotate_if_due(&self) {
+        let now = std::time::Instant::now();
+        #[cfg(test)]
+        let now = now
+            + *self
+                .test_clock_offset
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (done, rotated) = tokio::sync::oneshot::channel();
+        let mut sealed = self.log.sealed_through();
+        if self
+            .log
+            .send(log_writer::Command::Rotate { now, done })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let Ok(Some(stream_seq)) = rotated.await else {
+            return;
+        };
+        let _ = sealed
+            .wait_for(|through| through.is_some_and(|through| through >= stream_seq))
+            .await;
+    }
+
     /// One collection tick (TG-WAL-003). Returns whether the tick task should
     /// go on.
     ///
-    /// In order: read the store's watermarks once; seal the active segments
-    /// that are due; select, per partition, the prefix of sealed segments at
-    /// or below both the durable watermark and the store's, and every stream
-    /// segment whose every partition's frames are; write `wal-collected`
-    /// covering them and only then unlink them; fsync the directory; set the
-    /// retained-bytes gauges.
+    /// In order: read the store's watermarks once; rotate the active stream
+    /// segment when it is due and wait until it is sealed; select, per
+    /// partition, the prefix of its own segments at or below both the
+    /// durable watermark and the store's, and every sealed stream segment
+    /// whose every partition's frames are; write `wal-collected` covering
+    /// them and only then unlink them; fsync the directory; set the
+    /// retained-bytes gauge.
     ///
-    /// Nothing is sealed, written or unlinked after `finish`, or when the
+    /// Nothing is rotated, written or unlinked after `finish`, or when the
     /// watermarks cannot be read — the next tick tries again. The task ends
     /// after `finish` and once the store is gone.
     async fn collect(&self) -> bool {
@@ -2824,91 +2493,15 @@ impl WalWriter {
         // only raise the store's value above it: a store value below the
         // durable one then means the store lost a row it acknowledged, which
         // is worth the counter and the log line.
-        let durable_now: Vec<u64> = self
-            .durable
-            .iter()
-            .map(|w| w.load(Ordering::Acquire))
-            .collect();
+        let durable_now = self.durable_now();
         let from_store = Self::tick_watermarks(store.as_ref());
         drop(store);
         let Some(from_store) = from_store else {
             return true;
         };
-
-        let partitions = match Self::segment_bytes_by_partition(&self.wal_dir) {
-            Ok(partitions) => partitions,
-            Err(e) => {
-                tracing::warn!(error = %e, "WAL collection skipped: the WAL directory could not be read");
-                return true;
-            }
-        };
-        let mut handles: Vec<(u32, Arc<PartitionHandle>)> = Vec::new();
-        for &partition in partitions.keys() {
-            match self.handle(partition).await {
-                Ok(handle) => handles.push((partition, handle)),
-                Err(e) => tracing::warn!(
-                    partition,
-                    error = %e,
-                    "WAL collection skipped a partition: its segments could not be opened"
-                ),
-            }
-        }
-
-        let now = std::time::Instant::now();
-        #[cfg(test)]
-        let now = now
-            + *self
-                .test_clock_offset
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (partition, handle) in &handles {
-            if Self::seal_due(*partition, handle, now) {
-                if let Err(e) = self.seal_and_rotate_if_needed(*partition, handle).await {
-                    tracing::error!(partition, error = %e, "WAL collection could not seal a segment");
-                }
-            }
-        }
-
-        // The prefix each partition may lose, and the new collected-up-to
-        // values that cover it. Only this tick changes a sealed set, so the
-        // prefix is still in place when it is unlinked below.
-        let mut reclaim: Vec<(&Arc<PartitionHandle>, usize)> = Vec::new();
-        let mut next: Box<[u64]> = collected.clone();
-        for (partition, handle) in &handles {
-            let index = *partition as usize;
-            let limit = self.collection_bound(*partition, from_store[index], from_store[index]);
-            let sealed = handle.sealed.lock().await;
-            let count = Self::reclaimable_prefix(*partition, &sealed, durable_now[index], limit);
-            if count > 0 {
-                next[index] = next[index].max(sealed[count - 1].max_seq());
-                reclaim.push((handle, count));
-            }
-        }
-        let stream = self.covered_stream_segments(&from_store, &mut next);
-
-        if !reclaim.is_empty() || !stream.is_empty() {
-            // Durable before the first unlink: a start that finds a segment
-            // gone must find the mark that covers it, so it can refuse a data
-            // directory older than what was unlinked.
-            if let Err(e) = write_wal_collected(&self.wal_dir, &next) {
-                tracing::error!(
-                    error = %e,
-                    "WAL collection unlinked nothing: wal-collected could not be written"
-                );
-                return true;
-            }
-            *collected = next;
-            #[cfg(test)]
-            test_abort_if_armed(TestAbortPoint::CollectAfterMark);
-
-            self.unlink_collected(reclaim).await;
-            self.unlink_stream_segments(&stream).await;
-        }
-
-        match Self::segment_bytes_by_partition(&self.wal_dir) {
-            Ok(retained) => set_retained_gauges(&retained),
-            Err(e) => tracing::warn!(error = %e, "WAL retained bytes not updated"),
-        }
+        self.rotate_if_due().await;
+        self.collect_covered(&mut collected, &durable_now, &from_store)
+            .await;
         true
     }
 
@@ -2951,6 +2544,9 @@ impl WalWriter {
             .values()
         {
             global = global.max(segment.summary.max_seq.values().copied().max().unwrap_or(0));
+        }
+        for (_, sequence) in self.unsealed_stream_addresses()? {
+            global = global.max(sequence);
         }
         Ok(global)
     }
@@ -4068,29 +3664,20 @@ fn current_millis() -> i64 {
 
 /// Accessors that open private WAL state to tests.
 ///
-/// They exist because the state below is otherwise unreachable — `PartitionHandle`
-/// and the pre-unlink re-validation are private, and sibling test modules
-/// cannot see them at all.
+/// They exist because the state below is otherwise unreachable — the log
+/// writer and the pre-unlink re-validation are private, and sibling test
+/// modules cannot see them at all.
 #[cfg(test)]
 impl WalWriter {
-    /// Seals the partition's active segment in place.
+    /// Marks the stream's active segment sealed in the writer.
     ///
-    /// Seal/rotate always installs a FRESH active segment under the same lock, so
-    /// a sealed active segment is not reachable through any production path. This
-    /// is the only way to construct the state the append pre-check guards.
-    pub(crate) async fn test_seal_active_segment(&self, partition: u32) -> anyhow::Result<()> {
-        let handle = self.handle(partition).await?;
-        let mut active = handle.active.lock().await;
-        // `into_sealed` consumes the segment, so swap a placeholder in to take
-        // ownership without ever leaving the guard holding an invalid value.
-        let placeholder = Segment::sealed_existing(
-            active.path().to_path_buf(),
-            active.first_seq(),
-            active.max_seq(),
-        );
-        let current = std::mem::replace(&mut *active, placeholder);
-        *active = current.into_sealed();
-        Ok(())
+    /// A rotation always installs a FRESH active segment, so a sealed active
+    /// segment is not reachable through any production path. This is the only
+    /// way to construct the state the writer's tier (P) check guards; the
+    /// partition is not consulted, since the one stream holds every
+    /// partition's frames.
+    pub(crate) async fn test_seal_active_segment(&self, _partition: u32) -> anyhow::Result<()> {
+        self.log.send(log_writer::Command::SealActive).await
     }
 
     /// Runs the pre-unlink re-validation directly, so its typed `Err` can be
@@ -4109,6 +3696,31 @@ impl WalWriter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// The writer's and the syncer's shared state and test controls.
+    fn test_log(&self) -> &Arc<log_writer::Shared> {
+        self.log.shared()
+    }
+
+    /// Makes the writer rotate its active segment now, if it holds a frame;
+    /// returns the rotated segment, without waiting for the syncer.
+    async fn test_rotate_now(&self) -> Option<u64> {
+        let (done, rotated) = tokio::sync::oneshot::channel();
+        let now = std::time::Instant::now() + 2 * log_writer::SEAL_AGE;
+        self.log
+            .send(log_writer::Command::Rotate { now, done })
+            .await
+            .ok()?;
+        rotated.await.ok().flatten()
+    }
+
+    /// Waits until the syncer has sealed stream segment `stream_seq`.
+    async fn test_wait_sealed(&self, stream_seq: u64) {
+        let mut sealed = self.log.sealed_through();
+        let _ = sealed
+            .wait_for(|through| through.is_some_and(|through| through >= stream_seq))
+            .await;
     }
 }
 
@@ -4168,40 +3780,32 @@ impl WalWriter {
             .is_some_and(|task| !task.is_finished())
     }
 
-    /// Installs the fsync observer, or removes it with `None`.
+    /// Installs the fsync observer, or removes it with `None`: it is called
+    /// with `(path, length)` after every fsync of a stream file, the length
+    /// being how far that file is durable.
     #[allow(clippy::type_complexity)]
     pub(crate) fn test_set_fsync_observer(
         &self,
         observer: Option<Arc<dyn Fn(&Path, u64) + Send + Sync>>,
     ) {
         *self
-            .test_fsync_observer
+            .test_log()
+            .hooks
+            .fsync_observer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = observer;
     }
 
-    /// Hands the observer the length of the active segment just fsynced,
-    /// read while the caller still holds the segment's lock: no frame can be
-    /// appended between the fsync and the length.
-    fn test_observe_fsync(&self, active: &Segment) {
-        let observer = self
-            .test_fsync_observer
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(observer) = observer {
-            let length = std::fs::metadata(active.path()).map_or(0, |m| m.len());
-            observer(active.path(), length);
-        }
-    }
-
-    /// Holds every fsync of the batched policy while `hold` is set.
+    /// Holds every fsync the batched policy would start while `hold` is set.
     pub(crate) fn test_hold_batched_fsync(&self, hold: bool) {
-        self.test_hold_batched_fsync.store(hold, Ordering::Release);
+        self.test_log()
+            .hooks
+            .hold_batched
+            .store(hold, Ordering::Release);
     }
 
-    /// Makes the collection tick fail to unlink the sealed segment at
-    /// `path` while `refuse` is set.
+    /// Makes the collection tick fail to unlink the segment at `path` while
+    /// `refuse` is set.
     pub(crate) fn test_refuse_unlink(&self, path: &Path, refuse: bool) {
         let mut refused = self
             .test_refused_unlinks
@@ -4222,46 +3826,18 @@ impl WalWriter {
         observer: Option<Arc<dyn Fn(WalTestEvent) + Send + Sync>>,
     ) {
         *self
-            .test_observer
+            .test_log()
+            .hooks
+            .observer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = observer;
     }
 
-    fn test_observe(&self, event: WalTestEvent) {
-        let observer = self
-            .test_observer
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(observer) = observer {
-            observer(event);
-        }
-    }
-
-    /// Makes every open that misses the installed map wait on `barrier`
-    /// before it takes the open mutex; `None` removes it.
-    pub(crate) fn test_set_open_barrier(&self, barrier: Option<Arc<tokio::sync::Barrier>>) {
-        *self
-            .test_open_barrier
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = barrier;
-    }
-
-    async fn test_wait_open_barrier(&self) {
-        let barrier = self
-            .test_open_barrier
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(barrier) = barrier {
-            barrier.wait().await;
-        }
-    }
-
-    /// Makes the next rotation fail after its new segment was created, as a
-    /// failed directory fsync would.
+    /// Makes the directory fsync of the next rotation fail.
     pub(crate) fn test_fail_next_rotation_dir_fsync(&self) {
-        self.test_fail_rotation_dir_fsync
+        self.test_log()
+            .hooks
+            .fail_next_dir_fsync
             .store(true, Ordering::Release);
     }
 
@@ -4302,12 +3878,16 @@ impl WalWriter {
         }
     }
 
-    /// The paths of the sealed segments the WAL holds for `partition`,
-    /// oldest first.
+    /// The paths of the sealed stream segments that hold a frame of
+    /// `partition`, oldest first.
     pub(crate) async fn test_sealed_paths(&self, partition: u32) -> Vec<PathBuf> {
-        let handle = self.handle(partition).await.expect("partition handle");
-        let sealed = handle.sealed.lock().await;
-        sealed.iter().map(|s| s.path().to_path_buf()).collect()
+        self.stream
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|segment| segment.summary.max_seq.contains_key(&partition))
+            .map(|segment| segment.path.clone())
+            .collect()
     }
 }
 
@@ -4315,14 +3895,11 @@ impl WalWriter {
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WalTestEvent {
-    /// A segment file was created (renamed into place) with `salt`.
-    Created {
-        partition: u32,
-        path: PathBuf,
-        salt: [u8; 32],
-    },
-    /// A frame was framed under the active lock as frame `index` of the
-    /// segment whose header carries `salt`.
+    /// A stream segment was created, under its temporary name, with `salt`;
+    /// `path` is the name it is renamed to.
+    Created { path: PathBuf, salt: [u8; 32] },
+    /// A frame was framed by the writer as frame `index` of the segment whose
+    /// header carries `salt`.
     Framed {
         salt: [u8; 32],
         index: u64,
@@ -4363,8 +3940,8 @@ pub(crate) enum TestAbortPoint {
     OpenInsideSidecarDelete,
     /// `finish`: the first rollback hint renamed into place, the others not.
     FinishInsideHints,
-    /// A segment's creation: its temporary file written and synced, not yet
-    /// renamed into place.
+    /// A stream segment's creation: its temporary file written and its header
+    /// fsynced, not yet renamed into place.
     CreateBeforeRename,
 }
 
@@ -4398,6 +3975,7 @@ pub(crate) fn test_abort_if_armed(point: TestAbortPoint) {
 
 #[cfg(test)]
 mod tests {
+    use super::log_writer::SEAL_AGE;
     use super::*;
     use crate::storage::map_data_store::{FlushCommit, WatermarkKeeping};
     use std::sync::Arc;
@@ -6163,53 +5741,6 @@ mod tests {
         assert_eq!(unapplied[0].sequence, 1);
     }
 
-    // Partitions whose first frames arrive together must not all seal in one
-    // tick, and each must still seal within 2 * SEAL_AGE plus one tick.
-    #[tokio::test]
-    async fn partitions_with_one_first_frame_time_seal_in_different_ticks() {
-        let dir = tempfile::tempdir().unwrap();
-        let (wal, _store) = open_over(dir.path(), WalFsyncPolicy::None, ReplayStore::default());
-        for partition in 0..PARTITION_COUNT {
-            wal.append(partition, &make_wal_entry(1)).await.unwrap();
-        }
-
-        let mut sealed_at = vec![None; PARTITION_COUNT as usize];
-        let mut elapsed = std::time::Duration::ZERO;
-        while elapsed < 2 * SEAL_AGE + COLLECTION_INTERVAL {
-            wal.test_advance_clock(COLLECTION_INTERVAL);
-            elapsed += COLLECTION_INTERVAL;
-            wal.test_collect_now().await;
-            for partition in 0..PARTITION_COUNT {
-                let at = &mut sealed_at[partition as usize];
-                if at.is_none() && !wal.test_sealed_paths(partition).await.is_empty() {
-                    *at = Some(elapsed);
-                }
-            }
-        }
-
-        let unsealed: Vec<u32> = (0..PARTITION_COUNT)
-            .filter(|p| sealed_at[*p as usize].is_none())
-            .collect();
-        assert!(
-            unsealed.is_empty(),
-            "every partition seals within 2 * SEAL_AGE plus one tick, unsealed: {unsealed:?}"
-        );
-        let last = PARTITION_COUNT as usize - 1;
-        assert_ne!(
-            sealed_at[0], sealed_at[last],
-            "partitions 0 and {last} sealed in the same tick"
-        );
-        let mut per_tick: HashMap<std::time::Duration, usize> = HashMap::new();
-        for at in sealed_at.iter().flatten() {
-            *per_tick.entry(*at).or_default() += 1;
-        }
-        let largest = per_tick.values().copied().max().unwrap_or(0);
-        assert!(
-            largest <= PARTITION_COUNT as usize / 2,
-            "one tick sealed {largest} of {PARTITION_COUNT} partitions: {per_tick:?}"
-        );
-    }
-
     // -----------------------------------------------------------------------
     // Concurrency regression: seal/rotate must not drop appends that interleave
     // with it. The collection tick, with every segment aged past the seal age,
@@ -6424,16 +5955,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // AC3 — lock discipline (structural): GC of sealed segments must NEVER block
-    // an in-flight append to the active segment. The two paths take DISTINCT
-    // locks (`PartitionHandle::active` vs `PartitionHandle::sealed`), so GC can
-    // run to completion while the active-append lock is held by someone else.
-    //
-    // We assert this by running a collection tick that reclaims every sealed
-    // segment while HOLDING the active-append lock the whole time. If GC took
-    // the active lock, the tick would never end; the test completing proves the
-    // locks are separate and that an append in flight (which would hold
-    // `active`) does not serialize against GC.
+    // AC3 — lock discipline (structural): collection must NEVER block an
+    // append. An append takes no lock collection holds — it hands its frame
+    // to the log writer over a channel — so appends resolve while the
+    // collection lock is held for the whole time, and a tick then reclaims
+    // every sealed segment the watermark covers.
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -6442,39 +5968,44 @@ mod tests {
         let (wal, store) = open_over(dir.path(), WalFsyncPolicy::None, ReplayStore::default());
         wal.test_advance_clock(SEAL_AGE);
 
-        // Build a partition with several sealed segments below a watermark by
-        // appending and sealing repeatedly. Each tick seals the active segment
-        // and rotates a fresh one; watermark 0 keeps them sealed (not yet GC'd)
-        // so the sealed set is populated for the GC-under-lock assertion. The
-        // last tick leaves the active segment empty, so a tick does not seal it.
+        // Several sealed segments: each tick rotates the active segment, which
+        // holds the frame just appended; watermark 0 keeps them.
         for seq in 1..=8u64 {
             wal.append(0, &make_wal_entry(seq)).await.unwrap();
             wal.test_collect_now().await;
         }
-        let handle = wal.handle(0).await.unwrap();
         assert!(
-            !handle.sealed.lock().await.is_empty(),
+            !wal.test_sealed_paths(0).await.is_empty(),
             "test setup must leave at least one sealed segment to GC"
         );
         commit_applied(store.as_ref(), &wal, 0, 8).await;
 
-        // Hold the active-append lock for the entire GC run. An in-flight append
-        // holds exactly this lock; if GC needed it, the tick would never end.
-        let active_guard = handle.active.lock().await;
+        // Hold the collection lock for the whole run of appends: a running
+        // tick holds exactly this lock; an append that needed it would hang.
+        let collection_guard = wal.collection.collected.lock().await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            for seq in 9..=20u64 {
+                wal.append(0, &make_wal_entry(seq)).await.unwrap();
+            }
+        })
+        .await
+        .expect("an append must not wait for the collection lock");
+        drop(collection_guard);
 
-        tokio::time::timeout(std::time::Duration::from_secs(30), wal.test_collect_now())
+        wal.test_collect_now().await;
+        assert_eq!(
+            wal.test_sealed_paths(0).await.len(),
+            1,
+            "the segments at or below the watermark are reclaimed, the one above it kept"
+        );
+        let left: Vec<u64> = wal
+            .unapplied(0)
             .await
-            .expect("the collection tick must not wait for the active-append lock");
-
-        // Reaching here while still holding the active lock proves GC made full
-        // progress without the active-append lock — the AC3 lock-discipline
-        // guarantee. Drop the guard explicitly to document the held duration.
-        drop(active_guard);
-
-        // Sanity: the sealed set is now empty (everything GC'd) and the active
-        // segment is untouched and still appendable.
-        assert!(handle.sealed.lock().await.is_empty());
-        wal.append(0, &make_wal_entry(9)).await.unwrap();
+            .unwrap()
+            .iter()
+            .map(|e| e.sequence)
+            .collect();
+        assert_eq!(left, (9..=20).collect::<Vec<_>>());
     }
 
     // -----------------------------------------------------------------------
@@ -6535,7 +6066,7 @@ mod tests {
 
         // Simulate a crash mid-append: append a few garbage / partial bytes to the
         // active segment file so its tail is torn (not a clean frame boundary).
-        let active_path = dir_path.join(segment::format_segment_filename(0, 0));
+        let active_path = dir_path.join(segment::format_stream_filename(0));
         {
             use tokio::io::AsyncWriteExt as _;
             let mut f = tokio::fs::OpenOptions::new()
@@ -6548,7 +6079,7 @@ mod tests {
             f.write_all(&format::FRAME_MAGIC.to_be_bytes())
                 .await
                 .unwrap();
-            f.write_all(&[format::FRAME_VERSION_V2, 0xAB, 0xCD])
+            f.write_all(&[format::FRAME_VERSION_V3, 0xAB, 0xCD])
                 .await
                 .unwrap();
             f.flush().await.unwrap();
@@ -6556,7 +6087,7 @@ mod tests {
 
         // Phase 2: reopen the writer. The open truncates the torn tail and keeps
         // the segment sealed, never appending to it again; frames 4..=6 go to a
-        // new segment, which a collection tick then seals and rotates. Watermark
+        // new stream segment, which a collection tick then rotates and seals. Watermark
         // 0 keeps nothing GC'd so every frame must remain recoverable.
         let intact_len = std::fs::metadata(&active_path).unwrap().len() - 7;
         let wal = reopen();
@@ -6569,7 +6100,7 @@ mod tests {
             wal.test_sealed_paths(0).await,
             vec![
                 active_path.clone(),
-                dir_path.join(segment::format_segment_filename(0, 4))
+                dir_path.join(segment::format_stream_filename(1))
             ],
             "the torn segment is kept sealed and the new one sealed by the tick, or the test \
              shows nothing"
@@ -7150,16 +6681,11 @@ mod tests {
 
         let before = WalWriter::test_fail_stop_observations().len();
 
-        // Run the append on its own task so the fail-stop's test-mode panic is
-        // caught by the JoinHandle instead of unwinding the test itself — the
-        // tier record has to stay readable afterwards.
-        let wal_clone = Arc::clone(&wal);
-        let outcome = tokio::spawn(async move { wal_clone.append(0, &make_wal_entry(2)).await })
-            .await
-            .err();
+        // The writer frames the append and fail-stops; under test its panic
+        // ends the writer thread, and the append is refused, never resolved.
         assert!(
-            outcome.is_some_and(|e| e.is_panic()),
-            "An append to a sealed active segment must fail-stop, not return"
+            wal.append(0, &make_wal_entry(2)).await.is_err(),
+            "An append to a sealed active segment must fail-stop, not resolve"
         );
 
         let observed = WalWriter::test_fail_stop_observations();
@@ -7177,38 +6703,33 @@ mod tests {
     }
 
     /// Under `Batched` an appended frame is in the file but not fsynced until
-    /// the group-commit timer runs, and that timer ends with the process. A
+    /// the syncer's window closes, and the syncer ends with the process. A
     /// shutdown therefore has to be able to fsync on demand.
     ///
-    /// The clock is paused so the timer cannot be what empties the counts: the
-    /// precondition below fails if it ever does.
-    #[tokio::test(start_paused = true)]
+    /// The batched fsyncs are held so the window cannot be what makes the
+    /// frames durable: the precondition below fails if it ever does.
+    #[tokio::test(flavor = "multi_thread")]
     async fn wal_writer_sync_leaves_no_unfsynced_frame() {
-        async fn unfsynced(wal: &WalWriter, partition: u32) -> u32 {
-            let handle = wal.handle(partition).await.unwrap();
-            let active = handle.active.lock().await;
-            active.unfsynced_count()
-        }
-
         let dir = tempfile::tempdir().unwrap();
         let (wal, _store) = open_over(dir.path(), WalFsyncPolicy::Batched, ReplayStore::default());
+        wal.test_hold_batched_fsync(true);
 
         wal.append(0, &make_wal_entry(1)).await.unwrap();
         wal.append(1, &make_wal_entry(2)).await.unwrap();
         wal.append(1, &make_wal_entry(3)).await.unwrap();
-        assert_eq!(
-            (unfsynced(&wal, 0).await, unfsynced(&wal, 1).await),
-            (1, 2),
+        let log = wal.test_log();
+        assert!(
+            log.test_durable() < log.test_written(),
             "the appended frames must be un-fsynced before `sync`, or the test shows nothing"
         );
 
         wal.sync().await.unwrap();
 
-        assert_eq!(
-            (unfsynced(&wal, 0).await, unfsynced(&wal, 1).await),
-            (0, 0),
-            "`sync` must fsync the active segment of every partition that held a frame"
+        assert!(
+            log.test_durable() >= log.test_written(),
+            "`sync` must make every frame written before it durable"
         );
+        wal.test_hold_batched_fsync(false);
     }
 
     // -----------------------------------------------------------------------
@@ -7292,16 +6813,17 @@ mod sealed_frame_tests {
 
     use std::collections::{BTreeSet, HashSet};
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
-    use super::format::{decode_segment, FRAME_HEADER_LEN};
-    use super::segment::{SegmentCipher, SEGMENT_HEADER_LEN};
+    use super::format::{decode_stream_segment, FRAME_HEADER_LEN, FRAME_HEADER_LEN_V3};
+    use super::log_writer::SEAL_AGE;
+    use super::segment::SegmentCipher;
     use super::store_mode_tests::{
         keys_in, lww, open_engine, record_key, segment_files, store_frame, CountingEngine, Node,
         Root,
     };
-    use super::{Wal, WalFsyncPolicy, WalTestEvent, WalWriter, SEAL_AGE};
+    use super::{Wal, WalFsyncPolicy, WalWriter};
     use crate::storage::datastores::engine_store::{
         meta_key, EngineMapDataStore, KS_BACKUP, KS_PRIMARY, META_KEYRING,
     };
@@ -7368,9 +6890,10 @@ mod sealed_frame_tests {
         let keyring = wal.keyring.as_deref().expect("a sealed node");
         let mut fingerprints = BTreeSet::new();
         for path in segment_paths(&wal.wal_dir) {
-            let header = decode_segment(&std::fs::read(&path).expect("segment"))
-                .header
-                .expect("a v2 segment");
+            let header =
+                decode_stream_segment(&std::fs::read(&path).expect("segment"), None, false)
+                    .header
+                    .expect("a stream segment");
             assert_eq!(
                 header.cipher,
                 SegmentCipher::XChaCha20Poly1305,
@@ -7379,7 +6902,7 @@ mod sealed_frame_tests {
             );
             fingerprints.insert(
                 keyring
-                    .segment_key(&header)
+                    .stream_segment_key(&header)
                     .expect("its key id is in the keyring")
                     .test_fingerprint(),
             );
@@ -7388,9 +6911,7 @@ mod sealed_frame_tests {
     }
 
     fn segment_paths(wal_dir: &Path) -> Vec<PathBuf> {
-        (0..crate::storage::wal::PARTITION_COUNT)
-            .flat_map(|p| segment_files(wal_dir, p).into_values())
-            .collect()
+        super::segment::inspect::segment_paths(wal_dir)
     }
 
     /// Asserts that no `(segment key, index)` pair of a segment of `wal`'s
@@ -7437,16 +6958,13 @@ mod sealed_frame_tests {
             .expect("a segment")
     }
 
-    /// The offset of every frame of the segment file `data`.
+    /// The offset of every frame of the stream segment file `data`.
     fn frame_offsets(data: &[u8]) -> Vec<usize> {
-        let mut offsets = Vec::new();
-        let mut at = SEGMENT_HEADER_LEN;
-        while at + FRAME_HEADER_LEN <= data.len() {
-            offsets.push(at);
-            let len = u32::from_be_bytes(data[at + 5..at + 9].try_into().unwrap()) as usize;
-            at += FRAME_HEADER_LEN + len;
-        }
-        offsets
+        decode_stream_segment(data, None, false)
+            .spans
+            .iter()
+            .map(|span| span.offset)
+            .collect()
     }
 
     /// AC8 (`TG-ENC-005`): many tasks append to one sealed partition at
@@ -7493,48 +7011,6 @@ mod sealed_frame_tests {
                 .expect("recovery opens every frame"),
             (1..=TASKS * PER_TASK).collect::<Vec<_>>()
         );
-        node.close().await;
-    }
-
-    /// AC8 (`TG-ENC-005`): the first opens of a sealed partition by an
-    /// append and by the collection tick race past the installed-map miss.
-    /// The open mutex lets one of them create the new segment.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn ac8_racing_first_opens_of_a_sealed_partition_create_one_segment() {
-        let root = Root::new();
-        let provider = provider();
-        let node = sealed_node(&root, &provider);
-        append(&node, P, 1).await;
-        node.close().await;
-
-        let node = sealed_node(&root, &provider);
-        let created = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&created);
-        node.wal.test_set_observer(Some(Arc::new(move |event| {
-            if matches!(event, WalTestEvent::Created { partition: P, .. }) {
-                counter.fetch_add(1, Ordering::SeqCst);
-            }
-        })));
-        node.wal
-            .test_set_open_barrier(Some(Arc::new(tokio::sync::Barrier::new(2))));
-        let wal = Arc::clone(&node.wal);
-        let append_task =
-            tokio::spawn(async move { wal.append(P, &store_frame("k2", &lww("v", 2), 2)).await });
-        let wal = Arc::clone(&node.wal);
-        let tick = tokio::spawn(async move { wal.test_collect_now().await });
-        append_task.await.expect("append task").expect("append");
-        tick.await.expect("tick task");
-        node.wal.test_set_open_barrier(None);
-        assert_eq!(
-            created.load(Ordering::SeqCst),
-            1,
-            "the racing opens created more than one segment"
-        );
-        assert_eq!(unapplied(&node, P).await.expect("recovery"), vec![1, 2]);
-        assert_no_pair_repeats(&node.wal);
-        node.close().await;
-        let node = sealed_node(&root, &provider);
-        assert_eq!(unapplied(&node, P).await.expect("recovery"), vec![1, 2]);
         node.close().await;
     }
 
@@ -7586,40 +7062,39 @@ mod sealed_frame_tests {
         }
     }
 
-    /// AC8 (`TG-ENC-005`): a rotation whose directory fsync fails leaves its
-    /// new sealed segment behind with no frame; the next rotation replaces or
-    /// passes it, and no (key, index) pair repeats.
+    /// AC8 (`TG-ENC-005`): every rotation and every restart starts a new
+    /// sealed stream segment under a fresh salt, so no (key, index) pair
+    /// repeats across them and recovery opens every frame.
     #[tokio::test(flavor = "multi_thread")]
-    async fn ac8_a_sealed_rotation_with_a_failed_directory_fsync_then_the_next() {
+    async fn ac8_sealed_rotations_and_restarts_never_repeat_a_pair() {
         let root = Root::new();
         let provider = provider();
-        let node = sealed_node(&root, &provider);
-        let rotate = |fail: bool| {
-            let wal = Arc::clone(&node.wal);
-            async move {
-                if fail {
-                    wal.test_fail_next_rotation_dir_fsync();
-                }
-                wal.test_advance_clock(2 * SEAL_AGE + std::time::Duration::from_secs(1));
-                wal.test_collect_now().await;
-            }
+        let rotate = |wal: Arc<WalWriter>| async move {
+            wal.test_advance_clock(SEAL_AGE);
+            wal.test_collect_now().await;
         };
+        let node = sealed_node(&root, &provider);
         append(&node, P, 1).await;
-        rotate(true).await;
-        assert_eq!(segment_files(&root.wal_dir(), P).len(), 2);
-        rotate(false).await;
+        rotate(Arc::clone(&node.wal)).await;
         append(&node, P, 2).await;
-        rotate(true).await;
+        rotate(Arc::clone(&node.wal)).await;
         append(&node, P, 3).await;
-        rotate(false).await;
+        assert_eq!(segment_files(&root.wal_dir(), P).len(), 3);
+        assert_no_pair_repeats(&node.wal);
+        node.close().await;
+
+        let node = sealed_node(&root, &provider);
         append(&node, P, 4).await;
+        rotate(Arc::clone(&node.wal)).await;
+        append(&node, P, 5).await;
+        assert_eq!(segment_files(&root.wal_dir(), P).len(), 5);
         assert_no_pair_repeats(&node.wal);
         node.close().await;
 
         let node = sealed_node(&root, &provider);
         assert_eq!(
             unapplied(&node, P).await.expect("recovery"),
-            vec![1, 2, 3, 4]
+            vec![1, 2, 3, 4, 5]
         );
         assert_no_pair_repeats(&node.wal);
         node.close().await;
@@ -7655,9 +7130,10 @@ mod sealed_frame_tests {
         let mut data = std::fs::read(path).expect("segment");
         let at = frame_offsets(&data)[frame];
         let len = u32::from_be_bytes(data[at + 5..at + 9].try_into().unwrap()) as usize;
-        let payload = at + FRAME_HEADER_LEN..at + FRAME_HEADER_LEN + len;
+        let payload = at + FRAME_HEADER_LEN_V3..at + FRAME_HEADER_LEN_V3 + len;
         data[payload.start + 1] ^= 0x01;
-        let crc = crc32c::crc32c(&data[payload]);
+        // The CRC covers the frame from its address on.
+        let crc = crc32c::crc32c(&data[at + FRAME_HEADER_LEN..payload.end]);
         data[at + 9..at + FRAME_HEADER_LEN].copy_from_slice(&crc.to_be_bytes());
         std::fs::write(path, data).expect("write segment");
         at
@@ -7810,10 +7286,6 @@ mod sealed_frame_tests {
         let path = last_segment(&root.wal_dir(), P);
 
         let node = sealed_node(&root, &provider);
-        assert!(
-            !node.wal.partitions.lock().await.contains_key(&P),
-            "the partition has an installed handle before finish"
-        );
         node.wal.finish(true).await.expect("finish");
         assert!(
             path.exists(),
@@ -7898,9 +7370,13 @@ mod sealed_frame_tests {
         assert!(row.keys.iter().all(|k| k.state == KeyState::DecryptOnly));
         // New segments are plain once no key is active.
         append(&node, P, 4).await;
-        let header = decode_segment(&std::fs::read(last_segment(&root.wal_dir(), P)).unwrap())
-            .header
-            .expect("a v2 segment");
+        let header = decode_stream_segment(
+            &std::fs::read(last_segment(&root.wal_dir(), P)).unwrap(),
+            None,
+            false,
+        )
+        .header
+        .expect("a stream segment");
         assert_eq!(header.cipher, SegmentCipher::None);
         node.close().await;
 

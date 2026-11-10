@@ -1314,24 +1314,23 @@ fn c08_batched_replay_equals_per_frame_replay_under_refusals() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn c09_a_segment_that_fails_to_unlink_holds_back_only_its_own_partition() {
+async fn c09_a_segment_that_fails_to_unlink_holds_back_only_itself() {
     const A: u32 = 241;
     const B: u32 = 257;
     let root = Root::new();
     let node = FaultNode::open(&root);
     node.seed(&[("warm".to_string(), lww("warm", 1))]).await;
-    // Two sealed segments in A, one in B, every frame at or below the rows:
-    // a tick seals an active segment whose first frame is old enough, and
-    // collects nothing while no row covers a segment. 61 s is past the seal
-    // age of every partition (30 s plus a per-partition offset below 30 s).
+    // Three sealed stream segments — A's first frame, B's frame, A's second
+    // frame — every frame at or below the rows: a tick rotates an active
+    // segment whose first frame is old enough, and collects nothing while no
+    // row covers a segment.
     let seal_age = Duration::from_secs(61);
-    node.append(A, &store_frame("a1", &lww("v", 5), 1)).await;
-    node.append(B, &store_frame("b1", &lww("v", 5), 2)).await;
-    node.wal.test_advance_clock(seal_age);
-    node.wal.test_collect_now().await;
-    node.append(A, &store_frame("a2", &lww("v", 5), 3)).await;
-    node.wal.test_advance_clock(seal_age);
-    node.wal.test_collect_now().await;
+    for (partition, key, sequence) in [(A, "a1", 1), (B, "b1", 2), (A, "a2", 3)] {
+        node.append(partition, &store_frame(key, &lww("v", 5), sequence))
+            .await;
+        node.wal.test_advance_clock(seal_age);
+        node.wal.test_collect_now().await;
+    }
     node.store
         .inner
         .commit(&FlushCommit {
@@ -1355,9 +1354,9 @@ async fn c09_a_segment_that_fails_to_unlink_holds_back_only_its_own_partition() 
     let first_tick = (
         sealed_a.iter().map(|p| p.exists()).collect::<Vec<_>>(),
         sealed_b[0].exists(),
-        node.wal.test_sealed_paths(A).await == sealed_a,
+        node.wal.test_sealed_paths(A).await == sealed_a[..1],
         node.wal.test_sealed_paths(B).await.is_empty(),
-        retained_matches_disk(&node.wal, &root.wal_dir(), &[A, B]).await,
+        retained_matches_disk(&node.wal, &root.wal_dir()).await,
     );
 
     node.wal.test_refuse_unlink(&sealed_a[0], false);
@@ -1365,49 +1364,37 @@ async fn c09_a_segment_that_fails_to_unlink_holds_back_only_its_own_partition() 
     let second_tick = (
         sealed_a.iter().map(|p| p.exists()).collect::<Vec<_>>(),
         node.wal.test_sealed_paths(A).await.is_empty(),
-        retained_matches_disk(&node.wal, &root.wal_dir(), &[A, B]).await,
+        retained_matches_disk(&node.wal, &root.wal_dir()).await,
     );
     assert_eq!(
         (first_tick, second_tick),
         (
-            (vec![true, true], false, true, true, true),
+            (vec![true, false], false, true, true, true),
             (vec![false, false], true, true),
         ),
-        "a refused unlink in A leaves A's segments on disk and in the sealed set, B is collected \
-         in the same tick, and the next tick collects A"
+        "a refused unlink keeps that segment on disk and in the summaries, the other covered \
+         segments are collected in the same tick, and the next tick collects it"
     );
     node.close().await;
 }
 
-/// The bytes of the segment files of `partition` in `wal_dir`.
-fn segment_bytes(wal_dir: &Path, partition: u32) -> u64 {
-    super::store_mode_tests::segment_files(wal_dir, partition)
-        .values()
-        .map(|p| std::fs::metadata(p).expect("segment metadata").len())
-        .sum()
-}
-
-/// Whether `topgun_wal_retained_bytes{partition}` reads the bytes on disk for
-/// every partition of `partitions`, right after a tick of `wal` set it. The
-/// recorder is process-global and another test's tick may set the same
-/// series in between, so a mismatch is retried with a fresh tick.
-async fn retained_matches_disk(wal: &WalWriter, wal_dir: &Path, partitions: &[u32]) -> bool {
+/// Whether `topgun_wal_retained_bytes_total` reads the bytes of the segment
+/// files on disk, right after a tick of `wal` set it. The recorder is
+/// process-global and another test's tick may set the same series in
+/// between, so a mismatch is retried with a fresh tick.
+async fn retained_matches_disk(wal: &WalWriter, wal_dir: &Path) -> bool {
     for _ in 0..20 {
         wal.test_collect_now().await;
         let rendered =
             crate::service::middleware::observability::init_observability().render_metrics();
-        let all = partitions.iter().all(|p| {
-            let series = format!("{}{{partition=\"{p}\"}}", super::WAL_RETAINED_BYTES_GAUGE);
-            let gauge = rendered
-                .lines()
-                .find(|line| line.starts_with(&series))
-                .and_then(|line| line.rsplit(' ').next())
-                .and_then(|v| v.parse::<f64>().ok());
-            #[allow(clippy::cast_precision_loss)]
-            let disk = segment_bytes(wal_dir, *p) as f64;
-            gauge == Some(disk)
-        });
-        if all {
+        let gauge = rendered
+            .lines()
+            .find(|line| line.starts_with(&format!("{} ", super::WAL_RETAINED_BYTES_TOTAL_GAUGE)))
+            .and_then(|line| line.rsplit(' ').next())
+            .and_then(|v| v.parse::<f64>().ok());
+        #[allow(clippy::cast_precision_loss)]
+        let disk = super::segment::inspect::bytes_on_disk(wal_dir) as f64;
+        if gauge == Some(disk) {
             return true;
         }
     }
@@ -1911,29 +1898,25 @@ fn logged_lengths(root: &Path) -> BTreeMap<String, u64> {
 fn cut_to_last_fsync(root: &Path) -> u64 {
     let lengths = logged_lengths(root);
     let wal_dir = root.join("wal");
-    let mut partitions = BTreeSet::new();
-    for entry in std::fs::read_dir(&wal_dir).expect("read the WAL dir") {
-        let entry = entry.expect("dir entry");
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some((partition, _)) = super::segment::parse_segment_filename(&name) {
-            partitions.insert(partition);
-            let keep = lengths.get(&name).copied().unwrap_or(0);
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .open(entry.path())
-                .expect("open a segment");
-            if file.metadata().expect("segment metadata").len() > keep {
-                file.set_len(keep).expect("cut a segment");
-            }
+    for path in super::segment::inspect::segment_paths(&wal_dir) {
+        let name = path
+            .file_name()
+            .expect("a file name")
+            .to_string_lossy()
+            .into_owned();
+        let keep = lengths.get(&name).copied().unwrap_or(0);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open a segment");
+        if file.metadata().expect("segment metadata").len() > keep {
+            file.set_len(keep).expect("cut a segment");
         }
     }
-    partitions
-        .into_iter()
-        .filter_map(|p| {
-            super::store_mode_tests::frames_on_disk(&wal_dir, p)
-                .last()
-                .copied()
-        })
+    super::segment::inspect::frames_on_disk(&wal_dir)
+        .expect("the cut WAL reads")
+        .iter()
+        .map(|frame| frame.sequence)
         .max()
         .unwrap_or(0)
 }
