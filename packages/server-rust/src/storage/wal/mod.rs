@@ -599,6 +599,12 @@ struct StreamSegment {
     /// `None` only for a file shorter than its header, which holds no frame.
     header: Option<segment::StreamSegmentHeader>,
     summary: segment::SegmentSummary,
+    /// Why the open could not read the segment's frames — corruption, a torn
+    /// tail on a segment that is not the newest, a frame of no partition —
+    /// naming the file and the offset. Recovery refuses to start with it, as
+    /// it does on a per-partition segment it cannot read; until then the
+    /// segment is never collected or cut.
+    refusal: Option<String>,
 }
 
 /// Whether every partition with a frame in `summary` has its highest sequence
@@ -642,6 +648,10 @@ pub struct WalWriter {
     /// is refused before it frames anything. Separate from
     /// `collection.closed`, which every `finish` sets.
     appends_closed: AtomicBool,
+    /// Whether the open found a stream segment it could not read: recovery
+    /// refuses to start, and until then every append is refused, so nothing
+    /// is written to a log that will not be replayed.
+    unreadable_stream: bool,
     /// Whether the payloads are sealed, i.e. the keyring has an active key:
     /// fixed for the life of the process, so the payload limit an append
     /// checks is the one the writer frames under.
@@ -692,6 +702,9 @@ pub struct WalWriter {
     /// Parks the next append to a partition at the entry of `append`.
     #[cfg(test)]
     test_append_park: std::sync::Mutex<Option<TestAppendPark>>,
+    /// While set, the timer's ticks do nothing: only a test's own tick runs.
+    #[cfg(test)]
+    test_hold_collection_task: AtomicBool,
 }
 
 /// A sealed segment was retained instead of reclaimed.
@@ -821,8 +834,10 @@ impl WalWriter {
     ///    older binary — and refuse a data directory that holds no watermarks
     ///    beside a directory that has served a store keeping them;
     /// 4. refuse when any watermark is below what the WAL already collected,
-    ///    and read the summary of every stream segment, refusing one that is
-    ///    torn anywhere but at the tail of the newest;
+    ///    and read the summary of every stream segment; one whose frames
+    ///    cannot be read — torn anywhere but at the tail of the newest, a
+    ///    corrupt frame, a frame of no partition — is kept with its refusal,
+    ///    which recovery refuses to start with;
     /// 5. import the sidecar values, with the marker, in one durable batch;
     /// 6. create `wal-collected`, all zero, when absent;
     /// 7. delete every sidecar, sidecar temporary file and segment temporary
@@ -949,6 +964,10 @@ impl WalWriter {
                 let Some(writer) = writer.upgrade() else {
                     return;
                 };
+                #[cfg(test)]
+                if writer.test_hold_collection_task.load(Ordering::Acquire) {
+                    continue;
+                }
                 if !writer.collect().await {
                     return;
                 }
@@ -1126,6 +1145,10 @@ impl WalWriter {
         let Some((&stream_seq, newest)) = stream.iter().next_back() else {
             return Ok(());
         };
+        if newest.refusal.is_some() {
+            // Recovery refuses it as it is: nothing is written to it.
+            return Ok(());
+        }
         let path = newest.path.clone();
         let len = std::fs::metadata(&path)
             .map_err(|e| anyhow::anyhow!("Cannot read WAL segment {}: {e}", path.display()))?
@@ -1184,6 +1207,7 @@ impl WalWriter {
         // A process never appends to a segment it did not create
         // (`TG-ENC-005`): its first segment follows every one on disk.
         let next_stream_seq = stream.keys().next_back().map_or(0, |last| last + 1);
+        let unreadable_stream = stream.values().any(|segment| segment.refusal.is_some());
         let stream = Arc::new(std::sync::Mutex::new(stream));
         let log = log_writer::LogStream::start(
             wal_dir.clone(),
@@ -1195,6 +1219,7 @@ impl WalWriter {
         Ok(Arc::new(Self {
             wal_dir,
             appends_closed: AtomicBool::new(false),
+            unreadable_stream,
             sealed_payloads: keyring.as_deref().and_then(Keyring::active_id).is_some(),
             log,
             store,
@@ -1220,6 +1245,8 @@ impl WalWriter {
             test_refused_unlinks: std::sync::Mutex::new(HashSet::new()),
             #[cfg(test)]
             test_append_park: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            test_hold_collection_task: AtomicBool::new(false),
         }))
     }
 
@@ -1341,8 +1368,27 @@ impl WalWriter {
         for (stream_seq, path) in segments {
             let data = std::fs::read(&path)
                 .map_err(|e| anyhow::anyhow!("Cannot read WAL segment {}: {e}", path.display()))?;
-            let (header, spans, _) =
-                Self::read_stream_segment(&path, &data, Some(stream_seq) == newest, None, false)?;
+            let (header, spans) = match Self::read_stream_segment(
+                &path,
+                &data,
+                Some(stream_seq) == newest,
+                None,
+                false,
+            ) {
+                Ok((header, spans, _)) => (header, spans),
+                Err(e) => {
+                    summaries.insert(
+                        stream_seq,
+                        Arc::new(StreamSegment {
+                            path,
+                            header: None,
+                            summary: segment::SegmentSummary::default(),
+                            refusal: Some(format!("{e:#}")),
+                        }),
+                    );
+                    continue;
+                }
+            };
             let mut summary = segment::SegmentSummary::default();
             for (index, span) in (0u64..).zip(&spans) {
                 let Some((partition, sequence)) = span.address else {
@@ -1369,6 +1415,7 @@ impl WalWriter {
                     path,
                     header,
                     summary,
+                    refusal: None,
                 }),
             );
         }
@@ -1456,6 +1503,7 @@ impl WalWriter {
     /// there must still be the partition's frame at that sequence.
     async fn stream_frames_of(&self, partition: u32, floor: u64) -> anyhow::Result<Vec<WalEntry>> {
         use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+        self.refuse_unreadable_stream()?;
         let segments: Vec<Arc<StreamSegment>> = self
             .stream
             .lock()
@@ -1581,8 +1629,22 @@ impl WalWriter {
         Ok(addresses)
     }
 
+    /// Refuses, with the first refusal the open recorded, when a stream
+    /// segment's frames could not be read.
+    fn refuse_unreadable_stream(&self) -> anyhow::Result<()> {
+        let stream = self
+            .stream
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match stream.values().find_map(|segment| segment.refusal.clone()) {
+            Some(refusal) => Err(anyhow::anyhow!(refusal)),
+            None => Ok(()),
+        }
+    }
+
     /// Every partition with a frame in a segment of either layout, ascending.
     fn wal_partitions(&self) -> anyhow::Result<Vec<u32>> {
+        self.refuse_unreadable_stream()?;
         let mut partitions: BTreeSet<u32> = WalRecovery::discover_partitions(&self.wal_dir)?
             .into_iter()
             .collect();
@@ -1864,6 +1926,9 @@ impl Wal for WalWriter {
                  sequence={}",
                 entry.sequence
             );
+        }
+        if self.unreadable_stream {
+            self.refuse_unreadable_stream()?;
         }
         let payload = format::encode_v2_payload(entry, self.sealed_payloads)?;
         let (ack, resolved) = tokio::sync::oneshot::channel();
@@ -2366,7 +2431,7 @@ impl WalWriter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut covered = Vec::new();
-        for (stream_seq, segment) in stream.iter() {
+        for (stream_seq, segment) in stream.iter().filter(|(_, s)| s.refusal.is_none()) {
             let bound = |partition: u32| {
                 let index = partition as usize;
                 let durable = self
@@ -2531,6 +2596,7 @@ impl WalWriter {
     /// unrecognised magic, or an unknown format version — consistent with
     /// recovery refusing to start on corrupt data.
     pub async fn max_observed_sequence(&self) -> anyhow::Result<u64> {
+        self.refuse_unreadable_stream()?;
         // A store row survives collection of every segment it covers, and a
         // WAL cut at its last fsync under the batched policy can end below
         // it, so every row bounds the seed whether or not frames remain.
@@ -3770,6 +3836,13 @@ impl WalWriter {
             Some(value) => overrides.insert(partition, value),
             None => overrides.remove(&partition),
         };
+    }
+
+    /// Makes the collection tick task skip its ticks while `hold` is set, so
+    /// a test's own tick is the only one that runs.
+    pub(crate) fn test_hold_collection_task(&self, hold: bool) {
+        self.test_hold_collection_task
+            .store(hold, Ordering::Release);
     }
 
     /// Wakes the collection tick task now, without running the tick body in
@@ -5538,6 +5611,7 @@ mod tests {
                     path: segment.path.clone(),
                     header: segment.header,
                     summary,
+                    refusal: None,
                 });
                 stream.insert(1, changed);
                 offset
@@ -5568,12 +5642,39 @@ mod tests {
         };
         let offset = segment::STREAM_HEADER_LEN;
 
+        // Refused by recovery, as a segment it cannot read is; the open keeps
+        // it untouched.
         let dir = tempfile::tempdir().unwrap();
-        let (path, _) = write_stream_segment(dir.path(), 1, &[(PARTITION_COUNT, 1)]);
+        let (path, data) = write_stream_segment(dir.path(), 1, &[(PARTITION_COUNT, 1)]);
+        let (wal, _kept) = open_over(dir.path(), WalFsyncPolicy::None, ReplayStore::default());
         let error = format!(
             "{:#}",
-            open(dir.path()).err().expect("partition out of range")
+            wal.wal_partitions().err().expect("partition out of range")
         );
+        // Until recovery refuses, nothing is written: no append, no new
+        // segment, no collection or cut of the one it cannot read.
+        let refused = wal.append(1, &addressed_frame(1, 5)).await;
+        assert_eq!(
+            refused.err().map(|e| format!("{e:#}")),
+            Some(error.clone()),
+            "an append before recovery is refused with the same refusal"
+        );
+        wal.mark_applied(PARTITION_COUNT - 1, u64::MAX)
+            .await
+            .unwrap();
+        wal.test_advance_clock(log_writer::SEAL_AGE);
+        wal.test_collect_now().await;
+        assert_eq!(
+            segment::inspect::segment_paths(dir.path()),
+            vec![path.clone()],
+            "a segment appeared or the unreadable one was collected"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            data,
+            "the open or a tick changed the segment"
+        );
+        drop(wal);
         assert!(
             error.contains(&path.display().to_string())
                 && error.contains(&format!("offset {offset}"))
@@ -5645,9 +5746,11 @@ mod tests {
 
         std::fs::write(&newest, &newest_data).unwrap();
         std::fs::write(&older, &older_data[..older_data.len() - 3]).unwrap();
+        let wal = open().expect("the open defers the refusal to recovery");
         let error = format!(
             "{:#}",
-            open()
+            wal.unapplied(1)
+                .await
                 .err()
                 .expect("a torn older stream segment is refused")
         );

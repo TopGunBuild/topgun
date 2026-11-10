@@ -2777,6 +2777,9 @@ async fn a20_a_commit_carrying_a_watermark_below_the_held_row_is_refused_and_wri
 /// one, with `[1, 2]` stored and its row `(P, 2)` committed.
 async fn a21_setup(root: &Root) -> Node {
     let node = Node::open(root, WalFsyncPolicy::PerOp).expect("store-mode open");
+    // Only this test's ticks run: a timer tick could take the one injected
+    // read failure, or collect between the fingerprints.
+    node.wal.test_hold_collection_task(true);
     let records: Vec<(String, RecordValue)> = keys_in(P, 4)
         .into_iter()
         .enumerate()

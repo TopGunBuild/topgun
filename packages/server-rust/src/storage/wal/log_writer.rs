@@ -1105,6 +1105,7 @@ impl Syncer {
                         path: old.path,
                         header: Some(old.header),
                         summary,
+                        refusal: None,
                     }),
                 );
             shared.sealed_through.send_replace(Some(old.stream_seq));
