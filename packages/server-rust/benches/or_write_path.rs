@@ -63,7 +63,7 @@ struct Node {
     crdt: Arc<CrdtService>,
     factory: Arc<RecordStoreFactory>,
     inner: Arc<RedbDataStore>,
-    _write_behind: Arc<WriteBehindDataStore>,
+    write_behind: Arc<WriteBehindDataStore>,
     _dir: tempfile::TempDir,
 }
 
@@ -122,8 +122,18 @@ fn node(write_delay_ms: u64, flush_interval_ms: u64) -> Node {
         crdt,
         factory,
         inner,
-        _write_behind: write_behind,
+        write_behind,
         _dir: dir,
+    }
+}
+
+impl Node {
+    /// Stops the node's write-behind and its WAL before the directory goes.
+    /// The WAL's writer thread and collection tick outlive the `Node` value
+    /// otherwise, and once a segment ages into a seal they create the next one
+    /// in the removed directory, which is a WAL fail-stop: the process aborts.
+    async fn stop(&self) {
+        self.write_behind.hard_flush().await.expect("node stop");
     }
 }
 
@@ -222,6 +232,7 @@ async fn resident() {
         println!(
             "or_write_path case=resident N={n} reps={RESIDENT_REPS} median_us={median:.1} p99_us={p99:.1}"
         );
+        node.stop().await;
     }
 }
 
@@ -246,6 +257,7 @@ async fn materialize() {
         println!(
             "or_write_path case=materialize N={n} reps={MATERIALIZE_REPS} median_us={median:.1} p99_us={p99:.1}"
         );
+        node.stop().await;
     }
 }
 
@@ -318,6 +330,7 @@ async fn flush_phase(loaded: bool) -> (f64, f64, f64, u64) {
         .iter_mut()
         .map(|s| quantiles(s).1)
         .fold(0.0_f64, f64::max);
+    node.stop().await;
     (median, p99, max_key_p99, big_ops.load(Ordering::Relaxed))
 }
 

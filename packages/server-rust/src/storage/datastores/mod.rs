@@ -20,8 +20,9 @@ pub mod engine_store;
 mod engine_store_tests;
 #[cfg(test)]
 mod kv_conformance;
+// Reachable from the WAL's crash proofs, which need the redb crash backend.
 #[cfg(all(test, feature = "redb"))]
-mod kv_crash;
+pub(crate) mod kv_crash;
 // The main tests are frozen once committed; the style lints they trip are
 // allowed here, by name, as for the engine store's.
 #[allow(clippy::cast_possible_truncation)]

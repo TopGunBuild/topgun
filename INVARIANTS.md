@@ -66,14 +66,24 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Statement:** the applied watermark a WAL collection reads is durable before any segment it
   licenses is unlinked; a crash between them must not lose or corrupt data (collection is
   resumable, replay is filtered by the watermark).
-  - *Store mode:* the watermark is the engine row of the WAL partition, committed `sync: true`
-    in the one engine batch of the records it covers, and never lower than the row it replaces;
-    the WAL's in-memory copy advances only after that commit returned `Ok`. A collection tick
-    (every 5 s) limits collection by a fresh engine read, `min(the WAL's copy, the engine
-    row)`, and collects nothing when that read fails or after `finish`. `finish(true)` — the
+  - *Store mode:* the watermark is the engine row of the WAL partition, committed in the one
+    engine batch of the records it covers; that batch need not be durable when its write
+    returns. The row is never lower than the row it replaces; the WAL's in-memory copy advances
+    only after that commit returned `Ok`. A collection tick and `finish(true)` take the WAL's
+    copy and then the store's rows (under the store's commit lock, so only commits that returned
+    are seen), then sync the engine unless every returned commit is already covered by a durable
+    point, and only then use what they took: every collection bound and every rollback hint
+    `finish(true)` writes over a live store is covered by a completed durable point — an engine
+    sync that began after the take, or a durable point (a `sync: true` commit or an earlier sync)
+    that had already covered every commit returned at the take, in which case no sync runs. A sync that fails collects nothing (`reason="store_sync_failed"`) and, at `finish`,
+    writes no hint. A collection tick (every 5 s) limits collection by the engine read taken
+    under the store's commit lock before that sync, `min(the WAL's copy, the engine row)`, and
+    collects nothing when that read or sync fails or after `finish`. `finish(true)` — the
     stop that writes the rollback hints — itself unlinks every segment, sealed, active or
     header-only, whose frames are all at or below its partition's watermark, against the same
-    bound and nothing when the read fails or the store is already dropped; before it reads which
+    bound, and nothing when the read or the sync fails or the store is already dropped; with the
+    store dropped (a path the server's stop does not take) the hints are still written from the
+    WAL's copy, without a store sync; before it reads which
     segments are covered it closes the WAL to appends under each partition's append lock.
     `finish(false)` unlinks and closes nothing; `finish` seals nothing. `wal-collected` (the
     highest collected sequence of each partition) is durable before the first unlink it
@@ -83,12 +93,15 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     by the first open of its partition in a process, which keeps the last segment as a sealed
     one and creates a new active segment (`TG-ENC-005`); an age fixed per partition so that partitions do not all seal in one tick. The
     `.applied` files a stop that returns `Ok` writes are rollback hints for older
-    binaries, each equal to the durable engine row (also after a drain that did not finish);
+    binaries, each `min(the WAL's copy, the store's row taken before the sync)`, so at or below
+    the durable engine row; with the store dropped, the WAL's copy (also after a drain that did
+    not finish);
     this binary reads one only through the import at open, when the WAL directory holds no
     `wal-collected` or the store is `wal_import_pending`, and deletes every one at open.
 - **Maintaining code:** store mode — `wal/mod.rs` `open_over_store`, `mark_applied`, the
   collection tick, `write_wal_collected`, `finish`; `engine_store.rs` `commit` (records and
-  `0x20` rows in one batch, a lower row refused); `write_behind.rs` the commit plan and its
+  `0x20` rows in one batch, a lower row refused) and `durable_applied_watermarks` (take under
+  the commit lock, then sync, then return); `write_behind.rs` the commit plan and its
   settle after `Ok`.
 - **Enforcing test:** store mode — `store_mode_tests.rs::a01_a_commit_is_one_engine_write_holding_its_records_and_its_watermark_rows`,
   `a02_a_refused_commit_changes_no_watermark_and_no_pending_sequence`,
@@ -108,7 +121,19 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `crash_safety_proptest.rs::concurrent_compaction_loses_no_acked_write_across_crash` (collection
   ticks racing appends to one partition lose no acked write across a crash),
   `crash_safety_proptest.rs::crash_on_partial_active_segment_recovers_intact_prefix` (a torn
-  active segment beside sealed ones is tolerated and every frame below the tear replays).
+  active segment beside sealed ones is tolerated and every frame below the tear replays);
+  take → sync → use, with pass commits written unsynced —
+  `durable_collect_tests.rs::ac1_a_tick_syncs_once_after_its_take_and_before_any_unlink_and_only_when_needed`,
+  `ac2_every_acknowledged_write_survives_a_lost_engine_tail_on_redb`,
+  `ac2_every_acknowledged_write_survives_a_lost_engine_tail_on_whole_batches`,
+  `ac3_a_commit_that_lands_during_the_sync_is_not_used_by_that_tick`,
+  `ac4_a_failed_sync_unlinks_nothing_is_counted_and_the_next_tick_collects`,
+  `ac4_a_broken_engine_sync_is_counted_like_any_other_and_does_not_stop_the_node`,
+  `ac5_finish_syncs_once_before_its_first_hint`, `ac5_a_failed_sync_at_finish_writes_no_hint`,
+  `ac5_a_hint_is_the_lower_of_the_wal_copy_and_the_store_row`,
+  `ac5_hints_after_finish_are_durable_rows_on_redb`,
+  `ac5_hints_after_finish_are_durable_rows_on_whole_batches`,
+  `ac6_a_slow_sync_does_not_hold_the_runtime_worker`.
 - **Violation consequence:** under-seeded `max_observed_sequence` on restart → sequence reuse →
   recovery filter silently drops frames.
 - **Discovered by:** SPEC-330 era; hardened by SPEC-350; crash-point injection proved by SPEC-352.
@@ -119,12 +144,13 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 
 - **Scope:** `W(p)` tracker in `write_behind.rs` + `wal/mod.rs` (SPEC-350).
 - **Statement:** `W(p) = min(unresolved wal_seq) − 1`; W never advances past a frame that is
-  neither durably applied to the inner store nor superseded-by-carried-successor — including
+  neither applied to the inner store (its commit returned) nor superseded-by-carried-successor;
+  the applied rows are made durable before collection or a hint relies on them (`TG-WAL-003`) — including
   across restarts (boot-seeded from `wal.unapplied(p)`); an unseeded partition refuses to
   advance.
 - **Maintaining code:** the tracker bundled with `Arc<dyn Wal>` (one struct, cannot diverge);
   boot seeding; unseeded-refuse guard. Store mode: the commit plan of `write_behind.rs` puts a
-  partition's row in the commit only when its new value is above the durable one — never a
+  partition's row in the commit only when its new value is above the row the store holds — never a
   lower or equal value, so a row cannot regress after a restart resets the tracker.
 - **Enforcing test:** store mode — `prefix_watermark_proptest.rs` — restart-crossing proptest
   (`stranded_lower_sequences_survive_only_under_prefix_complete`,
@@ -271,7 +297,8 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     write of the same key is queued by then, the sequences are carried onto that entry
     (`PartitionQueue::retire_into_queued`). The flush pass never resolves the sequences of an
     entry the store refused, and no longer abandons them either (`TG-WB-009`). Carried
-    sequences are resolved when the survivor is durable, or earlier, when a subsuming write
+    sequences are resolved when the survivor's commit returned (applied in the inner store; made
+    durable before collection relies on it, `TG-WAL-003`), or earlier, when a subsuming write
     coalesces over the survivor (`coalesce_wal_sequences`; holder
     `a_subsuming_write_over_a_survivor_resolves_the_carried_sequences`). The early resolve is
     sound: the subsuming write's own frame is still pending at a higher sequence, so the watermark
@@ -440,12 +467,26 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Scope:** entry-ordering-space `pending_seqs` / `flushed_watermark()` (tombstone fence
   consumer; INDEPENDENT of TG-WAL-005's wal_seq-space tracker).
 - **Statement:** `flushed_watermark()` never returns a value above a still-buffered sequence;
-  assign+track is atomic under one lock (the mid-range-hole guard).
-- **Maintaining code:** `write_behind.rs` `assign_tracked_sequence` + `resolve_pending`.
+  assign+track is atomic under one lock (the mid-range-hole guard); and over an inner store that
+  keeps commit counters (`commit_durability` is `Some`) the value `flushed_watermark()` returns
+  only increases and is covered by a completed durable point of the inner store: it is published
+  only once the inner store's `durable` count reaches the count of returned commits read after
+  the value was captured (`commit_durability`, read without the commit lock) — at once when an
+  earlier durable point already covers that count, else after the sync that does; over any other inner store it is the
+  prefix-complete value itself. With unsynced pass commits pruning may lag by up to two
+  collection ticks plus one frontier refresh.
+- **Maintaining code:** `write_behind.rs` `assign_tracked_sequence` + `resolve_pending` +
+  `flushed_watermark`; `engine_store.rs` `commit_durability` and the counters `commit` and
+  `durable_applied_watermarks` raise.
 - **Enforcing test:** `write_behind.rs::ac3c_flushed_watermark_prefix_complete_never_exposes_hole`
   + surrounding block (coalesce-resolves-a-hole, prune-frontier-stall regression), and
   `write_behind_batch_tests.rs::b10_a_refused_commit_leaves_staging_counts_and_both_watermarks_unchanged`
-  (a refused pass commit leaves the flushed watermark where it was). Additionally
+  (a refused pass commit leaves the flushed watermark where it was);
+  `durable_collect_tests.rs::ac7_the_fence_moves_only_after_a_sync_and_never_back`,
+  `ac7_with_synced_passes_the_fence_is_the_raw_value_at_once`,
+  `ac7_a_commit_between_the_fence_reads_is_not_published_before_a_sync`,
+  `ac7_over_a_store_without_counters_the_fence_is_the_raw_value`,
+  `ac7_the_fence_does_not_wait_on_a_pass_inside_its_engine_write`. Additionally
   exercised by the `wal_harness` frame oracle (O2) via `ac3_ac14_baseline_coverage_and_timing`.
 - **Violation consequence:** a tombstone pruned while its bytes are still RAM-only → resurrection
   after crash.
@@ -687,7 +728,7 @@ measured; do not read it as reported.
   (`TG-WB-009`). The retirement happens when an entry that is put back — after a refusal, or
   un-attempted when a store-wide hold began — finds a newer write of its key on the queue: the
   count goes down by one, the entry sequence is resolved, and the WAL sequences move to the
-  newer entry under the same shard lock, so they resolve when it becomes durable and are
+  newer entry under the same shard lock, so they resolve when its commit returns and are
   replayed at boot if it never does. Nothing suspends between the store's answer and the end of
   the put-back, so a cancelled flush task cannot leave it half done. A flush batch is one pass,
   and a pass holds at most `L = 1000` entries or 8 MiB of encoded values (the first entry taken
@@ -2632,7 +2673,8 @@ weaker than a test.
   call. The drop waits until every write that registered before it switched the epoch has left,
   snapshots each WAL partition's highest un-applied sequence `S_p` (frames an earlier process left
   un-applied included), and waits until no entry of an owned name is buffered and every partition's
-  durable applied watermark is at least `S_p`. Only then does the inner drop remove each owned map's
+  applied watermark (the WAL's copy: commits returned) is at least `S_p`; the `sync: true` inner
+  drop that follows makes those commits durable. Only then does the inner drop remove each owned map's
   registry rows and records in one durable engine batch per map (`TG-ENG-005`). So no WAL frame and
   no buffered or in-flight write recreates an owned map — in the process, because the close stays
   for the rest of it once the inner drop has started, or after a restart, because every owned frame

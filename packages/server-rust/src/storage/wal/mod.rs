@@ -36,7 +36,7 @@ use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
 use topgun_core::PARTITION_COUNT;
 
-use crate::storage::map_data_store::MapDataStore;
+use crate::storage::map_data_store::{MapDataStore, StoreSyncFailed};
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::sealing::Keyring;
 
@@ -432,10 +432,12 @@ pub trait Wal: Send + Sync {
     /// entry at or below it from what `unapplied` returns.
     ///
     /// `sequence` MUST be **prefix-complete**: every frame at or below it has
-    /// been durably applied to the inner store. It is not a high-water mark of
-    /// whatever happened to succeed — a single un-applied frame holds the
-    /// watermark below itself, because the watermark is what licenses the log to
-    /// discard the frames it covers. Implementations clamp monotonically, so a
+    /// been applied to the inner store (the commit carrying it returned). It
+    /// is not a high-water mark of whatever happened to succeed — a single
+    /// un-applied frame holds the watermark below itself, because the store's
+    /// copy of the watermark, made durable by the store sync collection runs
+    /// before it unlinks (`TG-WAL-003`), is what licenses the log to discard
+    /// the frames it covers. Implementations clamp monotonically, so a
     /// caller that under-advances is safe; a caller that over-advances loses
     /// data.
     async fn mark_applied(&self, partition: u32, sequence: u64) -> anyhow::Result<()>;
@@ -464,19 +466,20 @@ pub trait Wal: Send + Sync {
         Ok(())
     }
 
-    /// The durable applied watermark of `partition` as the store holds it, or
-    /// `None` for a partition this WAL does not have.
+    /// The applied watermark of `partition` as the store holds it, or `None`
+    /// for a partition this WAL does not have.
     ///
     /// The watermark is kept by the store the WAL was opened over, committed
     /// together with the data: a caller commits each watermark row in the
-    /// store batch that makes its frames durable, and
-    /// [`mark_applied`](Wal::mark_applied) only records that the commit
-    /// returned.
+    /// store batch of its frames, and [`mark_applied`](Wal::mark_applied)
+    /// only records that the commit returned (applied in the engine). It is
+    /// not necessarily synced: what makes it durable is the store sync that
+    /// collection and `finish` run before using it (`TG-WAL-003`).
     fn durable_applied(&self, partition: u32) -> Option<u64>;
 
     /// Ends the WAL's background collection and, when `write_hints`, writes
-    /// one rollback hint per partition: its durable applied watermark, in the
-    /// sidecar format an older binary reads.
+    /// one rollback hint per partition: its applied watermark, at or below the
+    /// store's durable row, in the sidecar format an older binary reads.
     ///
     /// Returns the number of hints written. The default writes none.
     async fn finish(&self, write_hints: bool) -> anyhow::Result<usize> {
@@ -665,9 +668,11 @@ pub struct WalWriter {
     /// are sealed under its active key, sealed segments are read with it
     /// (`TG-ENC-005`).
     keyring: Option<Arc<Keyring>>,
-    /// The durable watermark of every WAL partition, indexed by partition:
-    /// the value of its row once a commit carrying it returned. In memory
-    /// only — the store's row is the durable copy.
+    /// The applied watermark of every WAL partition, indexed by partition:
+    /// the value of its row once a commit carrying it returned (applied in
+    /// the engine, not necessarily synced). In memory only — the store's row,
+    /// synced before collection or a hint uses it, is the durable copy
+    /// (`TG-WAL-003`).
     durable: Box<[AtomicU64]>,
     /// The collection tick's state.
     collection: Collection,
@@ -767,6 +772,10 @@ pub(crate) const WAL_RETAINED_BYTES_TOTAL_GAUGE: &str = "topgun_wal_retained_byt
 /// Why a collection tick collected nothing, as the `reason` label on the
 /// skipped-GC counter: the store's watermarks could not be read.
 const GC_SKIP_REASON_READ_FAILED: &str = "watermark_read_failed";
+
+/// Why a collection tick collected nothing: the store's watermarks were read,
+/// but the engine sync that makes them durable failed (`TG-WAL-003`).
+const GC_SKIP_REASON_SYNC_FAILED: &str = "store_sync_failed";
 
 /// Sets the retained-bytes gauge to the bytes of every segment file of
 /// `wal_dir`, read from the directory.
@@ -936,6 +945,7 @@ impl WalWriter {
         Self::cut_torn_stream_tail(&wal_dir, &mut stream)?;
 
         let durable: Box<[AtomicU64]> = effective.into_iter().map(AtomicU64::new).collect();
+        store.wal_attached();
         let writer = Self::build(
             wal_dir,
             policy,
@@ -1950,8 +1960,10 @@ impl Wal for WalWriter {
         })
     }
 
-    /// Records that `sequence` is durable in the store as the partition's
-    /// watermark: a commit carrying that row returned `Ok`.
+    /// Records that `sequence` is applied in the store as the partition's
+    /// watermark: a commit carrying that row returned `Ok`. The row need not
+    /// be synced yet; collection and `finish` sync the store before they use
+    /// it (`TG-WAL-003`).
     ///
     /// The in-memory copy moves to `max(current, sequence)` — no I/O, no
     /// rotation, no GC; collection belongs to the collection tick, which
@@ -2041,16 +2053,24 @@ impl Wal for WalWriter {
     /// appends, writes the rollback hints of a clean stop and unlinks every
     /// segment they cover.
     ///
-    /// A hint is `partition-{p:03}.applied` holding the partition's durable
-    /// watermark — never a higher sequence, so an older binary started on
-    /// this directory replays exactly the frames the data directory lacks.
-    /// One per partition that has a segment file, a frame in a stream
-    /// segment, or a non-zero watermark;
-    /// each a synced temporary file renamed into place, the directory synced
-    /// once after the last. The segments are then collected as by a tick
-    /// (`TG-WAL-003`), the closed active one included, so a directory with
-    /// nothing above the watermark is left with no segment an older binary
-    /// could not read.
+    /// A hint is `partition-{p:03}.applied` holding `min(the WAL's copy, the
+    /// store's row)`, both taken before the first hint is written and covered
+    /// by a completed durable point of the store — a sync that began after
+    /// the take, or, when every commit returned at the take was already
+    /// durable, the point that made it so (no sync then) — never a higher
+    /// sequence, so an older binary started on this directory replays exactly
+    /// the frames the data directory lacks. One per partition that has a segment file, a
+    /// frame in a stream segment, or a non-zero watermark; each a synced
+    /// temporary file renamed into place, the directory synced once after the
+    /// last. The segments are then collected against the same pair, as by a
+    /// tick (`TG-WAL-003`), the closed active one included, so a directory
+    /// with nothing above the watermark is left with no segment an older
+    /// binary could not read.
+    ///
+    /// When the store's watermarks cannot be taken or synced, no hint is
+    /// written and `Err` is returned. With the store already dropped (a path
+    /// the server's stop does not take: it holds the store), the hints are
+    /// the WAL's copy, written without a store sync, and nothing is unlinked.
     async fn finish(&self, write_hints: bool) -> anyhow::Result<usize> {
         let collection = &self.collection;
         collection.closed.store(true, Ordering::Release);
@@ -2071,12 +2091,32 @@ impl Wal for WalWriter {
                 .values()
                 .flat_map(|segment| segment.summary.max_seq.keys().copied()),
         );
+        // The WAL's copy before the store's: a commit that returns in between
+        // only raises the store's rows (see `collect`).
+        let durable_now = self.durable_now();
+        let taken = if let Some(store) = self.store.upgrade() {
+            Some(Self::tick_watermarks(store).await.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "rollback hints not written: the store's applied watermarks could not be \
+                     read and made durable"
+                )
+            })?)
+        } else {
+            tracing::warn!(
+                target: "topgun_server::storage::wal_watermark",
+                "WAL segments kept at shutdown: the store is gone, its watermarks cannot be read; \
+                 rollback hints are written from the WAL's copy without a store sync"
+            );
+            None
+        };
         let mut written = 0usize;
-        for partition in 0..PARTITION_COUNT {
-            let watermark = Self::durable_slot(&self.durable, partition)?.load(Ordering::Acquire);
-            if watermark == 0 && !with_segments.contains(&partition) {
+        for (partition, &own) in (0..PARTITION_COUNT).zip(&durable_now) {
+            if own == 0 && !with_segments.contains(&partition) {
                 continue;
             }
+            let watermark = taken
+                .as_ref()
+                .map_or(own, |taken| own.min(taken[partition as usize]));
             let path = self.applied_path(partition);
             Self::write_applied_file(&path, watermark).map_err(|e| {
                 anyhow::anyhow!("Cannot write rollback hint {}: {e}", path.display())
@@ -2090,7 +2130,10 @@ impl Wal for WalWriter {
         if written > 0 {
             fsync_dir(&self.wal_dir)?;
         }
-        self.collect_covered_at_finish(&mut collected).await;
+        if let Some(taken) = taken {
+            self.collect_covered(&mut collected, &durable_now, &taken)
+                .await;
+        }
         Ok(written)
     }
 }
@@ -2111,30 +2154,6 @@ impl WalWriter {
         log_writer::resolution(closed)
             .await
             .map_err(|_| anyhow::anyhow!("the WAL was not closed: the log writer stopped"))
-    }
-
-    /// Unlinks, at a `finish` that wrote rollback hints, every segment a tick
-    /// would: those whose frames of every partition are at or below the
-    /// partition's bound — the lower of the durable watermark and a fresh
-    /// read of the store's — after `wal-collected` covering them is durable
-    /// (`TG-WAL-003`). Nothing is unlinked when the store's watermarks cannot
-    /// be read, the store gone included.
-    async fn collect_covered_at_finish(&self, collected: &mut Box<[u64]>) {
-        let Some(store) = self.store.upgrade() else {
-            tracing::warn!(
-                target: "topgun_server::storage::wal_watermark",
-                "WAL segments kept at shutdown: the store is gone, its watermarks cannot be read"
-            );
-            return;
-        };
-        let durable_now = self.durable_now();
-        let from_store = Self::tick_watermarks(store.as_ref());
-        drop(store);
-        let Some(from_store) = from_store else {
-            return;
-        };
-        self.collect_covered(collected, &durable_now, &from_store)
-            .await;
     }
 
     /// The durable watermark of every partition, as this process holds it.
@@ -2290,28 +2309,55 @@ impl WalWriter {
         Ok(max_seq)
     }
 
-    /// The store's watermark of every WAL partition, read once for a tick, or
-    /// `None` — logged and counted — when it cannot be read.
-    fn tick_watermarks(store: &dyn MapDataStore) -> Option<Vec<u64>> {
-        let error = match store.applied_watermarks() {
-            Ok(Some(watermarks)) if watermarks.by_partition.len() == PARTITION_COUNT as usize => {
-                return Some(watermarks.by_partition);
-            }
-            Ok(Some(watermarks)) => format!(
-                "the store returned {} watermarks, one per WAL partition is {PARTITION_COUNT}",
-                watermarks.by_partition.len()
-            ),
-            Ok(None) => "the store keeps no applied watermark".to_string(),
-            Err(e) => format!("{e:#}"),
+    /// The store's watermark of every WAL partition, taken and then made
+    /// durable by [`MapDataStore::durable_applied_watermarks`] once for a tick
+    /// or a `finish`, or `None` — logged and counted — when that fails
+    /// (`TG-WAL-003`).
+    ///
+    /// Runs on the blocking pool, since the call may sync the engine; the
+    /// store is moved there and dropped there. A failed sync counts
+    /// `reason="store_sync_failed"`; a failed read, a malformed answer or a
+    /// panic of the blocking task — which may come from the read as well as
+    /// from the sync — counts `reason="watermark_read_failed"`.
+    async fn tick_watermarks(store: Arc<dyn MapDataStore>) -> Option<Vec<u64>> {
+        let answer = tokio::task::spawn_blocking(move || store.durable_applied_watermarks()).await;
+        let mut reason = GC_SKIP_REASON_READ_FAILED;
+        let error = match answer {
+            Err(join) => format!("the store call did not complete: {join}"),
+            Ok(answer) => match answer {
+                Ok(Some(watermarks))
+                    if watermarks.by_partition.len() == PARTITION_COUNT as usize =>
+                {
+                    return Some(watermarks.by_partition);
+                }
+                Ok(Some(watermarks)) => format!(
+                    "the store returned {} watermarks, one per WAL partition is {PARTITION_COUNT}",
+                    watermarks.by_partition.len()
+                ),
+                Ok(None) => "the store keeps no applied watermark".to_string(),
+                Err(e) => {
+                    if e.is::<StoreSyncFailed>() {
+                        reason = GC_SKIP_REASON_SYNC_FAILED;
+                    }
+                    format!("{e:#}")
+                }
+            },
         };
-        tracing::warn!(
-            target: "topgun_server::storage::wal_watermark",
-            error,
-            "WAL collection skipped: the applied watermarks could not be read"
-        );
+        if reason == GC_SKIP_REASON_SYNC_FAILED {
+            tracing::warn!(
+                target: "topgun_server::storage::wal_watermark",
+                error,
+                "WAL collection skipped: the store could not be synced"
+            );
+        } else {
+            tracing::warn!(
+                target: "topgun_server::storage::wal_watermark",
+                error,
+                "WAL collection skipped: the applied watermarks could not be read"
+            );
+        }
         describe_wal_watermark_metrics();
-        metrics::counter!(WAL_GC_SKIPPED_COUNTER, "reason" => GC_SKIP_REASON_READ_FAILED)
-            .increment(1);
+        metrics::counter!(WAL_GC_SKIPPED_COUNTER, "reason" => reason).increment(1);
         None
     }
 
@@ -2524,9 +2570,7 @@ impl WalWriter {
         // durable one then means the store lost a row it acknowledged, which
         // is worth the counter and the log line.
         let durable_now = self.durable_now();
-        let from_store = Self::tick_watermarks(store.as_ref());
-        drop(store);
-        let Some(from_store) = from_store else {
+        let Some(from_store) = Self::tick_watermarks(store).await else {
             return true;
         };
         self.rotate_if_due().await;
@@ -6894,6 +6938,9 @@ mod store_mode_tests;
 #[cfg(test)]
 #[path = "batched_replay_tests.rs"]
 mod batched_replay_tests;
+
+#[cfg(all(test, feature = "redb"))]
+mod durable_collect_tests;
 
 #[cfg(test)]
 mod sealed_frame_tests {
