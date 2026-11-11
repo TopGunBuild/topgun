@@ -2764,6 +2764,16 @@ impl WriteBehindDataStore {
         (reached_rx, release)
     }
 
+    /// The fence's published value and held candidate.
+    #[cfg(test)]
+    pub(crate) fn test_fence_state(&self) -> (u64, Option<(u64, u64)>) {
+        let fence = self
+            .fence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (fence.published, fence.candidate)
+    }
+
     #[cfg(test)]
     fn fence_park_point(&self) {
         let park = self

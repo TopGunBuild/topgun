@@ -6937,6 +6937,9 @@ mod store_mode_tests;
 #[path = "batched_replay_tests.rs"]
 mod batched_replay_tests;
 
+#[cfg(all(test, feature = "redb"))]
+mod durable_collect_tests;
+
 #[cfg(test)]
 mod sealed_frame_tests {
     //! Sealed WAL frames over a sealed store: no (segment key, nonce) pair is
