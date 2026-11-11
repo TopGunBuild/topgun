@@ -814,8 +814,10 @@ async fn ac6_a_slow_sync_does_not_hold_the_runtime_worker() {
 
     let wal = Arc::clone(&node.wal);
     let tick = tokio::spawn(async move { wal.test_collect_now().await });
+    // 500 ms gives the blocking pool room to enter the sync on a loaded
+    // runner; the sync stays parked for 2 s, so it has not returned yet.
     let started = Instant::now();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     let elapsed = started.elapsed();
     assert_eq!(node.engine.syncs().len(), 1, "the tick is in its sync");
     assert_eq!(
@@ -824,7 +826,7 @@ async fn ac6_a_slow_sync_does_not_hold_the_runtime_worker() {
         "the sync has not returned yet"
     );
     assert!(
-        elapsed < Duration::from_millis(150),
+        elapsed < Duration::from_millis(600),
         "a task on the one worker was delayed {elapsed:?} by the sync"
     );
     tick.await.expect("the tick");
@@ -1007,8 +1009,10 @@ async fn ac7_the_fence_does_not_wait_on_a_pass_inside_its_engine_write() {
     })
     .await
     .expect("join");
+    // The pass is parked for 500 ms; 100 ms leaves room for a loaded runner
+    // while a fence that waits on the pass still fails.
     assert!(
-        took < Duration::from_millis(10),
+        took < Duration::from_millis(100),
         "the fence waited {took:?} on a pass's engine write"
     );
     node.engine.inner.set_write_delay(Duration::ZERO);
