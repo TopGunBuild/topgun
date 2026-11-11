@@ -2001,8 +2001,10 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
     }
 
     fn commit_durability(&self) -> Option<CommitDurability> {
-        // `returned` first: a commit raises `durable` only after `returned`,
-        // so this order never shows a durable count above the returned one.
+        // `returned` first, so it counts every commit the caller's earlier
+        // raw read covers. A commit landing between the two loads can show
+        // `durable > returned`; that is harmless, `durable` stays a lower
+        // bound of what is durable.
         let returned = self.returned.load(Ordering::Acquire);
         let durable = self.durable.load(Ordering::Acquire);
         Some(CommitDurability { returned, durable })

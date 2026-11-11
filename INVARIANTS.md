@@ -73,8 +73,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     copy and then the store's rows (under the store's commit lock, so only commits that returned
     are seen), then sync the engine unless every returned commit is already covered by a durable
     point, and only then use what they took: every collection bound and every rollback hint
-    `finish(true)` writes over a live store is covered by a durable point that began after it was
-    taken. A sync that fails collects nothing (`reason="store_sync_failed"`) and, at `finish`,
+    `finish(true)` writes over a live store is covered by a completed durable point — an engine
+    sync that began after the take, or a durable point (a `sync: true` commit or an earlier sync)
+    that had already covered every commit returned at the take, in which case no sync runs. A sync that fails collects nothing (`reason="store_sync_failed"`) and, at `finish`,
     writes no hint. A collection tick (every 5 s) limits collection by the engine read taken
     under the store's commit lock before that sync, `min(the WAL's copy, the engine row)`, and
     collects nothing when that read or sync fails or after `finish`. `finish(true)` — the
@@ -468,9 +469,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Statement:** `flushed_watermark()` never returns a value above a still-buffered sequence;
   assign+track is atomic under one lock (the mid-range-hole guard); and over an inner store that
   keeps commit counters (`commit_durability` is `Some`) the value `flushed_watermark()` returns
-  only increases and is covered by a completed durable point of the inner store: captured before
-  an engine sync or a `sync: true` commit began and published after it returned
-  (`commit_durability`, read without the commit lock); over any other inner store it is the
+  only increases and is covered by a completed durable point of the inner store: it is published
+  only once the inner store's `durable` count reaches the count of returned commits read after
+  the value was captured (`commit_durability`, read without the commit lock) — at once when an
+  earlier durable point already covers that count, else after the sync that does; over any other inner store it is the
   prefix-complete value itself. With unsynced pass commits pruning may lag by up to two
   collection ticks plus one frontier refresh.
 - **Maintaining code:** `write_behind.rs` `assign_tracked_sequence` + `resolve_pending` +

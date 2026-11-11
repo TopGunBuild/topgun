@@ -2054,10 +2054,12 @@ impl Wal for WalWriter {
     /// segment they cover.
     ///
     /// A hint is `partition-{p:03}.applied` holding `min(the WAL's copy, the
-    /// store's row)`, both taken before the store's sync that makes them
-    /// durable and the first hint written — never a higher sequence, so an
-    /// older binary started on this directory replays exactly the frames the
-    /// data directory lacks. One per partition that has a segment file, a
+    /// store's row)`, both taken before the first hint is written and covered
+    /// by a completed durable point of the store — a sync that began after
+    /// the take, or, when every commit returned at the take was already
+    /// durable, the point that made it so (no sync then) — never a higher
+    /// sequence, so an older binary started on this directory replays exactly
+    /// the frames the data directory lacks. One per partition that has a segment file, a
     /// frame in a stream segment, or a non-zero watermark; each a synced
     /// temporary file renamed into place, the directory synced once after the
     /// last. The segments are then collected against the same pair, as by a
@@ -2102,7 +2104,8 @@ impl Wal for WalWriter {
         } else {
             tracing::warn!(
                 target: "topgun_server::storage::wal_watermark",
-                "WAL segments kept at shutdown: the store is gone, its watermarks cannot be read"
+                "WAL segments kept at shutdown: the store is gone, its watermarks cannot be read; \
+                 rollback hints are written from the WAL's copy without a store sync"
             );
             None
         };
