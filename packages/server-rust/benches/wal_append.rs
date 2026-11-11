@@ -184,6 +184,10 @@ async fn run_once(
         histogram.add(task.await??)?;
     }
     let elapsed = started.elapsed().as_secs_f64();
+    // Stop the writer thread and the collection tick before the directory
+    // goes: left running, a segment sealed by age is followed by one created
+    // in the removed directory, which is a WAL fail-stop.
+    wal.finish(false).await?;
     drop(wal);
     drop(store);
     let appends = histogram.len();
