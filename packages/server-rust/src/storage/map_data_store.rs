@@ -447,17 +447,19 @@ impl StoreBrokenCause {
     }
 }
 
-/// What one [`MapDataStore::commit`] makes durable: record writes and, beside
-/// them, the applied WAL watermark rows they let advance.
+/// What one [`MapDataStore::commit`] stores: record writes and, beside them,
+/// the applied WAL watermark rows they let advance.
 ///
-/// A store that keeps applied watermarks stores both in one durable batch, so
-/// a watermark row can never be durable without the records it covers.
+/// A store that keeps applied watermarks stores both in one engine batch, so a
+/// watermark row is never present without the records it covers; the batch is
+/// made durable by a `sync: true` write or the engine's sync before any use
+/// that needs it (`TG-WAL-003`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlushCommit<'a> {
     /// Record writes, applied in order.
     pub writes: Vec<StoreWrite<'a>>,
     /// `(wal_partition, sequence)`: the applied watermark of that WAL
-    /// partition once the commit is durable.
+    /// partition once the commit has returned.
     pub applied: Vec<(u32, u64)>,
 }
 
@@ -528,6 +530,39 @@ impl std::fmt::Display for RecordRefused {
 }
 
 impl std::error::Error for RecordRefused {}
+
+/// How far the commits of a store are durable, read without its commit lock.
+///
+/// Both counters only increase. `returned` counts the commits whose engine
+/// write returned; `durable` is the highest `returned` value a completed
+/// durable point covers (a `sync: true` commit, or an engine sync that began
+/// after that many commits had returned). `durable < returned` means some
+/// commit that returned may still be lost to a power cut (`TG-WB-001`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitDurability {
+    /// Commits whose engine write returned.
+    pub returned: u64,
+    /// The highest `returned` value known durable.
+    pub durable: u64,
+}
+
+/// The engine sync of [`MapDataStore::durable_applied_watermarks`] failed, as
+/// opposed to the read of the watermarks: the WAL counts it under its own
+/// label (`TG-WAL-003`).
+#[derive(Debug)]
+pub struct StoreSyncFailed(pub anyhow::Error);
+
+impl std::fmt::Display for StoreSyncFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the store's engine sync failed: {:#}", self.0)
+    }
+}
+
+impl std::error::Error for StoreSyncFailed {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
 
 /// Used as `Arc<dyn MapDataStore>`.
 #[async_trait]
@@ -841,8 +876,8 @@ pub trait MapDataStore: Send + Sync {
 
     /// Stores the writes of `commit` and its applied watermark rows.
     ///
-    /// A store that keeps applied watermarks stores both as one durable batch.
-    /// Any other store refuses a commit that carries rows and stores the
+    /// A store that keeps applied watermarks stores both as one engine batch
+    /// (`TG-WAL-003`). Any other store refuses a commit that carries rows and stores the
     /// writes one at a time, in order, through its per-record methods.
     ///
     /// # Errors
@@ -919,6 +954,42 @@ pub trait MapDataStore: Send + Sync {
         let _ = rows;
         anyhow::bail!("this store keeps no applied watermark to import into")
     }
+
+    /// The applied WAL watermarks, made durable before they are returned: the
+    /// rows are taken first, then the store is synced unless every commit that
+    /// had returned at the take is already covered by a durable point, and
+    /// only then returned (`TG-WAL-003`). A collection bound or a rollback
+    /// hint may rest only on what this returns, never on a read made before a
+    /// sync, because a commit could land between such a sync and the read.
+    ///
+    /// Synchronous and possibly slow (an engine sync): the WAL calls it off
+    /// the runtime workers. The default is
+    /// [`applied_watermarks`](MapDataStore::applied_watermarks), for a store
+    /// whose commits are durable when they return.
+    ///
+    /// A store that forwards `applied_watermarks` to another store must
+    /// forward this method, [`commit_durability`](MapDataStore::commit_durability)
+    /// and [`wal_attached`](MapDataStore::wal_attached) too.
+    ///
+    /// # Errors
+    ///
+    /// A failed read, as for `applied_watermarks`; a failed sync, wrapped in
+    /// [`StoreSyncFailed`].
+    fn durable_applied_watermarks(&self) -> anyhow::Result<Option<AppliedWatermarks>> {
+        self.applied_watermarks()
+    }
+
+    /// How far this store's commits are durable, read without taking its
+    /// commit lock, so a caller on the client-sync path never waits on a
+    /// pass's engine write (`TG-WB-001`). `None`, the default, means every
+    /// commit is durable when it returns.
+    fn commit_durability(&self) -> Option<CommitDurability> {
+        None
+    }
+
+    /// Called once by a WAL opened over this store, after its open checks
+    /// succeeded. The default ignores it.
+    fn wal_attached(&self) {}
 }
 
 /// A test store that keeps applied WAL watermarks over a store `S` that keeps
