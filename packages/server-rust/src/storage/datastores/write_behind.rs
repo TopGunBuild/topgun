@@ -18,9 +18,9 @@ use tracing::{error, info, warn};
 
 use crate::storage::engine::SlotCell;
 use crate::storage::map_data_store::{
-    check_tenant, merkle_leaf_hash, DropOutcome, FlushCommit, LeafSink, Loaded, MapDataStore,
-    MerkleLeaf, PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder, StoreBrokenCause,
-    StoreErrorClass, StoreWrite, WriteSource,
+    check_tenant, merkle_leaf_hash, CommitDurability, DropOutcome, FlushCommit, LeafSink, Loaded,
+    MapDataStore, MerkleLeaf, PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder,
+    StoreBrokenCause, StoreErrorClass, StoreWrite, WriteSource,
 };
 use crate::storage::record::RecordValue;
 use crate::storage::wal::{
@@ -54,7 +54,7 @@ pub struct WriteBehindConfig {
     ///
     /// Nothing reads it: a flush pass takes up to 1000 entries or 8 MiB of
     /// encoded values, whichever comes first — fixed limits — and commits
-    /// them in one durable store write, so the value neither groups nor
+    /// them in one store write, so the value neither groups nor
     /// limits the pass. Honouring it would silently cut every pass to the
     /// value configurations copied from the documented example. It is kept so
     /// that a configuration which sets it still loads.
@@ -854,6 +854,21 @@ struct TestParks {
     /// Parks the flush task between the choice of a probe and its removal
     /// from its queue.
     between_probe_choice_and_removal: Mutex<Option<ParkGate>>,
+    /// Parks the next `flushed_watermark` between its two reads, blocking its
+    /// thread: `(reached, release)`.
+    fence: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+}
+
+/// The fence's state over an inner store with commit counters: the value it
+/// returns, and at most one captured value waiting for the durable point
+/// that covers it.
+#[derive(Default)]
+struct FenceState {
+    /// Only increases.
+    published: u64,
+    /// `(value, need)`: published once the inner store's `durable` count
+    /// reaches `need`, the count of returned commits read after `value`.
+    candidate: Option<(u64, u64)>,
 }
 
 #[cfg(test)]
@@ -1996,6 +2011,9 @@ pub struct WriteBehindDataStore {
     /// NOT the last-assigned counter, which advances at enqueue and would let a
     /// prune drop a tombstone still buffered in RAM.
     pending_seqs: Mutex<BTreeSet<u64>>,
+    /// The tombstone fence's published value and its held candidate, over an
+    /// inner store with commit counters (`TG-WB-001`). Never the commit lock.
+    fence: Mutex<FenceState>,
     /// Cross-tick state of the stalled-watermark watchdog: how long each
     /// partition's smallest pending sequence has held still, and which sequence
     /// is one confirming sample away from a `TrackerLeak` verdict.
@@ -2264,6 +2282,7 @@ impl WriteBehindDataStore {
             wal,
             wal_sequence: AtomicU64::new(wal_sequence_start),
             pending_seqs: Mutex::new(BTreeSet::new()),
+            fence: Mutex::new(FenceState::default()),
             stall_watch: Mutex::new(StallWatch::default()),
             flush_loop: Mutex::new(None),
             #[cfg(test)]
@@ -2572,8 +2591,9 @@ impl WriteBehindDataStore {
         let failure = self.background_failure.borrow().clone();
         // After the sync, so the hints follow every frame this process wrote.
         // Written exactly when this stop returns `Ok` — also after a drain
-        // that timed out or was refused — because a hint is always the durable
-        // watermark, never a pending frame's sequence; a failed node writes
+        // that timed out or was refused — because a hint is always `min(the
+        // WAL's copy, the store's row synced before it)`, never a pending
+        // frame's sequence; a failed node writes
         // none and only ends the WAL's collection.
         if let Some(tracking) = &self.wal {
             let write_hints = failure.is_none();
@@ -2723,6 +2743,39 @@ impl WriteBehindDataStore {
     #[cfg(test)]
     pub(crate) fn test_load_slot_park_hits(&self) -> u64 {
         self.test_parks.load_slot_hits.load(Ordering::Relaxed)
+    }
+
+    /// Arms a one-shot park in the next `flushed_watermark`, between its read
+    /// of the raw value and its read of the inner store's commit counters: it
+    /// sends on the returned receiver's channel, then blocks its thread until
+    /// a message on the returned sender or the sender is dropped. Call that
+    /// `flushed_watermark` from a thread that may block.
+    #[cfg(test)]
+    pub(crate) fn arm_fence_park(
+        &self,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (reached, reached_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        *self
+            .test_parks
+            .fence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((reached, release_rx));
+        (reached_rx, release)
+    }
+
+    #[cfg(test)]
+    fn fence_park_point(&self) {
+        let park = self
+            .test_parks
+            .fence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some((reached, release)) = park {
+            let _ = reached.send(());
+            let _ = release.recv();
+        }
     }
 
     /// Parks the next `remove` of `(map, key)` once its delete is staged and
@@ -3218,8 +3271,9 @@ impl WriteBehindDataStore {
         }
     }
 
-    /// Mark `seq` resolved — its bytes are durable in the inner store (flushed)
-    /// or it was superseded by a coalescing write (retired). This is what lets
+    /// Mark `seq` resolved — its commit returned from the inner store (flushed;
+    /// durable before collection relies on it, `TG-WAL-003`) or it was
+    /// superseded by a coalescing write (retired). This is what lets
     /// the prefix-complete flushed watermark advance past `seq`.
     fn resolve_pending(&self, seq: u64) {
         self.pending_seqs().remove(&seq);
@@ -3601,8 +3655,8 @@ impl WriteBehindDataStore {
 
     /// Resolves `seqs` WITHOUT advancing the durable watermark.
     ///
-    /// The watermark moves only as a row in a store commit, durable with the
-    /// records it covers; resolving just lets the next planned row pass these
+    /// The watermark moves only as a row in a store commit, in the one batch
+    /// of the records it covers; resolving just lets the next planned row pass these
     /// sequences. For a stored entry the row was already in its commit. For a
     /// coalesce-retired entry no write has reached the inner store and the
     /// survivor is still only buffered, so there is nothing a row could be
@@ -4326,8 +4380,9 @@ impl WriteBehindDataStore {
     ///
     /// The commit is awaited on this task, never moved to a blocking thread: a
     /// shutdown drain whose deadline passes while a store write runs then still
-    /// learns that the write and its rows are durable, so the rollback hints it
-    /// writes next are the rows the store holds.
+    /// learns that the write and its rows returned, so the rollback hints
+    /// written next, after the store's sync in `finish`, are at or below the
+    /// rows the store holds.
     async fn commit_prepared(&self, batch: &[PreparedEntry]) -> anyhow::Result<Vec<(u32, u64)>> {
         injected_store_fault()?;
 
@@ -6012,18 +6067,57 @@ impl MapDataStore for WriteBehindDataStore {
         self.sequence.load(Ordering::Relaxed)
     }
 
+    /// The tombstone fence (`TG-WB-001`).
+    ///
+    /// Raw value, prefix-complete: the smallest still-pending sequence is the
+    /// first un-resolved write; every sequence below it was flushed (its
+    /// commit returned) or retired (coalesced away). With nothing pending,
+    /// all assigned writes are resolved, so it is the full assigned counter.
+    /// It can NEVER be above an un-flushed sequence.
+    ///
+    /// A returned commit may not be durable yet when the inner store writes
+    /// unsynced, so over an inner store with commit counters the raw value is
+    /// only captured, with the count of returned commits read after it, and
+    /// published once a durable point covers that count; the returned value
+    /// only increases. Over any other inner store every commit is durable on
+    /// return and the raw value is returned as it is. Neither path takes the
+    /// inner store's commit lock: callers sit on the client-sync path.
     fn flushed_watermark(&self) -> u64 {
-        // Prefix-complete: the smallest still-pending sequence is the first
-        // un-resolved write; every sequence below it is durable (flushed) or
-        // retired (coalesced away). With nothing pending, all assigned writes
-        // are resolved, so the watermark is the full assigned counter. This can
-        // NEVER expose a value above an un-flushed sequence — the property that
-        // makes `stamped_seq <= flushed_watermark()` a sound durability fence.
-        let pending = self.pending_seqs();
-        match pending.iter().next().copied() {
-            Some(min_pending) => min_pending,
-            None => self.sequence.load(Ordering::Relaxed),
+        // The guard ends here: a settle that resolves entries needs it.
+        let raw = {
+            let pending = self.pending_seqs();
+            match pending.iter().next().copied() {
+                Some(min_pending) => min_pending,
+                None => self.sequence.load(Ordering::Relaxed),
+            }
+        };
+        #[cfg(test)]
+        self.fence_park_point();
+        // After `raw`: an entry is resolved only after its commit returned
+        // and was counted, so `returned` counts every commit `raw` covers.
+        let Some(CommitDurability { returned, durable }) = self.inner.commit_durability() else {
+            return raw;
+        };
+        let mut fence = self
+            .fence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((value, need)) = fence.candidate {
+            if durable >= need {
+                fence.published = fence.published.max(value);
+                fence.candidate = None;
+            }
         }
+        // One candidate until it is published: replacing it by a newer one
+        // could starve the fence under continuous load.
+        if fence.candidate.is_none() {
+            if durable >= returned {
+                fence.published = fence.published.max(raw);
+            } else {
+                fence.candidate = Some((raw, returned));
+            }
+        }
+        fence.published
     }
 
     async fn hard_flush(&self) -> anyhow::Result<()> {
