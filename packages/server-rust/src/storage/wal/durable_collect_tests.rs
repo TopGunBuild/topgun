@@ -409,7 +409,7 @@ async fn open_life<E: KvEngine + 'static>(
 
 /// Ends a life by dropping its runtime, then waits until its WAL writer is
 /// gone, so the next life opens the directory alone.
-fn crash_life(rt: tokio::runtime::Runtime, wal: std::sync::Weak<WalWriter>) {
+fn crash_life(rt: tokio::runtime::Runtime, wal: &std::sync::Weak<WalWriter>) {
     drop(rt);
     let deadline = Instant::now() + Duration::from_secs(30);
     while wal.upgrade().is_some() {
@@ -455,7 +455,7 @@ where
         write_through(&wb, first).await;
         Arc::downgrade(&wal)
     });
-    crash_life(rt, wal);
+    crash_life(rt, &wal);
     let target = target.crash(CrashMode::DropUnsynced, 0);
 
     // Life B: every acknowledged write is served (replayed, unsynced again),
@@ -466,7 +466,7 @@ where
         assert_served(store.as_ref(), first, "after the first crash").await;
         Arc::downgrade(&wal)
     });
-    crash_life(rt, wal);
+    crash_life(rt, &wal);
     let target = target.crash(CrashMode::DropUnsynced, 0);
 
     // Life C: the same frames replay again; more writes; a tick that unlinks;
@@ -487,7 +487,7 @@ where
         );
         (Arc::downgrade(&wal), kept)
     });
-    crash_life(rt, wal);
+    crash_life(rt, &wal);
     let target = target.crash(CrashMode::DropUnsynced, 0);
 
     // Life D: the WAL holds every frame above the synced row, and every
@@ -758,7 +758,7 @@ where
         wal.finish(true).await.expect("finish");
         Arc::downgrade(&wal)
     });
-    crash_life(rt, wal);
+    crash_life(rt, &wal);
     let target = target.crash(CrashMode::DropUnsynced, 0);
 
     let store = EngineMapDataStore::open(target.engine()).expect("store opens");
@@ -937,7 +937,7 @@ fn ac7_a_commit_between_the_fence_reads_is_not_published_before_a_sync() {
             .collect();
         (Arc::downgrade(&wal), covered)
     });
-    crash_life(rt, wal);
+    crash_life(rt, &wal);
     let target = target.crash(CrashMode::DropUnsynced, 0);
 
     let store = EngineMapDataStore::open(target.engine()).expect("store opens");

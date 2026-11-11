@@ -2092,20 +2092,19 @@ impl Wal for WalWriter {
         // The WAL's copy before the store's: a commit that returns in between
         // only raises the store's rows (see `collect`).
         let durable_now = self.durable_now();
-        let taken = match self.store.upgrade() {
-            Some(store) => Some(Self::tick_watermarks(store).await.ok_or_else(|| {
+        let taken = if let Some(store) = self.store.upgrade() {
+            Some(Self::tick_watermarks(store).await.ok_or_else(|| {
                 anyhow::anyhow!(
                     "rollback hints not written: the store's applied watermarks could not be \
                      read and made durable"
                 )
-            })?),
-            None => {
-                tracing::warn!(
-                    target: "topgun_server::storage::wal_watermark",
-                    "WAL segments kept at shutdown: the store is gone, its watermarks cannot be read"
-                );
-                None
-            }
+            })?)
+        } else {
+            tracing::warn!(
+                target: "topgun_server::storage::wal_watermark",
+                "WAL segments kept at shutdown: the store is gone, its watermarks cannot be read"
+            );
+            None
         };
         let mut written = 0usize;
         for (partition, &own) in (0..PARTITION_COUNT).zip(&durable_now) {
