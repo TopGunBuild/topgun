@@ -62,6 +62,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
@@ -72,9 +73,9 @@ use topgun_core::types::tenant_owns;
 
 use super::kv_engine::{KeyRange, KvEngine, KvError, KvSnapshot, WriteBatch, WriteOptions};
 use crate::storage::map_data_store::{
-    check_map_name, check_tenant, merkle_leaf_hash, AppliedWatermarks, DropOutcome, FlushCommit,
-    LeafSink, MapDataStore, MerkleLeaf, PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder,
-    StoreErrorClass, StoreWrite,
+    check_map_name, check_tenant, merkle_leaf_hash, AppliedWatermarks, CommitDurability,
+    DropOutcome, FlushCommit, LeafSink, MapDataStore, MerkleLeaf, PutValue, RecordRefused,
+    ScanBatch, ScanCursor, ScanOrder, StoreErrorClass, StoreSyncFailed, StoreWrite,
 };
 use crate::storage::record::RecordValue;
 use crate::storage::sealing::{
@@ -714,6 +715,18 @@ pub struct EngineMapDataStore<E: KvEngine> {
     /// across a commit's check, write and update, so no row moves below the
     /// value it holds, whoever commits.
     applied: Mutex<[u64; WAL_PARTITIONS]>,
+    /// Commits whose engine write returned. Written only under `applied`,
+    /// read without it (`TG-WB-001`).
+    returned: AtomicU64,
+    /// The highest `returned` value a completed durable point covers: a
+    /// `sync: true` commit raises it under `applied`, a completed sync of
+    /// [`MapDataStore::durable_applied_watermarks`] raises it by `fetch_max`.
+    durable: AtomicU64,
+    /// Whether a pass commit is written `sync: true`; `true` in every
+    /// production store.
+    pass_sync: bool,
+    /// A WAL has been opened over this store; never cleared.
+    wal_attached: AtomicBool,
     /// The effective unwrapped keyring: `None` for a store that never had
     /// encryption on. Values are sealed while it has an active key.
     keyring: Option<Arc<Keyring>>,
@@ -1004,10 +1017,27 @@ impl<E: KvEngine> EngineMapDataStore<E> {
             registry_lock: Mutex::new(()),
             cache: RwLock::new(HashMap::new()),
             applied: Mutex::new(*applied),
+            returned: AtomicU64::new(0),
+            durable: AtomicU64::new(0),
+            pass_sync: true,
+            wal_attached: AtomicBool::new(false),
             keyring,
             #[cfg(test)]
             registry_park: Mutex::new(None),
         }
+    }
+
+    /// Makes pass commits unsynced (`sync: false`), so a test can run the
+    /// regime where only the WAL's collection sync makes them durable.
+    #[cfg(test)]
+    pub(crate) fn set_pass_sync(&mut self, sync: bool) {
+        self.pass_sync = sync;
+    }
+
+    /// Whether a WAL has been opened over this store.
+    #[cfg(test)]
+    pub(crate) fn is_wal_attached(&self) -> bool {
+        self.wal_attached.load(Ordering::Acquire)
     }
 
     /// Opens a store whose migration is unfinished, or formats an empty
@@ -1887,9 +1917,17 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
                 sequence,
             });
         }
-        match self.write_records(&ops, WriteOptions { sync: true }) {
+        let sync = self.pass_sync;
+        match self.write_records(&ops, WriteOptions { sync }) {
             Ok(()) => {
                 *held = next;
+                // `returned` before `durable`, both under the lock: a
+                // lock-free reader that loads them in the same order never
+                // sees this commit durable before it counts it.
+                let returned = self.returned.fetch_add(1, Ordering::Release) + 1;
+                if sync {
+                    self.durable.fetch_max(returned, Ordering::Release);
+                }
                 Ok(())
             }
             Err(err) => match err.downcast_ref::<MapIdSpaceExhausted>() {
@@ -1937,6 +1975,41 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
                 by_partition: vec![0; WAL_PARTITIONS],
             },
         }))
+    }
+
+    /// Takes the rows and the count of returned commits under the commit
+    /// lock, then syncs the engine unless that count is already durable, and
+    /// only then returns the rows (`TG-WAL-003`). Under the lock no commit is
+    /// between its write and its settle, so every row the snapshot shows
+    /// belongs to a write that returned before the sync, which the engine's
+    /// sync contract covers. The lock is never held across the sync.
+    fn durable_applied_watermarks(&self) -> anyhow::Result<Option<AppliedWatermarks>> {
+        let (rows, taken) = {
+            let _held = self.applied.lock();
+            (
+                self.applied_watermarks()?,
+                self.returned.load(Ordering::Acquire),
+            )
+        };
+        if self.durable.load(Ordering::Acquire) < taken {
+            self.sync()
+                .map_err(|err| anyhow::Error::new(StoreSyncFailed(err)))?;
+            // `fetch_max`: a `sync: true` commit may have raised it meanwhile.
+            self.durable.fetch_max(taken, Ordering::Release);
+        }
+        Ok(rows)
+    }
+
+    fn commit_durability(&self) -> Option<CommitDurability> {
+        // `returned` first: a commit raises `durable` only after `returned`,
+        // so this order never shows a durable count above the returned one.
+        let returned = self.returned.load(Ordering::Acquire);
+        let durable = self.durable.load(Ordering::Acquire);
+        Some(CommitDurability { returned, durable })
+    }
+
+    fn wal_attached(&self) {
+        self.wal_attached.store(true, Ordering::Release);
     }
 
     fn import_applied_watermarks(&self, rows: &[(u32, u64)]) -> anyhow::Result<()> {
