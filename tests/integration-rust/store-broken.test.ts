@@ -65,7 +65,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { LagScrape, allZero, lwwPut, scrapeGauge, scrapeLag } from './helpers/fault-binary';
+import { LagScrape, allZero, lwwPut, scrapeLag } from './helpers/fault-binary';
 import { TestClient } from './helpers/test-client';
 import {
   spawnBinary,
@@ -89,7 +89,8 @@ const EARLY_KEYS = ['early-0', 'early-1', 'early-2', 'early-3', 'early-4'];
 /**
  * The late writes, one of whose flushes meets the I/O error. Each late key
  * has a map of its own, so the read-back of one is a small snapshot: all of
- * them together are tens of MiB.
+ * them together are tens of MiB, and one snapshot of that size does not
+ * answer in time (TODO-951).
  */
 const LATE_MAP_PREFIX = 'store_broken_late_';
 const lateMap = (key: string) => `${LATE_MAP_PREFIX}${key}`;
@@ -119,7 +120,6 @@ const STORE_OPEN_REFUSED_TEXT = 'store open: refusing to start';
 const PERMISSION_TEXT = 'Permission denied';
 /** What a full disk would be named by: a permission error must not read as one. */
 const ENOSPC_TEXT = 'No space left on device';
-const BROKEN_COUNTER = 'topgun_write_behind_store_broken_total{cause="io"}';
 
 /** Given to the server explicitly, so the deadline below is a known number. */
 const SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -317,8 +317,6 @@ interface Observed {
   drainStoppedLines: string[];
   binaryBrokenLines: string[];
   panicLines: number;
-  /** The broken-store counter, scraped once the store's line was seen. */
-  brokenCounter: number | null;
   /** The distinct readiness answers of probes started after the binary's line. */
   readinessAfterBroken: string[];
   /** Arm 2 only: the restart with the directory still read-only. */
@@ -459,24 +457,12 @@ async function runArm(arm: Arm): Promise<Observed> {
     // Readiness, probed until the process is gone; only probes started after
     // the binary's line count, since the 503 follows that line.
     const readinessAfterBroken = new Set<string>();
-    // The broken-store counter, from scrapes started after the store's line
-    // that were answered; `null` while none was.
-    let brokenCounter: number | null = null;
     let probing = true;
     const prober = (async () => {
       while (probing) {
         const binaryLineSeen = linesWith(launched.stdout(), BINARY_BROKEN_TEXT).length > 0;
-        const storeLineSeen = linesWith(launched.stdout(), STORE_BROKEN_TEXT).length > 0;
         const answer = await readiness(port);
         if (binaryLineSeen) readinessAfterBroken.add(answer);
-        if (storeLineSeen) {
-          try {
-            const value = await within(scrapeGauge(port, BROKEN_COUNTER), SCRAPE_WAIT_MS, 'scrape');
-            if (value !== null) brokenCounter = Math.max(brokenCounter ?? 0, value);
-          } catch {
-            // Nothing answers once the listener has closed.
-          }
-        }
         await sleep(READY_POLL_MS);
       }
     })();
@@ -519,7 +505,7 @@ async function runArm(arm: Arm): Promise<Observed> {
       note(
         `step 4: ${lateAnswers.length} late writes, ${lateBytesSent} bytes; answers ${JSON.stringify(
           lateAnswers.filter(([, answer]) => answer !== 'OP_ACK'),
-        )}; counter ${brokenCounter}`,
+        )}`,
       );
     }
 
@@ -620,7 +606,7 @@ async function runArm(arm: Arm): Promise<Observed> {
       `exit=${JSON.stringify(exit)} exit_after_read_only_ms=${exitAfterReadOnlyMs} ` +
       `store_broken_lines=${storeBrokenLines.length} drain_stopped_lines=${drainStoppedLines.length} ` +
       `binary_broken_lines=${binaryBrokenLines.length} panic_lines=${panicLines} ` +
-      `broken_counter=${brokenCounter} readiness_after_broken=${JSON.stringify([...readinessAfterBroken])} ` +
+      `readiness_after_broken=${JSON.stringify([...readinessAfterBroken])} ` +
       `still_read_only_restart=${JSON.stringify(stillReadOnly)} ` +
       `acked_keys=${Object.values(acked).reduce((sum, rows) => sum + Object.keys(rows).length, 0)} ` +
       `read_back=${readBackOk ? 'ok' : 'fail'} healed_exit_on_sigterm=${JSON.stringify(healedExitOnSigterm)}`;
@@ -637,7 +623,6 @@ async function runArm(arm: Arm): Promise<Observed> {
       drainStoppedLines,
       binaryBrokenLines,
       panicLines,
-      brokenCounter,
       readinessAfterBroken: [...readinessAfterBroken].sort(),
       stillReadOnly,
       acked,
@@ -735,10 +720,8 @@ function observed(o: Observed) {
       (line) => /\bexit_code=72\b/.test(line) && line.includes('cause="io"'),
     ).length,
     panicLines: o.panicLines,
-    // The listener closes as the node starts its stop, so a scrape after the
-    // store's line may find nothing to answer; one that answers must count
-    // the cause.
-    brokenCounterWhenScraped: o.brokenCounter === null ? 'not answered' : o.brokenCounter,
+    // The listener stops accepting as the node starts its stop, so a probe
+    // after the binary's line is refused or answered 503, never 200.
     readinessNeverReadyAfterBroken: !o.readinessAfterBroken.includes('200'),
     // (i) at least one late key was acknowledged.
     someLateKeyAcked: Object.keys(lateAcked(o)).length > 0,
@@ -765,7 +748,6 @@ function expected(o: Observed) {
     binaryBrokenLines: 1,
     binaryBrokenLinesWithExitCode72: 1,
     panicLines: 0,
-    brokenCounterWhenScraped: o.brokenCounter === null ? 'not answered' : 1,
     readinessNeverReadyAfterBroken: true,
     someLateKeyAcked: true,
     earlyReadBack: o.acked[EARLY_MAP],

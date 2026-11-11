@@ -104,6 +104,17 @@ fn choose_backend(
     }
 }
 
+/// The `STORAGE_BACKEND` value; one that is not valid Unicode is refused
+/// rather than read as unset, which would silently pick the default store.
+fn storage_backend_value(raw: Option<std::ffi::OsString>) -> anyhow::Result<Option<String>> {
+    raw.map(|value| {
+        value
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("STORAGE_BACKEND is not valid Unicode"))
+    })
+    .transpose()
+}
+
 const REDB_DEPRECATED: &str = "STORAGE_BACKEND=redb is deprecated: the embedded store is now RocksDB, and an existing redb store is migrated at this start; set STORAGE_BACKEND=rocksdb (or unset it). The value redb will be refused by the next release. See CHANGELOG.md.";
 
 const ENGINE_CACHE_ENV: &str = "TOPGUN_ENGINE_CACHE_MB";
@@ -253,7 +264,13 @@ fn spawn_engine_stats(engine: Arc<RocksKvEngine>) {
         let mut failure_logged = false;
         loop {
             tick.tick().await;
-            match engine.stats() {
+            // The properties are read under RocksDB's own locks; off the
+            // runtime threads, so a slow read never holds a worker.
+            let reader = Arc::clone(&engine);
+            let Ok(read) = tokio::task::spawn_blocking(move || reader.stats()).await else {
+                break;
+            };
+            match read {
                 Ok(stats) => publish_engine_stats(&stats),
                 Err(topgun_server::storage::datastores::kv_engine::KvError::ShutDown) => break,
                 Err(error) => {
@@ -402,7 +419,7 @@ fn load_encryption(config: &EncryptionConfig) -> anyhow::Result<Encryption> {
 /// backend name or a set `DATABASE_URL` is refused before any file is opened.
 /// Any error of the store open itself ends the process with exit 1.
 fn select_datastore(settings: &EngineSettings) -> anyhow::Result<Selected> {
-    let storage_backend = std::env::var("STORAGE_BACKEND").ok();
+    let storage_backend = storage_backend_value(std::env::var_os("STORAGE_BACKEND"))?;
     let database_url_set = std::env::var_os("DATABASE_URL").is_some();
     let backend = choose_backend(storage_backend.as_deref(), database_url_set)?;
     let encryption = encryption_config(&|name| std::env::var_os(name), backend)?;
@@ -1899,6 +1916,23 @@ mod tests {
         }
     }
 
+    /// A `STORAGE_BACKEND` that is not valid Unicode is refused, never read as
+    /// unset (which would pick the default store).
+    #[test]
+    fn a_storage_backend_that_is_not_unicode_is_refused() {
+        use std::os::unix::ffi::OsStringExt;
+        let refused = super::storage_backend_value(Some(std::ffi::OsString::from_vec(vec![
+            b'r', 0xff, b'b',
+        ])))
+        .expect_err("not unicode");
+        assert_eq!(refused.to_string(), "STORAGE_BACKEND is not valid Unicode");
+        assert_eq!(super::storage_backend_value(None).unwrap(), None);
+        assert_eq!(
+            super::storage_backend_value(Some("null".into())).unwrap(),
+            Some("null".to_string())
+        );
+    }
+
     /// The engine budget parse table: unset is the default, a value that does
     /// not parse warns and falls back to it, and a set-but-empty value or one
     /// below the 64 MiB floor is fatal.
@@ -3063,10 +3097,13 @@ mod tests {
     }
 
     /// A write the engine migration cannot make ends the start with exit 1 —
-    /// the store-open refusal — and never with the broken-store exit 72,
-    /// although the error carries an engine error. The fault is real: the
-    /// data directory holding `engine.redb` is read-only, so the migration
-    /// cannot create its target. Run as root it fails, naming the reason.
+    /// the store-open refusal — and never with the broken-store exit 72. The
+    /// fault is real: the data directory holding `engine.redb` is read-only,
+    /// so the migration cannot create its target. An error that carries a
+    /// `KvError` inside (a failed migration write, the seal pass) needs no
+    /// case of its own: every error of the open reaches the one call site in
+    /// `select_datastore`, which refuses without looking inside it. Run as
+    /// root it fails, naming the reason.
     #[test]
     fn a_write_the_engine_migration_cannot_make_is_a_store_open_refusal() {
         use std::os::unix::fs::PermissionsExt;
@@ -3117,8 +3154,10 @@ mod tests {
             "stdout: {stdout}\nstderr: {stderr}"
         );
         assert!(
-            stderr.contains("Error: store open:"),
-            "the refusal names the store open: {stderr}"
+            stderr.contains("Error: store open:")
+                && stderr.contains("store engine: cannot create")
+                && stderr.contains("engine.rocksdb"),
+            "the refusal names the store open and the target it could not create: {stderr}"
         );
         assert!(!stdout.contains("MIGRATION-FAULT-UNEXPECTED"), "{stdout}");
         assert!(data_dir.join("engine.redb").is_file(), "the source is kept");

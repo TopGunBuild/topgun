@@ -854,7 +854,10 @@ fn spawn_engine_peaks(
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             tick.tick().await;
-            let Ok(stats) = engine.stats() else { break };
+            let reader = Arc::clone(&engine);
+            let Ok(Ok(stats)) = tokio::task::spawn_blocking(move || reader.stats()).await else {
+                break;
+            };
             peaks.l0_files = peaks.l0_files.max(stats.l0_files);
             peaks.pending_compaction_bytes = peaks
                 .pending_compaction_bytes
