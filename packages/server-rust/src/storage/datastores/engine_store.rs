@@ -1042,6 +1042,22 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         self.pass_sync = Some(sync);
     }
 
+    /// Whether a commit is written `sync: true`. Unsynced only where a
+    /// returned write survives a process crash and a WAL frame covers every
+    /// record of the batch: the WAL is collected and its hints written only
+    /// past a synced watermark (`TG-WAL-003`), so a power loss of the
+    /// engine's unsynced tail is replayed from it. Both inputs are fixed
+    /// after open, so the answer does not change within a pass.
+    fn commit_sync(&self) -> bool {
+        self.pass_sync.unwrap_or_else(|| {
+            !(self
+                .engine
+                .capabilities()
+                .unsynced_write_survives_process_crash
+                && self.wal_attached.load(Ordering::Acquire))
+        })
+    }
+
     /// Whether a WAL has been opened over this store.
     #[cfg(test)]
     pub(crate) fn is_wal_attached(&self) -> bool {
@@ -1927,19 +1943,7 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
                 sequence,
             });
         }
-        // Unsynced only where a returned write survives a process crash and a
-        // WAL frame covers every record of the batch: the WAL is collected
-        // and its hints written only past a synced watermark (`TG-WAL-003`),
-        // so a power loss of the engine's unsynced tail is replayed from it.
-        // Both inputs are fixed after open, so the answer does not change
-        // within a pass.
-        let sync = self.pass_sync.unwrap_or_else(|| {
-            !(self
-                .engine
-                .capabilities()
-                .unsynced_write_survives_process_crash
-                && self.wal_attached.load(Ordering::Acquire))
-        });
+        let sync = self.commit_sync();
         match self.write_records(&ops, WriteOptions { sync }) {
             Ok(()) => {
                 *held = next;
