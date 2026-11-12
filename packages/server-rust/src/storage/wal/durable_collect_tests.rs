@@ -8,7 +8,10 @@
 //! crash tests run over the `kv_crash` targets, whose crash keeps nothing
 //! written since the last sync. Pass commits are written unsynced here
 //! (`set_pass_sync(false)`) unless a test says otherwise, which is the regime
-//! the collection sync exists for.
+//! the collection sync exists for. The tests of the engine-aware choice let
+//! the store choose (no override): over RocksDB, which has
+//! `unsynced_write_survives_process_crash`, or over a [`Logged`] wrapper that
+//! claims it for an engine whose crash model loses the unsynced tail.
 
 // Each test is one scenario read top to bottom; splitting one across helpers
 // would hide the order its claim depends on.
@@ -28,12 +31,16 @@ use super::store_mode_tests::{
     flush_idle, frames_on_disk, gc_skipped, keys_in, lww, open_engine, sidecar_files, sidecar_path,
     store_frame, wb_config, CountingEngine, Root, MAP,
 };
-use super::{Wal, WalFsyncPolicy, WalRecovery, WalWriter};
+use super::{Wal, WalFsyncPolicy, WalRecovery, WalWriter, WAL_COLLECTED_FILE};
 use crate::storage::datastores::engine_store::EngineMapDataStore;
+#[cfg(feature = "rocksdb")]
+use crate::storage::datastores::kv_crash::RocksTarget;
 use crate::storage::datastores::kv_crash::{CrashMode, CrashTarget, MemTarget, RedbTarget};
 use crate::storage::datastores::kv_engine::{
     KeyRange, KvCapabilities, KvEngine, KvError, KvResult, KvSnapshot, WriteBatch, WriteOptions,
 };
+#[cfg(feature = "rocksdb")]
+use crate::storage::datastores::rocks_engine::{OpenMode, RocksConfig, RocksKvEngine};
 use crate::storage::datastores::{WalBootstrap, WriteBehindDataStore};
 use crate::storage::map_data_store::{
     FlushCommit, MapDataStore, PutValue, StoreBrokenCause, StoreWrite, WatermarkKeeping,
@@ -181,6 +188,108 @@ impl KvEngine for SyncEngine {
     fn shutdown(&self) -> KvResult<()> {
         self.inner.shutdown()
     }
+}
+
+// ---------------------------------------------------------------------------
+// The write-logging, capability-claiming engine
+// ---------------------------------------------------------------------------
+
+/// A [`KvEngine`] over `E` that logs the `sync` flag of every write and
+/// counts `sync` calls; when `claim` is set it reports
+/// `unsynced_write_survives_process_crash`, so the store chooses unsynced
+/// commits over an engine whose crash model loses them.
+struct Logged<E> {
+    inner: Arc<E>,
+    claim: bool,
+    writes: Mutex<Vec<bool>>,
+    syncs: AtomicU64,
+}
+
+impl<E: KvEngine> Logged<E> {
+    fn over(inner: Arc<E>, claim: bool) -> Self {
+        Self {
+            inner,
+            claim,
+            writes: Mutex::new(Vec::new()),
+            syncs: AtomicU64::new(0),
+        }
+    }
+
+    fn mark(&self) -> usize {
+        self.writes.lock().len()
+    }
+
+    /// The `sync` flag of every write from `mark` on.
+    fn writes_since(&self, mark: usize) -> Vec<bool> {
+        self.writes.lock()[mark..].to_vec()
+    }
+
+    fn syncs(&self) -> u64 {
+        self.syncs.load(Ordering::SeqCst)
+    }
+}
+
+impl<E: KvEngine> KvEngine for Logged<E> {
+    fn capabilities(&self) -> KvCapabilities {
+        if self.claim {
+            KvCapabilities {
+                unsynced_write_survives_process_crash: true,
+                ..self.inner.capabilities()
+            }
+        } else {
+            self.inner.capabilities()
+        }
+    }
+
+    fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+
+    fn write(&self, batch: WriteBatch, opts: WriteOptions) -> KvResult<()> {
+        self.writes.lock().push(opts.sync);
+        self.inner.write(batch, opts)
+    }
+
+    fn snapshot(&self) -> KvResult<Box<dyn KvSnapshot + '_>> {
+        self.inner.snapshot()
+    }
+
+    fn ingest(
+        &self,
+        range: KeyRange,
+        sorted: Vec<(Vec<u8>, Vec<u8>)>,
+        opts: WriteOptions,
+    ) -> KvResult<()> {
+        self.inner.ingest(range, sorted, opts)
+    }
+
+    fn sync(&self) -> KvResult<()> {
+        self.syncs.fetch_add(1, Ordering::SeqCst);
+        self.inner.sync()
+    }
+
+    fn shutdown(&self) -> KvResult<()> {
+        self.inner.shutdown()
+    }
+}
+
+/// A RocksDB engine at `path` with the production options; memtables large
+/// enough that a test's writes stay in them.
+#[cfg(feature = "rocksdb")]
+fn rocks_at(path: &Path, mode: OpenMode) -> Arc<RocksKvEngine> {
+    let engine = RocksKvEngine::open(path, mode, &RocksConfig::production(64 * 1024 * 1024, -1))
+        .unwrap_or_else(|e| panic!("rocksdb at {}: {e}", path.display()));
+    Arc::new(engine)
+}
+
+/// The `0x20` row of [`P`] a store over `engine` reads.
+fn row_of<E: KvEngine>(engine: Arc<E>) -> u64 {
+    EngineMapDataStore::open(engine)
+        .expect("store opens")
+        .applied_watermarks()
+        .expect("rows")
+        .expect("kept")
+        .by_partition[P as usize]
 }
 
 // ---------------------------------------------------------------------------
@@ -370,9 +479,107 @@ async fn ac1_a_tick_syncs_once_after_its_take_and_before_any_unlink_and_only_whe
     );
 }
 
+/// N passes over `engine` with a WAL attached and the store choosing: they
+/// are written `sync: !unsynced` and make no sync; the tick after them makes
+/// one sync exactly when they were unsynced.
+async fn ac1_passes_choose<E: KvEngine>(engine: Arc<E>, wal_dir: PathBuf, unsynced: bool) {
+    let engine = Arc::new(Logged::over(engine, false));
+    let store = Arc::new(EngineMapDataStore::open(Arc::clone(&engine)).expect("store opens"));
+    let wal = WalWriter::open_over_store(
+        wal_dir,
+        WalFsyncPolicy::PerOp,
+        Arc::clone(&store) as Arc<dyn MapDataStore>,
+    )
+    .expect("store-mode open");
+    wal.test_hold_collection_task(true);
+    let recs = records(4);
+    for (seq, (key, value)) in (1u64..).zip(&recs) {
+        wal.append(P, &store_frame(key, value, seq))
+            .await
+            .expect("append");
+    }
+    let mark = engine.mark();
+    commit_and_mark(store.as_ref(), &wal, &recs[..2], 2).await;
+    commit_and_mark(store.as_ref(), &wal, &recs[2..3], 3).await;
+    commit_and_mark(store.as_ref(), &wal, &recs[3..], 4).await;
+    assert_eq!(
+        engine.writes_since(mark),
+        vec![!unsynced; 3],
+        "one engine write per pass, sync: {}",
+        !unsynced
+    );
+    assert_eq!(engine.syncs(), 0, "the passes make no sync");
+    wal.test_advance_clock(SEAL_AGE);
+    wal.test_collect_now().await;
+    assert_eq!(
+        engine.syncs(),
+        u64::from(unsynced),
+        "the tick syncs once exactly when a pass returned unsynced"
+    );
+}
+
+#[cfg(feature = "rocksdb")]
+#[tokio::test(flavor = "multi_thread")]
+async fn ac1_on_rocksdb_under_a_wal_passes_are_unsynced_and_a_tick_syncs_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let engine = rocks_at(&dir.path().join("db"), OpenMode::CreateNew);
+    assert!(engine.capabilities().unsynced_write_survives_process_crash);
+    ac1_passes_choose(engine, dir.path().join("wal"), true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ac1_on_redb_under_a_wal_passes_stay_synced() {
+    let root = Root::new();
+    let engine = open_engine(&root);
+    assert!(!engine.capabilities().unsynced_write_survives_process_crash);
+    ac1_passes_choose(engine, root.wal_dir(), false).await;
+}
+
+#[cfg(feature = "rocksdb")]
+#[tokio::test(flavor = "multi_thread")]
+async fn ac1_on_rocksdb_without_a_wal_commits_stay_synced() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let engine = Arc::new(Logged::over(
+        rocks_at(&dir.path().join("db"), OpenMode::CreateNew),
+        false,
+    ));
+    let store = EngineMapDataStore::open(Arc::clone(&engine)).expect("store opens");
+    let recs = records(1);
+    let mark = engine.mark();
+    store
+        .commit(&FlushCommit {
+            writes: vec![StoreWrite::Put {
+                map: MAP,
+                key: &recs[0].0,
+                value: PutValue::Value(&recs[0].1),
+                store_time: 0,
+            }],
+            applied: vec![(P, 1)],
+        })
+        .await
+        .expect("commit");
+    assert_eq!(
+        engine.writes_since(mark),
+        vec![true],
+        "no WAL frame covers the commit, so it is synced"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // AC2: durability under a lost engine tail
 // ---------------------------------------------------------------------------
+
+/// How a life's store chooses whether its commits are synced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Passes {
+    /// Unsynced by the test override, whatever the engine says.
+    Forced,
+    /// Chosen by the store, over a [`Logged`] wrapper that claims the
+    /// capability for an engine whose crash loses the unsynced tail.
+    Claimed,
+    /// Chosen by the store from the engine's own capability.
+    Native,
+}
 
 /// A runtime of its own per process life: dropping it is the crash of the
 /// tasks it runs, write-behind's included, with no drain and no `finish`.
@@ -384,15 +591,25 @@ fn life_runtime() -> tokio::runtime::Runtime {
         .expect("runtime")
 }
 
-/// One process life over `engine`: the store with unsynced passes, its WAL
-/// recovered as at start; the WAL's collection timer is held off.
+/// One process life over `engine`: the store with its commits synced as
+/// `passes` says, its WAL recovered as at start; the WAL's collection timer
+/// is held off.
 async fn open_life<E: KvEngine + 'static>(
     engine: Arc<E>,
     wal_dir: &Path,
-) -> (Arc<EngineMapDataStore<E>>, Arc<WalWriter>) {
-    let mut store = EngineMapDataStore::open(engine).expect("store opens");
-    store.set_pass_sync(false);
-    let store = Arc::new(store);
+    passes: Passes,
+) -> (Arc<dyn MapDataStore>, Arc<WalWriter>) {
+    let store: Arc<dyn MapDataStore> = match passes {
+        Passes::Forced => {
+            let mut store = EngineMapDataStore::open(engine).expect("store opens");
+            store.set_pass_sync(false);
+            Arc::new(store)
+        }
+        Passes::Claimed => Arc::new(
+            EngineMapDataStore::open(Arc::new(Logged::over(engine, true))).expect("store opens"),
+        ),
+        Passes::Native => Arc::new(EngineMapDataStore::open(engine).expect("store opens")),
+    };
     let wal = WalWriter::open_over_store(
         wal_dir.to_path_buf(),
         WalFsyncPolicy::PerOp,
@@ -437,7 +654,17 @@ async fn write_through(wb: &WriteBehindDataStore, recs: &[(String, RecordValue)]
     flush_idle(wb).await;
 }
 
-fn ac2_lost_engine_tail<T: CrashTarget>()
+/// Acknowledged writes in two passes, crashes before any tick and right
+/// after recovery replay, then a tick that unlinks and a third crash: every
+/// acknowledged write is served after each, and the WAL keeps every frame
+/// above the row the last crash left.
+///
+/// Every crash keeps `seed` unsynced batches on a whole-batch target. Where
+/// a crash drops the whole unsynced tail, the row it leaves is checked to be
+/// the pre-crash synced one, so the commits of that life (passes, then
+/// replay) really were unsynced; where it keeps every returned batch, the
+/// row is the latest one.
+fn ac2_lost_engine_tail<T: CrashTarget>(passes: Passes, seed: u64)
 where
     T::Engine: 'static,
 {
@@ -445,37 +672,72 @@ where
     let wal_dir = dir.path().join("wal");
     let recs = records(8);
     let (first, second) = recs.split_at(4);
+    let keeps_tail = T::KEEPS_EVERY_RETURNED_BATCH || (T::KEEPS_WHOLE_BATCHES && seed == u64::MAX);
+    let drops_tail = !keeps_tail && (!T::KEEPS_WHOLE_BATCHES || seed == 0);
 
-    // Life A: acknowledged writes, unsynced passes, crash before any tick.
+    // Life A: acknowledged writes in two unsynced passes, crash before any
+    // tick.
     let target = T::fresh();
     let rt = life_runtime();
-    let wal = rt.block_on(async {
-        let (store, wal) = open_life(target.engine(), &wal_dir).await;
-        let wb = write_behind_over(store, &wal).await;
-        write_through(&wb, first).await;
-        Arc::downgrade(&wal)
+    let (wal, rows_a) = rt.block_on(async {
+        let (store, wal) = open_life(target.engine(), &wal_dir, passes).await;
+        let wb = write_behind_over(Arc::clone(&store), &wal).await;
+        let mut rows = Vec::new();
+        for half in first.chunks(2) {
+            write_through(&wb, half).await;
+            rows.push(
+                store
+                    .applied_watermarks()
+                    .expect("rows")
+                    .expect("kept")
+                    .by_partition[P as usize],
+            );
+        }
+        (Arc::downgrade(&wal), rows)
     });
     crash_life(rt, &wal);
-    let target = target.crash(CrashMode::DropUnsynced, 0);
+    let target = target.crash(CrashMode::DropUnsynced, seed);
+    let row = row_of(target.engine());
+    assert!(
+        0 < rows_a[0] && rows_a[0] < rows_a[1],
+        "two passes, two rows: {rows_a:?}"
+    );
+    if drops_tail {
+        assert_eq!(row, 0, "the passes were unsynced, so the crash lost them");
+    } else if keeps_tail {
+        assert_eq!(row, rows_a[1], "the crash kept every returned pass");
+    } else {
+        assert_eq!(
+            row, rows_a[0],
+            "the crash kept the first pass: a row above the synced one survived"
+        );
+    }
 
-    // Life B: every acknowledged write is served (replayed, unsynced again),
-    // then a second crash before the first tick.
+    // Life B: every acknowledged write is served (replayed from the row the
+    // crash left, unsynced again), then a second crash before the first tick.
     let rt = life_runtime();
     let wal = rt.block_on(async {
-        let (store, wal) = open_life(target.engine(), &wal_dir).await;
+        let (store, wal) = open_life(target.engine(), &wal_dir, passes).await;
         assert_served(store.as_ref(), first, "after the first crash").await;
         Arc::downgrade(&wal)
     });
     crash_life(rt, &wal);
-    let target = target.crash(CrashMode::DropUnsynced, 0);
+    let target = target.crash(CrashMode::DropUnsynced, seed);
+    if drops_tail {
+        assert_eq!(
+            row_of(target.engine()),
+            row,
+            "the replay commits were unsynced, so the crash lost them"
+        );
+    }
 
     // Life C: the same frames replay again; more writes; a tick that unlinks;
     // then the crash.
     let rt = life_runtime();
     let (wal, kept) = rt.block_on(async {
-        let (store, wal) = open_life(target.engine(), &wal_dir).await;
+        let (store, wal) = open_life(target.engine(), &wal_dir, passes).await;
         assert_served(store.as_ref(), first, "after the replay was lost").await;
-        let wb = write_behind_over(Arc::clone(&store) as Arc<dyn MapDataStore>, &wal).await;
+        let wb = write_behind_over(Arc::clone(&store), &wal).await;
         write_through(&wb, second).await;
         let before = frames_on_disk(&wal_dir, P);
         wal.test_advance_clock(SEAL_AGE);
@@ -488,41 +750,201 @@ where
         (Arc::downgrade(&wal), kept)
     });
     crash_life(rt, &wal);
-    let target = target.crash(CrashMode::DropUnsynced, 0);
+    let target = target.crash(CrashMode::DropUnsynced, seed);
 
-    // Life D: the WAL holds every frame above the synced row, and every
-    // acknowledged write is served.
-    let rows = EngineMapDataStore::open(target.engine())
-        .expect("store opens")
-        .applied_watermarks()
-        .expect("rows")
-        .expect("kept")
-        .by_partition;
+    // Life D: the WAL holds every frame above the row the crash left, and
+    // every acknowledged write is served.
+    let row = row_of(target.engine());
     let on_disk = frames_on_disk(&wal_dir, P);
     assert_eq!(on_disk, kept, "the crash changed no WAL file");
-    let top = kept.iter().copied().max().unwrap_or(rows[P as usize]);
-    for seq in rows[P as usize] + 1..=top {
+    let top = kept.iter().copied().max().unwrap_or(row);
+    for seq in row + 1..=top {
         assert!(
             on_disk.contains(&seq),
-            "frame {seq} above the synced row {} is kept",
-            rows[P as usize]
+            "frame {seq} above the row {row} is kept"
         );
     }
     let rt = life_runtime();
     rt.block_on(async {
-        let (store, _wal) = open_life(target.engine(), &wal_dir).await;
+        let (store, _wal) = open_life(target.engine(), &wal_dir, passes).await;
         assert_served(store.as_ref(), &recs, "after collection and the crash").await;
     });
 }
 
 #[test]
 fn ac2_every_acknowledged_write_survives_a_lost_engine_tail_on_redb() {
-    ac2_lost_engine_tail::<RedbTarget>();
+    ac2_lost_engine_tail::<RedbTarget>(Passes::Forced, 0);
 }
 
 #[test]
 fn ac2_every_acknowledged_write_survives_a_lost_engine_tail_on_whole_batches() {
-    ac2_lost_engine_tail::<MemTarget>();
+    ac2_lost_engine_tail::<MemTarget>(Passes::Forced, 0);
+}
+
+/// AC2(a): RocksDB's own choice, crashed as a process dies. The copy keeps
+/// every returned batch, so this proves the capability's premise and replay
+/// idempotence, not durability against a lost tail.
+#[cfg(feature = "rocksdb")]
+#[test]
+fn ac2a_rocksdb_unsynced_passes_survive_a_process_crash() {
+    ac2_lost_engine_tail::<RocksTarget>(Passes::Native, 0);
+}
+
+/// AC2(b): an engine that claims the capability loses everything since its
+/// last sync; the store chose unsynced passes and replays.
+#[test]
+fn ac2b_with_the_capability_claimed_a_lost_tail_since_the_last_sync_loses_no_acknowledged_write() {
+    ac2_lost_engine_tail::<RedbTarget>(Passes::Claimed, 0);
+}
+
+/// AC2(b′): the same over whole batches, keeping none, the first, or every
+/// unsynced batch, so a surviving row above the synced one is replayed from.
+#[test]
+fn ac2b_prime_with_the_capability_claimed_a_lost_batch_suffix_loses_no_acknowledged_write() {
+    for keep in [0, 1, u64::MAX] {
+        ac2_lost_engine_tail::<MemTarget>(Passes::Claimed, keep);
+    }
+}
+
+/// AC2(d): plain redb, the first open imports the rollback hints, writes
+/// `wal-collected` and deletes the hints; a power loss right after, with no
+/// later engine write to make the import durable by accident, must not leave
+/// a store the next start refuses (`TG-WAL-013`).
+#[test]
+fn ac2d_the_import_survives_a_power_loss_right_after_the_first_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wal_dir = dir.path().join("wal");
+    std::fs::create_dir_all(&wal_dir).expect("wal dir");
+    std::fs::write(sidecar_path(&wal_dir, P), 5u64.to_be_bytes()).expect("hint");
+
+    let target = RedbTarget::fresh();
+    let rt = life_runtime();
+    let wal = rt.block_on(async {
+        let engine = Arc::new(Logged::over(target.engine(), false));
+        let store = Arc::new(EngineMapDataStore::open(Arc::clone(&engine)).expect("store opens"));
+        assert!(
+            !store
+                .applied_watermarks()
+                .expect("rows")
+                .expect("kept")
+                .imported,
+            "a fresh store has not imported"
+        );
+        let mark = engine.mark();
+        let wal = WalWriter::open_over_store(
+            wal_dir.clone(),
+            WalFsyncPolicy::PerOp,
+            Arc::clone(&store) as Arc<dyn MapDataStore>,
+        )
+        .expect("store-mode open");
+        wal.test_hold_collection_task(true);
+        WalRecovery::new(Arc::clone(&wal), Vec::new())
+            .run(Arc::clone(&store) as Arc<dyn MapDataStore>)
+            .await
+            .expect("recovery");
+        assert!(sidecar_files(&wal_dir).is_empty(), "the hints are deleted");
+        assert!(wal_dir.join(WAL_COLLECTED_FILE).is_file());
+        assert_eq!(
+            engine.writes_since(mark).len(),
+            1,
+            "the import is the last engine write before the crash"
+        );
+        Arc::downgrade(&wal)
+    });
+    crash_life(rt, &wal);
+    let target = target.crash(CrashMode::DropUnsynced, 0);
+
+    let store = Arc::new(EngineMapDataStore::open(target.engine()).expect("store opens"));
+    let held = store.applied_watermarks().expect("rows").expect("kept");
+    assert!(held.imported, "the import survived the power loss");
+    assert_eq!(held.by_partition[P as usize], 5);
+    let rt = life_runtime();
+    rt.block_on(async {
+        WalWriter::open_over_store(
+            wal_dir.clone(),
+            WalFsyncPolicy::PerOp,
+            Arc::clone(&store) as Arc<dyn MapDataStore>,
+        )
+        .expect("the next start is not refused");
+    });
+}
+
+/// Copies every file of the RocksDB directory `from` into a new directory,
+/// RocksDB's own WAL files (`*.log`) only when `logs`.
+#[cfg(feature = "rocksdb")]
+fn copy_db(from: &Path, logs: bool) -> tempfile::TempDir {
+    let to = tempfile::tempdir().expect("tempdir");
+    for entry in std::fs::read_dir(from).expect("the database directory") {
+        let path = entry.expect("a directory entry").path();
+        if !logs && path.extension().is_some_and(|e| e == "log") {
+            continue;
+        }
+        std::fs::copy(
+            &path,
+            to.path().join(path.file_name().expect("a file name")),
+        )
+        .unwrap_or_else(|e| panic!("copy {}: {e}", path.display()));
+    }
+    to
+}
+
+/// AC2(e): `kill -9`, a new process opens the store read-write, and the
+/// machine then loses everything the new process has not synced. The rows
+/// the new process read at open must have left RocksDB's WAL files during
+/// the open (the recovery flush, `avoid_flush_during_recovery = false`).
+#[cfg(feature = "rocksdb")]
+#[test]
+fn ac2e_rows_a_dead_process_left_unsynced_leave_the_engine_wal_at_the_next_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("db");
+    let wal_dir = dir.path().join("wal");
+    let recs = records(4);
+
+    // 1. The dead process: unsynced passes, ticks held, no graceful stop.
+    let engine = rocks_at(&db, OpenMode::CreateNew);
+    let rt = life_runtime();
+    let (wal, latest) = rt.block_on(async {
+        let (store, wal) = open_life(Arc::clone(&engine), &wal_dir, Passes::Native).await;
+        let wb = write_behind_over(Arc::clone(&store), &wal).await;
+        write_through(&wb, &recs).await;
+        let latest = store
+            .applied_watermarks()
+            .expect("rows")
+            .expect("kept")
+            .by_partition[P as usize];
+        (Arc::downgrade(&wal), latest)
+    });
+    crash_life(rt, &wal);
+    assert!(latest > 0, "the passes stored a row");
+    assert_eq!(Arc::strong_count(&engine), 1, "the dead store is gone");
+    engine.stop_background_work();
+    let image = copy_db(&db, true);
+    drop(engine);
+
+    // 2. Not vacuous: the row lived only in RocksDB's WAL files.
+    let without_logs = copy_db(image.path(), false);
+    assert!(
+        row_of(rocks_at(without_logs.path(), OpenMode::Existing)) < latest,
+        "the dead process flushed the row itself, so this arm proves nothing"
+    );
+
+    // 3. The new process opens read-write and writes nothing; the copy
+    //    without RocksDB's WAL files is what a loss of the unsynced tail
+    //    leaves.
+    let reopened = rocks_at(image.path(), OpenMode::Existing);
+    reopened.stop_background_work();
+    let lost_tail = copy_db(image.path(), false);
+    drop(reopened);
+
+    // 4. The row and every record it covers are there.
+    let engine = rocks_at(lost_tail.path(), OpenMode::Existing);
+    assert_eq!(
+        row_of(Arc::clone(&engine)),
+        latest,
+        "the row left the engine WAL during the open"
+    );
+    let store = EngineMapDataStore::open(engine).expect("store opens");
+    life_runtime().block_on(assert_served(&store, &recs, "after the lost tail"));
 }
 
 // ---------------------------------------------------------------------------
@@ -747,7 +1169,7 @@ where
     let target = T::fresh();
     let rt = life_runtime();
     let wal = rt.block_on(async {
-        let (store, wal) = open_life(target.engine(), &wal_dir).await;
+        let (store, wal) = open_life(target.engine(), &wal_dir, Passes::Forced).await;
         for (seq, (key, value)) in (1u64..).zip(&recs) {
             wal.append(P, &store_frame(key, value, seq))
                 .await
@@ -908,7 +1330,7 @@ fn ac7_a_commit_between_the_fence_reads_is_not_published_before_a_sync() {
     let target = RedbTarget::fresh();
     let rt = life_runtime();
     let (wal, covered) = rt.block_on(async {
-        let (store, wal) = open_life(target.engine(), &wal_dir).await;
+        let (store, wal) = open_life(target.engine(), &wal_dir, Passes::Forced).await;
         let wb = write_behind_over(Arc::clone(&store) as Arc<dyn MapDataStore>, &wal).await;
         let mut after = Vec::new();
         for rec in recs[..2].chunks(1) {

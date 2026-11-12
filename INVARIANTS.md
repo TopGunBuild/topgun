@@ -98,9 +98,15 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     not finish);
     this binary reads one only through the import at open, when the WAL directory holds no
     `wal-collected` or the store is `wal_import_pending`, and deletes every one at open.
+    On an engine with `unsynced_write_survives_process_crash` and a WAL attached, the pass
+    commit and the recovery replay commit are written without a sync; on any other engine,
+    `sync: true`. Rows a process left unsynced and a later process reads at open are durable
+    once the open returns (RocksDB: recovery flush, `avoid_flush_during_recovery=false`, pinned
+    by `r_a_options_are_the_e2_set_plus_bounded_index`).
 - **Maintaining code:** store mode — `wal/mod.rs` `open_over_store`, `mark_applied`, the
   collection tick, `write_wal_collected`, `finish`; `engine_store.rs` `commit` (records and
-  `0x20` rows in one batch, a lower row refused) and `durable_applied_watermarks` (take under
+  `0x20` rows in one batch, a lower row refused, `sync` from the engine's capability and
+  `wal_attached`) and `durable_applied_watermarks` (take under
   the commit lock, then sync, then return); `write_behind.rs` the commit plan and its
   settle after `Ok`.
 - **Enforcing test:** store mode — `store_mode_tests.rs::a01_a_commit_is_one_engine_write_holding_its_records_and_its_watermark_rows`,
@@ -133,7 +139,16 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `ac5_a_hint_is_the_lower_of_the_wal_copy_and_the_store_row`,
   `ac5_hints_after_finish_are_durable_rows_on_redb`,
   `ac5_hints_after_finish_are_durable_rows_on_whole_batches`,
-  `ac6_a_slow_sync_does_not_hold_the_runtime_worker`.
+  `ac6_a_slow_sync_does_not_hold_the_runtime_worker`;
+  the engine-aware choice, with the store choosing —
+  `ac1_on_rocksdb_under_a_wal_passes_are_unsynced_and_a_tick_syncs_once`,
+  `ac1_on_redb_under_a_wal_passes_stay_synced`, `ac1_on_rocksdb_without_a_wal_commits_stay_synced`,
+  `ac2a_rocksdb_unsynced_passes_survive_a_process_crash` (capability premise and replay
+  idempotence only),
+  `ac2b_with_the_capability_claimed_a_lost_tail_since_the_last_sync_loses_no_acknowledged_write`,
+  `ac2b_prime_with_the_capability_claimed_a_lost_batch_suffix_loses_no_acknowledged_write`,
+  `ac2d_the_import_survives_a_power_loss_right_after_the_first_open`,
+  `ac2e_rows_a_dead_process_left_unsynced_leave_the_engine_wal_at_the_next_open`.
 - **Violation consequence:** under-seeded `max_observed_sequence` on restart → sequence reuse →
   recovery filter silently drops frames.
 - **Discovered by:** SPEC-330 era; hardened by SPEC-350; crash-point injection proved by SPEC-352.
@@ -376,7 +391,8 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `left: [3, 1, 2]` vs `right: [1, 2, 3]`), which aborts the test before the replay-order assertion is
   reached — so the enforcement is real, but it is the enumeration-order assertion that discriminates.
   Store mode: `batched_replay_tests.rs::c01_a_replay_batch_is_one_durable_engine_write_with_its_row`
-  (the row is in the one durable write of its batch), `c04_replay_batches_respect_1000_frames_or_8_mib`,
+  (redb: no `unsynced_write_survives_process_crash`; the row is in the one durable write of its
+  batch), `c04_replay_batches_respect_1000_frames_or_8_mib`,
   `c06_a_kill_between_replay_batches_resumes_from_the_last_committed_row`.
 - **Violation consequence:** out-of-order replay would let a stale Remove delete a strictly-newer
   re-creation replayed before it, or miscompute the contiguous frontier — an acked-write loss.
@@ -1277,7 +1293,8 @@ weaker than a test.
   `write_behind.rs::the_probe_is_the_never_refused_entry_with_the_latest_store_time_whatever_its_sequence`,
   `write_behind.rs::an_entry_refused_a_hundred_times_backs_off_at_the_cap_and_the_flush_task_lives`,
   `write_behind.rs::a_refusal_count_at_its_maximum_stays_there`, and the nineteen tests of
-  `write_behind_batch_tests.rs` over a counting engine on redb:
+  `write_behind_batch_tests.rs` over a counting engine on redb (redb: no
+  `unsynced_write_survives_process_crash`, so its pass commits are durable):
   `b01_a_pass_is_one_durable_engine_write_holding_its_entries_and_rows`,
   `b02_a_pass_takes_at_most_1000_entries_or_8_mib_and_the_first_entry_whole`,
   `b03_passes_run_back_to_back_while_entries_are_due`,

@@ -1934,7 +1934,10 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         // Both inputs are fixed after open, so the answer does not change
         // within a pass.
         let sync = self.pass_sync.unwrap_or_else(|| {
-            !(self.engine.capabilities().unsynced_write_survives_process_crash
+            !(self
+                .engine
+                .capabilities()
+                .unsynced_write_survives_process_crash
                 && self.wal_attached.load(Ordering::Acquire))
         });
         match self.write_records(&ops, WriteOptions { sync }) {
