@@ -287,11 +287,10 @@ fn spawn_engine_stats(engine: Arc<RocksKvEngine>) {
 /// Ends the process on any error of the store open: every one of them is a
 /// refusal to start (exit 1), never a broken store (exit 72), whatever error
 /// it carries inside, because nothing has been acknowledged from this store
-/// yet.
+/// yet. A refusing site may have logged its own ERROR line, so the error goes
+/// to stderr only: a second ERROR line would repeat it.
 fn store_open_refused(error: &anyhow::Error) -> ! {
-    let error = format!("{error:#}");
-    tracing::error!(%error, "store open: refusing to start");
-    eprintln!("Error: store open: {error}");
+    eprintln!("Error: store open: refusing to start: {error:#}");
     std::process::exit(1);
 }
 
