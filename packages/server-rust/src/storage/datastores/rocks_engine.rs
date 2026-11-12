@@ -116,7 +116,7 @@ impl RocksKvEngine {
                 path.display()
             )));
         }
-        let options = options(mode, config);
+        let options = options(mode, config)?;
         let db = match mode {
             OpenMode::CreateNew | OpenMode::Existing => DB::open(&options, path),
             OpenMode::ReadOnly => DB::open_for_read_only(&options, path, false),
@@ -181,8 +181,13 @@ impl RocksKvEngine {
 /// compression, 6 background jobs, 4 memtables, engine WAL on and flushed per
 /// write) plus one bounded memory budget: index and filter blocks in the
 /// cache (high priority, L0 and top level pinned, partitioned), memtables
-/// charged to the same cache by a write buffer manager.
-fn options(mode: OpenMode, config: &RocksConfig) -> Options {
+/// charged to the same cache by a write buffer manager; and the recovery
+/// flush at open kept on (`avoid_flush_during_recovery = false`).
+///
+/// # Errors
+///
+/// [`KvError::Other`] if RocksDB refuses the option string.
+fn options(mode: OpenMode, config: &RocksConfig) -> KvResult<Options> {
     let budget = config.memory_budget_bytes;
     let cache = Cache::new_lru_cache(budget);
 
@@ -196,7 +201,17 @@ fn options(mode: OpenMode, config: &RocksConfig) -> Options {
     table.set_index_type(BlockBasedIndexType::TwoLevelIndexSearch);
     table.set_partition_filters(true);
 
-    let mut options = Options::default();
+    // The recovery flush is what makes rows a dead process left unsynced
+    // durable before a new process acts on them (the second half of
+    // `unsynced_write_survives_process_crash`), so it is set rather than
+    // left to RocksDB's default. The binding has no typed setter, only the
+    // string API, and that returns a fresh `Options` whose Rust-side
+    // lifetime holders are empty: it must come first, on the default base,
+    // so the typed setters below collect the table-factory cache and the
+    // write buffer manager onto the `Options` the open uses.
+    let mut options = Options::default()
+        .get_options_from_string("avoid_flush_during_recovery=false")
+        .map_err(|err| KvError::Other(anyhow::Error::new(err)))?;
     options.create_if_missing(mode == OpenMode::CreateNew);
     options.set_block_based_table_factory(&table);
     options.set_compaction_style(rocksdb::DBCompactionStyle::Level);
@@ -215,7 +230,7 @@ fn options(mode: OpenMode, config: &RocksConfig) -> Options {
     if config.statistics {
         options.enable_statistics();
     }
-    options
+    Ok(options)
 }
 
 /// Whether a RocksDB error is fatal for this process (`TG-WB-010`), from the
@@ -741,6 +756,10 @@ mod tests {
                 "compression=kNoCompression".to_string(),
                 "max_background_jobs=6".to_string(),
                 "manual_wal_flush=false".to_string(),
+                // The recovery flush at open is what makes rows a dead
+                // process left unsynced durable before a new one acts on
+                // them (`unsynced_write_survives_process_crash`).
+                "avoid_flush_during_recovery=false".to_string(),
                 "max_open_files=1000".to_string(),
                 // RocksDB's dump names the policy without its bits per key.
                 "filter_policy=bloomfilter".to_string(),
