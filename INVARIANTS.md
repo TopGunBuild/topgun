@@ -100,8 +100,8 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     `wal-collected` or the store is `wal_import_pending`, and deletes every one at open.
     On an engine with `unsynced_write_survives_process_crash` and a WAL attached, the pass
     commit and the recovery replay commit are written without a sync; on any other engine,
-    `sync: true`. Rows a process left unsynced and a later process reads at open are durable
-    once the open returns (RocksDB: recovery flush, `avoid_flush_during_recovery=false`, pinned
+    `sync: true`. Rows a process left unsynced and a later process reads at a read-write open are
+    durable once the open returns (RocksDB: recovery flush, `avoid_flush_during_recovery=false`, pinned
     by `r_a_options_are_the_e2_set_plus_bounded_index`).
 - **Maintaining code:** store mode — `wal/mod.rs` `open_over_store`, `mark_applied`, the
   collection tick, `write_wal_collected`, `finish`; `engine_store.rs` `commit` (records and

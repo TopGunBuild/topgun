@@ -77,9 +77,10 @@ pub struct KvCapabilities {
     /// `true` when a batch written with `sync = false` whose `write`
     /// returned survives the death of the process (not of the machine) — it
     /// is in a file the OS holds, not in process memory — **and becomes
-    /// durable at the next open of the engine or at its next `sync`**. The
-    /// second half matters after `kill -9`: a new process reads such rows
-    /// and acts on them before it has synced anything.
+    /// durable at the next read-write open of the engine or at its next
+    /// `sync`**. The second half matters after `kill -9`: a new process reads
+    /// such rows and acts on them before it has synced anything; a read-only
+    /// open flushes nothing, so such rows it reads are not yet durable.
     pub unsynced_write_survives_process_crash: bool,
 }
 
