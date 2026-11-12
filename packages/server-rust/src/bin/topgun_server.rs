@@ -4,7 +4,7 @@
 //! and prints `PORT=<number>` to stdout. The TS test harness passes `--port 0`
 //! to opt into an ephemeral port and reads it from stdout to connect.
 //!
-//! Defaults to the embedded redb store. The JWT signing secret is
+//! Defaults to the embedded RocksDB store. The JWT signing secret is
 //! read from the `JWT_SECRET` env var; the process fails fast if it is unset and
 //! `TOPGUN_NO_AUTH` is not `1` / `true`. Integration tests, benches, and the
 //! sync-lab demo expect `JWT_SECRET=test-e2e-secret` (matched against the
@@ -43,7 +43,11 @@ use topgun_server::service::expiry::SweepConfig;
 use topgun_server::service::policy::{
     DurablePolicyStore, InMemoryPolicyStore, PolicyEvaluator, PolicyStore,
 };
-#[cfg(feature = "redb")]
+use topgun_server::storage::datastores::rocks_engine::{
+    max_open_files_for, raise_nofile_limit, RocksConfig, RocksKvEngine, RocksStats,
+    DEFAULT_ENGINE_CACHE_MB,
+};
+use topgun_server::storage::datastores::rocks_store::open_rocks_location_sealed;
 use topgun_server::storage::datastores::RedbDataStore;
 use topgun_server::storage::datastores::{
     NullDataStore, WalBootstrap, WriteBehindConfig, WriteBehindDataStore,
@@ -65,12 +69,12 @@ use topgun_server::storage::wal::WalFsyncPolicy;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StorageBackend {
     Null,
-    Redb,
+    Rocksdb,
 }
 
-const POSTGRES_REMOVED: &str = "STORAGE_BACKEND=postgres is no longer supported: the Postgres backend has been removed. The server keeps its data in its embedded store (STORAGE_BACKEND=redb, the default). There is no migration tool: data kept by the Postgres backend remains available with the server built from the tag postgres-backend-last. See CHANGELOG.md.";
+const POSTGRES_REMOVED: &str = "STORAGE_BACKEND=postgres is no longer supported: the Postgres backend has been removed. The server keeps its data in its embedded store (STORAGE_BACKEND=rocksdb, the default). There is no migration tool: data kept by the Postgres backend remains available with the server built from the tag postgres-backend-last. See CHANGELOG.md.";
 
-const DATABASE_URL_UNREAD: &str = "DATABASE_URL is set, but the Postgres backend has been removed and this server does not read it. Unset DATABASE_URL (an empty value counts as set) to start on the embedded store (STORAGE_BACKEND=redb, the default). There is no migration tool: data kept by the Postgres backend remains available with the server built from the tag postgres-backend-last. See CHANGELOG.md.";
+const DATABASE_URL_UNREAD: &str = "DATABASE_URL is set, but the Postgres backend has been removed and this server does not read it. Unset DATABASE_URL (an empty value counts as set) to start on the embedded store (STORAGE_BACKEND=rocksdb, the default). There is no migration tool: data kept by the Postgres backend remains available with the server built from the tag postgres-backend-last. See CHANGELOG.md.";
 
 /// Pure backend decision, kept free of the environment so it is unit-testable.
 ///
@@ -86,16 +90,208 @@ fn choose_backend(
     if database_url_set {
         anyhow::bail!(DATABASE_URL_UNREAD);
     }
-    match storage_backend.unwrap_or("redb") {
+    match storage_backend.unwrap_or("rocksdb") {
+        "rocksdb" => Ok(StorageBackend::Rocksdb),
+        // Accepted for one release because our own configs and docs taught
+        // operators to set it; refusing it would stop every node that
+        // followed them.
+        "redb" => {
+            tracing::warn!("{REDB_DEPRECATED}");
+            Ok(StorageBackend::Rocksdb)
+        }
         "null" => Ok(StorageBackend::Null),
-        #[cfg(feature = "redb")]
-        "redb" => Ok(StorageBackend::Redb),
-        #[cfg(not(feature = "redb"))]
-        "redb" => anyhow::bail!(
-            "STORAGE_BACKEND=redb requested but topgun-server was built without the `redb` feature"
-        ),
-        other => anyhow::bail!("Unknown STORAGE_BACKEND='{other}' (expected: redb, null)"),
+        other => anyhow::bail!("Unknown STORAGE_BACKEND='{other}' (expected: rocksdb, null)"),
     }
+}
+
+/// The `STORAGE_BACKEND` value; one that is not valid Unicode is refused
+/// rather than read as unset, which would silently pick the default store.
+fn storage_backend_value(raw: Option<std::ffi::OsString>) -> anyhow::Result<Option<String>> {
+    raw.map(|value| {
+        value
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("STORAGE_BACKEND is not valid Unicode"))
+    })
+    .transpose()
+}
+
+const REDB_DEPRECATED: &str = "STORAGE_BACKEND=redb is deprecated: the embedded store is now RocksDB, and an existing redb store is migrated at this start; set STORAGE_BACKEND=rocksdb (or unset it). The value redb will be refused by the next release. See CHANGELOG.md.";
+
+const ENGINE_CACHE_ENV: &str = "TOPGUN_ENGINE_CACHE_MB";
+
+/// Below this budget a memtable is under 8 MiB and level-0 churn dominates.
+const ENGINE_CACHE_FLOOR_MB: usize = 64;
+
+/// A soft descriptor limit below this is named in a warning: RocksDB then
+/// keeps under 512 table files open and every other one is reopened per read.
+const NOFILE_WARN_BELOW: u64 = 1024;
+
+/// Pure reading of `TOPGUN_ENGINE_CACHE_MB`: unset is the default, a value
+/// that does not parse warns and falls back to it, and a set-but-empty value,
+/// one below the floor or one whose bytes do not fit are fatal.
+fn engine_cache_mb(value: Option<&std::ffi::OsStr>) -> Result<usize, String> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_ENGINE_CACHE_MB);
+    };
+    if value.is_empty() {
+        return Err(format!("{ENGINE_CACHE_ENV} is set but empty"));
+    }
+    let Some(mb) = value.to_str().and_then(|v| v.parse::<usize>().ok()) else {
+        tracing::warn!(
+            value = %value.to_string_lossy(),
+            default = DEFAULT_ENGINE_CACHE_MB,
+            "{ENGINE_CACHE_ENV} does not parse as a whole number of MiB; using the default"
+        );
+        return Ok(DEFAULT_ENGINE_CACHE_MB);
+    };
+    if mb < ENGINE_CACHE_FLOOR_MB {
+        return Err(format!(
+            "{ENGINE_CACHE_ENV}={mb} is below the floor of {ENGINE_CACHE_FLOOR_MB} MiB"
+        ));
+    }
+    if mb.checked_mul(1024 * 1024).is_none() {
+        return Err(format!("{ENGINE_CACHE_ENV}={mb} does not fit in memory"));
+    }
+    Ok(mb)
+}
+
+/// How the engine is sized, and the descriptor limit it was sized under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EngineSettings {
+    /// The effective `TOPGUN_ENGINE_CACHE_MB`.
+    cache_mb: usize,
+    /// The soft `RLIMIT_NOFILE` after the raise.
+    nofile_soft: u64,
+    /// RocksDB's `max_open_files` under `nofile_soft`.
+    max_open_files: i32,
+}
+
+impl EngineSettings {
+    /// Reads `TOPGUN_ENGINE_CACHE_MB` from `cache` and raises the descriptor
+    /// limit, which must happen before the store opens: RocksDB sizes its
+    /// table cache from `max_open_files` at the open.
+    fn resolve(cache: Option<&std::ffi::OsStr>) -> Result<Self, String> {
+        let cache_mb = engine_cache_mb(cache)?;
+        let nofile_soft = match raise_nofile_limit() {
+            Ok(soft) => soft,
+            Err(error) => {
+                let soft = rlimit::Resource::NOFILE
+                    .get()
+                    .map_or(0, |(soft, _hard)| soft);
+                tracing::warn!(
+                    %error,
+                    nofile_soft = soft,
+                    "the descriptor limit could not be raised; RocksDB is sized under the current one"
+                );
+                soft
+            }
+        };
+        if nofile_soft < NOFILE_WARN_BELOW {
+            tracing::warn!(
+                nofile_soft,
+                "the soft RLIMIT_NOFILE is {nofile_soft}, below {NOFILE_WARN_BELOW}: RocksDB keeps at most half of it open; raise the hard limit (ulimit -Hn, LimitNOFILE=)"
+            );
+        }
+        Ok(Self {
+            cache_mb,
+            nofile_soft,
+            max_open_files: max_open_files_for(nofile_soft),
+        })
+    }
+
+    /// The engine configuration these settings ask for.
+    fn rocks_config(&self) -> RocksConfig {
+        RocksConfig::production(self.cache_mb * 1024 * 1024, self.max_open_files)
+    }
+}
+
+/// The engine gauges, registered at zero at boot so they are present from
+/// the first scrape whatever the backend.
+const STORE_L0_FILES: &str = "topgun_store_l0_files";
+const STORE_PENDING_COMPACTION_BYTES: &str = "topgun_store_pending_compaction_bytes";
+const STORE_WRITE_STOPPED: &str = "topgun_store_write_stopped";
+const STORE_DELAYED_WRITE_RATE: &str = "topgun_store_delayed_write_rate";
+const STORE_BLOCK_CACHE_USAGE_BYTES: &str = "topgun_store_block_cache_usage_bytes";
+const STORE_TABLE_READERS_MEM_BYTES: &str = "topgun_store_table_readers_mem_bytes";
+
+/// How often the engine gauges are read.
+const ENGINE_STATS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn register_engine_gauges() {
+    for (name, help) in [
+        (STORE_L0_FILES, "SST files at level 0 of the store engine."),
+        (
+            STORE_PENDING_COMPACTION_BYTES,
+            "Bytes the store engine estimates compaction still has to rewrite.",
+        ),
+        (
+            STORE_WRITE_STOPPED,
+            "1 while the store engine stops writes (level-0 or pending-compaction limit), else 0.",
+        ),
+        (
+            STORE_DELAYED_WRITE_RATE,
+            "The rate the store engine delays writes to, in bytes/s; 0 when not delayed.",
+        ),
+        (
+            STORE_BLOCK_CACHE_USAGE_BYTES,
+            "Bytes held by the store engine's block cache, memtable reservations included.",
+        ),
+        (
+            STORE_TABLE_READERS_MEM_BYTES,
+            "Memory of the store engine's table readers outside the block cache.",
+        ),
+    ] {
+        metrics::describe_gauge!(name, help);
+        metrics::gauge!(name).set(0.0);
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn publish_engine_stats(stats: &RocksStats) {
+    metrics::gauge!(STORE_L0_FILES).set(stats.l0_files as f64);
+    metrics::gauge!(STORE_PENDING_COMPACTION_BYTES).set(stats.pending_compaction_bytes as f64);
+    metrics::gauge!(STORE_WRITE_STOPPED).set(if stats.write_stopped { 1.0 } else { 0.0 });
+    metrics::gauge!(STORE_DELAYED_WRITE_RATE).set(stats.actual_delayed_write_rate as f64);
+    metrics::gauge!(STORE_BLOCK_CACHE_USAGE_BYTES).set(stats.block_cache_usage as f64);
+    metrics::gauge!(STORE_TABLE_READERS_MEM_BYTES).set(stats.table_readers_mem as f64);
+}
+
+/// Publishes the engine gauges every 5 s until the engine is shut down; a
+/// failed read keeps the last values and is logged once.
+fn spawn_engine_stats(engine: Arc<RocksKvEngine>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(ENGINE_STATS_INTERVAL);
+        let mut failure_logged = false;
+        loop {
+            tick.tick().await;
+            // The properties are read under RocksDB's own locks; off the
+            // runtime threads, so a slow read never holds a worker.
+            let reader = Arc::clone(&engine);
+            let Ok(read) = tokio::task::spawn_blocking(move || reader.stats()).await else {
+                break;
+            };
+            match read {
+                Ok(stats) => publish_engine_stats(&stats),
+                Err(topgun_server::storage::datastores::kv_engine::KvError::ShutDown) => break,
+                Err(error) => {
+                    if !failure_logged {
+                        tracing::warn!(%error, "the store engine's statistics could not be read");
+                        failure_logged = true;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Ends the process on any error of the store open: every one of them is a
+/// refusal to start (exit 1), never a broken store (exit 72), whatever error
+/// it carries inside, because nothing has been acknowledged from this store
+/// yet. A refusing site may have logged its own ERROR line, so the error goes
+/// to stderr only: a second ERROR line would repeat it.
+fn store_open_refused(error: &anyhow::Error) -> ! {
+    eprintln!("Error: store open: refusing to start: {error:#}");
+    std::process::exit(1);
 }
 
 const ENCRYPTION_ENV: &str = "TOPGUN_ENCRYPTION_AT_REST";
@@ -208,40 +404,63 @@ fn load_encryption(config: &EncryptionConfig) -> anyhow::Result<Encryption> {
 
 /// Resolve the storage backend at startup.
 ///
-/// Reads `STORAGE_BACKEND` (default: `redb`) and constructs the matching
+/// Reads `STORAGE_BACKEND` (default: `rocksdb`) and constructs the matching
 /// `Arc<dyn MapDataStore>`. Each branch is responsible for any per-backend
-/// initialization (e.g. opening a redb file).
+/// initialization (e.g. opening the RocksDB store, migrating a redb one).
 ///
 /// Returns the constructed store paired with a `StorageBackend` discriminant
 /// so the bootstrap can branch on backend variant when deciding whether to
 /// wrap with `WriteBehindDataStore` without re-reading the env var.
 ///
-/// The default is `redb` so a developer running `pnpm start:server` with no
-/// env vars gets durable embedded storage out of the box. Set
+/// The default is `rocksdb` so a developer running `pnpm start:server` with
+/// no env vars gets durable embedded storage out of the box. Set
 /// `STORAGE_BACKEND=null` for ephemeral integration-test fixtures. A removed
 /// backend name or a set `DATABASE_URL` is refused before any file is opened.
-async fn select_datastore(
-) -> anyhow::Result<(Arc<dyn MapDataStore>, StorageBackend, EncryptionConfig)> {
-    let storage_backend = std::env::var("STORAGE_BACKEND").ok();
+/// Any error of the store open itself ends the process with exit 1.
+fn select_datastore(settings: &EngineSettings) -> anyhow::Result<Selected> {
+    let storage_backend = storage_backend_value(std::env::var_os("STORAGE_BACKEND"))?;
     let database_url_set = std::env::var_os("DATABASE_URL").is_some();
     let backend = choose_backend(storage_backend.as_deref(), database_url_set)?;
     let encryption = encryption_config(&|name| std::env::var_os(name), backend)?;
     match backend {
-        StorageBackend::Null => Ok((Arc::new(NullDataStore), StorageBackend::Null, encryption)),
-        #[cfg(feature = "redb")]
-        StorageBackend::Redb => {
-            let location = RedbDataStore::location_from_env()?;
-            // Under `off` too, so a sealed store is refused with the
-            // fingerprint of the key it needs, and a disable unseals it.
-            let store =
-                RedbDataStore::open_location_sealed(&location, &load_encryption(&encryption)?)?;
-            store.initialize().await?;
-            Ok((Arc::new(store), StorageBackend::Redb, encryption))
+        StorageBackend::Null => Ok((Arc::new(NullDataStore), backend, encryption, None)),
+        StorageBackend::Rocksdb => {
+            // Classified here, by where the error comes from: the migration's
+            // writes and the seal pass can fail with an engine error, which
+            // must not be read as a store broken at runtime.
+            let (store, engine) = match open_rocks_store(&encryption, settings) {
+                Ok(opened) => opened,
+                Err(error) => store_open_refused(&error),
+            };
+            Ok((store, backend, encryption, Some(engine)))
         }
-        // choose_backend already bailed for Redb without the feature.
-        #[cfg(not(feature = "redb"))]
-        StorageBackend::Redb => unreachable!("choose_backend refuses redb without the feature"),
     }
+}
+
+/// The store the binary serves, its backend, the encryption it was opened
+/// with, and the RocksDB engine behind it (for the engine gauges).
+type Selected = (
+    Arc<dyn MapDataStore>,
+    StorageBackend,
+    EncryptionConfig,
+    Option<Arc<RocksKvEngine>>,
+);
+
+/// Opens the RocksDB store by the location rules, migrating a redb store
+/// once when they say so.
+fn open_rocks_store(
+    encryption: &EncryptionConfig,
+    settings: &EngineSettings,
+) -> anyhow::Result<(Arc<dyn MapDataStore>, Arc<RocksKvEngine>)> {
+    let location = RedbDataStore::location_from_env()?;
+    // Under `off` too, so a sealed store is refused with the fingerprint of
+    // the key it needs, and a disable unseals it.
+    let opened = open_rocks_location_sealed(
+        &location,
+        &load_encryption(encryption)?,
+        &settings.rocks_config(),
+    )?;
+    Ok((Arc::new(opened.store), opened.engine))
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +605,8 @@ fn log_boot_summary(
     rbac_configured: bool,
     tenant_claim: Option<&str>,
     expiry_sweep: &SweepConfig,
+    store_engine: &str,
+    engine: &EngineSettings,
 ) {
     tracing::info!(
         max_ram_mb = eviction_config.max_ram_bytes / (1024 * 1024),
@@ -408,6 +629,10 @@ fn log_boot_summary(
         tenant_claim = %tenant_claim.map_or_else(|| "off".to_string(), |c| format!("{c:?}")),
         expiry_sweep_interval_ms = expiry_sweep.interval_ms,
         expiry_sweep_rows_per_sec = expiry_sweep.rows_per_sec,
+        store_engine,
+        nofile_soft = engine.nofile_soft,
+        rocksdb_max_open_files = engine.max_open_files,
+        engine_cache_mb = engine.cache_mb,
         "eviction + write-behind + WAL initialized"
     );
 }
@@ -739,10 +964,21 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     });
 
+    let engine_settings = EngineSettings::resolve(std::env::var_os(ENGINE_CACHE_ENV).as_deref())
+        .unwrap_or_else(|reason| {
+            eprintln!("FATAL: {reason}");
+            std::process::exit(1);
+        });
+    register_engine_gauges();
+
     // Resolve the persistence backend once per process. The default branch
-    // creates ./topgun.redb in the working directory; STORAGE_BACKEND=null
+    // opens the RocksDB store in the data directory; STORAGE_BACKEND=null
     // preserves the legacy ephemeral integration-test behavior.
-    let (inner_data_store, backend, encryption_config) = select_datastore().await?;
+    let (inner_data_store, backend, encryption_config, engine) =
+        select_datastore(&engine_settings)?;
+    if let Some(engine) = engine {
+        spawn_engine_stats(engine);
+    }
 
     // Construct the policy store AFTER the backend resolves so durable backends
     // get a write-through DurablePolicyStore whose configured-marker survives
@@ -761,7 +997,7 @@ async fn main() -> anyhow::Result<()> {
     // middleware (PolicyEvaluator) hold Arc references to the SAME store, so
     // policies created via the admin API are immediately visible to the evaluator.
     let policy_store: Arc<dyn PolicyStore> = match backend {
-        StorageBackend::Redb => {
+        StorageBackend::Rocksdb => {
             let durable = DurablePolicyStore::new(Arc::clone(&inner_data_store));
             if let Err(err) = durable.load_from_backend().await {
                 eprintln!("FATAL: policy recovery failed: {err}");
@@ -818,7 +1054,7 @@ async fn main() -> anyhow::Result<()> {
     // any client can observe stale state. The Null backend is intentionally
     // skipped (mirrors the write-behind skip: buffering a no-op store is wasteful).
     let wal_opt: Option<WalBootstrap> = match backend {
-        StorageBackend::Redb => {
+        StorageBackend::Rocksdb => {
             match WalBootstrap::open_over_store(
                 write_behind_config.wal_dir.clone(),
                 write_behind_config.wal_fsync_policy,
@@ -848,7 +1084,7 @@ async fn main() -> anyhow::Result<()> {
     // has no such task and so no receiver.
     let store_failure: Option<watch::Receiver<Option<_>>>;
     let datastore: Arc<dyn MapDataStore> = match backend {
-        StorageBackend::Redb => {
+        StorageBackend::Rocksdb => {
             tracing::debug!(
                 target: "topgun_server::bootstrap",
                 backend = ?backend,
@@ -1060,6 +1296,11 @@ async fn main() -> anyhow::Result<()> {
         rbac_configured,
         tenant_claim.as_deref(),
         &sweep_config,
+        match backend {
+            StorageBackend::Rocksdb => "rocksdb",
+            StorageBackend::Null => "null",
+        },
+        &engine_settings,
     );
 
     // Make each policy's crash-durability caveat impossible to miss at boot on a
@@ -1627,13 +1868,142 @@ where
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "redb")]
     #[test]
     fn t_choose_default() {
         assert_eq!(
             super::choose_backend(None, false).unwrap(),
-            super::StorageBackend::Redb
+            super::StorageBackend::Rocksdb
         );
+        assert_eq!(
+            super::choose_backend(Some("rocksdb"), false).unwrap(),
+            super::StorageBackend::Rocksdb
+        );
+    }
+
+    /// Runs `f` under a subscriber that writes into the returned buffer.
+    fn captured<T>(f: impl FnOnce() -> T) -> (T, String) {
+        let captured = CapturedLog::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let out = tracing::subscriber::with_default(subscriber, f);
+        let text = String::from_utf8(
+            captured
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .expect("captured log is utf-8");
+        (out, text)
+    }
+
+    /// `redb` is a deprecated name of the RocksDB store: accepted with exactly
+    /// one warning, which no other value gives.
+    #[test]
+    fn redb_is_a_deprecated_alias_of_rocksdb_with_one_warning() {
+        let (backend, log) = captured(|| super::choose_backend(Some("redb"), false));
+        assert_eq!(backend.unwrap(), super::StorageBackend::Rocksdb);
+        assert_eq!(log.matches(super::REDB_DEPRECATED).count(), 1, "{log}");
+        assert!(log.contains("WARN"), "{log}");
+        for value in [None, Some("rocksdb"), Some("null")] {
+            let (backend, log) = captured(|| super::choose_backend(value, false));
+            assert!(backend.is_ok(), "{value:?}");
+            assert!(!log.contains("deprecated"), "{value:?}: {log}");
+        }
+    }
+
+    /// A `STORAGE_BACKEND` that is not valid Unicode is refused, never read as
+    /// unset (which would pick the default store).
+    #[test]
+    fn a_storage_backend_that_is_not_unicode_is_refused() {
+        use std::os::unix::ffi::OsStringExt;
+        let refused = super::storage_backend_value(Some(std::ffi::OsString::from_vec(vec![
+            b'r', 0xff, b'b',
+        ])))
+        .expect_err("not unicode");
+        assert_eq!(refused.to_string(), "STORAGE_BACKEND is not valid Unicode");
+        assert_eq!(super::storage_backend_value(None).unwrap(), None);
+        assert_eq!(
+            super::storage_backend_value(Some("null".into())).unwrap(),
+            Some("null".to_string())
+        );
+    }
+
+    /// The engine budget parse table: unset is the default, a value that does
+    /// not parse warns and falls back to it, and a set-but-empty value or one
+    /// below the 64 MiB floor is fatal.
+    #[test]
+    fn the_engine_cache_variable_parse_table() {
+        use std::ffi::OsStr;
+        let parse = |v: Option<&str>| super::engine_cache_mb(v.map(OsStr::new));
+        assert_eq!(parse(None), Ok(256));
+        assert_eq!(parse(Some("512")), Ok(512));
+        assert_eq!(parse(Some("64")), Ok(64));
+        let (abc, log) = captured(|| parse(Some("abc")));
+        assert_eq!(abc, Ok(256));
+        assert!(
+            log.contains("WARN") && log.contains("TOPGUN_ENGINE_CACHE_MB"),
+            "{log}"
+        );
+        for fatal in ["32", "63", "0", ""] {
+            let reason = parse(Some(fatal)).expect_err(fatal);
+            assert!(reason.contains("TOPGUN_ENGINE_CACHE_MB"), "{reason}");
+        }
+        assert!(parse(Some("")).unwrap_err().contains("set but empty"));
+        assert!(parse(Some("32")).unwrap_err().contains("floor"));
+        assert!(parse(Some(&u64::MAX.to_string())).is_err());
+    }
+
+    /// The descriptor limit is raised before the engine is sized, and the
+    /// engine is sized from the raised limit and the effective budget. Run in
+    /// a child process, because it first lowers the process's own soft limit.
+    #[test]
+    fn engine_settings_raise_the_descriptor_limit_and_size_the_engine() {
+        const CHILD: &str = "TOPGUN_TEST_NOFILE_CHILD";
+        const MARK: &str = "NOFILE-OBSERVATION ";
+        const NAME: &str = "tests::engine_settings_raise_the_descriptor_limit_and_size_the_engine";
+        const LOWERED: u64 = 300;
+
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([NAME, "--exact", "--nocapture", "--test-threads", "1"])
+                .env(CHILD, "1")
+                .output()
+                .expect("the child run starts");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let printed = stdout
+                .lines()
+                .find_map(|line| line.split_once(MARK).map(|(_, rest)| rest.to_string()));
+            assert_eq!(output.status.code(), Some(0), "{stdout}");
+            assert_eq!(printed.as_deref(), Some("ok"), "{stdout}");
+            return;
+        }
+
+        let (_, hard) = rlimit::Resource::NOFILE.get().expect("read the limit");
+        rlimit::Resource::NOFILE
+            .set(LOWERED, hard)
+            .expect("lower the soft limit");
+        let settings =
+            super::EngineSettings::resolve(Some(std::ffi::OsStr::new("192"))).expect("settings");
+        let (soft_now, _) = rlimit::Resource::NOFILE.get().expect("read the limit");
+        assert!(
+            settings.nofile_soft > LOWERED,
+            "the soft limit was not raised: {settings:?}"
+        );
+        assert_eq!(
+            settings.nofile_soft, soft_now,
+            "the reported limit is the one in force"
+        );
+        let expected = i32::try_from((settings.nofile_soft / 2).min(40_960)).unwrap();
+        assert_eq!(settings.max_open_files, expected);
+        assert_eq!(settings.cache_mb, 192);
+        let config = settings.rocks_config();
+        assert_eq!(config.memory_budget_bytes, 192 * 1024 * 1024);
+        assert_eq!(config.max_open_files, expected);
+        println!("\n{MARK}ok");
     }
 
     fn encryption_vars<'a>(
@@ -1659,16 +2029,21 @@ mod tests {
             error.to_string().contains("STORAGE_BACKEND=null"),
             "{error}"
         );
-        let config = super::encryption_config(&encryption_vars(&vars), super::StorageBackend::Redb)
-            .expect("redb + on");
-        assert_eq!(config.boot_field(), "on:file");
+        // The default backend and the `redb` alias both serve RocksDB, which
+        // seals.
+        for value in [None, Some("redb"), Some("rocksdb")] {
+            let backend = super::choose_backend(value, false).expect("backend");
+            let config = super::encryption_config(&encryption_vars(&vars), backend)
+                .unwrap_or_else(|e| panic!("{value:?} + on: {e}"));
+            assert_eq!(config.boot_field(), "on:file");
+        }
     }
 
     #[test]
     fn the_encryption_variables_refuse_every_value_they_do_not_name() {
-        let redb = super::StorageBackend::Redb;
+        let rocksdb = super::StorageBackend::Rocksdb;
         let refused = |vars: &[(&str, &str)]| {
-            super::encryption_config(&encryption_vars(vars), redb)
+            super::encryption_config(&encryption_vars(vars), rocksdb)
                 .expect_err("refused")
                 .to_string()
         };
@@ -1679,7 +2054,7 @@ mod tests {
         assert!(refused(&[("TOPGUN_MASTER_KEY_PROVIDER", "file")]).contains("needs"));
         assert!(refused(&[("TOPGUN_MASTER_KEY_FILE", "/k")]).contains("is not"));
         assert!(refused(&[("TOPGUN_MASTER_KEY_PREVIOUS_FILE", "/k")]).contains("is not"));
-        let off = super::encryption_config(&encryption_vars(&[]), redb).expect("default");
+        let off = super::encryption_config(&encryption_vars(&[]), rocksdb).expect("default");
         assert_eq!(off.boot_field(), "off");
         assert_eq!(off.key_file, None);
     }
@@ -1717,7 +2092,7 @@ mod tests {
         let err = super::choose_backend(Some("mysql"), false).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "Unknown STORAGE_BACKEND='mysql' (expected: redb, null)"
+            "Unknown STORAGE_BACKEND='mysql' (expected: rocksdb, null)"
         );
     }
 
@@ -1816,8 +2191,14 @@ mod tests {
         let tenant_off = tenant_claim_from_env(None, false).unwrap();
         // Parsed as the binary parses them, to values neither default has.
         let sweep = SweepConfig::from_env_values(Some("12345"), Some("777"), 5000).unwrap();
+        // Resolved as the binary resolves them: 192 is no default, and the
+        // unset variable must render the default 256.
+        let engine_set =
+            super::EngineSettings::resolve(Some(std::ffi::OsStr::new("192"))).expect("192");
+        let engine_unset = super::EngineSettings::resolve(None).expect("unset");
         tracing::subscriber::with_default(subscriber, || {
-            for tenant_claim in [&tenant_on, &tenant_off] {
+            for (tenant_claim, engine) in [(&tenant_on, &engine_set), (&tenant_off, &engine_unset)]
+            {
                 log_boot_summary(
                     &EvictionConfig::default(),
                     &write_behind_config,
@@ -1827,6 +2208,8 @@ mod tests {
                     false,
                     tenant_claim.as_deref(),
                     &sweep,
+                    "rocksdb",
+                    engine,
                 );
             }
         });
@@ -1869,6 +2252,25 @@ mod tests {
                 && rendered.contains("expiry_sweep_rows_per_sec=777"),
             "the operator-facing boot line must carry the EFFECTIVE expiry sweep knobs; \
              captured: {rendered}"
+        );
+        assert!(
+            rendered.contains("store_engine=\"rocksdb\"")
+                || rendered.contains("store_engine=rocksdb"),
+            "the operator-facing boot line must name the store engine; captured: {rendered}"
+        );
+        assert!(
+            rendered.contains("engine_cache_mb=192") && rendered.contains("engine_cache_mb=256"),
+            "the operator-facing boot line must carry the EFFECTIVE engine budget; \
+             captured: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("nofile_soft={}", engine_set.nofile_soft))
+                && rendered.contains(&format!(
+                    "rocksdb_max_open_files={}",
+                    engine_set.max_open_files
+                )),
+            "the operator-facing boot line must carry the descriptor limit and the engine's \
+             max_open_files; captured: {rendered}"
         );
         assert!(
             rendered.contains("or_delta_wal=false"),
@@ -2560,13 +2962,16 @@ mod tests {
         );
     }
 
-    /// The store the binary builds for the redb backend declares a scan order, and
-    /// a write-behind store over that very value places a buffered key in one
-    /// batch (`TG-WB-008`). A wrapper put into `select_datastore` that does not
-    /// forward the declaration turns the scan back to the order-free rule.
-    #[cfg(feature = "redb")]
+    /// The store the binary builds declares a scan order, and a write-behind
+    /// store over that very value places a buffered key in one batch
+    /// (`TG-WB-008`). A wrapper put into `select_datastore` that does not
+    /// forward the declaration turns the scan back to the order-free rule. On
+    /// a blank directory the store is RocksDB only — by default and under the
+    /// deprecated `redb` name alike, which never creates `engine.redb`.
     #[tokio::test]
-    async fn the_store_the_binary_selects_for_redb_emits_a_staged_key_once_under_write_behind() {
+    #[allow(clippy::too_many_lines)]
+    async fn the_store_the_binary_selects_is_rocksdb_and_emits_a_staged_key_once_under_write_behind(
+    ) {
         use topgun_core::hlc::Timestamp;
         use topgun_core::types::Value;
         use topgun_server::storage::datastores::WriteBehindDataStore;
@@ -2587,46 +2992,69 @@ mod tests {
 
         // `select_datastore` reads its backend and its path from the process
         // environment. The check therefore runs in a child process — this same
-        // test, re-run alone — with the two variables given on its command, so
+        // test, re-run alone — with the variables given on its command, so
         // the environment of the test process is never changed.
         const CHILD: &str = "TOPGUN_TEST_WIRING_CHILD";
         const MARK: &str = "WIRING-OBSERVATION ";
         const NAME: &str =
-            "tests::the_store_the_binary_selects_for_redb_emits_a_staged_key_once_under_write_behind";
+            "tests::the_store_the_binary_selects_is_rocksdb_and_emits_a_staged_key_once_under_write_behind";
 
         if std::env::var_os(CHILD).is_none() {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
-                .env_remove("DATABASE_URL")
-                .args([NAME, "--exact", "--nocapture", "--test-threads", "1"])
-                .env("STORAGE_BACKEND", "redb")
-                .env("TOPGUN_REDB_PATH", dir.path().join("wiring.redb"))
-                .env(CHILD, "1")
-                .output()
-                .expect("the child run starts");
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let printed = stdout
-                .lines()
-                .find_map(|line| line.split_once(MARK).map(|(_, rest)| rest.to_string()));
-            // A child that exits 0 without having printed its observation did
-            // not run the check: absence is red, not green.
-            assert_eq!(
-                (
-                    output.status.code(),
-                    printed.is_some(),
-                    printed.unwrap_or_default()
-                ),
-                (
-                    Some(0),
-                    true,
-                    r#"("Redb", true, [["k2"], ["k1"]])"#.to_string(),
-                ),
-                "the binary's redb store declares a scan order and the wrap honours it"
-            );
+            for backend in [None, Some("redb")] {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let data_dir = dir.path().join("data");
+                let mut command =
+                    std::process::Command::new(std::env::current_exe().expect("test binary"));
+                command
+                    .env_remove("DATABASE_URL")
+                    .env_remove("STORAGE_BACKEND")
+                    .args([NAME, "--exact", "--nocapture", "--test-threads", "1"])
+                    .env("TOPGUN_DATA_DIR", &data_dir)
+                    .env("TOPGUN_REDB_PATH", dir.path().join("topgun.redb"))
+                    .env(CHILD, "1");
+                if let Some(backend) = backend {
+                    command.env("STORAGE_BACKEND", backend);
+                }
+                let output = command.output().expect("the child run starts");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let printed = stdout
+                    .lines()
+                    .find_map(|line| line.split_once(MARK).map(|(_, rest)| rest.to_string()));
+                // A child that exits 0 without having printed its observation
+                // did not run the check: absence is red, not green.
+                assert_eq!(
+                    (
+                        output.status.code(),
+                        printed.is_some(),
+                        printed.unwrap_or_default()
+                    ),
+                    (
+                        Some(0),
+                        true,
+                        r#"("Rocksdb", true, [["k2"], ["k1"]])"#.to_string(),
+                    ),
+                    "{backend:?}: the binary's store declares a scan order and the wrap honours it"
+                );
+                let mut entries: Vec<String> = std::fs::read_dir(&data_dir)
+                    .expect("the data directory")
+                    .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+                    .collect();
+                entries.sort();
+                assert_eq!(
+                    entries,
+                    ["engine.rocksdb"],
+                    "{backend:?}: a blank directory gets a RocksDB store only"
+                );
+            }
             return;
         }
 
-        let (inner, backend, _) = super::select_datastore().await.expect("select");
+        let settings = super::EngineSettings::resolve(None).expect("settings");
+        let (inner, backend, _, engine) = super::select_datastore(&settings).expect("select");
+        assert!(
+            engine.is_some(),
+            "the RocksDB engine is kept for its gauges"
+        );
         let declared = inner.scan_order().is_some();
         for key in ["k1", "k2"] {
             inner
@@ -2665,5 +3093,136 @@ mod tests {
         }
 
         println!("\n{MARK}{:?}", (format!("{backend:?}"), declared, batches));
+    }
+
+    /// A write the engine migration cannot make ends the start with exit 1 —
+    /// the store-open refusal — and never with the broken-store exit 72. The
+    /// fault is real: the data directory holding `engine.redb` is read-only,
+    /// so the migration cannot create its target. An error that carries a
+    /// `KvError` inside (a failed migration write, the seal pass) needs no
+    /// case of its own: every error of the open reaches the one call site in
+    /// `select_datastore`, which refuses without looking inside it. Run as
+    /// root it fails, naming the reason.
+    #[test]
+    fn a_write_the_engine_migration_cannot_make_is_a_store_open_refusal() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD: &str = "TOPGUN_TEST_MIGRATION_FAULT_CHILD";
+        const NAME: &str =
+            "tests::a_write_the_engine_migration_cannot_make_is_a_store_open_refusal";
+
+        if std::env::var_os(CHILD).is_some() {
+            let settings = super::EngineSettings::resolve(None).expect("settings");
+            // Returns only if the open succeeded; a refusal exits the process.
+            let opened = super::select_datastore(&settings);
+            println!("\nMIGRATION-FAULT-UNEXPECTED {}", opened.is_ok());
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let legacy = dir.path().join("topgun.redb");
+        drop(super::RedbDataStore::new(&data_dir).expect("a redb store"));
+        assert!(data_dir.join("engine.redb").is_file());
+
+        let mode = |m: u32| {
+            std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(m))
+                .expect("chmod the data directory");
+        };
+        mode(0o555);
+        let probe = std::fs::create_dir(data_dir.join("probe"));
+        if probe.is_ok() {
+            mode(0o755);
+            panic!("running as root: the read-only directory cannot refuse the migration's write");
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .env_remove("DATABASE_URL")
+            .env_remove("STORAGE_BACKEND")
+            .args([NAME, "--exact", "--nocapture", "--test-threads", "1"])
+            .env("TOPGUN_DATA_DIR", &data_dir)
+            .env("TOPGUN_REDB_PATH", &legacy)
+            .env(CHILD, "1")
+            .output()
+            .expect("the child run starts");
+        mode(0o755);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "stdout: {stdout}\nstderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("Error: store open:")
+                && stderr.contains("store engine: cannot create")
+                && stderr.contains("engine.rocksdb"),
+            "the refusal names the store open and the target it could not create: {stderr}"
+        );
+        assert!(!stdout.contains("MIGRATION-FAULT-UNEXPECTED"), "{stdout}");
+        assert!(data_dir.join("engine.redb").is_file(), "the source is kept");
+        assert!(!data_dir.join("engine.rocksdb").exists());
+    }
+
+    /// The engine gauges are present at zero before any read, and a write load
+    /// moves them.
+    #[test]
+    fn the_engine_gauges_are_present_at_zero_and_move_under_a_write_load() {
+        use metrics_exporter_prometheus::PrometheusBuilder;
+        use topgun_server::storage::datastores::kv_engine::{KvEngine, WriteBatch, WriteOptions};
+        use topgun_server::storage::datastores::rocks_engine::OpenMode;
+
+        let names = [
+            super::STORE_L0_FILES,
+            super::STORE_PENDING_COMPACTION_BYTES,
+            super::STORE_WRITE_STOPPED,
+            super::STORE_DELAYED_WRITE_RATE,
+            super::STORE_BLOCK_CACHE_USAGE_BYTES,
+            super::STORE_TABLE_READERS_MEM_BYTES,
+        ];
+        let value = |text: &str, name: &str| -> f64 {
+            text.lines()
+                .find_map(|line| line.strip_prefix(&format!("{name} ")))
+                .unwrap_or_else(|| panic!("{name} is not rendered: {text}"))
+                .trim()
+                .parse()
+                .expect("a number")
+        };
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, super::register_engine_gauges);
+        let first = handle.render();
+        for name in names {
+            assert!(value(&first, name).abs() < f64::EPSILON, "{name}: {first}");
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = super::EngineSettings {
+            cache_mb: 64,
+            nofile_soft: 1024,
+            max_open_files: 512,
+        };
+        let engine = super::RocksKvEngine::open(
+            &dir.path().join("engine.rocksdb"),
+            OpenMode::CreateNew,
+            &settings.rocks_config(),
+        )
+        .expect("engine");
+        for chunk in 0..64u32 {
+            let mut batch = WriteBatch::new();
+            for i in 0..256u32 {
+                batch.put(format!("k{chunk:04}{i:04}"), vec![7u8; 1024]);
+            }
+            engine
+                .write(batch, WriteOptions { sync: false })
+                .expect("write");
+        }
+        let stats = engine.stats().expect("stats");
+        metrics::with_local_recorder(&recorder, || super::publish_engine_stats(&stats));
+        let after = handle.render();
+        assert!(
+            value(&after, super::STORE_L0_FILES) > 0.0
+                || value(&after, super::STORE_BLOCK_CACHE_USAGE_BYTES) > 0.0,
+            "{after}"
+        );
     }
 }

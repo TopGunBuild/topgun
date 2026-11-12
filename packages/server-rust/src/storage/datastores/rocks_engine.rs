@@ -22,6 +22,38 @@ use crate::storage::StoreBrokenCause;
 /// The largest memtable, whatever the budget: E2's measured size.
 const MAX_WRITE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 
+/// The engine budget, in MiB, of a node that does not set
+/// `TOPGUN_ENGINE_CACHE_MB`.
+pub const DEFAULT_ENGINE_CACHE_MB: usize = 256;
+
+/// The most table files RocksDB keeps open, whatever the descriptor limit
+/// (the cap `TiKV` uses).
+const MAX_OPEN_FILES_CAP: u64 = 40_960;
+
+/// The fewest table files RocksDB keeps open: it raises any smaller value
+/// other than `-1` to this at the open.
+const MAX_OPEN_FILES_FLOOR: u64 = 20;
+
+/// RocksDB's `max_open_files` under a soft descriptor limit `nofile_soft`:
+/// half of it, at most 40 960, so the other half stays for sockets and the
+/// WAL; never below the floor RocksDB itself applies, so the value reported
+/// at boot is the one in force.
+#[must_use]
+pub fn max_open_files_for(nofile_soft: u64) -> i32 {
+    i32::try_from((nofile_soft / 2).clamp(MAX_OPEN_FILES_FLOOR, MAX_OPEN_FILES_CAP))
+        .unwrap_or(i32::MAX)
+}
+
+/// Raises the soft `RLIMIT_NOFILE` to the hard limit (on macOS also clamped
+/// to `kern.maxfilesperproc`) and returns the soft limit in force afterwards.
+///
+/// # Errors
+///
+/// The operating system's refusal to read or set the limit.
+pub fn raise_nofile_limit() -> std::io::Result<u64> {
+    rlimit::increase_nofile_limit(u64::MAX)
+}
+
 /// How the engine is sized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RocksConfig {
@@ -41,6 +73,12 @@ impl RocksConfig {
     /// The shipped configuration for a budget `B`: memtables of
     /// `min(256 MiB, B / 8)`, so the four memtables fit the half of `B` the
     /// write buffer manager allows them.
+    ///
+    /// A store that takes writes needs `B` of at least 64 MiB: below that a
+    /// memtable is under 8 MiB and level-0 churn dominates. Nothing here
+    /// refuses a smaller `B` — a read-only engine may run with less — so the
+    /// caller that sizes a served store from operator input enforces the
+    /// floor (`TOPGUN_ENGINE_CACHE_MB`, refused below 64 at startup).
     #[must_use]
     pub fn production(memory_budget_bytes: usize, max_open_files: i32) -> Self {
         Self {
@@ -426,7 +464,7 @@ mod tests {
     use rocksdb::statistics::Ticker;
     use rocksdb::ErrorKind;
 
-    use super::{broken_cause, OpenMode, RocksConfig, RocksKvEngine};
+    use super::{broken_cause, max_open_files_for, OpenMode, RocksConfig, RocksKvEngine};
     use crate::storage::datastores::kv_engine::{
         KeyRange, KvEngine, KvError, WriteBatch, WriteOptions,
     };
@@ -435,6 +473,27 @@ mod tests {
     const MIB: usize = 1024 * 1024;
     const SYNC: WriteOptions = WriteOptions { sync: true };
     const NO_SYNC: WriteOptions = WriteOptions { sync: false };
+
+    /// Half the soft descriptor limit, capped at 40 960 as `TiKV` caps it and
+    /// floored at RocksDB's own 20; the limit is the input, so a rule that
+    /// ignores it returns one value for all rows.
+    #[test]
+    fn max_open_files_is_half_the_soft_limit_capped() {
+        for (soft, expected) in [
+            (0, 20),
+            (41, 20),
+            (42, 21),
+            (256, 128),
+            (1_023, 511),
+            (10_240, 5_120),
+            (81_920, 40_960),
+            (81_921, 40_960),
+            (1 << 40, 40_960),
+            (u64::MAX, 40_960),
+        ] {
+            assert_eq!(max_open_files_for(soft), expected, "soft limit {soft}");
+        }
+    }
 
     fn small() -> RocksConfig {
         RocksConfig::production(64 * MIB, -1)

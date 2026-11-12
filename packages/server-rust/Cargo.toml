@@ -82,6 +82,9 @@ redb = { version = "2", optional = true }
 # are incompressible or sealed), so no compression library is linked.
 rocksdb = { version = "=0.25.0", default-features = false, features = ["bindgen-runtime"], optional = true }
 fs4 = { version = "0.8", default-features = false }
+# Raises the soft descriptor limit through a safe API: the workspace forbids
+# `unsafe`, and RocksDB keeps one descriptor per open table file.
+rlimit = "0.11"
 madsim = { workspace = true, optional = true }
 # Default features minus `compression` and `parquet`: the SQL path only queries
 # in-memory tables, and both features pull in zstd 0.13.
@@ -118,6 +121,9 @@ crc32c = "0.6"
 [[bin]]
 name = "topgun-server"
 path = "src/bin/topgun_server.rs"
+# The binary serves only the RocksDB store, and the store opens through the
+# location rules that still read a redb store to migrate it.
+required-features = ["redb", "rocksdb"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "time", "process"] }

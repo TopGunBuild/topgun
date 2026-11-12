@@ -1,37 +1,46 @@
 /**
- * Integration: a server whose embedded redb store reports an I/O error stops
- * in order with exit code 72, and a restart on a healed disk reads back every
- * acknowledged write.
+ * Integration: a server whose RocksDB store reports an I/O error stops in
+ * order with exit code 72, and a restart on a writable directory reads back
+ * every acknowledged write.
  *
- * After its first I/O error a redb handle refuses every later write
- * transaction, also once the cause is gone; only a fresh handle — a new
+ * Once RocksDB has met an I/O error on a write it refuses every later write
+ * on the same handle (its background error); only a fresh handle — a new
  * process — can store again. A write is acknowledged once it is in the
  * write-ahead log, so the acknowledged writes the broken handle could not
  * store are replayed from the WAL by the next process. This test makes the
  * handle break under a running server and checks what a process supervisor
  * and an operator would see: the process ends by itself with code 72, the
- * store and the binary say why, and after a restart every acknowledged write
- * is readable (`TG-WB-010`).
+ * store and the binary say why, readiness stops answering 200, and after a
+ * restart every acknowledged write is readable (`TG-WB-010`).
  *
- * The I/O error comes from a server built with the `fault-injection` cargo
- * feature: while a file exists at the path named by TOPGUN_FAULT_REDB_IO_FILE,
- * redb's writes to its file answer ENOSPC ("No space left on device"); reads
- * pass. The binary is given by path (FAULT_SERVER_BINARY) together with the
- * commit it was built from (FAULT_SERVER_COMMIT). With either missing the test
- * fails; it never skips and never falls back to another binary.
+ * The I/O error is real. The engine directory `engine.rocksdb` is made
+ * read-only (mode 0555 on the directory and its files) under the running
+ * server. Files RocksDB already holds open stay writable, so the error comes
+ * when RocksDB must create a file: a memtable switch opens a new engine log
+ * and a flush a new table file. The server runs with
+ * `TOPGUN_ENGINE_CACHE_MB=64` (8 MiB memtables), and the test writes large
+ * late values until the store reports broken, bounded by 32 MiB of values.
+ * RocksDB carries no subcode for the error, so the store names it
+ * `cause="io"` with `io_kind="Other"`.
+ *
+ * The binary is the release binary of this checkout: RUST_SERVER_BINARY when
+ * set, else the one `cargo build --release --bin topgun-server` produces. The
+ * test fails, never skips, when run as root: root writes into a read-only
+ * directory, so no I/O error would come.
  *
  * Two arms, one data directory each:
  *
  * - LATCH-THEN-ORDERLY-EXIT — a few keys are written and reach the store, the
- *   sentinel is created, one more key is written and acknowledged. The flush
- *   of that key meets the I/O error, the store fails, and the process exits 72
- *   by itself inside the server's own deadline for a failed stop. The sentinel
- *   is removed ("the disk has room again") and a restart on the same directory
- *   reads every acknowledged key.
- * - STILL-FULL-AT-RESTART — the same up to the exit 72, but the sentinel stays
- *   for the restart: opening the store writes, so the restarted process exits
- *   1 by itself before it is ready and names the I/O error. Then the sentinel
- *   is removed and a third start reads every acknowledged key.
+ *   engine directory is made read-only, and late keys are written until the
+ *   store reports broken. The process exits 72 by itself inside the server's
+ *   own deadline for a failed stop. The modes are restored and a restart on
+ *   the same directory reads exactly the acknowledged keys.
+ * - STILL-READ-ONLY-AT-RESTART — the same up to the exit 72, but the modes
+ *   stay read-only for a restart: opening RocksDB for writing must open its
+ *   LOCK file for writing and create a new engine log, so the restarted
+ *   process exits 1 at the store open before it is ready, names the
+ *   permission error, and leaves the WAL directory as it was. Then the modes
+ *   are restored and a third start reads exactly the acknowledged keys.
  *
  * Each arm checks that its own setup held (its precondition) before it says
  * anything. A precondition that did not hold is an error of the scenario — the
@@ -41,6 +50,7 @@
  *
  * Environment:
  *
+ * - RUST_SERVER_BINARY        — the release binary to run (else built here);
  * - STORE_BROKEN_EXIT_WAIT_MS — how long the test waits for the process to end
  *                               by itself (default: the server's own deadline
  *                               for a failed stop plus a margin, 50 s);
@@ -49,18 +59,13 @@
  * - LIVENESS_RUN              — label of the run in those file names.
  */
 
+import * as child_process from 'child_process';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import {
-  SEAM_BOOT_TEXT,
-  LagScrape,
-  allZero,
-  lwwPut,
-  requireFaultBinary,
-  scrapeLag,
-} from './helpers/fault-binary';
+import { LagScrape, allZero, lwwPut, scrapeLag } from './helpers/fault-binary';
 import { TestClient } from './helpers/test-client';
 import {
   spawnBinary,
@@ -74,29 +79,47 @@ import {
   BinaryExit,
 } from './helpers/two-binary';
 
-type Arm = 'LATCH-THEN-ORDERLY-EXIT' | 'STILL-FULL-AT-RESTART';
+type Arm = 'LATCH-THEN-ORDERLY-EXIT' | 'STILL-READ-ONLY-AT-RESTART';
+
+const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
 /** Written and flushed while the store is healthy. */
 const EARLY_MAP = 'store_broken_early';
 const EARLY_KEYS = ['early-0', 'early-1', 'early-2', 'early-3', 'early-4'];
-/** The one write whose flush meets the I/O error. */
-const LATE_MAP = 'store_broken_late';
-const LATE_KEY = 'late';
+/**
+ * The late writes, one of whose flushes meets the I/O error. Each late key
+ * has a map of its own, so the read-back of one is a small snapshot: all of
+ * them together are tens of MiB, and one snapshot of that size does not
+ * answer in time (TODO-951).
+ */
+const LATE_MAP_PREFIX = 'store_broken_late_';
+const lateMap = (key: string) => `${LATE_MAP_PREFIX}${key}`;
+/** Each late value: large, so few writes fill a memtable. */
+const LATE_PAD = 'x'.repeat(64 * 1024);
+/**
+ * Four memtables of 8 MiB: past this much late data without an I/O error,
+ * the engine is not refusing what it must create.
+ */
+const LATE_BYTES_BOUND = 4 * 8 * 1024 * 1024;
+/** Given after the bound, for the last flush passes to reach the engine. */
+const LATE_SETTLE_MS = 10_000;
 
-/** The boot line of a build that has the redb I/O seam and was given a sentinel path. */
-const REDB_SEAM_BOOT_TEXT = 'redb writes answer ENOSPC while the sentinel file exists';
 /** The store's line when it classifies an error as a broken store. */
 const STORE_BROKEN_TEXT =
   'write-behind store: the durable store is broken and stores nothing more in this process; writes are refused from now on and the node stops';
 /** The store's line when its shutdown drain stops at a broken store. */
 const DRAIN_STOPPED_TEXT =
   'write-behind shutdown drain stopped at a broken store: the entries it did not store stay un-resolved and replay from the WAL at the next start';
-/** The binary's line when it learns that the store is broken. */
+/** The binary's line when it learns that the store is broken; it precedes the 503. */
 const BINARY_BROKEN_TEXT = 'the durable store is broken; shutting the node down';
 /** The store's line for a panicked background task: a broken store must not be reported as one. */
 const PANIC_TEXT = 'write-behind background task panicked';
-/** What the restarted process names when it cannot open the store on a full disk. */
-const NO_SPACE_TEXT = 'No space left on device';
+/** The binary's line when the store does not open. */
+const STORE_OPEN_REFUSED_TEXT = 'store open: refusing to start';
+/** What RocksDB says when the read-only directory refuses it. */
+const PERMISSION_TEXT = 'Permission denied';
+/** What a full disk would be named by: a permission error must not read as one. */
+const ENOSPC_TEXT = 'No space left on device';
 
 /** Given to the server explicitly, so the deadline below is a known number. */
 const SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -110,7 +133,6 @@ const EXIT_WAIT_MARGIN_MS = 5_000;
 
 const ACK_WAIT_MS = 5_000;
 const CONNECT_WAIT_MS = 5_000;
-const SEAM_LINE_WAIT_MS = 2_000;
 const SCRAPE_WAIT_MS = 2_000;
 /**
  * How long after the last acknowledgement the early writes had all reached the
@@ -121,11 +143,12 @@ const FLUSH_OBSERVED_MS = 2_400;
 /** Room on top of that for a slower host; the wait ends as soon as the sign is seen. */
 const FLUSH_MARGIN_MS = 3_600;
 const FLUSH_POLL_MS = 100;
-/** How long a restart on a still-full disk may take to end by itself once it has not printed its port. */
-const STILL_FULL_EXIT_WAIT_MS = 15_000;
+const READY_POLL_MS = 20;
+/** How long a restart on a still read-only directory may take to end by itself once it has not printed its port. */
+const STILL_READ_ONLY_EXIT_WAIT_MS = 15_000;
 const RESTART_STOP_MS = 15_000;
-/** Bounds a hung arm: boot, the flush wait, the wait for the exit, and up to two restarts. */
-const ARM_TIMEOUT_MS = 240_000;
+/** Bounds a hung arm: the build, boot, the late writes, the wait for the exit, and up to two restarts. */
+const ARM_TIMEOUT_MS = 600_000;
 
 /**
  * The setup of an arm did not hold, so the arm has no result: not a pass and
@@ -151,6 +174,77 @@ function exitWaitMs(): number {
     );
   }
   return value;
+}
+
+/** The release binary: RUST_SERVER_BINARY, else built here. */
+function releaseBinary(): { binary: string; commit: string } {
+  const commit = child_process
+    .execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO_ROOT })
+    .toString()
+    .trim();
+  const named = process.env.RUST_SERVER_BINARY;
+  if (named) return { binary: named, commit };
+  const out = child_process.execFileSync(
+    'cargo',
+    ['build', '--release', '--bin', 'topgun-server', '--message-format=json'],
+    { cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'inherit'], maxBuffer: 256 * 1024 * 1024 },
+  );
+  for (const line of out.toString().split('\n').reverse()) {
+    if (!line.includes('"executable"')) continue;
+    const message = JSON.parse(line);
+    if (message.target?.name === 'topgun-server' && message.executable) {
+      return { binary: message.executable as string, commit };
+    }
+  }
+  throw new Error('cargo build --release --bin topgun-server named no executable');
+}
+
+/**
+ * Fails — never skips — when a read-only directory accepts a write: under root
+ * it does, and no I/O error can come.
+ */
+function requireReadOnlyRefuses(scratch: string): void {
+  const probe = path.join(scratch, 'read-only-probe');
+  fs.mkdirSync(probe);
+  fs.chmodSync(probe, 0o555);
+  let refused = false;
+  try {
+    fs.writeFileSync(path.join(probe, 'file'), '');
+  } catch {
+    refused = true;
+  }
+  fs.chmodSync(probe, 0o755);
+  fs.rmSync(probe, { recursive: true, force: true });
+  if (!refused) {
+    throw new Error('running as root: the read-only directory cannot produce an IOError');
+  }
+}
+
+/** Sets `mode` on `dir` and on every entry under it. */
+function chmodTree(dir: string, mode: number): void {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) chmodTree(entryPath, mode);
+    else fs.chmodSync(entryPath, mode);
+  }
+  fs.chmodSync(dir, mode);
+}
+
+/** One hash over the names, sizes and contents of every file under `dir`. */
+function treeDigest(dir: string): string {
+  const hash = crypto.createHash('sha256');
+  const walk = (at: string) => {
+    for (const entry of fs
+      .readdirSync(at, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name))) {
+      const entryPath = path.join(at, entry.name);
+      hash.update(path.relative(dir, entryPath));
+      if (entry.isDirectory()) walk(entryPath);
+      else hash.update(fs.readFileSync(entryPath));
+    }
+  };
+  walk(dir);
+  return hash.digest('hex');
 }
 
 /** Sends one write and reports the type of the frame that answered it, or what happened instead. */
@@ -193,25 +287,50 @@ function linesWith(capture: string, text: string): string[] {
   return plainLines(capture).filter((line) => line.includes(text));
 }
 
+/** The status `/health/ready` answers, or `refused` when nothing answers. */
+async function readiness(port: number): Promise<string> {
+  try {
+    const resp = await within(
+      fetch(`http://127.0.0.1:${port}/health/ready`),
+      SCRAPE_WAIT_MS,
+      'readiness probe',
+    );
+    return String(resp.status);
+  } catch {
+    return 'refused';
+  }
+}
+
 interface Observed {
   arm: Arm;
   /** Why the arm has no result, or `null` when its setup held. */
   preconditionNotMet: string | null;
-  lateWriteAnswer: string;
+  /** Late key to the answer its write got, in the order sent. */
+  lateAnswers: Array<[string, string]>;
+  lateBytesSent: number;
   /** How the process ended by itself, or `null` when it was still running when the wait ran out. */
   exit: BinaryExit | null;
   exitWaitMs: number;
-  /** From the sentinel being created to the process being gone. */
-  exitAfterSentinelMs: number | null;
+  /** From the directory being made read-only to the process being gone. */
+  exitAfterReadOnlyMs: number | null;
   storeBrokenLines: string[];
   drainStoppedLines: string[];
   binaryBrokenLines: string[];
   panicLines: number;
-  /** Arm 2 only: the restart with the sentinel still present. */
-  stillFull: { port: number | null; exit: BinaryExit | null; noSpaceNamed: boolean } | null;
+  /** The distinct readiness answers of probes started after the binary's line. */
+  readinessAfterBroken: string[];
+  /** Arm 2 only: the restart with the directory still read-only. */
+  stillReadOnly: {
+    port: number | null;
+    exit: BinaryExit | null;
+    refusalAtStoreOpen: boolean;
+    permissionNamed: boolean;
+    diskFullNamed: boolean;
+    walUnchanged: boolean;
+  } | null;
   /** Key to the last acknowledged value, per map. */
   acked: Record<string, Record<string, unknown>>;
-  /** What the healed restart returned for the same maps, restricted to the acknowledged keys. */
+  /** Every row the healed restart returned for the written maps. */
   readBack: Record<string, Record<string, unknown>> | string;
   healedExitOnSigterm: BinaryExit | null;
   sha256Before: string;
@@ -219,7 +338,9 @@ interface Observed {
 }
 
 async function runArm(arm: Arm): Promise<Observed> {
-  const env = requireFaultBinary();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-store-broken-'));
+  requireReadOnlyRefuses(dataDir);
+  const env = releaseBinary();
   const waitForExitMs = exitWaitMs();
   const outDir = process.env.LIVENESS_OUT_DIR || null;
   if (outDir) fs.mkdirSync(outDir, { recursive: true });
@@ -229,64 +350,58 @@ async function runArm(arm: Arm): Promise<Observed> {
       .toISOString()
       .replace(/[^0-9]/g, '')
       .slice(0, 14);
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-store-broken-'));
-  const sentinel = path.join(dataDir, 'disk-full');
+  const storeDir = path.join(dataDir, 'data');
+  const engineDir = path.join(storeDir, 'engine.rocksdb');
+  const walDir = path.join(dataDir, 'wal');
   const startedAt = Date.now();
   const notes: string[] = [];
   const note = (text: string) => {
     notes.push(`${new Date().toISOString()} +${Date.now() - startedAt}ms ${text}`);
   };
   let server: SpawnedBinary | null = null;
-  let stillFullServer: SpawnedBinary | null = null;
+  let stillReadOnlyServer: SpawnedBinary | null = null;
   let healed: SpawnedBinary | null = null;
   let writer: TestClient | null = null;
   let reader: TestClient | null = null;
   let summary = `store-broken arm=${arm} commit=${env.commit} aborted=before the server was launched`;
 
   const storeEnv: Record<string, string> = {
-    STORAGE_BACKEND: 'redb',
+    // Named, because the launcher's default is the null store.
+    STORAGE_BACKEND: 'rocksdb',
+    TOPGUN_DATA_DIR: storeDir,
     TOPGUN_REDB_PATH: path.join(dataDir, 'topgun.redb'),
-    TOPGUN_WAL_DIR: path.join(dataDir, 'wal'),
+    TOPGUN_WAL_DIR: walDir,
     TOPGUN_WAL_FSYNC_POLICY: 'per_op',
+    TOPGUN_ENGINE_CACHE_MB: '64',
     TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS: String(SHUTDOWN_TIMEOUT_MS),
     // Refreshes the lag gauge every 600 ms, which is what the flush wait reads.
     TOPGUN_WAL_WATERMARK_STALL_BOUND_MS: '6000',
-    // Every start of the arm is given the same sentinel path; whether a file
-    // exists there is what decides if redb writes are refused.
-    TOPGUN_FAULT_REDB_IO_FILE: sentinel,
+  };
+  const spawnServer = async (label: string) => {
+    const proc = await spawnBinary({
+      binaryPath: env.binary,
+      commit: env.commit,
+      label: `store-broken ${arm} ${label}`,
+      env: storeEnv,
+    });
+    return proc;
   };
 
   try {
-    // No file exists at the sentinel path yet: the disk "has room" until the sentinel is created.
-    server = await spawnBinary({
-      binaryPath: env.binary,
-      commit: env.commit,
-      label: `store-broken ${arm}`,
-      env: storeEnv,
-    });
+    server = await spawnServer('first start');
     const launched = server;
     const sha256Before = launched.sha256;
     const abort = (reason: string): never => {
       summary = `store-broken arm=${arm} sha256=${sha256Before} commit=${env.commit} aborted=${reason}`;
-      throw new Error(`${reason}\n--- stderr ---\n${launched.stderr()}`);
+      throw new Error(
+        `${reason}\n--- stdout ---\n${launched.stdout()}\n--- stderr ---\n${launched.stderr()}`,
+      );
     };
     summary = `store-broken arm=${arm} sha256=${sha256Before} commit=${env.commit} aborted=the run did not reach its end`;
     if (launched.port === null) abort('the server did not print PORT=');
     const port = launched.port as number;
     note(`PORT=${port}`);
-
-    const seamDeadline = Date.now() + SEAM_LINE_WAIT_MS;
-    const seamLine = () =>
-      plainLines(launched.stdout()).find(
-        (line) => line.includes(SEAM_BOOT_TEXT) && line.includes(REDB_SEAM_BOOT_TEXT),
-      );
-    while (!seamLine() && Date.now() < seamDeadline) await sleep(25);
-    if (!seamLine()) {
-      abort(
-        `the launched binary did not print its "${SEAM_BOOT_TEXT}: ${REDB_SEAM_BOOT_TEXT}" line: it has no redb I/O seam, so nothing it does is about a broken store`,
-      );
-    }
-    note(`seam boot line seen`);
+    if (!fs.existsSync(engineDir)) abort(`the server created no ${engineDir}`);
 
     const acked: Observed['acked'] = {};
     let preconditionNotMet: string | null = null;
@@ -334,26 +449,76 @@ async function runArm(arm: Arm): Promise<Observed> {
       preconditionNotMet = `step 2: no scrape with a lag of 1 or more followed by a scrape with every lag at 0 within ${FLUSH_OBSERVED_MS + FLUSH_MARGIN_MS} ms of the last early acknowledgement (rise after ${riseAfterMs} ms, last scrape ${JSON.stringify(lastScrape)}), so the early writes are not known to be in the store`;
     }
 
-    // Step 3: from here on redb's writes to its file answer ENOSPC.
-    fs.writeFileSync(sentinel, '');
-    const sentinelAt = Date.now();
-    note('step 3: sentinel created: redb writes answer ENOSPC');
+    // Step 3: from here on RocksDB cannot create a file in its directory.
+    chmodTree(engineDir, 0o555);
+    const readOnlyAt = Date.now();
+    note('step 3: the engine directory is read-only');
 
-    // Step 4: ONE more key. Its WAL frame is written before the ack; its
-    // flush to redb is what meets the I/O error.
-    let lateWriteAnswer = 'not sent: the precondition did not hold';
+    // Readiness, probed until the process is gone; only probes started after
+    // the binary's line count, since the 503 follows that line.
+    const readinessAfterBroken = new Set<string>();
+    let probing = true;
+    const prober = (async () => {
+      while (probing) {
+        const binaryLineSeen = linesWith(launched.stdout(), BINARY_BROKEN_TEXT).length > 0;
+        const answer = await readiness(port);
+        if (binaryLineSeen) readinessAfterBroken.add(answer);
+        await sleep(READY_POLL_MS);
+      }
+    })();
+
+    // Step 4: late keys until the store reports broken. Each WAL frame is
+    // written before its ack; a flush to RocksDB is what meets the error.
+    const lateAnswers: Array<[string, string]> = [];
+    let lateBytesSent = 0;
+    const brokenSeen = () => linesWith(launched.stdout(), STORE_BROKEN_TEXT).length > 0;
     if (preconditionNotMet === null) {
-      lateWriteAnswer = await writeAndSee(writer, 'late', LATE_MAP, LATE_KEY, { late: true });
-      note(`step 4: the late write was answered with ${lateWriteAnswer}`);
-      if (lateWriteAnswer === 'OP_ACK') (acked[LATE_MAP] ??= {})[LATE_KEY] = { late: true };
+      let i = 0;
+      let settleUntil: number | null = null;
+      for (;;) {
+        if (brokenSeen()) break;
+        if (lateBytesSent >= LATE_BYTES_BOUND) {
+          settleUntil ??= Date.now() + LATE_SETTLE_MS;
+          if (Date.now() >= settleUntil) break;
+          await sleep(100);
+          continue;
+        }
+        i += 1;
+        const key = `late-${String(i).padStart(4, '0')}`;
+        const value = { late: i, pad: LATE_PAD };
+        const answer = await writeAndSee(writer, key, lateMap(key), key, value);
+        lateAnswers.push([key, answer]);
+        lateBytesSent += LATE_PAD.length;
+        if (answer === 'OP_ACK') acked[lateMap(key)] = { [key]: value };
+        else break;
+      }
+      // One write after the store said it is broken, which it must refuse
+      // before the WAL.
+      if (brokenSeen() && lateAnswers.every(([, answer]) => answer === 'OP_ACK')) {
+        i += 1;
+        const key = `late-${String(i).padStart(4, '0')}`;
+        const value = { late: i, pad: LATE_PAD };
+        const answer = await writeAndSee(writer, key, lateMap(key), key, value);
+        lateAnswers.push([key, answer]);
+        if (answer === 'OP_ACK') acked[lateMap(key)] = { [key]: value };
+      }
+      note(
+        `step 4: ${lateAnswers.length} late writes, ${lateBytesSent} bytes; answers ${JSON.stringify(
+          lateAnswers.filter(([, answer]) => answer !== 'OP_ACK'),
+        )}`,
+      );
     }
 
     // Step 5: the process ends by itself, with the client connection still open.
     const exit =
       preconditionNotMet === null ? await launched.waitForExit(waitForExitMs) : launched.exit();
+    probing = false;
+    await prober;
     const exitAt = Date.now();
-    const exitAfterSentinelMs = exit !== null ? exitAt - sentinelAt : null;
-    note(`step 5: exit ${JSON.stringify(exit)} ${exitAfterSentinelMs} ms after the sentinel`);
+    const exitAfterReadOnlyMs = exit !== null ? exitAt - readOnlyAt : null;
+    note(
+      `step 5: exit ${JSON.stringify(exit)} ${exitAfterReadOnlyMs} ms after the directory became read-only`,
+    );
     if (exit === null) await launched.stop('SIGKILL', 5_000);
 
     const out = launched.stdout();
@@ -364,59 +529,50 @@ async function runArm(arm: Arm): Promise<Observed> {
     for (const line of [...storeBrokenLines, ...drainStoppedLines, ...binaryBrokenLines]) {
       note(`server: ${line}`);
     }
+    note(`readiness after the binary's line: ${JSON.stringify([...readinessAfterBroken])}`);
     if (writer.ws.readyState !== writer.ws.CLOSED) writer.ws.terminate();
 
-    let stillFull: Observed['stillFull'] = null;
+    let stillReadOnly: Observed['stillReadOnly'] = null;
     let readBack: Observed['readBack'] = 'NOT OBSERVED: the process did not end by itself';
     let healedExitOnSigterm: BinaryExit | null = null;
     if (exit !== null) {
-      if (arm === 'STILL-FULL-AT-RESTART') {
-        // The sentinel stays: opening the store must write, and cannot.
-        stillFullServer = await spawnBinary({
-          binaryPath: env.binary,
-          commit: env.commit,
-          label: `store-broken ${arm} restart with the sentinel present`,
-          env: storeEnv,
-        });
-        const stillFullPort = stillFullServer.port;
-        const stillFullExit =
-          stillFullPort === null
-            ? await stillFullServer.waitForExit(STILL_FULL_EXIT_WAIT_MS)
-            : stillFullServer.exit();
-        const stillFullOutput = `${stillFullServer.stdout()}\n${stillFullServer.stderr()}`;
-        stillFull = {
-          port: stillFullPort,
-          exit: stillFullExit,
-          noSpaceNamed: stillFullServer.stderr().includes(NO_SPACE_TEXT),
+      if (arm === 'STILL-READ-ONLY-AT-RESTART') {
+        // The modes stay: opening RocksDB for writing must create files, and cannot.
+        const walBefore = treeDigest(walDir);
+        stillReadOnlyServer = await spawnServer('restart on the read-only directory');
+        const stillPort = stillReadOnlyServer.port;
+        const stillExit =
+          stillPort === null
+            ? await stillReadOnlyServer.waitForExit(STILL_READ_ONLY_EXIT_WAIT_MS)
+            : stillReadOnlyServer.exit();
+        await stillReadOnlyServer.stop('SIGKILL', 5_000);
+        const output = `${stillReadOnlyServer.stdout()}\n${stillReadOnlyServer.stderr()}`;
+        const refusal = linesWith(output, STORE_OPEN_REFUSED_TEXT);
+        stillReadOnly = {
+          port: stillPort,
+          exit: stillExit,
+          refusalAtStoreOpen: refusal.length > 0,
+          permissionNamed: refusal.some((line) => line.includes(PERMISSION_TEXT)),
+          diskFullNamed: output.includes(ENOSPC_TEXT),
+          walUnchanged: treeDigest(walDir) === walBefore,
         };
-        note(`restart with the sentinel present: ${JSON.stringify(stillFull)}`);
-        for (const line of plainLines(stillFullOutput).filter((l) => l.includes(NO_SPACE_TEXT))) {
-          note(`restart with the sentinel present: ${line}`);
-        }
-        await stillFullServer.stop('SIGKILL', 5_000);
-        if (stillFullPort !== null || stillFullExit === null || stillFullExit.code !== 1) {
-          preconditionNotMet = `the restart with the sentinel present did not exit 1 by itself before it was ready (port ${stillFullPort}, exit ${JSON.stringify(stillFullExit)})`;
-        }
+        note(`restart on the read-only directory: ${JSON.stringify(stillReadOnly)}`);
+        for (const line of refusal) note(`restart on the read-only directory: ${line}`);
       }
 
-      // The disk has room again: the same data directory, no sentinel.
-      fs.rmSync(sentinel, { force: true });
-      healed = await spawnBinary({
-        binaryPath: env.binary,
-        commit: env.commit,
-        label: `store-broken ${arm} healed restart`,
-        env: storeEnv,
-      });
+      // The directory is writable again.
+      chmodTree(engineDir, 0o755);
+      healed = await spawnServer('healed restart');
       if (healed.port === null) {
         readBack = `NOT OBSERVED: the healed restart did not print PORT= (exit ${JSON.stringify(healed.exit())}): ${healed.stderr().slice(0, 500)}`;
       } else {
         try {
           reader = await connectWithin(healed.port, 'store-broken-reader', CONNECT_WAIT_MS);
           const read: Record<string, Record<string, unknown>> = {};
-          for (const mapName of Object.keys(acked)) {
-            const rows = await readMap(reader, mapName);
-            read[mapName] = {};
-            for (const key of Object.keys(acked[mapName])) read[mapName][key] = rows[key];
+          // Every map written to, acknowledged or not: a map of a key that was
+          // not acknowledged must read back empty.
+          for (const mapName of [EARLY_MAP, ...lateAnswers.map(([key]) => lateMap(key))]) {
+            read[mapName] = await readMap(reader, mapName);
           }
           readBack = read;
         } catch (err) {
@@ -438,29 +594,37 @@ async function runArm(arm: Arm): Promise<Observed> {
 
     const sha256After = sha256OfFile(env.binary);
     const readBackOk =
-      typeof readBack !== 'string' && JSON.stringify(readBack) === JSON.stringify(acked);
+      typeof readBack !== 'string' &&
+      JSON.stringify(lateReadBack({ readBack, lateAnswers })) ===
+        JSON.stringify(lateAcked({ acked })) &&
+      JSON.stringify(readBack[EARLY_MAP]) === JSON.stringify(acked[EARLY_MAP]);
     summary =
       `store-broken arm=${arm} sha256_before=${sha256Before} sha256_after=${sha256After} commit=${env.commit} ` +
       `precondition=${preconditionNotMet === null ? 'met' : 'NOT MET'} flushed_after_ms=${flushedAfterMs} ` +
-      `late_write=${lateWriteAnswer} exit=${JSON.stringify(exit)} exit_after_sentinel_ms=${exitAfterSentinelMs} ` +
+      `late_writes=${lateAnswers.length} late_bytes=${lateBytesSent} ` +
+      `late_not_acked=${JSON.stringify(lateAnswers.filter(([, a]) => a !== 'OP_ACK'))} ` +
+      `exit=${JSON.stringify(exit)} exit_after_read_only_ms=${exitAfterReadOnlyMs} ` +
       `store_broken_lines=${storeBrokenLines.length} drain_stopped_lines=${drainStoppedLines.length} ` +
       `binary_broken_lines=${binaryBrokenLines.length} panic_lines=${panicLines} ` +
-      `still_full_restart=${JSON.stringify(stillFull)} ` +
+      `readiness_after_broken=${JSON.stringify([...readinessAfterBroken])} ` +
+      `still_read_only_restart=${JSON.stringify(stillReadOnly)} ` +
       `acked_keys=${Object.values(acked).reduce((sum, rows) => sum + Object.keys(rows).length, 0)} ` +
       `read_back=${readBackOk ? 'ok' : 'fail'} healed_exit_on_sigterm=${JSON.stringify(healedExitOnSigterm)}`;
 
     return {
       arm,
       preconditionNotMet,
-      lateWriteAnswer,
+      lateAnswers,
+      lateBytesSent,
       exit,
       exitWaitMs: waitForExitMs,
-      exitAfterSentinelMs,
+      exitAfterReadOnlyMs,
       storeBrokenLines,
       drainStoppedLines,
       binaryBrokenLines,
       panicLines,
-      stillFull,
+      readinessAfterBroken: [...readinessAfterBroken].sort(),
+      stillReadOnly,
       acked,
       readBack,
       healedExitOnSigterm,
@@ -471,7 +635,7 @@ async function runArm(arm: Arm): Promise<Observed> {
     for (const client of [writer, reader]) {
       if (client && client.ws.readyState !== client.ws.CLOSED) client.ws.terminate();
     }
-    for (const proc of [server, stillFullServer, healed]) {
+    for (const proc of [server, stillReadOnlyServer, healed]) {
       if (proc) await proc.stop('SIGKILL', 5_000);
     }
     // Straight to stderr: the suite silences console.log, and this line is the record of the run.
@@ -482,12 +646,15 @@ async function runArm(arm: Arm): Promise<Observed> {
       fs.writeFileSync(`${base}.stdout.txt`, server ? server.stdout() : '');
       fs.writeFileSync(`${base}.stderr.txt`, server ? server.stderr() : '');
       fs.writeFileSync(
-        `${base}.still-full.stderr.txt`,
-        stillFullServer ? stillFullServer.stderr() : '',
+        `${base}.still-read-only.txt`,
+        stillReadOnlyServer
+          ? `${stillReadOnlyServer.stdout()}\n${stillReadOnlyServer.stderr()}`
+          : '',
       );
       fs.writeFileSync(`${base}.healed.stdout.txt`, healed ? healed.stdout() : '');
       fs.writeFileSync(`${base}.healed.stderr.txt`, healed ? healed.stderr() : '');
     }
+    if (fs.existsSync(engineDir)) chmodTree(engineDir, 0o755);
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 }
@@ -495,49 +662,103 @@ async function runArm(arm: Arm): Promise<Observed> {
 /** Fails the arm with a named observation when the process had to be ended by the test. */
 function requireExitByItself(o: Observed): void {
   if (o.exit === null) {
+    const notAcked = o.lateAnswers.filter(([, a]) => a !== 'OP_ACK');
+    const reason =
+      o.storeBrokenLines.length === 0 && o.lateBytesSent >= LATE_BYTES_BOUND
+        ? `no IOError after ${LATE_BYTES_BOUND / (1024 * 1024)} MiB`
+        : 'the store did not report broken';
     throw new Error(
-      `arm ${o.arm}: the process did not exit by itself within ${o.exitWaitMs} ms of its redb store being made to refuse writes, with the client connection open (late write: ${o.lateWriteAnswer}; store's line seen: ${o.storeBrokenLines.length}, drain line seen: ${o.drainStoppedLines.length}, binary's line seen: ${o.binaryBrokenLines.length}). It was killed by the test.`,
+      `arm ${o.arm}: ${reason}; the process did not exit by itself within ${o.exitWaitMs} ms of its engine directory being made read-only, with the client connection open (late writes: ${o.lateAnswers.length}, ${o.lateBytesSent} bytes, not acknowledged: ${JSON.stringify(notAcked)}; store's line seen: ${o.storeBrokenLines.length}, drain line seen: ${o.drainStoppedLines.length}, binary's line seen: ${o.binaryBrokenLines.length}). It was killed by the test.`,
     );
   }
 }
 
-/** What both arms assert about the first process. */
-function firstProcess(o: Observed) {
+/** Every late key acknowledged, with its value. */
+function lateAcked(o: Pick<Observed, 'acked'>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [mapName, rows] of Object.entries(o.acked)) {
+    if (mapName.startsWith(LATE_MAP_PREFIX)) Object.assign(out, rows);
+  }
+  return out;
+}
+
+/** Every late key the healed restart served, with its value, over the maps of every late write sent. */
+function lateReadBack(
+  o: Pick<Observed, 'readBack' | 'lateAnswers'>,
+): Record<string, unknown> | string {
+  if (typeof o.readBack === 'string') return o.readBack;
+  const out: Record<string, unknown> = {};
+  for (const [key] of o.lateAnswers) Object.assign(out, o.readBack[lateMap(key)] ?? {});
+  return out;
+}
+
+/** The late keys answered with a refusal: the server turned them away before the WAL. */
+function refusedLateKeys(o: Observed): string[] {
+  return o.lateAnswers
+    .filter(([, answer]) => answer === 'ERROR' || answer === 'OP_REJECTED')
+    .map(([key]) => key);
+}
+
+/** What both arms assert about the first process and the healed read-back. */
+function observed(o: Observed) {
+  const lateRead = lateReadBack(o);
+  const earlyRead = typeof o.readBack === 'string' ? o.readBack : o.readBack[EARLY_MAP];
+  const refused = refusedLateKeys(o);
   return {
-    lateWriteAnswer: o.lateWriteAnswer,
     exit: o.exit,
     exitedInsideTheDeadline:
-      o.exitAfterSentinelMs !== null && o.exitAfterSentinelMs < FAILURE_DEADLINE_MS,
+      o.exitAfterReadOnlyMs !== null && o.exitAfterReadOnlyMs < FAILURE_DEADLINE_MS,
     storeBrokenLines: o.storeBrokenLines.length,
     storeBrokenLineNamesItsCause: o.storeBrokenLines.filter(
-      (line) => line.includes('cause="io"') && line.includes('io_kind="StorageFull"'),
+      (line) => line.includes('cause="io"') && line.includes('io_kind="Other"'),
     ).length,
     drainStoppedLines: o.drainStoppedLines.length,
-    drainStoppedLineNamesItsCauseAndCount: o.drainStoppedLines.filter(
-      (line) => /\bcause="\w+"/.test(line) && /\babandoned_entries=[1-9]\d*\b/.test(line),
-    ).length,
+    drainStoppedLineNamesItsCause: o.drainStoppedLines.filter((line) => /\bcause="\w+"/.test(line))
+      .length,
     binaryBrokenLines: o.binaryBrokenLines.length,
     binaryBrokenLinesWithExitCode72: o.binaryBrokenLines.filter(
       (line) => /\bexit_code=72\b/.test(line) && line.includes('cause="io"'),
     ).length,
     panicLines: o.panicLines,
+    // The listener stops accepting as the node starts its stop, so a probe
+    // after the binary's line is refused or answered 503, never 200.
+    readinessNeverReadyAfterBroken: !o.readinessAfterBroken.includes('200'),
+    // (i) at least one late key was acknowledged.
+    someLateKeyAcked: Object.keys(lateAcked(o)).length > 0,
+    // (iv) every early key is served, with its value.
+    earlyReadBack: earlyRead,
+    // (ii) the late map served is exactly the acknowledged late keys with
+    // their values, which also says (iii): no refused late key is served.
+    lateReadBack: lateRead,
+    refusedLateKeysServed:
+      typeof lateRead === 'string' ? lateRead : refused.filter((key) => key in lateRead),
+    healedExitOnSigterm: o.healedExitOnSigterm,
+    sha256BeforeEqualsAfter: o.sha256Before === o.sha256After,
   };
 }
 
-const EXPECTED_FIRST_PROCESS = {
-  lateWriteAnswer: 'OP_ACK',
-  exit: { code: 72, signal: null },
-  exitedInsideTheDeadline: true,
-  storeBrokenLines: 1,
-  storeBrokenLineNamesItsCause: 1,
-  drainStoppedLines: 1,
-  drainStoppedLineNamesItsCauseAndCount: 1,
-  binaryBrokenLines: 1,
-  binaryBrokenLinesWithExitCode72: 1,
-  panicLines: 0,
-};
+function expected(o: Observed) {
+  return {
+    exit: { code: 72, signal: null },
+    exitedInsideTheDeadline: true,
+    storeBrokenLines: 1,
+    storeBrokenLineNamesItsCause: 1,
+    drainStoppedLines: 1,
+    drainStoppedLineNamesItsCause: 1,
+    binaryBrokenLines: 1,
+    binaryBrokenLinesWithExitCode72: 1,
+    panicLines: 0,
+    readinessNeverReadyAfterBroken: true,
+    someLateKeyAcked: true,
+    earlyReadBack: o.acked[EARLY_MAP],
+    lateReadBack: lateAcked(o),
+    refusedLateKeysServed: [],
+    healedExitOnSigterm: { code: 0, signal: null },
+    sha256BeforeEqualsAfter: true,
+  };
+}
 
-describe('Integration: a server whose redb store is broken ends by itself with exit code 72', () => {
+describe('Integration: a server whose RocksDB store is broken ends by itself with exit code 72', () => {
   test(
     'arm 1 LATCH-THEN-ORDERLY-EXIT',
     async () => {
@@ -546,51 +767,35 @@ describe('Integration: a server whose redb store is broken ends by itself with e
         throw new ScenarioPreconditionError(o.arm, o.preconditionNotMet);
       }
       requireExitByItself(o);
-      expect({
-        ...firstProcess(o),
-        readBackAfterRestart: o.readBack,
-        healedExitOnSigterm: o.healedExitOnSigterm,
-        sha256BeforeEqualsAfter: o.sha256Before === o.sha256After,
-      }).toEqual({
-        ...EXPECTED_FIRST_PROCESS,
-        readBackAfterRestart: o.acked,
-        healedExitOnSigterm: { code: 0, signal: null },
-        sha256BeforeEqualsAfter: true,
-      });
-      // Every key acknowledged before the failure, and the one whose flush met it.
+      expect(observed(o)).toEqual(expected(o));
       expect(Object.keys(o.acked[EARLY_MAP] ?? {})).toEqual(EARLY_KEYS);
-      expect(Object.keys(o.acked[LATE_MAP] ?? {})).toEqual([LATE_KEY]);
     },
     ARM_TIMEOUT_MS,
   );
 
   test(
-    'arm 2 STILL-FULL-AT-RESTART',
+    'arm 2 STILL-READ-ONLY-AT-RESTART',
     async () => {
-      const o = await runArm('STILL-FULL-AT-RESTART');
+      const o = await runArm('STILL-READ-ONLY-AT-RESTART');
       if (o.preconditionNotMet !== null) {
         throw new ScenarioPreconditionError(o.arm, o.preconditionNotMet);
       }
       requireExitByItself(o);
       expect({
-        ...firstProcess(o),
-        restartWithTheSentinelPresent: o.stillFull,
-        readBackAfterTheThirdStart: o.readBack,
-        healedExitOnSigterm: o.healedExitOnSigterm,
-        sha256BeforeEqualsAfter: o.sha256Before === o.sha256After,
+        ...observed(o),
+        restartOnTheReadOnlyDirectory: o.stillReadOnly,
       }).toEqual({
-        ...EXPECTED_FIRST_PROCESS,
-        restartWithTheSentinelPresent: {
+        ...expected(o),
+        restartOnTheReadOnlyDirectory: {
           port: null,
           exit: { code: 1, signal: null },
-          noSpaceNamed: true,
+          refusalAtStoreOpen: true,
+          permissionNamed: true,
+          diskFullNamed: false,
+          walUnchanged: true,
         },
-        readBackAfterTheThirdStart: o.acked,
-        healedExitOnSigterm: { code: 0, signal: null },
-        sha256BeforeEqualsAfter: true,
       });
       expect(Object.keys(o.acked[EARLY_MAP] ?? {})).toEqual(EARLY_KEYS);
-      expect(Object.keys(o.acked[LATE_MAP] ?? {})).toEqual([LATE_KEY]);
     },
     ARM_TIMEOUT_MS,
   );
