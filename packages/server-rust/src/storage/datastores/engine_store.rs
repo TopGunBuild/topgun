@@ -54,11 +54,16 @@
 //!
 //! # Durability
 //!
-//! Every [`MapDataStore`] method writes with `sync = true`: the store is
-//! write-through, durable on return, as the redb store is. A
-//! [`MapDataStore::commit`] is one durable engine batch holding its records
-//! and its `0x20` rows, so no row is ever durable without the records it
-//! covers; a row never moves below the value it holds.
+//! Every [`MapDataStore`] method except [`MapDataStore::commit`] writes with
+//! `sync = true`: the store is write-through, durable on return. A `commit`
+//! is one engine batch holding its records and its `0x20` rows, written
+//! `sync = true` unless the engine has
+//! [`unsynced_write_survives_process_crash`](super::kv_engine::KvCapabilities::unsynced_write_survives_process_crash)
+//! and a WAL is attached to the store (RocksDB under a WAL; never redb). Such
+//! a commit is made durable by the sync the WAL's collection and `finish`
+//! run before they use its rows (`TG-WAL-003`); until then its frames stay
+//! in the WAL. Either way no row is ever present without the records it
+//! covers, and a row never moves below the value it holds.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -710,8 +715,10 @@ pub struct EngineMapDataStore<E: KvEngine> {
     registry_lock: Mutex<()>,
     /// `name → (map_id, flags)`, filled only from rows that exist.
     cache: RwLock<HashMap<String, (u32, u8)>>,
-    /// The durable `0x20` row of every WAL partition, loaded at open and
-    /// updated only after the engine write that stored it returned. Held
+    /// The `0x20` row of every WAL partition as the last returned commit
+    /// left it (durable once a later sync covers it, `TG-WAL-003`), loaded
+    /// at open and updated only after the engine write that stored it
+    /// returned. Held
     /// across a commit's check, write and update, so no row moves below the
     /// value it holds, whoever commits.
     applied: Mutex<[u64; WAL_PARTITIONS]>,
@@ -722,9 +729,10 @@ pub struct EngineMapDataStore<E: KvEngine> {
     /// `sync: true` commit raises it under `applied`, a completed sync of
     /// [`MapDataStore::durable_applied_watermarks`] raises it by `fetch_max`.
     durable: AtomicU64,
-    /// Whether a pass commit is written `sync: true`; `true` in every
-    /// production store.
-    pass_sync: bool,
+    /// A test's override of whether a commit is written `sync: true`;
+    /// `None` in every production store, where the engine's capability and
+    /// `wal_attached` decide.
+    pass_sync: Option<bool>,
     /// A WAL has been opened over this store; never cleared.
     wal_attached: AtomicBool,
     /// The effective unwrapped keyring: `None` for a store that never had
@@ -1019,7 +1027,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
             applied: Mutex::new(*applied),
             returned: AtomicU64::new(0),
             durable: AtomicU64::new(0),
-            pass_sync: true,
+            pass_sync: None,
             wal_attached: AtomicBool::new(false),
             keyring,
             #[cfg(test)]
@@ -1027,11 +1035,27 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         }
     }
 
-    /// Makes pass commits unsynced (`sync: false`), so a test can run the
-    /// regime where only the WAL's collection sync makes them durable.
+    /// Fixes whether commits are written `sync: true`, whatever the engine
+    /// and the WAL say, so a test can run either regime on any engine.
     #[cfg(test)]
     pub(crate) fn set_pass_sync(&mut self, sync: bool) {
-        self.pass_sync = sync;
+        self.pass_sync = Some(sync);
+    }
+
+    /// Whether a commit is written `sync: true`. Unsynced only where a
+    /// returned write survives a process crash and a WAL frame covers every
+    /// record of the batch: the WAL is collected and its hints written only
+    /// past a synced watermark (`TG-WAL-003`), so a power loss of the
+    /// engine's unsynced tail is replayed from it. Both inputs are fixed
+    /// after open, so the answer does not change within a pass.
+    fn commit_sync(&self) -> bool {
+        self.pass_sync.unwrap_or_else(|| {
+            !(self
+                .engine
+                .capabilities()
+                .unsynced_write_survives_process_crash
+                && self.wal_attached.load(Ordering::Acquire))
+        })
     }
 
     /// Whether a WAL has been opened over this store.
@@ -1824,7 +1848,9 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
     }
 
     fn is_loadable(&self, _key: &str) -> bool {
-        // Write-through: every write is durable before it returns.
+        // Write-through: every write is in the engine before it returns (a
+        // `commit` on an engine with the capability is made durable later,
+        // `TG-WAL-003`).
         true
     }
 
@@ -1917,7 +1943,7 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
                 sequence,
             });
         }
-        let sync = self.pass_sync;
+        let sync = self.commit_sync();
         match self.write_records(&ops, WriteOptions { sync }) {
             Ok(()) => {
                 *held = next;

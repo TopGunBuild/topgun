@@ -123,6 +123,9 @@ impl KvEngine for RedbKvEngine {
             engine: "redb",
             ingest: false,
             range_delete_cost: RangeDeleteCost::LinearInKeys,
+            // `Durability::None` keeps a commit in process memory until the
+            // next durable commit, so `kill -9` loses it.
+            unsynced_write_survives_process_crash: false,
         }
     }
 
