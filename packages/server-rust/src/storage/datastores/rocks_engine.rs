@@ -269,6 +269,14 @@ impl KvEngine for RocksKvEngine {
             engine: "rocksdb",
             ingest: false,
             range_delete_cost: RangeDeleteCost::Constant,
+            // A returned write is in RocksDB's own WAL file in the OS page
+            // cache (`manual_wal_flush = false`), so `kill -9` keeps it. The
+            // next read-write open flushes the recovered memtables to synced
+            // L0 files before it returns (`avoid_flush_during_recovery =
+            // false`, set in `options`), so a power loss after `kill -9` and
+            // before the new process's first sync cannot lose a row the new
+            // process has already read and acted on.
+            unsynced_write_survives_process_crash: true,
         }
     }
 
