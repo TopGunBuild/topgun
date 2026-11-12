@@ -30,12 +30,18 @@ pub const DEFAULT_ENGINE_CACHE_MB: usize = 256;
 /// (the cap `TiKV` uses).
 const MAX_OPEN_FILES_CAP: u64 = 40_960;
 
+/// The fewest table files RocksDB keeps open: it raises any smaller value
+/// other than `-1` to this at the open.
+const MAX_OPEN_FILES_FLOOR: u64 = 20;
+
 /// RocksDB's `max_open_files` under a soft descriptor limit `nofile_soft`:
 /// half of it, at most 40 960, so the other half stays for sockets and the
-/// WAL.
+/// WAL; never below the floor RocksDB itself applies, so the value reported
+/// at boot is the one in force.
 #[must_use]
 pub fn max_open_files_for(nofile_soft: u64) -> i32 {
-    i32::try_from(MAX_OPEN_FILES_CAP.min(nofile_soft / 2)).unwrap_or(i32::MAX)
+    i32::try_from((nofile_soft / 2).clamp(MAX_OPEN_FILES_FLOOR, MAX_OPEN_FILES_CAP))
+        .unwrap_or(i32::MAX)
 }
 
 /// Raises the soft `RLIMIT_NOFILE` to the hard limit (on macOS also clamped
@@ -468,12 +474,15 @@ mod tests {
     const SYNC: WriteOptions = WriteOptions { sync: true };
     const NO_SYNC: WriteOptions = WriteOptions { sync: false };
 
-    /// Half the soft descriptor limit, capped at 40 960 as `TiKV` caps it; the limit is
-    /// the input, so a rule that ignores it returns one value for all rows.
+    /// Half the soft descriptor limit, capped at 40 960 as `TiKV` caps it and
+    /// floored at RocksDB's own 20; the limit is the input, so a rule that
+    /// ignores it returns one value for all rows.
     #[test]
     fn max_open_files_is_half_the_soft_limit_capped() {
         for (soft, expected) in [
-            (0, 0),
+            (0, 20),
+            (41, 20),
+            (42, 21),
             (256, 128),
             (1_023, 511),
             (10_240, 5_120),
