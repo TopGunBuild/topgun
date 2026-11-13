@@ -42,13 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     way. Time grows with the number of rows; Linux is not measured. Measured at `949d8872`, before
     RocksDB was opened with `avoid_flush_during_recovery=false` and a `max_open_files` limit. While the kept file exists
     the node holds both stores.
-  - **Resumable, with one gap.** Every copy batch (at most 10 000 rows or 8 MiB of values) is
-    synced together with the mark that says how far the copy got, so a start killed after the
-    first batch resumes at the next start and ends with the same content as an uninterrupted
-    one. A `kill -9` while the first batch is being written can leave an `engine.rocksdb/` that
-    the next start refuses as a second store (`store engine: two stores found: …`, exit 1, at
-    every start); move `engine.rocksdb/` away and start again, which migrates `engine.redb`
-    anew (TODO-956).
+  - **Resumable.** Every copy batch (at most 10 000 rows or 8 MiB of values) is synced together
+    with the mark that says how far the copy got, so a start killed after the first batch
+    resumes at the next start and ends with the same content as an uninterrupted one. A start
+    killed while the first batch is still being written leaves an `engine.rocksdb/` with no row
+    and no mark; the next start removes it with a `WARN` (`store engine: removing …`) and
+    migrates `engine.redb` anew.
   - **Refusals.** Two stores in one data directory, a kept file with no store, an
     `engine.rocksdb/` with engine data but no `CURRENT` file, an engine that does not open
     (another process's lock included), too little free space and a failed verification each exit
