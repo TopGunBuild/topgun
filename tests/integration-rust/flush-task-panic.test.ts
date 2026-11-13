@@ -112,10 +112,13 @@ const DEFAULT_FLUSH_INTERVAL_MS = 10;
  * build (sequential, `per_op`): after the pass that stores the early writes the
  * next wake comes one interval later, and step 2 runs on for at most about
  * 0.8 s of it (one 100 ms poll and the 700 ms lag wait); the rest is margin.
+ * Measured on a Mac (a fault build over RocksDB, `per_op`, where each fsync is
+ * a full device barrier): r ≈ 120 acknowledged writes/s, so 20 s gives about
+ * 120 · 19 s ≈ 2 280 against the 2 000 needed.
  * The server's startup warning about an interval of 500 ms or more is expected
  * in this arm's log and not asserted.
  */
-const PANIC_IN_SHUTDOWN_FLUSH_INTERVAL_MS = 6_000;
+const PANIC_IN_SHUTDOWN_FLUSH_INTERVAL_MS = 20_000;
 /** Given to the server explicitly, so the deadline below is a known number. */
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 /**
