@@ -8,6 +8,12 @@
 # The same Rust as rust-toolchain.toml, so the image builds what CI tests.
 FROM rust:1.93.1-bookworm AS rust-builder
 
+# RocksDB is C++ built by the rocksdb crate's build script: bindgen needs
+# libclang, and the C++ compiler is the image's gcc.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends clang libclang-dev && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
