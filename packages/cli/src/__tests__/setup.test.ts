@@ -40,6 +40,9 @@ describe('topgun setup', () => {
       // Storage env-var fix: the server reads STORAGE_BACKEND
       expect(envContent).toContain('STORAGE_BACKEND=rocksdb');
       expect(envContent).not.toContain('STORAGE_MODE');
+      // redb is no longer offered: neither the written config nor the wizard output may name it
+      expect(envContent).not.toContain('redb');
+      expect(output).not.toContain('redb');
 
       expect(envContent).toContain('PORT=8080');
       expect(envContent).toContain('METRICS_PORT=9091');

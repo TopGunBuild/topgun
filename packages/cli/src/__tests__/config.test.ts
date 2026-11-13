@@ -115,6 +115,26 @@ PORT=8080
       }
     });
 
+    it('refuses redb and leaves STORAGE_BACKEND unchanged: the engine is no longer offered', () => {
+      const envContent = `STORAGE_BACKEND=rocksdb`;
+
+      withTempEnv(envContent, () => {
+        const result = runCli(['config', '--storage', 'redb']);
+
+        expect(result.exitCode).toBe(1);
+        const allOutput = result.stdout + result.stderr;
+        expect(allOutput).toContain('Invalid storage type: redb');
+        // The list of valid options must not name redb, or the refusal would contradict itself
+        const validLine = allOutput.split('\n').find((line) => line.includes('Valid options:'));
+        expect(validLine).toBeDefined();
+        expect(validLine).not.toContain('redb');
+
+        const written = fs.readFileSync(path.join(CLI_CWD, '.env'), 'utf8');
+        expect(written).toContain('STORAGE_BACKEND=rocksdb');
+        expect(written).not.toContain('redb');
+      });
+    });
+
     it('should show error for invalid storage type', () => {
       const envContent = `STORAGE_BACKEND=rocksdb`;
 
@@ -142,6 +162,18 @@ PORT=8080
       expect(output).toContain('--storage');
       // Updated help should mention new valid values
       expect(output).toContain('rocksdb');
+      expect(output).not.toContain('redb');
+    });
+
+    it('does not offer redb in the --storage option help', () => {
+      const output = execSync(`node ${CLI_PATH} config --help`, {
+        encoding: 'utf8',
+        cwd: CLI_CWD,
+      });
+
+      expect(output).toContain('--storage');
+      expect(output).toContain('rocksdb');
+      expect(output).not.toContain('redb');
     });
   });
 });
