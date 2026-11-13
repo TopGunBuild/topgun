@@ -136,24 +136,20 @@ jobs:
         # This is the same script a developer runs locally. What it leaves out,
         # and why, is listed in one place — tests/integration-rust/opt-in-suites.js —
         # and printed at the start of the run:
-        # - map-name-upgrade, map-name-rollback and watermark-rollback each drive
-        #   two server binaries, the current one and an older one (built from
-        #   07d009f0, b346e277 and 6a030bb6 respectively), and CI does not build
-        #   the older ones. Rollback across each boundary is a one-time
-        #   property, not a regression surface, so the three files are run locally
+        # - map-name-upgrade, map-name-rollback, watermark-rollback,
+        #   encryption-rollback, engine-upgrade, engine-rollback and
+        #   engine-migration-resume each drive two server binaries, the current
+        #   one and an older one (built from 07d009f0, b346e277, 6a030bb6,
+        #   727db547 and 7692c380), and CI does not build the older ones.
+        #   Upgrade and rollback across each boundary is a one-time property,
+        #   not a regression surface, so these files are run locally
         #   (`pnpm test:integration-rust:two-binary`) and their output is carried
         #   in the pull request.
-        # - store-refusal-liveness, flush-task-panic and store-broken each need a
-        #   server built with the `fault-injection` cargo feature, and this job
-        #   builds one binary without it. All three are run locally
-        #   (`pnpm test:integration-rust:liveness`). What guards the three defects
+        # - store-refusal-liveness and flush-task-panic each need a server built
+        #   with the `fault-injection` cargo feature, and this job builds one
+        #   binary without it. Both are run locally
+        #   (`pnpm test:integration-rust:liveness`). What guards the two defects
         #   in CI is the in-process tests in `cargo test` and the clippy gate.
-        # - write-behind-batch-measure times the write-behind drain and the start
-        #   replay of a 6a030bb6 build against this binary, out of process, for up
-        #   to three hours on one machine; CI builds neither the 6a030bb6 binary nor
-        #   offers a quiet machine, so it is run locally
-        #   (`pnpm test:integration-rust:measure`) and its JSON is carried in the
-        #   pull request.
         # - cluster-routing is left out by the variable below and gated separately
         #   (non-blocking) in the next job.
         # Each of these files fails, never skips, when what it needs is not given.

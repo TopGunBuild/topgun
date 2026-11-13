@@ -20,7 +20,7 @@ interface EnvConfig {
 }
 
 // Valid storage values the Rust server recognises (STORAGE_BACKEND env var)
-const VALID_STORAGES = ['redb', 'null'];
+const VALID_STORAGES = ['rocksdb', 'null'];
 
 async function config(options: ConfigOptions) {
   const envPath = path.join(process.cwd(), '.env');
@@ -37,7 +37,7 @@ async function config(options: ConfigOptions) {
     const cfg = parseEnvFile(envContent);
 
     console.log(chalk.cyan('  Storage'));
-    console.log(`    Backend: ${cfg.STORAGE_BACKEND || 'not set (server default: redb)'}`);
+    console.log(`    Backend: ${cfg.STORAGE_BACKEND || 'not set (server default: rocksdb)'}`);
 
     console.log('');
     console.log(chalk.cyan('  Auth'));
@@ -70,7 +70,7 @@ async function config(options: ConfigOptions) {
     console.log(chalk.gray('  Usage:'));
     console.log(chalk.gray('    topgun config --show              Show current configuration'));
     console.log(
-      chalk.gray('    topgun config --storage redb      Set storage to embedded redb (default)'),
+      chalk.gray('    topgun config --storage rocksdb   Set storage to embedded RocksDB (default)'),
     );
     console.log(
       chalk.gray('    topgun config --storage null      Set storage to ephemeral (no persistence)'),

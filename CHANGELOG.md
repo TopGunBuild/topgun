@@ -10,6 +10,165 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Changed (on-disk format): the server stores its data in RocksDB.** The data directory now
+  holds `engine.rocksdb/`, and the server moves an existing `engine.redb` there by itself, once,
+  at the first start of this version. Nothing has to be run by hand, and the redb store is kept.
+  - **Upgrade through this release.** The redb store, and both one-time migrations (from
+    `engine.redb` and from the table-per-map file of `TOPGUN_REDB_PATH`), are removed in the next
+    release. **Upgrading from a version before this release: start this release first, then the
+    next one.** A node still on the table-per-map file goes through both migrations in one start.
+  - **`STORAGE_BACKEND`** defaults to `rocksdb`. `redb` is deprecated: this release accepts it as
+    another name for the embedded store — it starts RocksDB, migrating an existing redb store —
+    and logs one `WARN`, `STORAGE_BACKEND=redb is deprecated: …`; the next release refuses it
+    with exit 1. Any other value is refused:
+    `Unknown STORAGE_BACKEND='…' (expected: rocksdb, null)`.
+  - **The one-time migration** runs inside the store open, before the write-ahead log is opened
+    and before the server listens. It copies every row byte for byte — records, map registry,
+    metadata, keyring and applied watermarks; sealed values stay sealed — verifies the copy,
+    renames `engine.redb` to `engine.redb.pre-rocksdb`, and then serves RocksDB; WAL recovery
+    then replays every frame above the watermark into it. Log lines (`INFO`):
+    `store engine: migrating {D}/engine.redb into {D}/engine.rocksdb`,
+    `store engine: migration progress` (at most every 10 s), `store engine: resuming after …` or
+    `store engine: resuming at the verification` after an interruption,
+    `store engine: migration complete`, and at every later start, while the kept file exists,
+    `store engine: the redb store is kept at {D}/engine.redb.pre-rocksdb; delete it once this store is confirmed`.
+    The boot summary line reports `store_engine=rocksdb`.
+  - **Free space and time.** The migration refuses to start, changing nothing, unless
+    `1.5 × the size of engine.redb + 64 MiB` is free on the file system of the data directory.
+    Measured in-process on a Mac (APFS, release build, through the store open with the default
+    256 MiB engine budget, not through the server binary) on an `engine.redb` of 1 000 000 rows of
+    1 KiB values in 100 maps (2.16 GB): 6.56 s, 152 362 rows/s; `engine.rocksdb/` came out at
+    0.49 × the redb file (1.05 GB), and the migration used at most 1.45 GB of free space on the
+    way. Time grows with the number of rows; Linux is not measured. Measured at `949d8872`, before
+    RocksDB was opened with `avoid_flush_during_recovery=false` and a `max_open_files` limit. While the kept file exists
+    the node holds both stores.
+  - **Resumable, with one gap.** Every copy batch (at most 10 000 rows or 8 MiB of values) is
+    synced together with the mark that says how far the copy got, so a start killed after the
+    first batch resumes at the next start and ends with the same content as an uninterrupted
+    one. A `kill -9` while the first batch is being written can leave an `engine.rocksdb/` that
+    the next start refuses as a second store (`store engine: two stores found: …`, exit 1, at
+    every start); move `engine.rocksdb/` away and start again, which migrates `engine.redb`
+    anew (TODO-956).
+  - **Refusals.** Two stores in one data directory, a kept file with no store, an
+    `engine.rocksdb/` with engine data but no `CURRENT` file, an engine that does not open
+    (another process's lock included), too little free space and a failed verification each exit
+    1, and none moves, deletes or overwrites `engine.redb` or `engine.redb.pre-rocksdb`, but
+    not every refusal changes nothing: an `engine.rocksdb/` holding no row is removed before the
+    start looks further; the migration's own refusals come after `engine.redb` was opened for
+    writing — its records are unchanged, or sealed when encryption was just turned on, but its
+    bytes may change; and a failed verification leaves the filled `engine.rocksdb/`, refused until
+    it is moved away. The reason is always on stderr as
+    `Error: store open: refusing to start: …`; most refusals also log one `ERROR` line, but some
+    — a raw I/O error while checking the location, `store engine: cannot open` or
+    `store engine: cannot create` of the migration's target, a failed copy-batch or seal-pass
+    write — reach only stderr. Run one server process per data directory: a start that finds an
+    `engine.rocksdb/` holding no row removes it without RocksDB's lock. The troubleshooting
+    guide lists each refusal and what to do.
+  - **Older binaries refuse.** Every data-directory binary built before this version finds no
+    `engine.redb` in a migrated data directory and refuses it at its store open
+    (`store location: {D} is not a store directory, an empty directory or absent`), exit 1,
+    before it opens the WAL and before it listens, changing no file (tested for the build of
+    `7692c380`). This also replaces the refusals named in the entries below: a data-directory
+    binary from before encryption at rest or before the applied-watermark move now stops at this
+    line first. A binary from before the data-directory layout (such as `07d009f0` or `b346e277`)
+    reads only `TOPGUN_REDB_PATH` and stops on the marker file there with
+    `Error: I/O error: invalid data`, as before.
+  - **Rollback** is a return to the kept file: stop this version until its stop exits 0 and logs
+    `drained=true`, move `{D}/engine.rocksdb` away, rename `{D}/engine.redb.pre-rocksdb` to
+    `{D}/engine.redb`, move the WAL directory away and create an empty one (its new segments are
+    unreadable to the older binary), and start the older binary. **Every write acknowledged since
+    the migration is then absent on the server**, and so is every write the older binary left in
+    its WAL above its watermark before the upgrade — after a `kill -9`, a crash, or a stop that
+    logged `drained=false` — because this version replays those into RocksDB, not into the kept
+    file. To lose only the writes since the migration, stop the older binary until its stop logs
+    `drained=true` before upgrading. There is no tool that exports RocksDB back to redb, and none
+    is planned.
+  - **Memory: `TOPGUN_ENGINE_CACHE_MB`** (default `256`) is the memory budget of RocksDB — its
+    block cache, index and filter blocks and memtables share it. It comes on top of
+    `TOPGUN_MAX_RAM_MB`, which bounds only the record cache, and it is approximate. A set-but-empty
+    value or one below `64` is fatal at startup; one that does not parse warns and takes the
+    default. The boot summary line gains `engine_cache_mb`.
+  - **File descriptors.** Before the store opens, the server raises its soft `RLIMIT_NOFILE` to
+    the hard limit and lets RocksDB keep half of it open (at least 20, at most 40 960); the boot
+    summary line gains `nofile_soft` and `rocksdb_max_open_files`. A raise the system refuses, and
+    a soft limit below 1024, each log a `WARN`; the node still starts. Give the service a high
+    `LimitNOFILE=`.
+  - **New metrics:** `topgun_store_l0_files`, `topgun_store_pending_compaction_bytes`,
+    `topgun_store_write_stopped`, `topgun_store_delayed_write_rate`,
+    `topgun_store_block_cache_usage_bytes` and `topgun_store_table_readers_mem_bytes`, read every
+    5 s and present from the first scrape.
+  - **When the store is synced.** Under the write-ahead log a flush pass is committed to RocksDB
+    without a sync: the WAL holds every frame of the pass, and the store is synced by each WAL
+    collection tick (every 5 s) and by a clean stop, before any WAL frame they cover is
+    collected. RocksDB is opened with its recovery flush on (`avoid_flush_during_recovery=false`),
+    so rows a killed process left unsynced are durable once the next start has opened the store.
+    Under `TOPGUN_WAL_FSYNC_POLICY=none` (tests and benchmarks) a power loss now also loses
+    records the store held since the last tick. A tick whose store sync fails collects nothing,
+    logs `WAL collection skipped: the store could not be synced` and counts
+    `topgun_wal_gc_skipped_total{reason="store_sync_failed"}`; a stop whose store read or sync
+    fails writes no rollback hint and logs
+    `write-behind shutdown: the WAL's rollback hints could not be written; …` instead of
+    `rollback hints written` with `drained=true`.
+  - **Exit code 72 on RocksDB.** RocksDB is taken for broken after an I/O error (`cause="io"`) or
+    corruption (`cause="corrupted"`); `io_kind` is always `"Other"`, so a full disk is not told
+    apart from another I/O error, and the `error` field carries RocksDB's own text. A store that
+    fails already at its open exits 1 (`store engine: cannot open …`) at every start until the
+    cause is gone. Every other RocksDB error is retried as before.
+  - **Throughput above the write buffer's limit.** Measured on a Mac with the in-process load
+    harness (open loop, 60 s, three runs per build, default settings; release build of `5de49bfe`,
+    which differs from this version only by the `max_open_files` floor and the refusal logging): at 10 000 offered writes/s
+    this version acknowledges 5 231–5 234 writes/s against 6 466–6 495 on the redb build before it,
+    about 19 % fewer, at a lower durable p99 (16.8–18.9 ms against 61.3–77.1 ms); the rest are
+    refused as a temporary error, which clients retry. The cause is the write-behind flush loop,
+    which falls into step with the faster store passes (TODO-930), not the store itself. At
+    5 000 offered writes/s both builds acknowledge 4 937–4 973 writes/s.
+  - **Store size, one workload.** After 60 s at 3 000 writes/s of new keys with empty values
+    (180 000 writes), sampled with `du` every 0.5 s around the end of the stop's drain on a Mac:
+    24 672–24 680 KiB for `engine.rocksdb/` against 44 156–44 300 KiB allocated for `engine.redb`
+    (a 67.9 MB file), three runs each. This is not a general ratio.
+  - **Build and binary.** RocksDB is compiled into the server binary (Apache-2.0, see `NOTICE`),
+    without any compression library. The macOS arm64 release binary grew from 17 409 504 bytes
+    (`7692c380`) to 24 036 000 bytes, about 6.3 MiB (file sizes of local release builds, read
+    with `stat`); Linux is not measured here. Building it needs
+    `clang` and `libclang`; the container image builds on `rust:1.93.1-bookworm`, the toolchain of
+    `rust-toolchain.toml`.
+
+- **Changed (on-disk format): WAL format v3, one log stream per node.** The write-ahead log
+  stores the frames of every partition in one stream, `stream-{n:016}.log`: one writer thread
+  appends them, and a separate thread fsyncs what was written, so one fsync covers a whole group
+  of writes however many partitions it spans, and a write never waits behind an fsync. Every
+  segment starts with a 57-byte header (`TGWS`, header version 3), and every frame carries its
+  partition and sequence; a sealed frame authenticates both. Segments of the per-partition
+  formats (v2 and v1) are still read and leave by ordinary collection; both readers are removed
+  in the next release. No earlier binary reads a v3 segment.
+  - **The policies keep their meaning.** `batched` (the default) acknowledges a write once its
+    frame is written and fsyncs once the oldest unfsynced frame of the node is 10 ms old or 100
+    frames are unfsynced — one window per node instead of one per partition. `per_op`
+    acknowledges a write only after an fsync that covers it. Measured with the WAL append
+    benchmark on a Mac M1 Max (10 concurrent writers over 271 partitions, 100-byte values, three
+    10 s runs per policy, release build of `df0f0317`, whose server and `wal_append` sources are
+    those of `4820cc02`): `per_op` 1 091–1 210 writes/s against 20 492–22 211 for `batched`. In
+    an earlier A/B on the same benchmark group commit raised `per_op` 3.3-fold over the
+    per-partition log it replaces (medians 1 231 and 1 356 writes/s against 269 and 286). Linux
+    is not measured.
+  - **Behaviour change: a failed WAL fsync stops the node, also under `batched`.** It used to log
+    `WAL batch fsync failed; acked frames may not be durable` and go on. After a failed fsync the
+    operating system may already have dropped the unwritten data and cleared the error, so a
+    later fsync that succeeds proves nothing, and going on would keep acknowledging writes whose
+    durability is unknown. The node now logs `WAL fail-stop: unrecoverable condition, terminating process`
+    and aborts, exit code 134; so does a WAL writer that makes no progress for 30 s while writes
+    wait. Check the disk; a restart replays the WAL.
+  - **Collection and sealing.** The active segment is sealed once it holds 8 MiB or 30 to 35 s
+    after its first frame; a sealed segment is deleted once every partition with a frame in it is
+    covered by the watermark the store holds. One write the store refuses for ever therefore
+    keeps every segment that holds a later frame of its partition, which under ongoing writes is
+    the WAL of the whole node, not only of its partition, until it is stored (TODO-824); watch
+    `topgun_wal_retained_bytes_total`.
+  - **Metrics.** `topgun_wal_retained_bytes{partition}` is removed; `topgun_wal_retained_bytes_total`
+    stays. New: `topgun_wal_fsyncs_total`, `topgun_wal_fsync_seconds`, `topgun_wal_group_frames`,
+    `topgun_wal_queue_depth`, `topgun_wal_queue_head_age_seconds` and
+    `topgun_wal_unsynced_frames`.
+
 - **Fixed (server): vector search works on the server binary.** `VECTOR_SEARCH` used to get no
   answer from the shipped binary, so `client.vectorSearch` waited for its timeout; the server now
   answers it. Vector indexes, including the `_embedding` indexes of `TOPGUN_VECTOR_MAPS`, are
@@ -168,15 +327,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The boot summary line gains `encryption_at_rest` (`off` or `on:file`). The only key provider is
   a local file; AWS KMS and Vault Transit are not available yet. See the "Encryption at rest"
   guide.
-- **Changed (on-disk format): WAL format v2.** Every write-ahead-log segment this version creates
-  starts with a 61-byte header (`TGWS`, header version 2) that names, besides the partition, the
+- **Changed (on-disk format): WAL format v2.** This release writes v3 stream segments instead
+  (see "WAL format v3" above) and still reads v2 ones. A v2 segment starts with a 61-byte header (`TGWS`, header version 2) that names, besides the partition, the
   first sequence, a random salt and the data key id, three format fields: `layout` = 0 (the
   partition function), `payload_schema` = 1 (the WAL entry schema) and `cipher` = 0 (plaintext)
   or 1 (XChaCha20-Poly1305, sealed under the data key the header names). A reader that does not
   know a value refuses the segment by name. The header is written and fsynced before the first
-  frame, and a process never appends to a segment it did not create, so every start begins a new
-  segment in each partition. Segments of the earlier format are still read, and leave by ordinary
-  collection; this reader stays for one version.
+  frame, and a process never appends to a segment it did not create. Segments of the earlier
+  format are still read, and leave by ordinary collection; this reader stays for one version.
   - **Older binaries refuse:** every binary built before this version — including the
     `feacb7d4`…`727db547` binaries that read OR delta frames — reads a v2 segment as a frame with
     the wrong magic at offset 0 and refuses to start before it accepts a connection. A store that
@@ -231,30 +389,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps applied watermarks, as the server does.
 - **Changed (server):** a start after an unclean stop replays the write-ahead log in batches.
   The frames a partition has not yet stored are applied up to 1000 frames or 8 MiB of encoded
-  values at a time, each batch one durable commit that also records how far the log is stored,
+  values at a time, each batch one store commit that also records how far the log is stored,
   instead of one commit per frame — so a restart after a full write buffer takes seconds rather
   than the better part of a minute. The result is the same as replaying frame by frame: a batch
   reads the values its own earlier frames wrote. A frame the storage refuses is retried alone and
   does not hold up the other frames, as before; a broken storage still stops the replay of that
   partition and the node exits at its first flush. The start now logs one `WAL recovery complete`
   line with the number of frames and batches and the time it took.
-- **Changed (server):** on a small store the store file (`topgun-data/engine.redb`) can be about
-  twice as large as before: one doubling of redb's usable space, plus its header and region
-  layout. A durable commit of a whole flush pass or replay batch copies the pages it changes, and
-  the pages the previous commit freed become reusable only after the next commit; while the file
-  is small, redb grows it by doubling, so that peak can cross one more doubling step than one
-  write per commit did. Measured on a Mac after a drain of 9 900 ~100-byte records: 8.96 MB
-  against 4.10 MB before; with 99 000 records 67.9 MB against 48.5 MB. The extra space is bounded
-  by what one commit touches, not by the amount of data, and it is reused: writing the same
-  records again and draining them again does not grow the file. Larger stores and Linux have not
-  been measured.
 - **Fixed (server):** a WAL segment that the collection could not delete no longer stops the
   collection of the other partitions, and is no longer forgotten until the next restart: it stays
-  counted in `topgun_wal_retained_bytes` and is deleted by a later collection.
+  counted in `topgun_wal_retained_bytes_total` and is deleted by a later collection.
 - **Changed (server):** the write buffer is stored in batches. A flush pass now takes up to
   1000 buffered writes or 8 MiB of encoded values, whichever comes first, and stores them,
-  together with how far the write-ahead log has been stored, in one durable commit instead of
-  one store call per write. While writes are still due, the next pass starts at once instead
+  together with how far the write-ahead log has been stored, in one store commit instead of
+  one store call per write (on RocksDB not synced at once; see "When the store is synced"
+  above). While writes are still due, the next pass starts at once instead
   of waiting for `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`, so a full buffer is emptied in a few
   passes. What changes for whoever runs the server:
   - **One refused record no longer holds up the others.** When the storage refuses a commit of
@@ -269,9 +418,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     commit after the storage came back is split down to single writes and starts no hold, so
     two refused records do not keep the storage on hold. Two records the storage refuses in
     one pass still start one hold even though the storage is up; no such record is known for
-    the embedded redb store.
+    the embedded store.
   - **Shutdown stores the buffer in the same batches.** The drain at a stop runs passes of the
-    same limits, each a durable commit, so a clean stop leaves nothing to replay. A refused
+    same limits, each a store commit that the clean stop then syncs, so a clean stop leaves
+    nothing to replay; after a failed stop the drained writes' frames stay in the WAL and replay
+    at the next start. A refused
     drain commit is split down to single writes for as long as
     `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS` allows; a write it could not store is applied from
     the write-ahead log at the next start, and one refused write no longer makes the drain give
@@ -313,19 +464,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the server stopped`. A WAL directory older than the data directory is accepted: nothing at
     or below the data directory's watermark is replayed and no sequence number is reused.
   - **Collection and sealing:** the WAL is collected on a tick every 5 s, up to the watermark
-    the data directory holds; a partition's active segment is sealed once it holds 8 MiB or its
-    first frame is 30 s old, not on every write.
-  - **Metrics:** `topgun_wal_retained_bytes{partition}` and `topgun_wal_retained_bytes_total`
-    report the bytes the WAL keeps, from the first scrape; they grow while the store refuses
-    writes. `topgun_wal_gc_skipped_total{reason="watermark_read_failed"}` counts ticks that
-    could not read the watermark and collected nothing.
+    the data directory holds, synced first; the active segment is sealed once it holds 8 MiB or
+    30 to 35 s after its first frame, not on every write.
+  - **Metrics:** `topgun_wal_retained_bytes_total` reports the bytes the WAL keeps, from the
+    first scrape; it grows while the store refuses writes.
+    `topgun_wal_gc_skipped_total{reason="watermark_read_failed"}` and
+    `{reason="store_sync_failed"}` count ticks that could not read the watermark or sync the
+    store and collected nothing.
 
 - **Changed (on-disk format):** the server keeps its store in a **data directory** and moves an
   existing store there by itself, once, at the first start of this version. Nothing has to be
   run by hand; the old store file is kept. An older server binary started on the node refuses
   to start instead of serving an empty store.
   - **Where the store lives:** `TOPGUN_DATA_DIR` names the store directory, which holds
-    `engine.redb`. Its default is `{directory of TOPGUN_REDB_PATH}/topgun-data` when
+    `engine.rocksdb/` (see the RocksDB entry above). Its default is `{directory of TOPGUN_REDB_PATH}/topgun-data` when
     `TOPGUN_REDB_PATH` is set (so a store on a volume stays on it), else `./topgun-data`. The
     container image sets `TOPGUN_DATA_DIR=/data/topgun-data` and the Helm chart
     `{mountPath}/topgun-data`. A set-but-empty value is refused at startup. Every start logs
@@ -358,8 +510,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     of `b346e277`, read from the source for `07d009f0`).
   - **Two stores refuse the start:** a table-per-map file at `TOPGUN_REDB_PATH` beside a data
     directory that already holds a store is refused, naming both; move one of them aside. Every
-    refusal at the store open logs one `ERROR` line, exits 1 and creates, moves or deletes
-    nothing. The troubleshooting guide lists each refusal and what to do.
+    refusal at the store open exits 1 with its reason on stderr and creates, moves or deletes
+    nothing; most also log one `ERROR` line. The troubleshooting guide lists each refusal and
+    what to do.
   - **Rollback** is supported only as a return to the pre-migration file: stop the new binary
     cleanly (exit 0), move the data directory away, delete the marker file, rename
     `{TOPGUN_REDB_PATH}.pre-migration` back to `TOPGUN_REDB_PATH`, start the old binary. **Every
@@ -401,8 +554,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   earlier chart is refused; install such a release anew (the earlier chart kept no data on a
   volume).
 
-- **Fixed (server):** a server on the embedded redb store no longer runs on while storing
-  nothing after the database reports a fault: it now stops by itself with exit code 72, and
+- **Fixed (server):** a server on the embedded store no longer runs on while storing
+  nothing after the database reports a fault (described here for redb; for RocksDB, the store
+  of this release, see "Exit code 72 on RocksDB" above): it now stops by itself with exit code 72, and
   a restart brings every acknowledged write back. Before, once redb reported an I/O error —
   a full disk included — it refused every later write on the same handle, also after the
   disk had room again, while the server kept acknowledging writes, retried each for as long

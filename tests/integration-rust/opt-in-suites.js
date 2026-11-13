@@ -11,11 +11,12 @@ const optInSuites = [
       'map-name-rollback',
       'watermark-rollback',
       'encryption-rollback',
-      'tenant-delete-rollback',
-      'ttl-rollback',
+      'engine-upgrade',
+      'engine-rollback',
+      'engine-migration-resume',
     ],
     reason:
-      'each drives two server binaries and needs the older one by path: map-name-upgrade a 07d009f0 build (OLD_SERVER_BINARY, OLD_SERVER_COMMIT), map-name-rollback a b346e277 build (FORMAT_OLD_SERVER_BINARY, FORMAT_OLD_SERVER_COMMIT), watermark-rollback a 6a030bb6 build (WATERMARK_OLD_SERVER_BINARY, WATERMARK_OLD_SERVER_COMMIT), encryption-rollback a 727db547 build (ENC_OLD_SERVER_BINARY, ENC_OLD_SERVER_COMMIT), tenant-delete-rollback a 727db547 build (TENANT_OLD_SERVER_BINARY, TENANT_OLD_SERVER_COMMIT), ttl-rollback a 241e65bb build (TTL_OLD_SERVER_BINARY, TTL_OLD_SERVER_COMMIT); all also NEW_SERVER_COMMIT for the newer binary',
+      'each drives two server binaries and needs the older one by path: map-name-upgrade a 07d009f0 build (OLD_SERVER_BINARY, OLD_SERVER_COMMIT), map-name-rollback a b346e277 build (FORMAT_OLD_SERVER_BINARY, FORMAT_OLD_SERVER_COMMIT), watermark-rollback a 6a030bb6 build (WATERMARK_OLD_SERVER_BINARY, WATERMARK_OLD_SERVER_COMMIT), encryption-rollback a 727db547 build (ENC_OLD_SERVER_BINARY, ENC_OLD_SERVER_COMMIT), engine-upgrade, engine-rollback and engine-migration-resume a 7692c380 build (ENGINE_OLD_SERVER_BINARY, ENGINE_OLD_SERVER_COMMIT); all also NEW_SERVER_COMMIT for the newer binary',
     script: 'pnpm test:integration-rust:two-binary',
   },
   {
@@ -23,12 +24,6 @@ const optInSuites = [
     reason:
       'each needs a server built with the fault-injection cargo feature (FAULT_SERVER_BINARY, FAULT_SERVER_COMMIT)',
     script: 'pnpm test:integration-rust:liveness',
-  },
-  {
-    files: ['write-behind-batch-measure'],
-    reason:
-      'measures the write-behind drain and the start replay of a 6a030bb6 build against the binary under test, out of process, for up to three hours (MEASURE_BASE_SERVER_BINARY, MEASURE_BASE_SERVER_COMMIT, RUST_SERVER_BINARY, MEASURE_NEW_SERVER_COMMIT)',
-    script: 'pnpm test:integration-rust:measure',
   },
 ];
 

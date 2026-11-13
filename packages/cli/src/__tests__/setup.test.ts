@@ -6,7 +6,7 @@ import { execSync } from 'child_process';
 const CLI_PATH = path.join(__dirname, '../../dist/topgun.js');
 
 describe('topgun setup', () => {
-  it('should create .env file with --yes mode (default redb storage)', () => {
+  it('should create .env file with --yes mode (default rocksdb storage)', () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-setup-test-'));
 
     // Create stub paths to skip pnpm install and cargo build steps
@@ -38,8 +38,11 @@ describe('topgun setup', () => {
       expect(envContent).toContain('TOPGUN_NO_AUTH=1');
 
       // Storage env-var fix: the server reads STORAGE_BACKEND
-      expect(envContent).toContain('STORAGE_BACKEND=redb');
+      expect(envContent).toContain('STORAGE_BACKEND=rocksdb');
       expect(envContent).not.toContain('STORAGE_MODE');
+      // redb is no longer offered: neither the written config nor the wizard output may name it
+      expect(envContent).not.toContain('redb');
+      expect(output).not.toContain('redb');
 
       expect(envContent).toContain('PORT=8080');
       expect(envContent).toContain('METRICS_PORT=9091');

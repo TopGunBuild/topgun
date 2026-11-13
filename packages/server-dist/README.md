@@ -6,7 +6,7 @@ Run a TopGun server with a single command — no Rust toolchain required.
 npx @topgunbuild/server
 ```
 
-This boots a zero-config server on `ws://localhost:8080` with embedded redb storage. Data survives restarts; no database to run, no Docker, no Rust compiler needed.
+This boots a zero-config server on `ws://localhost:8080` with embedded RocksDB storage. Data survives restarts; no database to run, no Docker, no Rust compiler needed.
 
 ## Installation
 
@@ -62,7 +62,7 @@ custom build directory to override; an explicit value is never overwritten.
 
 ## Storage
 
-The server uses embedded redb storage by default. Data is kept in the directory `./topgun-data` in the current directory. No external database is required.
+The server uses embedded RocksDB storage by default. Data is kept in the directory `./topgun-data` in the current directory. No external database is required.
 
 To keep the data elsewhere, set `TOPGUN_DATA_DIR` (store directory) and `TOPGUN_WAL_DIR` (write-ahead log); keep both on the same volume. To back up, stop the server and copy both directories; a copy of a running server's directory is not a supported backup.
 

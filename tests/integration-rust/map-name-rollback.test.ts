@@ -105,6 +105,13 @@ function unreplayedLines(server: SpawnedBinary): string[] {
     .map((l) => l.slice(0, 400));
 }
 
+/**
+ * The legacy file's migration into the data directory. The same start then
+ * migrates the data directory's redb store into RocksDB, which logs its own
+ * `store engine: migration complete`, so the bare words would count both.
+ */
+const FORMAT_MIGRATION_COMPLETE = 'store format: migration complete';
+
 function countLines(server: SpawnedBinary, needle: string): number {
   return plainLines(server.stdout()).filter((l) => l.includes(needle)).length;
 }
@@ -462,7 +469,7 @@ describe('Integration: R-C, the documented rollback to the pre-migration file, a
       writeAndCollect(newPort, 'rc-writer-v1', lwwPut('2', CONTROL_MAP, V1)),
     );
     o.newStop = await migrating.stop('SIGTERM', STOP_TIMEOUT_MS);
-    o.newMigrations = countLines(migrating, 'migration complete');
+    o.newMigrations = countLines(migrating, FORMAT_MIGRATION_COMPLETE);
 
     // --- The operator's rollback: move the data directory away, delete the
     // marker file, put the pre-migration file back at the old path.
@@ -510,7 +517,7 @@ describe('Integration: R-C, the documented rollback to the pre-migration file, a
       o.forwardValue = await observe(() => queryKey(p, CONTROL_MAP, KEY, 'rd-new-read'));
     }
     o.forwardStop = await forward.stop('SIGTERM', STOP_TIMEOUT_MS);
-    o.forwardMigrations = countLines(forward, 'migration complete');
+    o.forwardMigrations = countLines(forward, FORMAT_MIGRATION_COMPLETE);
 
     // --- R-D: the older binary meets the marker file that migration wrote.
     o.forwardMarker = movedMarkerState(legacy);
@@ -630,7 +637,7 @@ describe('Integration: R-E, a legacy file beside an existing data directory is r
     );
     o.migratedValue = await observe(() => queryKey(newPort, CONTROL_MAP, KEY, 're-new-read'));
     o.newStop = await migrating.stop('SIGTERM', STOP_TIMEOUT_MS);
-    o.migrations = countLines(migrating, 'migration complete');
+    o.migrations = countLines(migrating, FORMAT_MIGRATION_COMPLETE);
 
     // The legacy file goes back over the marker file; the data directory stays.
     fs.copyFileSync(legacyCopy, legacy);

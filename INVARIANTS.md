@@ -21,9 +21,12 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Scope:** `WriteBehindDataStore` write path with a WAL bootstrap, `PerOp` policy.
 - **Statement:** every write acked `Ok(())` is present after `WalRecovery::run` replays a WAL that
   survived an unclean shutdown (acked-before-crash ⊆ present-after-recovery). Under `PerOp`,
-  fsync completes before the append returns.
-- **Maintaining code:** `packages/server-rust/src/storage/wal/mod.rs` (PerOp arm, `sync_data`
-  before return); `write_behind.rs` append-before-ack path.
+  an append resolves only after an fsync of the node-wide WAL stream that began after its frame
+  was written has returned (`TG-WAL-014`); one such fsync covers every frame written before it
+  began, whatever their partitions.
+- **Maintaining code:** `packages/server-rust/src/storage/wal/log_writer.rs` (the syncer
+  publishes the position it fsynced up to; only that publication resolves a `PerOp` append);
+  `wal/mod.rs` the append path; `write_behind.rs` append-before-ack path.
 - **Enforcing test:** `packages/server-rust/src/storage/crash_safety_proptest.rs` (the file's
   stated oracle is exactly this invariant; real write-behind over a store-mode WAL, SIGKILL
   modeled by killing the runtime that runs them while the store survives, which holds none of
@@ -33,7 +36,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `c90_crash_loop_long`): a child process running write-behind over the store-mode WAL is killed
   with SIGKILL at a seeded moment, every WAL segment is cut back to its last logged fsync, and
   under `PerOp` every acknowledged op is found after the restart unless a later op of its key
-  superseded it.
+  superseded it; `log_writer.rs::r_e_per_op_resolves_only_after_covering_fsync` (64 `PerOp`
+  appends over 64 partitions, the syncer's fsync parked: none resolves until it is released, and
+  at most two fsyncs make all of them durable).
 - **Violation consequence:** silently vanished acked writes after restart — worst CRDT-storage
   class; client re-converges only if its own op-log survived.
 - **Discovered by:** SPEC-331/332/333 durability chain.
@@ -41,23 +46,36 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 
 ### TG-WAL-002: `Batched` (default) fsync loss window is bounded to the group-commit window
 
-- **Scope:** `WalFsyncPolicy::Batched` (production default).
-- **Statement:** an unclean shutdown may lose acked writes appended since the last group-commit
-  fsync (~10 ms timer / 100 frames) — and NO MORE than that window. The gap is a documented
-  product trade-off (CLAUDE.md); its BOUND is the invariant.
-- **Maintaining code:** `wal/mod.rs` batched group-commit timer task.
-- **Enforcing test:** `NAKED — no test proves the loss window is bounded to
-  writes-since-last-sync and no wider (TODO-602)`. `crash_safety_proptest.rs` proves the PerOp
-  positive only.
+- **Scope:** `WalFsyncPolicy::Batched` (production default), over the node-wide WAL stream.
+- **Statement:** an append resolves once its frame is written to the stream segment; the syncer
+  starts an fsync, when none is running, as soon as 100 frames are unsynced or the oldest unsynced
+  frame of the **node** is 10 ms old, and a frame's durable position is published only after the
+  fsync that covers it returned. An operating-system crash or a power loss may therefore lose
+  acked frames written since the last fsync that began — the window of one node, not of each
+  partition (before the stream it was one window per partition, so it can only have shrunk) —
+  and NO MORE than that window. A process crash (`kill -9`) loses none of them: they are in the
+  page cache. The gap is a documented product trade-off (CLAUDE.md); its BOUND is the invariant.
+- **Maintaining code:** `wal/log_writer.rs` — the syncer's start rule (`BATCH_FRAMES`,
+  `BATCH_AGE`) and the publication of the fsynced position.
+- **Enforcing test:** `log_writer.rs::r_e_batched_window_is_bounded` — with the syncer's
+  clock held, 100 unsynced frames start an fsync without the clock moving, one unsynced frame is
+  fsynced once it is 10 ms old and not before, and its durable position is published only once
+  that fsync returned; `r_e_batched_fsync_rate_is_independent_of_partitions` — 10 000 appends
+  over 271 partitions take at most one fsync per 10 ms window plus one per 100 frames, plus one.
+- **Not claimed:** how long one fsync takes. The bound is on when an fsync starts; an fsync that
+  never returns (a hung device) holds the window open, and nothing detects it (`TG-WAL-007`). The
+  loss itself under a real power loss is not reproduced: `batched_replay_tests.rs::c90_crash_loop`
+  cuts the WAL to its last logged fsync under `Batched` and proves no sequence is reused and no
+  segment is collected above the engine watermark, but the logged fsync lengths are the loss
+  model's input, not an oracle of how much may be lost. On RocksDB a flush pass is committed
+  without an engine sync under an attached WAL (`TG-WAL-003`), so a write whose pass was stored
+  before its frame was fsynced is lost with the frame on a power loss; the window is not widened
+  by that, because the frame was in it.
 - **Violation consequence:** an unbounded loss window under the default policy — the documented
   trade-off silently becomes a lie.
 - **Discovered by:** extraction pilot audit 2026-07-16; fsync-tier asymmetry noted vs TiKV.
-- **Status:** decided (gap intentional), **enforcement NAKED (TODO-602; the natural vehicle is
-  SPEC-352b / TODO-603 — a Batched-policy truncate-to-durable-frontier fault schedule, which the
-  in-process crash harness deliberately does not model)**. `batched_replay_tests.rs::c90_crash_loop`
-  cuts the WAL to its last logged fsync under `Batched` and proves no sequence is reused and no
-  segment is collected above the engine watermark; it does not make this row enforced, because the
-  logged fsync lengths are the loss model's input, not an oracle of how much may be lost.
+- **Status:** decided, **enforced** (TODO-602 closed for this row by the group-commit tests of
+  SPEC-409e; until then the row was NAKED).
 
 ### TG-WAL-003: The applied watermark a WAL collection reads is durable before any segment it licenses is unlinked
 
@@ -78,33 +96,41 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     that had already covered every commit returned at the take, in which case no sync runs. A sync that fails collects nothing (`reason="store_sync_failed"`) and, at `finish`,
     writes no hint. A collection tick (every 5 s) limits collection by the engine read taken
     under the store's commit lock before that sync, `min(the WAL's copy, the engine row)`, and
-    collects nothing when that read or sync fails or after `finish`. `finish(true)` — the
-    stop that writes the rollback hints — itself unlinks every segment, sealed, active or
-    header-only, whose frames are all at or below its partition's watermark, against the same
-    bound, and nothing when the read or the sync fails or the store is already dropped; with the
-    store dropped (a path the server's stop does not take) the hints are still written from the
-    WAL's copy, without a store sync; before it reads which
-    segments are covered it closes the WAL to appends under each partition's append lock.
-    `finish(false)` unlinks and closes nothing; `finish` seals nothing. `wal-collected` (the
-    highest collected sequence of each partition) is durable before the first unlink it
-    covers. A segment leaves the WAL's sealed set only once its file is unlinked; a segment that
-    cannot be unlinked holds back only its own partition, and a later tick unlinks it. A segment
-    is sealed by a tick, once it holds 8 MiB or its first frame is between 30 and 60 s old, or
-    by the first open of its partition in a process, which keeps the last segment as a sealed
-    one and creates a new active segment (`TG-ENC-005`); an age fixed per partition so that partitions do not all seal in one tick. The
+    collects nothing when that read or sync fails or after `finish`. Every segment this binary
+    writes is a segment of the node-wide stream, holding frames of any partitions: it is collected
+    only once, for **every** partition with a frame in it, that partition's highest sequence in it
+    is at or below that partition's bound; stream segments are judged one by one, not as a
+    prefix. Segments of the earlier per-partition layouts are collected per partition, as an
+    oldest-first prefix. `finish(true)` — the stop that writes the rollback hints — first closes
+    the WAL to appends (an append is refused before it is sent, and the writer refuses one sent
+    before it saw the close), has the writer seal its active segment fsynced to its end, then
+    unlinks every segment whose frames are all covered, against the same bound, and nothing when
+    the read or the sync fails or the store is already dropped; with the store dropped (a path the
+    server's stop does not take) the hints are still written from the WAL's copy, without a store
+    sync. `finish(false)` unlinks and closes nothing; `finish` seals only through that close.
+    `wal-collected` (the highest collected sequence of each partition) is durable before the first
+    unlink it covers. A segment leaves the WAL's sealed set only once its file is unlinked; a
+    stream segment that cannot be unlinked stays, a per-partition one holds back only its own
+    partition, and a later tick unlinks it. A stream segment is sealed by the writer once it holds
+    8 MiB, by the collection tick asking the writer to rotate it 30 to 35 s after its first frame,
+    and by the close at `finish`; it counts as sealed only once the syncer has fsynced it to its
+    end. A process never appends to a segment it did not create, so every start begins a new
+    stream segment (`TG-ENC-005`). The
     `.applied` files a stop that returns `Ok` writes are rollback hints for older
     binaries, each `min(the WAL's copy, the store's row taken before the sync)`, so at or below
     the durable engine row; with the store dropped, the WAL's copy (also after a drain that did
     not finish);
     this binary reads one only through the import at open, when the WAL directory holds no
     `wal-collected` or the store is `wal_import_pending`, and deletes every one at open.
-    On an engine with `unsynced_write_survives_process_crash` and a WAL attached, the pass
+    On an engine with `unsynced_write_survives_process_crash` (RocksDB, the server's store;
+    redb and the in-memory engine do not declare it) and a WAL attached, the pass
     commit and the recovery replay commit are written without a sync; on any other engine,
     `sync: true`. Rows a process left unsynced and a later process reads at a read-write open are
     durable once the open returns (RocksDB: recovery flush, `avoid_flush_during_recovery=false`, pinned
     by `r_a_options_are_the_e2_set_plus_bounded_index`).
 - **Maintaining code:** store mode — `wal/mod.rs` `open_over_store`, `mark_applied`, the
-  collection tick, `write_wal_collected`, `finish`; `engine_store.rs` `commit` (records and
+  collection tick, `covered_stream_segments`, `write_wal_collected`, `finish`;
+  `wal/log_writer.rs` rotation and sealing; `engine_store.rs` `commit` (records and
   `0x20` rows in one batch, a lower row refused, `sync` from the engine's capability and
   `wal_attached`) and `durable_applied_watermarks` (take under
   the commit lock, then sync, then return); `write_behind.rs` the commit plan and its
@@ -121,7 +147,7 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `a23_a_clean_stop_writes_one_rollback_hint_per_partition_equal_to_the_engine_row`,
   `c09_a_drained_stop_unlinks_every_covered_segment_and_keeps_one_above_the_watermark`,
   `c12_finish_unlinks_below_the_store_read_and_keeps_what_it_cannot_unlink`,
-  `batched_replay_tests.rs::c09_a_segment_that_fails_to_unlink_holds_back_only_its_own_partition`,
+  `batched_replay_tests.rs::c09_a_segment_that_fails_to_unlink_holds_back_only_itself`,
   `batched_replay_tests.rs::c90_crash_loop` (`wal-collected` never above the engine row of a
   partition at any observation across real SIGKILLs, under both policies),
   `crash_safety_proptest.rs::concurrent_compaction_loses_no_acked_write_across_crash` (collection
@@ -148,7 +174,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `ac2b_with_the_capability_claimed_a_lost_tail_since_the_last_sync_loses_no_acknowledged_write`,
   `ac2b_prime_with_the_capability_claimed_a_lost_batch_suffix_loses_no_acknowledged_write`,
   `ac2d_the_import_survives_a_power_loss_right_after_the_first_open`,
-  `ac2e_rows_a_dead_process_left_unsynced_leave_the_engine_wal_at_the_next_open`.
+  `ac2e_rows_a_dead_process_left_unsynced_leave_the_engine_wal_at_the_next_open`; the stream —
+  `wal/mod.rs::r_b_collection_unlinks_only_fully_covered_stream_segments`,
+  `r_b_finish_keeps_a_stream_segment_the_store_does_not_cover`,
+  `log_writer.rs::r_e_rotation_seals_only_after_sync`.
 - **Violation consequence:** under-seeded `max_observed_sequence` on restart → sequence reuse →
   recovery filter silently drops frames.
 - **Discovered by:** SPEC-330 era; hardened by SPEC-350; crash-point injection proved by SPEC-352.
@@ -222,16 +251,28 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Statement:** (P) sealed-target = programming bug → abort; (A) pre-frame errors (encode/open,
   bytes provably not in segment) → rollback of the frameless seq only; (B) write/fsync errors
   (frame possibly in segment) → abort, never retry the fsync (fsyncgate: PostgreSQL 2018, TiKV).
-  Discrimination is STRUCTURAL (pre-checks), never parsed from error content. Abort survives the
-  workspace's `panic = "abort"` prohibition and tokio unwind containment.
+  Tier (B) holds under **every** fsync policy: a failed write or fsync of the WAL stream — the
+  `batched` syncer's included, which before the stream only logged and continued — logs one
+  `ERROR` line, `WAL fail-stop: unrecoverable condition, terminating process` (`tier=B`, `ctx`
+  naming what failed), and aborts the process (exit 134), and no append resolves `Ok` after it.
+  So does a panic of the writer thread, and a writer that makes no progress for 30 s while a
+  submission waits. Discrimination is STRUCTURAL (pre-checks), never parsed from error content.
+  Abort survives the workspace's `panic = "abort"` prohibition and tokio unwind containment.
 - **Maintaining code:** `wal/mod.rs` pre-check seam + `wal_fail_stop` (`#[cfg(test)]` seam panics
-  for observability).
+  for observability); `wal/log_writer.rs` the writer's and the syncer's failure arms, the
+  writer's panic guard and its no-progress bound.
   An append to a WAL that `finish(true)` has closed is a tier (A) case: refused before a byte is
   written or a frame index is taken, never acknowledged.
 - **Enforcing test:** `prefix_watermark_proptest.rs::a_pre_frame_append_failure_removes_only_the_frameless_sequence_from_add`
   (+ `_from_remove` twin) and `::a_post_frame_append_failure_fail_stops_at_tier_b_without_rolling_back`
   — the (c1)/(c2) inverted pair (frameless removed / frame-backed NOT removed, loss-class guard);
-  the closed WAL, `c10_an_append_after_finish_is_refused_and_touches_no_file`.
+  the closed WAL, `c10_an_append_after_finish_is_refused_and_touches_no_file`; the stream,
+  `log_writer.rs::r_e_batched_fsync_error_fail_stops` (a failed fsync of the syncer is tier (B)
+  under `batched` and under `per_op`, and no append resolves `Ok` after it),
+  `r_e_no_progress_fail_stops`, `r_e_a_panicked_writer_fail_stops`.
+- **Not claimed:** a fail-stop on a really full disk or a really failing device — every test
+  injects the failure; an fsync that never returns, which stalls the syncer and is detected by
+  nothing (the writer's no-progress bound watches the writer, not the syncer).
 - **Violation consequence:** continuing on a broken WAL (silent corruption) or rolling back
   frame-backed seqs (the AC2(c2) resurrection defect).
 - **Discovered by:** SPEC-350 Audits v10–v12.
@@ -381,7 +422,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   contiguous-success frontier the applied watermark advances to is well-defined by sequence. In
   store mode the window is replayed in batches that keep this order — a batch takes the next frames
   in sequence and applies its writes in that order — and the partition's row is committed
-  in the batch of the frames it covers, so it is never durable without them.
+  in the batch of the frames it covers, so it is never durable without them. A stream segment
+  holds the frames of every partition, each frame carrying its partition and sequence; the window
+  of a partition is gathered from every segment of either layout and sorted the same way, so the
+  order in which the writer interleaved partitions in the stream does not reach replay.
 - **Maintaining code:** `wal/mod.rs::WalWriter::unapplied` (the `all.sort_by_key(|e| e.sequence)`
   before the `applied_seq` filter) + `WalRecovery::run`'s in-order replay loop; in store mode
   `WalRecovery::replay_partition` and `commit_batch`.
@@ -393,7 +437,11 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   Store mode: `batched_replay_tests.rs::c01_a_replay_batch_is_one_durable_engine_write_with_its_row`
   (redb: no `unsynced_write_survives_process_crash`; the row is in the one durable write of its
   batch), `c04_replay_batches_respect_1000_frames_or_8_mib`,
-  `c06_a_kill_between_replay_batches_resumes_from_the_last_committed_row`.
+  `c06_a_kill_between_replay_batches_resumes_from_the_last_committed_row`. The stream:
+  `wal/mod.rs::r_b_recovery_replays_each_partition_in_sequence_order` (one partition's frames out
+  of sequence order in a stream segment replay strictly ascending, and a frame at or below the
+  watermark is skipped), `r_b_unapplied_reads_only_the_partitions_frames`,
+  `r_b_recovery_reads_v2_and_v3_together`.
 - **Violation consequence:** out-of-order replay would let a stale Remove delete a strictly-newer
   re-creation replayed before it, or miscompute the contiguous frontier — an acked-write loss.
 - **Discovered by:** SPEC-354 Review v2 (cataloguing the gate-free warrant's premises).
@@ -434,7 +482,14 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   the start is refused with nothing written (`WAL directory check: refusing to start: the data
   directory is older than the WAL directory …`, the first partition below its mark named).
   `wal-collected` is durable before any segment it covers is unlinked, and never exceeds the
-  durable watermark. A data directory with no applied watermarks (no `wal_watermark` marker)
+  durable watermark. Over the node-wide stream: when a stream segment is collected, the
+  `wal-collected` value of every partition `p` with a frame in it becomes
+  `G(p) = max(G(p), the highest sequence of p in that segment)`, and partitions without a frame
+  there keep theirs; the segment is collected only when that highest sequence is at or below the
+  bound of `p` (the lower of the WAL's durable copy and the store's synced row, `TG-WAL-003`), so
+  `G(p) ≤ W(p)` always holds, and `wal-collected` is written and fsynced before the unlink. The
+  engine migration (`TG-ENG-008`) copies the watermark rows byte for byte, so a migrated data
+  directory carries the watermarks the WAL directory beside it was collected against. A data directory with no applied watermarks (no `wal_watermark` marker)
   beside a WAL directory that holds `wal-collected` is refused unless the store is
   `wal_import_pending` (just migrated from the old file) — so neither a pre-marker data
   directory beside a WAL directory after `kill -9` (no hints) nor one beside a WAL directory
@@ -460,12 +515,16 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Maintaining code:** `wal/mod.rs` — `open_over_store` (the import decision, the
   `wal-collected` read, `refuse_collected_above_watermark`), `write_wal_collected`, the
   collection tick (the mark written before the unlink, `G(p) ≤` the durable watermark),
-  `unapplied`, `max_observed_sequence`; `WalRecovery::run` (the refusal of a frame at or below
-  the engine watermark); `engine_store.rs` `applied_watermarks`.
+  `unapplied`, `max_observed_sequence`, `covered_stream_segments`; `WalRecovery::run` (the
+  refusal of a frame at or below the engine watermark); `engine_store.rs` `applied_watermarks`.
 - **Enforcing test:** `store_mode_tests.rs::a09_a_data_directory_older_than_the_wal_directory_is_refused_and_nothing_is_written`
   (both variants: a data directory below the collected mark, and one with no applied watermarks
   beside the WAL directory of a killed run and of a clean stop),
   `a08_the_collected_mark_is_durable_before_the_first_unlink`,
+  `wal/mod.rs::r_b_collection_unlinks_only_fully_covered_stream_segments` (the `G(p)` rule: a
+  stream segment is unlinked only once every partition in it is covered by the store's watermark,
+  and `wal-collected` is raised to its highest sequence of each),
+  `rocks_store.rs::r_c_migrated_store_with_watermark_opens_and_reopens`,
   `a24_a_store_just_migrated_beside_a_used_wal_directory_imports_the_sidecars_once`; the reverse
   case `a19_a_wal_directory_older_than_the_data_directory_replays_nothing_at_or_below_the_watermark_and_reuses_no_sequence`;
   the migrated case end to end, `tests/integration-rust/map-name-rollback.test.ts` R-D.
@@ -476,6 +535,57 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Not claimed:** that a data directory and a WAL directory from two different nodes, or from
   two unrelated runs, are recognised as such; only the order of the two copies is checked.
 - **Discovered by:** SPEC-395a.
+- **Status:** decided, **enforced**.
+
+### TG-WAL-014: Group commit — a `per_op` append resolves only after an fsync that covers it; one fsync serves a whole group; no fsync on the writer or under an append's lock; no frame acknowledged before its segment is durably open
+
+- **Scope:** the WAL the server opens: one node-wide log stream (`wal/log_writer.rs`) — one
+  log-writer thread that owns the active stream segment and writes the frames of every partition
+  into it, fed by a bounded channel (8192 submissions; a producer that finds it full waits), and
+  one syncer thread that fsyncs what the writer wrote.
+- **Statement:**
+  1. Under `per_op` an append resolves only once the syncer has published a durable position at
+     or past its frame, from an fsync that began after the frame was written (acked ⇒ durable,
+     `TG-WAL-001`).
+  2. Every frame written before an fsync begins shares it: at most one fsync per group, however
+     many of the 271 partitions the group spans; the group grows with load.
+  3. No fsync runs on the writer thread or under any lock an append takes — rotation included:
+     the writer rotates into a new segment and keeps writing while the old segment's tail and the
+     new header are fsynced by the syncer.
+  4. No frame of a segment is acknowledged, under `per_op` or `batched`, before its header, its
+     directory entry and the tail of every earlier segment are durable (none of it under `none`,
+     which never fsyncs); a rotated segment counts as sealed, and may be collected, only once the
+     syncer has fsynced it to its end.
+  5. A failed write or fsync, a panic of the writer, and a writer without progress for 30 s while
+     a submission waits are fail-stops (`TG-WAL-007`, exit 134).
+- **Maintaining code:** `wal/log_writer.rs` — the writer loop (one vectored write per group),
+  `rotate`, the syncer (start rule, publication of the fsynced position, the open of a new
+  segment), the progress watchdog; `wal/mod.rs` `append`.
+- **Enforcing test:** `log_writer.rs::r_e_per_op_resolves_only_after_covering_fsync` (clauses 1
+  and 2: 64 `per_op` appends over 64 partitions, the fsync parked — none resolves; released —
+  all resolve, made durable by at most two fsyncs), `r_e_writer_writes_while_fsync_runs` (clause
+  3: with an fsync parked, `batched` appends still resolve), `r_e_rotation_never_waits_on_fsync`
+  (clauses 3 and 4: with the old tail's fsync parked the writer rotates and keeps writing, and no
+  frame of the new segment resolves before the old tail and the new header are fsynced, the
+  segment renamed and the directory fsynced), `r_e_rotation_old_tail_fsync_resolves_per_op`,
+  `r_e_rotation_seals_only_after_sync`, `r_e_rotation_under_none_runs_no_fsync`,
+  `r_e_rotation_crash_image_recovers_the_old_segment_newest`,
+  `r_e_batched_fsync_rate_is_independent_of_partitions` (clause 2 under `batched`: 10 000 appends
+  over 271 partitions, at most one fsync per 10 ms window plus one per 100 frames, plus one),
+  `r_e_batched_fsync_error_fail_stops`, `r_e_no_progress_fail_stops`,
+  `r_e_a_panicked_writer_fail_stops` (clause 5), `r_e_a_cancelled_send_leaves_no_depth`.
+- **Violation consequence:** a `per_op` write acknowledged before it is durable (an acked write
+  lost on a power loss); one fsync per partition per window again — up to 271 device barriers on
+  macOS; appends stalled behind an fsync; a frame acknowledged in a segment whose header a crash
+  can lose, so recovery cannot read it.
+- **Not claimed:** an fsync that never returns (a hung device): it stalls the syncer, so no
+  `per_op` append and no frame of a segment not yet published open resolves, and nothing detects
+  it — the no-progress bound watches the writer, which keeps writing until the channel is full.
+  `per_op` throughput on the server path: each partition worker waits for its own append, so it
+  stays below the number of workers divided by the fsync latency (TODO-931). Absolute figures
+  on Linux (TODO-939).
+- **Discovered by:** SPEC-409e (the per-partition fsync under the append lock, one fsync per
+  partition per window).
 - **Status:** decided, **enforced**.
 
 ### TG-WB-001: The flushed watermark is prefix-complete — no mid-range hole
@@ -1411,14 +1521,25 @@ weaker than a test.
   half of a bisect, a re-commit after a record-level refusal, and a probe) and of its shutdown
   drain, its failure record and lifecycle state, `hard_flush`;
   `MapDataStore::classify_error` and its one override, `EngineMapDataStore::classify_error`
-  (the redb store, `RedbDataStore`, is `EngineMapDataStore` over `RedbKvEngine`); and the
+  (the server's store, `RocksDataStore`, is `EngineMapDataStore` over `RocksKvEngine`; the redb
+  store, `RedbDataStore`, kept as the source of the one-time engine migration, is
+  `EngineMapDataStore` over `RedbKvEngine`); and the
   shutdown path of the server binary (`bin/topgun_server.rs`). The store half holds for any
   embedder; the exit code is a property of the server binary only.
 - **Statement:**
   1. **Classification is by type.** An inner-store error is classified by
-     `MapDataStore::classify_error`, whose default answer is `Unknown`. Only the redb store
-     overrides it (its engine maps the redb error to `KvError::Broken { cause }`, and the
-     store's `classify_error` reads that variant): it returns `StoreBroken(cause)` for a
+     `MapDataStore::classify_error`, whose default answer is `Unknown`. Only the engine store
+     overrides it (its engine maps the engine's error to `KvError::Broken { cause }`, and the
+     store's `classify_error` reads that variant). **RocksDB** (`rocks_engine.rs::broken_cause`,
+     an exhaustive `match` over the binding's `ErrorKind` without a wildcard arm, so a new
+     upstream kind breaks the build): `IOError` is `Io(Other)` — the binding exposes no
+     subcode, so a full disk is not told apart from another I/O error — and `Corruption` is
+     `Corrupted`; after either, RocksDB itself refuses further writes on the handle. Every other
+     kind (`NotFound`, `NotSupported`, `InvalidArgument`, `MergeInProgress`, `Incomplete`,
+     `ShutdownInProgress`, `TimedOut`, `Aborted`, `Busy`, `Expired`, `TryAgain`,
+     `CompactionTooLarge`, `ColumnFamilyDropped`, `Unknown`) is `Unknown`; `PreviousIo` and
+     `LockPoisoned` are never produced on RocksDB, which re-reports its background error with
+     the original kind. The error text is never read. **redb**: it returns `StoreBroken(cause)` for a
      `redb::StorageError` — bare, or inside
      `CommitError::Storage`, `TransactionError::Storage` or `TableError::Storage` — that is one
      of four causes: `Io` (with the `io::ErrorKind`, so a full disk shows as `StorageFull`),
@@ -1457,8 +1578,9 @@ weaker than a test.
      `TG-WB-009`: in the flush task by the halving of the refused commit, the store-wide hold
      and the per-entry schedule; in the shutdown drain by the split to single entries until the
      drain deadline.
-- **Mechanical predicate:** on a write-behind store over a `RedbDataStore` whose backend has
-  returned an I/O error: (a) once the flush task's call that returned the error has returned,
+- **Mechanical predicate:** on a write-behind store over an engine store whose engine has
+  returned an error it classifies broken (a `RedbDataStore` whose backend returned an I/O error;
+  a RocksDB engine whose directory was made read-only): (a) once the flush task's call that returned the error has returned,
   the next `add`, `remove`, `remove_all` returns the store-broken sentence and the WAL saw no
   append for it; (b) `background_failure()` holds `Some` with `store_broken() == true`; (c) the
   flush task makes no further inner call; (d) `hard_flush` calls the store at most once and
@@ -1467,7 +1589,8 @@ weaker than a test.
   over the same bytes with the backend healed, after `WalRecovery`, holds every acknowledged
   value.
 - **Maintaining code:** `map_data_store.rs` — `StoreErrorClass`, `StoreBrokenCause`,
-  `MapDataStore::classify_error`. `redb.rs` — `broken_cause`, the `fault_io` backend
+  `MapDataStore::classify_error`. `rocks_engine.rs` — `broken_cause` and `kv_error`, the one
+  conversion of a RocksDB error at the boundary. `redb.rs` — `broken_cause`, the `fault_io` backend
   (`fault-injection` builds and tests only). `redb_engine.rs` — the error mapping
   (`kv_from_storage`, `kv_from_commit`, `kv_from_transaction`, `kv_from_table`) that turns the
   four causes into `KvError::Broken`. `engine_store.rs` — `classify_error`, and the
@@ -1481,9 +1604,11 @@ weaker than a test.
   `FailureKind`, `failure_kind_after_drain`, `log_store_failure`.
 - **Enforcing test:** `redb.rs::a_latched_redb_store_fails_the_write_behind_store` — over a
   redb store whose backend returned ENOSPC once, the next write is refused, the failure is
-  recorded and `hard_flush` returns an error. It runs in CI (`cargo test`). The table below
-  lists the others and what each one covers.
-- **Violation consequence:** a node whose redb handle has latched acknowledges writes (their
+  recorded and `hard_flush` returns an error; `rocks_engine.rs::r_a_real_io_error_is_broken_io`,
+  `r_a_real_corruption_is_broken_corrupted`, `r_a_broken_cause_covers_every_kind` — RocksDB's
+  classification over real faults. They run in CI (`cargo test`). The table below lists the
+  others and what each one covers.
+- **Violation consequence:** a node whose store handle has latched acknowledges writes (their
   frames are in the WAL) and stores none of them, retries each for the life of the process,
   holds the node-wide tombstone fence and fills its buffer until writes of new keys are refused
   — until something restarts the process, which nothing does. On a stop it reports a clean exit
@@ -1497,7 +1622,8 @@ weaker than a test.
   with `abandoned_entries` and `cause`; the binary's line
   `the durable store is broken; shutting the node down` with `cause` and `exit_code`; the
   counter `topgun_write_behind_store_broken_total{cause}` (`io`, `previous_io`, `corrupted`,
-  `lock_poisoned`, each rendered at 0 from the first scrape); a refused write's sentence
+  `lock_poisoned`, each rendered at 0 from the first scrape; on RocksDB only `io` and
+  `corrupted` move, and `io_kind` is always `Other`); a refused write's sentence
   `write-behind store has failed (the durable store is broken); write rejected for …`;
   `/health/ready` and `/healthz` at 503 while the stop runs; exit code 72.
 - **Discovered by:** a review of what the retry-until-stored schedule of `TG-WB-009` does on a
@@ -1524,7 +1650,10 @@ weaker than a test.
 | `t_read_after_break` (`write_behind.rs`) | after the failure a read of an acknowledged key answers its value from the slot, with no inner call | CI (`cargo test`) |
 | `a_panicked_store_shutdown_keeps_its_context_text` (`write_behind.rs`) | the panic texts of `TG-WB-006` are not changed by the new cause: `hard_flush`'s context after a panic stays byte for byte | CI (`cargo test`) |
 | `bin_broken_exit_code_for_is_total`, `bin_broken_signal_then_a_broken_store_in_the_record_exits_72` (`bin/topgun_server.rs`) | predicate (f): `exit_code_for` over every kind and shutdown outcome; on the signal path a store-broken record read after `hard_flush` gives 72, a panicked one 70 | CI (`cargo test`) |
-| `tests/integration-rust/store-broken.test.ts` | the CONSEQUENCE at process level on a `fault-injection` build, ENOSPC injected below redb by a sentinel file, a client connection open throughout: the process exits 72 by itself with the three lines; after a restart with the disk healed every acknowledged key reads back; a restart while the disk is still full exits 1 at the store open, and a third start with room reads every key back | local only (`pnpm test:integration-rust:liveness`) — opt-in, not run in CI, for the reason given under `TG-WB-004` (TODO-770) |
+| `r_a_broken_cause_covers_every_kind` (`rocks_engine.rs`) | the table over all 16 `ErrorKind`s of the binding: `IOError` → `Io(Other)`, `Corruption` → `Corrupted`, the other 14 → not broken | CI (`cargo test`) |
+| `r_a_real_io_error_is_broken_io` (`rocks_engine.rs`) | a real `IOError`: an engine with small memtables in a directory made read-only (`0555`) is written until a memtable switch must create a file; the binding's `kind()` is `IOError`, the engine answers `Broken { cause: Io(Other) }`, and the next write again; fails, not skips, when run as root | CI (`cargo test`) |
+| `r_a_real_corruption_is_broken_corrupted` (`rocks_engine.rs`) | a real `Corruption`: bytes of a flushed table file's data block flipped, the engine reopened, a read answers `Broken { cause: Corrupted }`; the binding's `kind()` is asserted too | CI (`cargo test`) |
+| `tests/integration-rust/store-broken.test.ts` | the CONSEQUENCE at process level on the release binary over RocksDB, a client connection open throughout: `engine.rocksdb` made read-only under the running server, so RocksDB meets a real I/O error when it must create a file; the process exits 72 by itself with `cause="io"` and the three lines, `/health/ready` never answers 200 again; after a restart with the modes restored every acknowledged key reads back; a restart while the directory is still read-only exits 1 at the store open, names the permission error and leaves the WAL directory as it was, and a third start reads every key back | the default `pnpm test:integration-rust` run |
 
 **Not claimed.** Each of these is outside the statement, or is in it and rests on something
 weaker than a test.
@@ -1540,14 +1669,18 @@ weaker than a test.
 - **A crash loop** on a corrupted file or a still-full disk is not detected or delayed by the
   process; the supervisor paces it. On a still-full disk it is a loop of exit 1 at the store
   open.
-- **One corrupted page stops the node**, although redb raises `Corrupted` per page and the other
-  pages still read. Likewise a `LockPoisoned` that came from a per-transaction lock after a
+- **One corrupted page stops the node**, although redb raises `Corrupted` per page (and RocksDB
+  per block) and the other pages still read. Likewise a `LockPoisoned` that came from a per-transaction lock after a
   caught panic stops it. The class is "fatal for this process" by decision, not a proof that no
   later call could succeed.
-- **A full disk is injected, not real.** ENOSPC comes from a wrapper below redb; no run used a
-  real full filesystem. In particular exit 134 — the WAL append aborting the process on a really
-  full disk shared by the WAL (`TG-WAL-007`) — is not shown: the injection never reaches the
-  WAL.
+- **A full disk is not shown.** On redb ENOSPC comes from a wrapper below redb; on RocksDB the
+  fault is a real read-only directory, not a full one, and `io_kind` is `Other`, so a full disk
+  is not told apart from another I/O error. No run used a real full filesystem. In particular
+  exit 134 — a WAL write or fsync aborting the process on a really full disk shared by the WAL
+  (`TG-WAL-007`) — is not shown: neither fault reaches the WAL.
+- **A store that fails at its open** (a corrupted RocksDB store, a directory the open cannot
+  write) is refused with exit 1 at every start (`store engine: cannot open …`), not 72; 72 is a
+  runtime contract of a store that has acknowledged writes in this process.
 - **`io_kind`** is visible on the first error only; a `PreviousIo` record has none.
 - **The metric** may not be scraped before the process exits.
 - **The per-entry drain `warn!` lines** for abandoned entries are still one per entry, so a
@@ -1555,6 +1688,9 @@ weaker than a test.
   `cause` instead of a timeout.
 - **`ValueTooLarge`, `TableTypeMismatch`, the map-name refusal** are `Unknown` here (TODO-824).
 - **A panic inside redb** (its own `.lock().unwrap()`) is the `TG-WB-006` path, not this one.
+- **RocksDB's classification is the binding's.** `kind()` comes from `rust-rocksdb`'s mapping of
+  RocksDB's status code; the two real-fault tests above assert it on the raw error, so a binding upgrade that
+  changes the mapping fails there.
 - **The window.** A write that loaded the lifecycle state before the record was made is
   acknowledged: its frame is in the WAL; the drain abandons it; it replays.
 - **A store without a WAL** (`WriteBehindDataStore::new`): abandoned entries are lost at the
@@ -3059,8 +3195,8 @@ weaker than a test.
 ### TG-ENG-001: A `KvEngine` write batch is atomic and ordered, also for a concurrent reader; `shutdown` keeps every returned batch
 
 - **Scope:** every implementation of the byte-level engine boundary `KvEngine`
-  (`storage/datastores/kv_engine.rs`): the reference engine `MemKvEngine` and `RedbKvEngine`. No
-  server code calls the boundary yet.
+  (`storage/datastores/kv_engine.rs`): the reference engine `MemKvEngine`, `RocksKvEngine` (the
+  server's store) and `RedbKvEngine` (the source of the one-time engine migration).
 - **Statement:** the ops of one `write` apply in batch order (a later op on a key wins; a range
   delete removes keys put earlier in the batch). A batch holding a range delete with
   `start > end` is refused with `InvalidArgument` and nothing of it is applied. When `write`
@@ -3069,8 +3205,15 @@ weaker than a test.
   batch whose `write` overlapped it wholly or not at all. After `shutdown` returned and the engine
   was dropped, an engine opened on the same files holds every batch whose `write` returned before
   `shutdown`. After a crash the durable state is the result of a prefix of the called batches, each
-  whole, containing every batch made durable by a returned `sync = true` write or `sync()`.
-- **Not claimed:** `Eventual` durability; engines without a crash target (none today); device
+  whole, containing every batch made durable by a returned `sync = true` write or `sync()`. On
+  RocksDB, under a process crash (`kill -9`: the page cache survives), the recovered state holds
+  every batch whose `write` returned, synced or not — the capability
+  `unsynced_write_survives_process_crash` that lets a flush pass commit without an engine sync
+  under an attached WAL (`TG-WAL-003`).
+- **Not claimed:** `Eventual` durability; a power loss on RocksDB — its crash target models a
+  process crash only: the image is every file of the database directory, the engine's own WAL
+  included, copied after `cancel_all_background_work(true)` stopped its flush and compaction
+  threads, with no flush for the occasion; device
   reordering across a completed `fsync` (redb's own assumption). The crash model is "everything
   written after the last sync may be lost, whole, per write or per 512-byte sector"; the file's
   length changes only by a kept `set_len`, never by a kept write past the end. redb runs with its
@@ -3093,7 +3236,8 @@ weaker than a test.
   order, so the op sequence of a run differs. `k03`/`k04` do not grow the file inside an unsynced
   window.
 - **Maintaining code:** `kv_engine.rs` — `MemKvEngine::write` (one lock acquisition per batch) and
-  `MemKvEngine::shutdown`; `redb_engine.rs` — `RedbKvEngine::write` (validation, then one write
+  `MemKvEngine::shutdown`; `rocks_engine.rs` — `RocksKvEngine::write` (validation, then one
+  RocksDB `WriteBatch`), `sync`, `shutdown` (the engine WAL flushed and synced); `redb_engine.rs` — `RedbKvEngine::write` (validation, then one write
   transaction), `sync`, `shutdown` (sync, then drop the database).
 - **Enforcing test:** `k01_the_crashable_backend_keeps_synced_and_drops_unsynced_writes` (the crash
   model, its length rule included), `k03_redb_every_crash_point_recovers_a_prefix_that_holds_every_durable_batch`,
@@ -3101,7 +3245,11 @@ weaker than a test.
   `k05_mem_crashes_recover_a_prefix_that_holds_every_durable_batch`,
   `k08_redb_crashes_while_the_file_grows_recover_a_prefix_that_holds_every_durable_batch`,
   `k09_redb_every_seventh_op_of_a_growing_workload_recovers_a_prefix_that_holds_every_durable_batch`
-  (ignored; run with `--ignored`) — in `storage/datastores/kv_crash_tests.rs`;
+  (ignored; run with `--ignored`),
+  `k10_rocksdb_every_crash_point_keeps_every_returned_batch`,
+  `k11_rocksdb_random_crashes_keep_every_returned_batch`,
+  `k13_rocksdb_crashes_during_flushes_keep_every_returned_batch` (64 KiB memtables, so the image
+  is taken with flushes and compactions in flight) — in `storage/datastores/kv_crash_tests.rs`;
   `c04_batch_ops_apply_in_order`,
   `c05_a_batch_with_an_invalid_range_changes_nothing`,
   `c25_a_concurrent_reader_never_sees_part_of_a_batch`,
@@ -3118,7 +3266,8 @@ weaker than a test.
 - **Violation consequence:** a record layer built on the engine would expose half of a multi-key
   update to a reader, or lose acknowledged batches across a clean restart.
 - **Discovered by:** SPEC-394a (the boundary's contract).
-- **Status:** decided, **enforced** for both engines. `k08` is red on unmodified redb 2.6.3 (a panic at
+- **Status:** decided, **enforced** for the three engines (RocksDB under the process-crash model
+  only). `k08` is red on unmodified redb 2.6.3 (a panic at
   `page_manager.rs:243` in the open) in 24 of 25 runs. Shown red on one-change mutants: a batch
   applied op by op (mem), one commit per op (redb, `r01`, 10 of 10 runs, each ending `FAILED`), the
   database forgotten instead of dropped (redb, `c27`). A14 (Mem lock per op) is killed
@@ -3313,19 +3462,26 @@ weaker than a test.
 
 ### TG-ENG-007: The store is a data directory in a format this binary knows; a table-per-map file is migrated once, resumably, and kept; every location that is not unambiguous is refused without side effects; while a store is open the old path holds the stub, which an older binary refuses; only the migration writes the mark
 
-- **Scope:** `RedbDataStore::open_location` (the location rules L1–L13, the migration and the
-  stub) and `RedbDataStore::new` (the same rules with no legacy path), as called by the server
-  binary's `select_datastore` before `WalWriter::open_over_store` and before the listener;
-  `run_migration`.
+- **Scope:** `open_rocks_location_sealed` in `rocks_store.rs` (the server's store open: the
+  location rules for `engine.rocksdb/`, the engine migration of `TG-ENG-008`, the stub; every
+  state with `engine.rocksdb/` absent that no RocksDB row claims is delegated unchanged to the
+  redb rows), `RedbDataStore::open_location` (the location rules L1–L13, the table-per-map
+  migration and the stub) and `RedbDataStore::new` (the same rules with no legacy path), as called
+  by the server binary's `select_datastore` before `WalWriter::open_over_store` and before the
+  listener; `run_migration`.
   `D` = `TOPGUN_DATA_DIR` (or the directory derived from `TOPGUN_REDB_PATH`, or
   `./topgun-data`); `L` = `TOPGUN_REDB_PATH` (default `./topgun.redb`), the legacy path;
   `K` = `{L}.pre-migration`; the stub = a regular file at `L` of at most 16 384 bytes whose first
   21 bytes are `TOPGUN-STORE-MOVED 1\n`.
 - **Statement:**
-  1. *One store, a known format.* The store is the data directory `D`, holding `engine.redb`.
-     Every open of an existing store goes through `EngineMapDataStore::open` or
-     `open_for_migration`, so a store of an unknown format or with an unfinished migration is
-     never served (`TG-ENG-006`).
+  1. *One store, a known format.* The store is the data directory `D`, holding
+     `engine.rocksdb/`; a `D` holding `engine.redb` (the layout of earlier versions) is migrated
+     into it once by `TG-ENG-008`, in the same start as a table-per-map migration when both are
+     due. With `engine.rocksdb/` present, `D` may hold nothing but `engine.rocksdb/`,
+     `engine.redb` and `engine.redb.pre-rocksdb`; anything else is the L3 refusal
+     (`store location: {D} is not a store directory, an empty directory or absent`). Every open of
+     an existing store goes through `EngineMapDataStore::open` or `open_for_migration`, so a store
+     of an unknown format or with an unfinished migration is never served (`TG-ENG-006`).
   2. *Migrated once, resumably, and kept.* A table-per-map file at `L` with no store in `D` is
      migrated once: its rows are copied with their value bytes verbatim, and the migration mark
      that says how far the copy got is written in the one engine batch of the copied rows, so an
@@ -3343,10 +3499,14 @@ weaker than a test.
      creates, moves and deletes nothing: `L`, `K` and the stub stay byte-identical and the sorted
      path list is unchanged. The engine directory's **key/value content** is unchanged; its
      **bytes are not claimed**, because a refusal that must read the mark opens the engine, and
-     that open commits. The logical content is the `KvEngine` key space of `D/engine.redb` —
-     every key and value of `KvSnapshot::iter(KeyRange::default())`; access to `engine.redb`
-     other than through `RedbKvEngine` (for example a raw `redb::Database` handle adding a table)
-     is out of contract.
+     that open commits (a RocksDB refusal reads the store through a read-only engine, which
+     writes no file). The logical content is the `KvEngine` key space of the store —
+     every key and value of `KvSnapshot::iter(KeyRange::default())`; access to the store
+     other than through its `KvEngine` (for example a raw `redb::Database` handle adding a table)
+     is out of contract. Not every refusal logs an error line: the reason is always on stderr as
+     `Error: store open: refusing to start: …`, but a raw I/O error in the location checks, the
+     engine migration's `store engine: cannot open` / `store engine: cannot create` of its target,
+     and a failed copy-batch or seal-pass write reach only stderr.
   4. *The stub.* Whenever the server holds an open store in `D` and nothing is at `L`, it writes
      the stub there, whole or not at all (a temporary file, `sync_all`, `rename`, `fsync` of the
      parent), so `L` is never observed empty or partial. This binary never migrates the stub. A
@@ -3354,15 +3514,22 @@ weaker than a test.
      with the same environment meets the stub, and started with `TOPGUN_REDB_PATH={D}` meets a
      directory: either way its redb refuses the open, before `WalWriter::new` and before it
      listens, so it exits non-zero, serves nothing and changes no file — neither the store nor
-     the WAL.
+     the WAL. Every data-directory binary built before the RocksDB store (tested for `7692c380`)
+     finds no `engine.redb` and a non-empty `D` on a migrated directory and refuses it with its
+     own L3 line, exit 1, before its WAL and before it listens, changing no file.
   5. *Exclusive verification.* The migration and its verification run inside the store open,
      before the server opens its WAL or accepts any write, on the one engine handle this process
-     opened (redb's exclusive lock refuses a second open of `engine.redb`) and holds from the
-     location rules to the end of the migration, so the verification's snapshots see one state.
+     opened (redb's exclusive lock refuses a second open of `engine.redb`; RocksDB's `LOCK`
+     refuses a second open of `engine.rocksdb/`, as the open refusal `store engine: cannot open`)
+     and holds from the location rules to the end of the migration, so the verification's
+     snapshots see one state.
   6. *Only the migration writes the mark.* In production code the only function that constructs
      `RecordOp::SetMigrationMark` is `run_migration` in `redb.rs` (the first mark goes through
-     `open_for_migration`).
-- **Maintaining code:** `storage/datastores/redb.rs` — `StoreLocation::from_env`,
+     `open_for_migration`). The engine migration writes its own mark as a raw engine row, only in
+     `engine_migration.rs` (`TG-ENG-008`).
+- **Maintaining code:** `storage/datastores/rocks_store.rs` — `open_rocks_location_sealed`, the
+  RocksDB rows (`resolve`, `check_same_place`, `check_known_entries`, `check_legacy_path`,
+  `open_present`, `open_absent`, `serve`); `storage/datastores/redb.rs` — `StoreLocation::from_env`,
   `RedbDataStore::{open_location, new}`, the row evaluation, `MovedMarker`, the migration mark
   codec, `run_migration`, `verify`, `read_legacy_catalog`; `bin/topgun_server.rs` —
   `select_datastore`. Citations are kept line-number-free on purpose, per `TG-OR-004`.
@@ -3377,7 +3544,13 @@ weaker than a test.
   `m19_the_stub_is_never_a_migration_source`,
   `m21_a_store_with_an_empty_file_at_the_old_path_is_refused_and_touches_nothing`,
   `m22_the_migration_holds_the_engine_exclusively_until_the_store_is_open` — in
-  `storage/datastores/redb_migration_tests.rs`. Clause 6 is checked mechanically: a program over
+  `storage/datastores/redb_migration_tests.rs`; the RocksDB rows,
+  `r_c_location_l1_l2_with_rocksdb`, `r_c_unknown_entry_beside_rocksdb_is_l3`,
+  `r_c_fresh_creates_only_rocksdb`, `r_c_redb_rows_through_the_delegation`,
+  `r_c_legacy_file_migrates_twice_in_one_start`, `r_c_held_lock_is_an_open_refusal` — in
+  `storage/datastores/rocks_store.rs`; an older binary on a migrated directory,
+  `tests/integration-rust/engine-rollback.test.ts` (local, the `7692c380` binary,
+  `ENGINE_OLD_SERVER_BINARY`). Clause 6 is checked mechanically: a program over
   `redb.rs` lists the enclosing production function of every `SetMigrationMark(` and must print
   exactly `run_migration`, and no other production file but `engine_store.rs` names the op.
   Clause 4 for a real older binary is proven by the two-binary run
@@ -3396,8 +3569,105 @@ weaker than a test.
   store with no maps and serves empty maps. The bytes of `engine.redb` across a refusal. A
   rollback after a `kill -9` of the new binary. Any binary older than `07d009f0`. A tool that
   exports the new format back to tables — there is none.
-- **Discovered by:** SPEC-394d (the table-per-map store moved behind `KvEngine`).
+- **Discovered by:** SPEC-394d (the table-per-map store moved behind `KvEngine`); the RocksDB rows
+  by SPEC-409c.
 - **Status:** decided, **enforced**.
+
+### TG-ENG-008: A redb store is migrated into RocksDB once: resumable once its first batch is durable, verified, kept and never overwritten; no refusal moves, deletes or overwrites the redb files
+
+- **Scope:** the engine migration (`engine_migration.rs` — `start`, `prepare_resume`, `resume`,
+  `copy`, `verify`, `switch`) and the RocksDB rows of `rocks_store.rs` that lead to it or refuse
+  it (`inspect`, `open_present`, `open_absent`), inside the store open of the server binary,
+  before `WalWriter::open_over_store` and before the listener. `D` = the data directory; the
+  source is `D/engine.redb`, the target `D/engine.rocksdb/`, the kept file
+  `D/engine.redb.pre-rocksdb`.
+- **Statement:**
+  1. *A raw copy.* Every key of the source's `KvEngine` key space — records, map registry,
+     metadata, keyring, watermark rows — is copied to the target byte for byte, in key order, in
+     batches of at most 10 000 rows or 8 MiB of values; sealed values stay sealed (their AAD
+     binds map, key and space, not the engine). No store is built over the target until the
+     migration is finished. The source is opened over a read-only overlay and never written.
+  2. *The mark only in the batch of its rows.* Every copy batch is one synced raw engine write
+     that also carries the mark naming its last key, so after a crash the mark never names a key
+     whose row is absent. The `verified` mark is one synced batch of its own, written only after
+     the verification (row and byte counts, every value byte for byte against the source)
+     passed.
+  3. *Kept, never overwritten.* After `verified`, `engine.redb` is renamed to
+     `engine.redb.pre-rocksdb` and `D` fsynced, checked right before the rename so that a kept
+     file present then refuses the start (`store engine: both {r} and {k} hold something; …`)
+     instead of being replaced; then the mark is cleared alone by a raw synced batch, and the
+     served store is a fresh `open_sealed` over the target, which runs any seal or unseal pass
+     to its end (`TG-ENC-004`).
+  4. *Resumable once the first batch is durable.* A start killed at any point after the first
+     copy batch's write returned resumes from the durable mark at the next start (`store engine:
+     resuming after {key}` in `copying`, `store engine: resuming at the verification` at
+     `verified`) and ends with the same content as an uninterrupted migration. Every check of a
+     resume runs before the writable open of the target, so a refused resume leaves the target as
+     it was.
+  5. *An interrupted create without a row is removed and restarted.* A target that holds no
+     row — no `*.sst`, every `*.log` empty, and either no `CURRENT` or a read-only walk that finds
+     no key — is removed with one `WARN` (`store engine: removing {dir}: it holds no row …`) and
+     the rows are evaluated again. A target with engine data but no `CURRENT` is refused
+     (`… holds engine data but no CURRENT; …`), and an error while inspecting it refuses
+     (`store engine: cannot inspect …; nothing was changed`), never read as "no row". The
+     removal holds no `LOCK`: the contract is one server process per data directory.
+  6. *Refusals never move, delete or overwrite the redb files.* Too little free space
+     (`1.5 × the size of engine.redb + 64 MiB`, less what the target holds on a resume), two stores
+     (`engine.rocksdb/` with rows and no mark beside `engine.redb`), a kept file with no store, a
+     mark that cannot be read, a resume whose source is gone, a source that carries an unfinished
+     table-per-map migration, a source another handle holds open, a verification difference —
+     each exits 1, and none moves, deletes or overwrites `engine.redb` or
+     `engine.redb.pre-rocksdb`. With `engine.rocksdb/` holding rows (`open_present`) every check
+     runs before the target's writable open and the source is only read; a kept file with no store,
+     and too little free space when `engine.redb` is already there, are refused before any open; these change nothing. Every other start
+     reaches the migration's refusals only after `open_absent` has removed a row-less target
+     (clause 5) and opened `engine.redb` writable (`RedbDataStore::open_location_sealed`): its
+     records are unchanged — or sealed, by the seal pass of that open, when encryption was just
+     turned on — but its bytes may change, and a table-per-map file at `L` has been migrated into
+     it. A verification difference, and a kept file found right before the rename (clause 3), leave
+     the created and filled target, refused until it is moved away.
+- **Maintaining code:** `storage/datastores/engine_migration.rs` — `start`, `prepare_resume`,
+  `resume`, `copy_verify_switch`, `copy`, `write_mark`, `verify`, `switch`, `check_free_space`,
+  `Source::open` (the read-only overlay); `storage/datastores/rocks_store.rs` — `inspect`,
+  `open_present`, `open_absent`, `serve`.
+- **Enforcing test:** `r_c_copy_resumes_after_a_kill_at_every_engine_write`,
+  `r_c_mark_round_trips_and_refuses_garbage`, `r_c_source_held_open_is_refused`,
+  `r_c_source_is_never_written` — in `engine_migration.rs`; `r_c_redb_store_migrates`,
+  `r_c_mark_is_in_the_batch_of_its_rows`, `r_c_verification_catches_a_changed_byte`,
+  `r_c_switch_never_renames_over_a_kept_file`, `r_c_two_stores_refused`,
+  `r_c_two_stores_with_an_sst_and_no_mark_refused_not_removed`,
+  `r_c_engine_data_without_current_is_refused`,
+  `r_c_uninspectable_directory_is_refused_not_removed`, `r_c_kept_only_refused`,
+  `r_c_redb_pair_refused_by_the_rocksdb_classifier`, `r_c_free_space_refusal_changes_nothing`,
+  `r_c_resume_free_space_refusal_changes_nothing`, `r_c_resume_without_the_source_changes_nothing`,
+  `r_c_resume_does_not_seal_the_source`, `r_c_mark_read_writes_no_engine_file`,
+  `r_c_sealed_values_and_keyring_survive`, `r_c_migrated_store_with_watermark_opens_and_reopens`
+  — in `rocks_store.rs`. Out of process, on the release binary against a `7692c380` build:
+  `tests/integration-rust/engine-upgrade.test.ts` (LWW, OR and sealed records, a TTL record and a
+  deleted tenant served after the migration; no second migration at the next start),
+  `engine-migration-resume.test.ts` (`kill -9` during the copy, after `verified` and after the
+  rename, each resumed to the content of an uninterrupted run; the state a kill before the first
+  batch leaves — a target without `CURRENT` — staged, and removed with the `WARN`),
+  `engine-rollback.test.ts` (the documented rollback, and an older binary refusing the migrated
+  directory) — local, opt-in.
+- **Violation consequence:** a partly copied store served as complete; the only copy of the data
+  moved, deleted or overwritten by a refused start; an operator's kept file replaced by the
+  rename; a resume that skips rows.
+- **Known gap — the first batch.** A `kill -9` while the **first** copy batch is being appended to
+  RocksDB's own WAL can leave `engine.rocksdb/` with `CURRENT` and a non-empty `*.log` that holds
+  only a torn record: no row and no mark. Clause 5 does not remove it (a `*.log` is not empty),
+  and with `engine.redb` beside it every later start refuses with the two-stores line
+  (`store engine: two stores found: …`, exit 1) until an operator moves `engine.rocksdb/` away;
+  the copy never writes `engine.redb`, so the next start then migrates anew. Observed twice in development
+  runs of `engine-migration-resume`; that the record is torn is inferred, not decoded. Tracked by
+  TODO-956. The in-process crash target kills between engine writes, not inside one, so
+  it does not reach this instant.
+- **Not claimed:** a power loss during the migration (process-crash model only, `TG-ENG-001`);
+  two server processes on one data directory; the bytes of the target across a refusal that
+  opens it read-only (no file is written, `r_c_mark_read_writes_no_engine_file`); a tool that
+  exports RocksDB back to redb — there is none, and the way back is the kept file.
+- **Discovered by:** SPEC-409c; the first-batch gap by SPEC-409f.
+- **Status:** decided, **enforced** — except the first-batch instant above.
 
 ### TG-ENC-001: Plaintext DEKs never leave process memory; the `keyring` row is their only persistent form, its key ids are never reused, and the row is never deleted
 
@@ -3455,23 +3725,32 @@ weaker than a test.
 - **Status:** decided, **enforced**. Shown red on one-change mutants: a nonce reused across seals
   (`a_thousand_seals_…`), associated data without the map id (both `a_transplanted_…` tests).
 
-### TG-ENC-003: A v2 segment's header is durable before its first frame; header and filename agree; a frame that fails authentication with an intact CRC is corruption, not a torn tail
+### TG-ENC-003: A segment's header is durable before its first frame is acknowledged; header and filename agree; a frame that fails authentication with an intact CRC is corruption, not a torn tail
 
-- **Scope:** every WAL segment this binary creates (format v2, a 61-byte `TGWS` header) and every
-  production reader of segment frames (`handle`, `decode_segment_max_seq`, `unapplied`, the
-  sequence seed, the `finish(true)` directory read).
-- **Statement:** a segment is created as `{name}.tmp` — header written, `sync_all`, renamed, the
-  WAL directory fsynced — before its first frame is appended. The header's partition and first
-  sequence equal the filename's; a mismatch, a bad header CRC or an unknown header version,
-  layout, payload schema or cipher is a refusal naming the file. A frame whose CRC is intact but
+- **Scope:** every WAL segment this binary creates (format v3, a 57-byte `TGWS` header, one
+  node-wide stream `stream-{n:016}.log`), every v2 segment (a 61-byte header, per partition) it
+  still reads, and every production reader of segment frames (`unapplied`, the sequence seed,
+  recovery, collection, the `finish(true)` directory read).
+- **Statement:** a stream segment is written as `{name}.tmp`; the syncer fsyncs its header, renames
+  it into place and fsyncs the WAL directory, and no frame in it is acknowledged before that is
+  done (`TG-WAL-014`); a `.tmp` a crash left is never read and is deleted by the next open before
+  recovery. The header's stream sequence equals the filename's (for v2: its partition and first
+  sequence); a mismatch, a bad header CRC or an unknown header version, layout, payload schema or
+  cipher is a refusal naming the file. A frame whose CRC is intact but
   whose authentication fails — on any frame, the last frame of the last segment included — is
   corruption and refuses the start naming file and offset; only a CRC or length failure at the end
   of the last segment is a torn tail. A sealed segment whose key id is not in the keyring is a
   refusal naming the segment.
-- **Maintaining code:** `storage/wal/segment.rs` `create_segment_file`, `SegmentHeader`;
-  `storage/wal/format.rs` `decode_segment_with`, `frame_v2`; `storage/wal/mod.rs`
-  `decode_segment_keyed`, `entries_or_refuse`, `create_active`.
-- **Enforcing test:** `c05_a_last_segment_without_an_intact_frame_is_replaced_under_its_name`,
+- **Maintaining code:** `storage/wal/segment.rs` `SegmentHeader` and the stream header;
+  `storage/wal/log_writer.rs` the syncer's open of a new segment (header fsync, rename, directory
+  fsync, then publication); `storage/wal/format.rs` `decode_segment_with`, `frame_aad`;
+  `storage/wal/mod.rs` `decode_segment_keyed`, `entries_or_refuse`.
+- **Enforcing test:** `r_e_rotation_never_waits_on_fsync`,
+  `r_e_rotation_crash_image_recovers_the_old_segment_newest` (`wal/log_writer.rs`);
+  `r_b_stream_header_round_trips_and_refuses_unknown_fields_by_name`,
+  `r_b_inspect_reads_every_layout` (`wal/segment.rs`);
+  `r_b_malformed_stream_frames_and_names_are_refused`, `r_b_torn_tail_only_on_newest_segment`,
+  `r_b_a_frame_off_its_location_is_refused_as_changed` (`wal/mod.rs`);
   `c06_a_crash_before_the_rename_of_a_created_segment_leaves_an_openable_directory`,
   `c08_the_header_aware_decoder_and_the_refusals_behind_the_header`,
   `c11_short_segment_files_by_position` (`wal/store_mode_tests.rs`);
@@ -3481,8 +3760,9 @@ weaker than a test.
   header a crash replaced; a changed frame on the last segment would be dropped as a torn tail and
   its write silently lost or replaced.
 - **Discovered by:** SPEC-399 (TODO-861), parts 399a and 399c.
-- **Status:** decided, **enforced**. Shown red on one-change mutants: the header written after the
-  first frame (`c05_…`), an authentication failure classified as a torn tail (`ac10_…`).
+- **Status:** decided, **enforced**. Shown red on one-change mutants, on v2: the header written
+  after the first frame (a `c05_…` test of that era, since replaced by the stream), an
+  authentication failure classified as a torn tail (`ac10_…`).
 
 ### TG-ENC-004: The seal and unseal pass is resumable and convergent
 
@@ -3497,38 +3777,47 @@ weaker than a test.
   unknown direction, a seal pass with no active key, an unseal pass with one, or a cursor outside the
   record spaces — is refused at open with nothing written.
 - **Maintaining code:** `engine_store.rs` `open_sealed` (the batch that starts a pass),
-  `seal_pass_with`, `check_sealing_rows`; `redb.rs` `open_location_sealed` (runs the pass after the
-  marker file is written).
+  `seal_pass_with`, `check_sealing_rows`; `rocks_store.rs` `serve` — every RocksDB serving path
+  (a fresh store, an existing one, the end of an engine migration and of a resumed one) ends
+  there and runs any pass to its end before the store is returned, so before WAL recovery and
+  before the listener; a resumed engine migration does not seal its source (`TG-ENG-008`);
+  `redb.rs` `open_location_sealed` (runs the pass after the marker file is written).
 - **Enforcing test:** `the_seal_pass_resumes_to_the_same_end_after_a_crash_over_redb`,
+  `rocks_store.rs::r_c_seal_pass_runs_on_rocksdb`, `r_c_resume_does_not_seal_the_source`,
+  `r_c_sealed_values_and_keyring_survive`,
   `the_seal_pass_resumes_to_the_same_end_after_a_crash_over_the_reference_engine`,
   `a_planted_keyring_or_seal_pass_row_is_refused_at_open` (`engine_store.rs`),
   `the_seal_pass_row_round_trips_and_refuses_an_unknown_direction` (`sealing.rs`).
 - **Violation consequence:** a crash during a pass would leave values the cursor counts as sealed in
   plaintext, or a resume would skip rows.
 - **Not claimed:** over redb the crash model of the tests is "drop every unsynced write". A crash while
-  redb grows its file is covered by TG-ENG-001 for this build, not by these tests.
+  redb grows its file is covered by TG-ENG-001 for this build, not by these tests. On RocksDB the
+  pass's resumability rests on the engine's process-crash model (`TG-ENG-001`): no test crashes a
+  seal pass over RocksDB, and a power loss is not claimed.
 - **Discovered by:** SPEC-399 (TODO-861), part 399b.
 - **Status:** decided, **enforced**. Shown red on one-change mutants: the cursor batch written before
   the rows it covers (both `the_seal_pass_resumes_…` tests).
 
 ### TG-ENC-005: No (segment key, nonce) pair is ever used for two different plaintexts
 
-- **Scope:** sealed WAL frames (cipher 1): the segment key is HKDF-SHA256 of the DEK, the header's
-  random salt and the header; the nonce of a frame is its index in the segment.
-- **Statement:** a process appends only to segment files it created in this process — at the first
-  open of a partition the last segment is kept as it is (truncated to its intact prefix) and a new
-  one is created, or, if it holds no intact frame, replaced under its name with a fresh salt; every
-  created segment has a fresh random salt; per-partition opens are serialized; the frame index is
-  taken under the append lock after the payload has encoded and passed the size check, so an
-  index is never handed out twice; and no frame is rewritten in place (collection unlinks whole
-  files).
-- **Maintaining code:** `storage/wal/mod.rs` `handle` (the open mutex and its re-check),
-  `frame_under_lock`, `append`; `storage/wal/segment.rs` `create_segment_file`, the segment's
-  next-index counter; `storage/sealing.rs` `SegmentKey::seal_frame`.
-- **Enforcing test:** `ac8_concurrent_sealed_appends_seal_each_index_once`,
-  `ac8_racing_first_opens_of_a_sealed_partition_create_one_segment`,
+- **Scope:** sealed WAL frames (cipher 1) of the node-wide stream and of the v2 segments still
+  read: the segment key is HKDF-SHA256 of the DEK, the header's random salt and the header; the
+  nonce of a frame is its index in the segment; the AAD of a stream frame is its first 9 bytes
+  and the partition and sequence it carries, so a sealed frame opens only at its own partition
+  and sequence.
+- **Statement:** a process appends only to segment files it created in this process — every
+  start begins a new stream segment, and a segment of an earlier process or layout is only read;
+  every created segment has a fresh random salt; the one writer thread owns the active segment and
+  its next-index counter, and takes a frame's index after its payload has encoded and passed the
+  size check, so an index is never handed out twice; and no frame is rewritten in place
+  (collection unlinks whole files).
+- **Maintaining code:** `storage/wal/log_writer.rs` the writer (the active segment, its next
+  frame index, rotation into a new segment with a fresh salt); `storage/wal/format.rs`
+  `frame_aad`; `storage/wal/mod.rs` `append`; `storage/sealing.rs` `SegmentKey::seal_frame`.
+- **Enforcing test:** `r_b_sealed_frame_bound_to_partition_and_sequence` (`wal/mod.rs`: a sealed
+  v3 frame whose partition or sequence is changed, the CRC recomputed, fails authentication and
+  recovery refuses, naming file and offset), `ac8_concurrent_sealed_appends_seal_each_index_once`,
   `ac8_a_cut_sealed_segment_is_never_appended_to`,
-  `ac8_a_sealed_rotation_with_a_failed_directory_fsync_then_the_next`,
   `an_oversized_sealed_entry_is_refused_before_its_index_is_taken`,
   `ac12b_finish_keeps_a_sealed_segment_above_the_watermark` (`wal/mod.rs`);
   `c01_concurrent_appends_to_one_partition_take_each_frame_index_once_in_order`,
@@ -3538,9 +3827,10 @@ weaker than a test.
   the authentication key be recovered, so an attacker who reads the WAL directory could read and
   forge frames.
 - **Discovered by:** SPEC-399 (TODO-861), parts 399a and 399c.
-- **Status:** decided, **enforced**. Shown red on one-change mutants: the reopen-for-append branch
-  restored, the frame sealed before the append lock, the open mutex removed (the `ac8_…` tests), and
-  the `finish` directory read made keyless (`ac12b_…`).
+- **Status:** decided, **enforced**. Shown red on one-change mutants, on the per-partition v2
+  writer before the stream: the reopen-for-append branch restored, the frame sealed before the
+  append lock, the open mutex removed (the `ac8_…` tests of that era), and the `finish` directory
+  read made keyless (`ac12b_…`).
 
 ### TG-ENC-006: A node whose store holds a keyring starts serving only after every DEK is unwrapped; otherwise it exits 1 before the WAL opens, with no record, metadata or WAL write by the refusal
 
@@ -3867,7 +4157,9 @@ weaker than a test.
   off), the pull case (`ttlMs` reaches a client that syncs later), the restart case and the
   eviction case; `tests/integration-rust/vector-search-restart.test.ts` —
   `AC13: an expired record is not returned` (vector and hybrid `semantic`, before and after a
-  restart); `tests/integration-rust/ttl-rollback.test.ts` (opt-in, two binaries).
+  restart); `tests/integration-rust/engine-upgrade.test.ts` (opt-in, two binaries) — a TTL record
+  written by the older binary keeps its TTL across the forward migration to RocksDB, then is hidden
+  and swept once it expires.
 - **Violation consequence:** an "expiring" record is kept and served for good, or reappears after a
   restart or an eviction, or lives longer than its TTL because it was re-anchored.
 - **Discovered by:** TODO-906 (SPEC-403 family); TODO-721.

@@ -192,7 +192,7 @@ Roles come from the authenticated principal (the JWT validated on the WebSocket 
 
 ## Persistence
 
-On the embedded store (the default, `STORAGE_BACKEND=redb`) policies are stored durably and survive a restart, including the marker that RBAC is configured: once any policy has been written, a store emptied of policies denies by default. With `STORAGE_BACKEND=null` policies are kept in memory only and a restart clears them.
+On the embedded store (the default, `STORAGE_BACKEND=rocksdb`) policies are stored durably and survive a restart, including the marker that RBAC is configured: once any policy has been written, a store emptied of policies denies by default. With `STORAGE_BACKEND=null` policies are kept in memory only and a restart clears them.
 
 See the [roadmap](/docs/roadmap) for the status of durable policy storage and cluster-wide policy replication.
 

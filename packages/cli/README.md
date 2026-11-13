@@ -50,7 +50,7 @@ topgun dev
 After running `topgun setup`, a `.env` file is written with:
 
 - `TOPGUN_NO_AUTH=1` — local dev runs without auth tokens; set `JWT_SECRET` for any networked/production deployment
-- `STORAGE_BACKEND=redb` — zero-config embedded storage (no external database, no Docker required)
+- `STORAGE_BACKEND=rocksdb` — zero-config embedded storage (no external database, no Docker required)
 
 Then `topgun dev` starts the server using those settings.
 
@@ -58,7 +58,7 @@ Then `topgun dev` starts the server using those settings.
 
 | Value | Description |
 |-------|-------------|
-| `redb` | Embedded storage (default, zero dependencies) |
+| `rocksdb` | Embedded storage (default, zero dependencies) |
 | `null` | Ephemeral in-memory only |
 
 ## Note on `topgun dev`

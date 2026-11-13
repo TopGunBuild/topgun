@@ -10,7 +10,7 @@ import { ChevronRight, Layers, Server, Lock, Cloud } from 'lucide-react';
 export const dockerBuildCode = `# From the root of the repository
 docker build -t topgun-server -f deploy/Dockerfile.server .`;
 
-export const dockerRunRedbCode = `# Run with the embedded store (default — no database to run)
+export const dockerRunCode = `# Run with the embedded store (default — no database to run)
 docker run -d \\
   --name topgun-server \\
   -p 8080:8080 \\
@@ -21,7 +21,7 @@ docker run -d \\
   -e TOPGUN_WAL_DIR=/data/topgun-wal \\
   topgun-server`;
 
-export const dockerComposeRedbCode = `version: '3.8'
+export const dockerComposeCode = `version: '3.8'
 
 services:
   server:
@@ -109,6 +109,15 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+          # The store open, including a one-time migration of an older store, runs
+          # before the server listens; this gives it up to 30 minutes before the
+          # liveness probe may restart the pod.
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 180
           livenessProbe:
             httpGet:
               path: /health/live
@@ -183,7 +192,7 @@ const engine = new SyncEngine({
 
 # Self-host the server
 
-Run the TopGun server on your own infrastructure using Docker, Docker Compose, or Kubernetes. The server keeps its data in an embedded store ([redb](https://github.com/cberner/redb)) inside the process — there is no database to run and no external dependency. Give it a persistent volume and your data survives restarts.
+Run the TopGun server on your own infrastructure using Docker, Docker Compose, or Kubernetes. The server keeps its data in an embedded store ([RocksDB](https://rocksdb.org)) inside the process — there is no database to run and no external dependency. Give it a persistent volume and your data survives restarts.
 
 ## Building the image
 
@@ -198,7 +207,7 @@ The Dockerfile uses a multi-stage Rust build (`rust:1.85-bookworm`) and produces
 ### Run with the embedded store (default)
 
 <div className="not-prose">
-  <CodeBlock title="terminal" language="bash" code={dockerRunRedbCode} />
+  <CodeBlock title="terminal" language="bash" code={dockerRunCode} />
 </div>
 
 ## Docker Compose
@@ -206,7 +215,7 @@ The Dockerfile uses a multi-stage Rust build (`rust:1.85-bookworm`) and produces
 ### Single node
 
 <div className="not-prose">
-  <CodeBlock title="docker-compose.yml" language="yaml" code={dockerComposeRedbCode} />
+  <CodeBlock title="docker-compose.yml" language="yaml" code={dockerComposeCode} />
 </div>
 
 <div className="not-prose">

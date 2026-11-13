@@ -50,7 +50,7 @@ program
 program
   .command('config')
   .description('Manage configuration')
-  .option('--storage <type>', 'Set storage: redb, null')
+  .option('--storage <type>', 'Set storage: rocksdb, null')
   .option('--show', 'Show current configuration')
   .action(configCmd);
 

@@ -7,7 +7,7 @@ order: 52
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, HardDrive, AlertTriangle } from 'lucide-react';
 
-export const redbStartCode = `# Default — no configuration needed
+export const rocksStartCode = `# Default — no configuration needed
 pnpm start:server
 
 # Or with explicit paths
@@ -29,44 +29,54 @@ STORAGE_BACKEND=null pnpm start:server`;
 
 # Storage backends
 
-TopGun keeps your data in an embedded store inside the server: there is no database to set up, run or connect to. Data survives restarts on the path you give it. The backend is selected at startup via `STORAGE_BACKEND`; two values are accepted: `redb` (the default) and `null` (ephemeral, tests only).
+TopGun keeps your data in an embedded store inside the server: there is no database to set up, run or connect to. Data survives restarts on the path you give it. The backend is selected at startup via `STORAGE_BACKEND`; two values are accepted: `rocksdb` (the default) and `null` (ephemeral, tests only). The older value `redb` is a deprecated alias in this release: the server accepts it with one warning, runs the RocksDB store, and migrates an existing redb store at start. The next release refuses it, so change it to `rocksdb` or remove the variable.
 
 ## Choosing a backend
 
 | Scenario | Backend | Reason |
 |----------|---------|--------|
-| Local development, demo, production on a single node | `redb` (default) | Zero-config, no Docker, data kept on a volume you control |
+| Local development, demo, production on a single node | `rocksdb` (default) | Zero-config, no Docker, data kept on a volume you control |
 | Integration tests / CI | `null` | Ephemeral; deterministic between runs |
 
-## redb (embedded default)
+## RocksDB (embedded default)
 
 <div className="flex items-center gap-2 mb-4 not-prose">
   <HardDrive className="w-6 h-6 text-brand" />
-  <span className="text-neutral-600 dark:text-neutral-300">A fast embedded key-value store — no external process required.</span>
+  <span className="text-neutral-600 dark:text-neutral-300">An embedded key-value store — no external process required.</span>
 </div>
 
-Your data stays on a path you choose and survives restarts, with no separate database, no Docker and no connection pool. The server keeps the store in a data directory (`./topgun-data` by default), served in-process by [redb](https://github.com/cberner/redb), and keeps acknowledged writes that are not yet in the store in a write-ahead log directory (`./topgun-wal` by default).
+Your data stays on a path you choose and survives restarts, with no separate database, no Docker and no connection pool. The server keeps the store in a data directory (`./topgun-data` by default), served in-process by [RocksDB](https://rocksdb.org), and keeps acknowledged writes that are not yet in the store in a write-ahead log directory (`./topgun-wal` by default).
 
-### Starting with redb
+### Starting with RocksDB
 
 <div className="not-prose">
-  <CodeBlock title="terminal" language="bash" code={redbStartCode} />
+  <CodeBlock title="terminal" language="bash" code={rocksStartCode} />
 </div>
 
 ### Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STORAGE_BACKEND` | `"redb"` | Set to `redb` or omit entirely |
-| `TOPGUN_DATA_DIR` | `topgun-data` beside `TOPGUN_REDB_PATH` when that is set, else `./topgun-data` | The store directory; it holds `engine.redb`, which also records how far the write-ahead log has been stored |
+| `STORAGE_BACKEND` | `"rocksdb"` | Set to `rocksdb` or omit entirely (`redb` is a deprecated alias, see above) |
+| `TOPGUN_DATA_DIR` | `topgun-data` beside `TOPGUN_REDB_PATH` when that is set, else `./topgun-data` | The store directory; it holds `engine.rocksdb/`, which also records how far the write-ahead log has been stored |
 | `TOPGUN_REDB_PATH` | `./topgun.redb` | The store file of earlier versions: migrated into the data directory once, then replaced by a small marker file (see below) |
 | `TOPGUN_WAL_DIR` | `./topgun-wal` | Directory of the write-ahead log; keep it on the same volume as the data directory, and treat the two as one unit |
 
 The container image sets `TOPGUN_DATA_DIR=/data/topgun-data` and `TOPGUN_REDB_PATH=/data/topgun.redb`, and its write-ahead log lives in `/data/topgun-wal`, so a volume mounted at `/data` holds everything. Every start logs `store location: data directory …` with the directory it uses and where that came from (`data_dir_source`).
 
+### File descriptor limit
+
+RocksDB keeps many files open at once. At start the server raises the soft `RLIMIT_NOFILE` of its process to the hard limit (on macOS also capped by `kern.maxfilesperproc`), then lets RocksDB keep open at most half of the resulting soft limit, never more than 40 960. Both numbers are on the `eviction + write-behind + WAL initialized` startup line as `nofile_soft` and `rocksdb_max_open_files`. If the limit cannot be raised, the server logs a warning and sizes RocksDB under the limit it has. If the soft limit is still below 1024, it warns that RocksDB then keeps fewer files open and the others are reopened for reads.
+
+The server can only raise the soft limit up to the hard limit, so set the hard limit where the process is started: `LimitNOFILE=` in a systemd unit, `ulimit -Hn` in a shell, or the `ulimits` of a container.
+
+### Upgrading from an earlier store
+
+Earlier versions kept the store in `engine.redb` inside the data directory. The first start of this version copies it into `engine.rocksdb/` by itself, verifies the copy, and keeps the old file as `engine.redb.pre-rocksdb`. Nothing is run by hand; the copy is resumable if the process stops in the middle. Back up the data directory and the WAL directory before upgrading.
+
 ### Upgrading from a store file
 
-Earlier versions kept the store as one file at `TOPGUN_REDB_PATH`. The first start of this version moves it into the data directory by itself: nothing to run by hand, and the old file is kept.
+Even earlier versions kept the store as one file at `TOPGUN_REDB_PATH`. The first start of a version with a data directory moved it into the data directory by itself: nothing to run by hand, and the old file is kept.
 
 - **Before upgrading,** copy the `TOPGUN_REDB_PATH` file to another disk. The migration keeps it, but only a copy elsewhere survives the loss of this disk.
 - The migration runs at start-up, before the server listens. It needs 1.5 × the size of the old file plus 64 MiB free on the data directory's file system, and otherwise refuses to start without changing anything. It logs `store format: migrating … into … from the table-per-map format`, a `store migration progress` line at least every 10 s, and `store format: migration complete`.
@@ -80,7 +90,7 @@ Earlier versions kept the store as one file at `TOPGUN_REDB_PATH`. The first sta
   4. Rename `{TOPGUN_REDB_PATH}.pre-migration` back to `TOPGUN_REDB_PATH`.
   5. Start the old server.
 
-  There is no tool that exports the new format back. Never point an older binary at the data directory's `engine.redb` itself: it would open it as a store with no maps and serve empty maps.
+  There is no tool that exports the new format back. Never point an older binary at the data directory's store itself: it would open it as a store with no maps and serve empty maps.
 - **Not a rollback target:** the first version with a data directory (built from `6a030bb6`) refuses a data directory this version has opened — it exits with `store format: refusing to open: unknown metadata …` before it listens and changes no file of the WAL directory. There is no tool to go back to it.
 - If the server refuses to start with a `store location:` or `store migration:` line, see [Troubleshooting](/docs/guides/troubleshooting#server-refuses-to-start-with-a-store-location-or-store-migration-line).
 

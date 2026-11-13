@@ -6,8 +6,13 @@ replicaCount: 1
 # live under mountPath (the store directory topgun-data and topgun-wal);
 # topgun.redb there is the store file of earlier versions, which the server
 # migrates into topgun-data once and then replaces by a small marker file.
-# The migration needs 1.5 x the size of that file plus 64 MiB free on the
-# volume. Without persistence the data is lost when the pod is rescheduled.
+# That migration needs 1.5 x the size of topgun.redb plus 64 MiB free on the
+# volume. A topgun-data written by an earlier version holds engine.redb,
+# which the server migrates once into engine.rocksdb/ and keeps as
+# engine.redb.pre-rocksdb; that migration needs 1.5 x the size of
+# engine.redb plus 64 MiB free, and the volume then holds both stores until
+# the kept file is deleted. Without persistence the data is lost when the
+# pod is rescheduled.
 persistence:
   enabled: true
   size: 1Gi
@@ -71,6 +76,19 @@ clustering:
 
 # Health probes
 probes:
+  # The store open runs before the server listens, and it includes the
+  # one-time migrations of a store written by an earlier version, so no probe
+  # answers until it is done. Measured on a Mac: 1 000 000 rows of 1 KiB
+  # migrated from engine.redb in 6.56 s; the older table-per-map file took
+  # about 16 s per GiB. The budget here, failureThreshold x periodSeconds =
+  # 30 minutes, leaves room for far larger stores and slower disks; liveness
+  # and readiness start only once this probe has passed. Raise it for a store
+  # of many GiB on slow storage.
+  startup:
+    enabled: true
+    path: /health/live
+    periodSeconds: 10
+    failureThreshold: 180
   liveness:
     enabled: true
     path: /health/live
@@ -87,10 +105,13 @@ metrics:
   enabled: true
   port: 9090
 
+# The server's defaults use up to TOPGUN_MAX_RAM_MB (1024 MiB, the record
+# cache) plus TOPGUN_ENGINE_CACHE_MB (256 MiB, RocksDB) = 1280 MiB, and the
+# rest of the process comes on top. Raise the limit when you raise either.
 resources:
   limits:
     cpu: 500m
-    memory: 512Mi
+    memory: 2Gi
   requests:
     cpu: 200m
     memory: 256Mi
