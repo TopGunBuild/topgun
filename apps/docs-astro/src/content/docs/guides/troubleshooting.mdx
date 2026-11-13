@@ -165,17 +165,27 @@ This guide covers common issues you may encounter when using TopGun, organized b
 - See [Storage Backends](/docs/deploy/storage-backends) for the embedded store, its paths and backup
 - If the server starts on the default embedded store and you see write failures, check that the data directory is writable (defaults to `./topgun-data`; override with `TOPGUN_DATA_DIR`)
 
+### `STORAGE_BACKEND=redb is deprecated` in the log, or an unknown STORAGE_BACKEND
+
+**Symptom:** The server starts and logs a warning that begins with `STORAGE_BACKEND=redb is deprecated:`, or it exits at startup with `Unknown STORAGE_BACKEND='…' (expected: rocksdb, null)`.
+
+**Cause:** The server keeps its data in RocksDB. This release still accepts `STORAGE_BACKEND=redb` as another name for the embedded store: it starts RocksDB and, if the data directory holds a redb store (`engine.redb`), migrates it once at that start (see [Upgrading to the RocksDB store](#upgrading-to-the-rocksdb-store-and-rolling-back)). The next release refuses `redb` with exit 1. Any value other than `rocksdb` and `null` is refused now.
+
+**Solutions:**
+- Set `STORAGE_BACKEND=rocksdb`, or unset it: `rocksdb` is the default. Check your shell, `.env` files, compose files, Helm values and container environment.
+- `null` keeps nothing on disk; use it only for tests and benchmarks.
+
 ### Server refuses to start with a store location or store migration line
 
-**Symptom:** The server exits with code 1 at startup, before it listens, with an error that begins with `store location:` or `store migration:` (a refusal is also logged as one `ERROR` line).
+**Symptom:** The server exits with code 1 at startup, before it listens, with an error that begins with `store location:` or `store migration:`. The reason is always printed on stderr as `Error: store open: refusing to start: …`; most refusals are also logged as one `ERROR` line, but some, such as a raw I/O error while the location is checked, appear only on stderr.
 
-**Cause:** The server keeps its store in a data directory (`TOPGUN_DATA_DIR`) and, once, migrates the store file of earlier versions (`TOPGUN_REDB_PATH`) into it. When the two paths do not say unambiguously which store to serve, it refuses rather than guess. A refusal creates, moves and deletes nothing: the old store file, the kept `.pre-migration` file and the marker file stay exactly as they were, and the data directory's records are unchanged. Fix the cause and start again. Below, `{D}` is the data directory, `{L}` the path `TOPGUN_REDB_PATH` names (default `./topgun.redb`), and `{K}` the kept file `{L}.pre-migration`. The `store location: data directory {D}` line logged just before the refusal shows the paths the server used (`data_dir`, `data_dir_source`, `legacy_path`).
+**Cause:** The server keeps its store in a data directory (`TOPGUN_DATA_DIR`), in `engine.rocksdb/`, and, once, migrates the store file of earlier versions (`TOPGUN_REDB_PATH`) into it. When the two paths do not say unambiguously which store to serve, it refuses rather than guess. A refusal creates, moves and deletes nothing: the old store file, the kept `.pre-migration` file and the marker file stay exactly as they were, and the data directory's records are unchanged. Fix the cause and start again. Below, `{D}` is the data directory, `{L}` the path `TOPGUN_REDB_PATH` names (default `./topgun.redb`), and `{K}` the kept file `{L}.pre-migration`. The `store location: data directory {D}` line logged just before the refusal shows the paths the server used (`data_dir`, `data_dir_source`, `legacy_path`).
 
 **Solutions, by the line the server logged:**
 
 - `store location: {VAR} is set but empty` — `TOPGUN_DATA_DIR` or `TOPGUN_REDB_PATH` is set to an empty value. Unset it to use the default, or set a path.
 - `store location: TOPGUN_DATA_DIR ({D}) and TOPGUN_REDB_PATH ({L}) name the same place or one lies inside the other` — give the data directory and the old store path different places, neither inside the other, for example `/data/topgun-data` and `/data/topgun.redb`.
-- `store location: {D} is not a store directory, an empty directory or absent` — the data directory holds files but no store (`engine.redb`), or is a file. Point `TOPGUN_DATA_DIR` at an empty or absent directory, or at the directory that holds your store.
+- `store location: {D} is not a store directory, an empty directory or absent` — the data directory holds files but no store, or is a file; beside `engine.rocksdb/` it may hold only `engine.redb` and `engine.redb.pre-rocksdb`. Point `TOPGUN_DATA_DIR` at an empty or absent directory, or at the directory that holds your store. An older server version logs this same line on a data directory this version has migrated to RocksDB: see [rolling back](#upgrading-to-the-rocksdb-store-and-rolling-back).
 - `store location: two stores found: {D} holds a store in the data-directory format and {L} is a table-per-map store file; the server serves only one. Move one of them aside: rename {L} to keep the data-directory store, or move {D} away to migrate {L} again` — an old store file was put back beside an existing data directory (for example restored from a backup, or after a rollback that left the data directory in place). Decide which one holds the data you want. To keep the data directory, rename the file at `{L}`; the server then writes its marker file there. To serve the old file, move `{D}` away; the next start migrates `{L}` into a new data directory.
 - `store location: {L} is an empty file; an older binary would open it as an empty store. Delete it, and this server writes the marker file there` — delete the empty file; the next start writes the marker file in its place.
 - `store location: {L} says the store was moved to a data directory, but {D} holds no store` — `{L}` holds the marker file, but `TOPGUN_DATA_DIR` points at a directory without a store. Point `TOPGUN_DATA_DIR` at the directory the marker file names (its second line says which), or restore that directory from your backup. The marker file is never a store, so the server does not migrate it.
@@ -194,9 +204,52 @@ This guide covers common issues you may encounter when using TopGun, organized b
 - `store migration: refusing to resume the migration from an unknown source: the mark cannot be read (…)` — the data directory holds an unfinished migration this server cannot read. Move `{D}` away and start again: the old file at `{L}` is migrated anew.
 - `store migration: verification failed for {table}: {difference}; {D} is left unfinished and is refused until it is removed` — the copy in the data directory does not match the old file. The old file is untouched. Move `{D}` away and start again to migrate anew; if the failure repeats, keep the logs and the old file and report it.
 - `store location: cannot write the stub at {L}` — the server could not write its marker file at `{L}`: check that the directory of `{L}` is writable by the server.
-- `store open: {file} does not open with this version: redb panicked while opening it (…), as it does on a file left by a crash while the file grew; do not delete the file, its records are probably intact; to bring the node back now, restore the data directory and the WAL directory from the same backup and keep this file` — the embedded store failed inside its own open on this file, and it fails the same way at every start. The known cause is a crash (power loss, `kill -9`) while an earlier version of the server was growing the store file: the store's header reached the disk and the file's growth did not. The current version makes the growth durable before the header can name it, so it no longer leaves such a file, but it still refuses one left by an earlier version. The records in the file are probably intact, but this version of the store cannot open it. Do not delete or edit the file. To bring the node back now, restore the data directory and the WAL directory from the same backup, taken with the server stopped, and keep the refused file aside. The store may have rewritten the file's header before it failed, so this refusal is the one that can change `{file}`.
+- `store open: {file} does not open with this version: redb panicked while opening it (…), as it does on a file left by a crash while the file grew; do not delete the file, its records are probably intact; to bring the node back now, restore the data directory and the WAL directory from the same backup and keep this file` — this version opens a redb file only to migrate it into RocksDB, and redb failed inside its own open on this file, and it fails the same way at every start. The known cause is a crash (power loss, `kill -9`) while an earlier version of the server was growing the store file: the store's header reached the disk and the file's growth did not. The current version makes the growth durable before the header can name it, so it no longer leaves such a file, but it still refuses one left by an earlier version. The records in the file are probably intact, but this version of the store cannot open it. Do not delete or edit the file. To bring the node back now, restore the data directory and the WAL directory from the same backup, taken with the server stopped, and keep the refused file aside. The store may have rewritten the file's header before it failed, so this refusal is the one that can change `{file}`.
 
 **Not a refusal:** `store location: TOPGUN_REDB_PATH names {L}, which is not read: TOPGUN_DATA_DIR ({D}) already holds a store` is a warning; the server starts on the data directory and leaves the file at `{L}` alone. Remove it, or point `TOPGUN_REDB_PATH` elsewhere, to silence it. `store format: the pre-migration store file is kept at {K}; delete it once this store is confirmed` is logged at every start while the kept file exists; delete `{K}` once you no longer need a way back (see [Storage backends](/docs/deploy/storage-backends)).
+
+### Server refuses to start with a store engine line
+
+**Symptom:** The server exits with code 1 at startup, before it listens, with an error that begins with `store engine:`. The reason is always printed on stderr as `Error: store open: refusing to start: …`. Most of these refusals are also logged as one `ERROR` line; `store engine: cannot open` of the redb file being migrated, `store engine: cannot create`, and a write error during the copy appear only on stderr.
+
+**Cause:** The server keeps its store in RocksDB, in `{D}/engine.rocksdb/`. A data directory written by an earlier version holds a redb store, `{D}/engine.redb`, which the server copies into RocksDB once, at its first start, and then keeps as `{D}/engine.redb.pre-rocksdb`. When the data directory does not say unambiguously what to serve, or the migration cannot go on, the server refuses rather than guess. A refusal creates, moves and deletes nothing: `engine.redb` and `engine.redb.pre-rocksdb` stay exactly as they were. Below, `{D}` is the data directory.
+
+**Solutions, by the line the server logged:**
+
+- `store engine: two stores found: {D} holds engine.rocksdb and engine.redb; the server serves only one. Move engine.redb aside to keep the RocksDB store, or move engine.rocksdb away to migrate engine.redb again` — if you put a redb store back beside the RocksDB one (for example from a backup), decide which one holds the data you want and move the other aside. If you did not put a second store there, this follows a crash during the first second of the migration, while its first batch was being written: move `{D}/engine.rocksdb` away and start again. `engine.redb` is untouched, so the next start migrates it anew.
+- `store engine: both {D}/engine.redb and {D}/engine.redb.pre-rocksdb hold something; the server keeps only one redb file and never overwrites the kept one. Move one of them away` — a kept file from an earlier migration is in the way. Move the one you do not need out of the data directory (keep it until the store is confirmed), then start again.
+- `store engine: the redb store is kept at {D}/engine.redb.pre-rocksdb, but {D} holds no store; restore the data directory, or rename … to {D}/engine.redb to migrate it again` — `engine.rocksdb` is missing after a migration. Restore the data directory and the WAL directory from the same backup, or rename the kept file to `engine.redb` so the next start migrates it again (writes acknowledged after the first migration are not in it).
+- `store engine: {D}/engine.rocksdb holds engine data but no CURRENT; restore the data directory from a backup` — the RocksDB directory is damaged. Restore the data directory and the WAL directory from the same backup. If the node was migrating and `engine.redb` is still there, moving `engine.rocksdb` away and starting again migrates anew.
+- `store engine: cannot inspect {D}/engine.rocksdb: …; nothing was changed` — the server could not read the RocksDB directory to decide what it holds. Check its permissions and the disk, then start again.
+- `store engine: refusing to migrate: {available} bytes are free on the file system of {D}, {required} are needed (1.5 × the size of engine.redb, plus 64 MiB); nothing was changed` — free disk space on the data directory's file system, or move the data directory to a larger one, and start again. While the kept file exists the node holds both stores.
+- `store engine: cannot read the free space of {D}: …` — the server could not ask the file system for its free space. Check that the data directory exists and is readable.
+- `store engine: refusing to resume the migration into {D}/engine.rocksdb: the mark cannot be read (…)` — an interrupted migration left a record this server cannot read. Move `engine.rocksdb` away and start again: `engine.redb` is migrated anew.
+- `store engine: refusing to resume the migration: {D}/engine.redb is gone; restore the data directory from a backup` — a migration was interrupted and the redb store it copies from was removed. Put `engine.redb` back, or restore the data directory and the WAL directory from the same backup.
+- `store engine: refusing to resume the migration: neither {D}/engine.redb nor {D}/engine.redb.pre-rocksdb holds the redb store the verified copy was taken from` — put the redb file back under one of those names, or restore both directories from the same backup.
+- `store engine: refusing to migrate {D}/engine.redb: a migration into it is unfinished` — the redb store itself still carries an unfinished migration of an earlier version, which this server does not take as a source. Keep the logs and the data directory and report it; restoring both directories from the same backup lets the node start.
+- `store engine: verification failed: {difference}; {D}/engine.rocksdb is left unfinished and is refused until it is moved away` — the copy does not match `engine.redb`, which is untouched. Move `engine.rocksdb` away and start again to migrate anew; if it fails again, keep the logs and `engine.redb` and report it.
+- `store engine: cannot open {path}: …` — the store, or the redb file being migrated, does not open. If the text names a lock (`LOCK`), another server process is running on the same data directory: stop it, and run one server process per data directory. Otherwise check permissions and free space; a store that is damaged refuses at every start until the data directory and the WAL directory are restored from the same backup.
+- `store engine: cannot create {D}/engine.rocksdb: …` — the server could not create the RocksDB store. Check that the data directory is writable and the disk has room.
+
+**Not a refusal:** `store engine: removing {D}/engine.rocksdb: it holds no row (a start was interrupted before its first write)` is a warning: a first start was stopped before it wrote anything, and the server starts over. `store engine: the redb store is kept at {D}/engine.redb.pre-rocksdb; delete it once this store is confirmed` is logged at every start while the kept file exists; delete it once you no longer need a way back (below).
+
+**One server process per data directory.** Nothing stops a second server started on the same directory, and the removal above does not take RocksDB's lock, so a second server started while the first one creates its store can delete it.
+
+### Upgrading to the RocksDB store and rolling back
+
+**Upgrading.** The first start of this version on a data directory that holds `engine.redb` migrates it into `engine.rocksdb/` inside the store open, before it listens; nothing is run by hand. Give the start time: measured in-process on a Mac, 1 000 000 rows of 1 KiB took 6.56 s. The migration needs `1.5 × the size of engine.redb + 64 MiB` free on the data directory's file system. The next release no longer reads redb stores or the store files of earlier versions, so **upgrading from a version before this release: start this release first, then the next one.**
+
+**Before you upgrade (recommended):** stop the older version until its stop logs `drained=true`, and take a backup of the data directory and the WAL directory together. Then a rollback loses only the writes acknowledged after the migration.
+
+**Rolling back** to an older version is a return to the kept redb file. An older version started on the migrated directory refuses with `store location: {D} is not a store directory, an empty directory or absent` and changes nothing.
+
+1. Stop this version. It must exit 0 and log `write-behind shutdown: rollback hints written` with `drained=true`. If it logs `write-behind shutdown: the WAL's rollback hints could not be written; …` or `drained=false`, start it again and stop it until it logs `drained=true`.
+2. Move `{D}/engine.rocksdb` out of the data directory.
+3. Rename `{D}/engine.redb.pre-rocksdb` to `{D}/engine.redb`.
+4. Move the WAL directory away and create an empty one in its place: the older version cannot read this version's log.
+5. Start the older version.
+
+On the server, **every write acknowledged since the migration is gone** after a rollback. So are writes the older version had acknowledged but not yet stored when it stopped — after a `kill -9`, a crash, or a stop that logged `drained=false` — because this version stored them in RocksDB, not in the kept file, and step 4 removes the log that held them. There is no tool that copies RocksDB back to redb.
 
 ### Server refuses to start with a WAL directory check line
 
@@ -241,18 +294,19 @@ This guide covers common issues you may encounter when using TopGun, organized b
 
 **Symptom:** The server exits with code 1 at startup, before it accepts a connection, with a `FATAL:` line about the WAL followed by a line that begins with `WAL segment` or `WAL file`.
 
-**Cause:** Each write-ahead-log segment starts with a header that names its partition, its first sequence number, its format and, when [encryption at rest](/docs/guides/encryption-at-rest) is on, the data key that seals its frames. A segment whose header, name or frames do not agree is refused rather than replayed. Below, `{file}` is the segment.
+**Cause:** The write-ahead log is one stream of segments, `stream-{n}.log`, each holding the writes of every partition. Each segment starts with a header that names its number in the stream, its format and, when [encryption at rest](/docs/guides/encryption-at-rest) is on, the data key that seals its frames, and every frame names its partition and sequence number. Segments written by earlier versions (`partition-{p}-{seq}.log`) are still read. A segment whose header, name or frames do not agree is refused rather than replayed. Below, `{file}` is the segment.
 
 **Solutions, by the line the server logged:**
 
-- `WAL segment {file} has a header for partition {p} from sequence {s}, which its name does not carry; refusing to start` — the file was renamed or copied between partitions. Restore the WAL directory together with the data directory from the same backup.
+- `WAL stream segment {file} has a header for stream segment {n}, which its name does not carry; refusing to start`, `WAL stream segment {file} does not carry its number in … digits; refusing to start`, or, for a segment of an earlier version, `WAL segment {file} has a header for partition {p} from sequence {s}, which its name does not carry; refusing to start` — the file was renamed or copied. Restore the WAL directory together with the data directory from the same backup.
+- `WAL stream segment {file} has a frame at offset {offset} for partition {p}, outside 0..271; refusing to start`, `… whose header names sequence {s} but whose entry is sequence {e}; refusing to start`, or `WAL stream segment {file} changed at offset {offset} after it was opened; refusing to start` — the segment was changed on disk. Restore both directories from the same backup, and keep the refused files.
 - `WAL segment {file} has a header that is refused: {reason}; refusing to start` — with `unknown header version`, `unknown partition layout`, `unknown payload schema` or `unknown cipher`, the segment was written by a newer version of the server: run that version. With `header CRC … does not match its content` or `key id … does not fit cipher …`, the header is damaged: restore the WAL directory together with the data directory from the same backup.
-- `WAL segment {file} has a truncated tail but is not the active segment; a torn non-last segment is corruption — refusing to start` — a segment that is not the last one in its partition is cut short. Restore both directories from the same backup.
+- `WAL segment {file} has a truncated tail but is not the active segment; a torn non-last segment is corruption — refusing to start` — a segment that is not the newest one is cut short. Restore both directories from the same backup.
 - `WAL segment {file} is sealed with data key {id}, which is not in the keyring; refusing to start` — the WAL directory does not belong to this data directory: no key the data directory holds opens it. Restore the data directory and the WAL directory from the same backup; they are one unit.
 - `WAL segment {file} has a frame at offset {offset} that fails authentication: its bytes were changed; refusing to start` — a sealed frame was changed on disk although its checksum is intact. It is not a torn write from a crash, which the server tolerates at the end of the last segment. Restore both directories from the same backup, and keep the refused files.
-- `WAL file {file} has wrong magic at offset 0; refusing to start to avoid replaying corrupt data` from a server **older** than WAL format v2 — the WAL directory was written by a newer version, which no older version reads. Start the newer version again and stop it until its stop logs `drained=true`: that stop removes every segment the store holds. An older version that refuses with `store format: refusing to open: unknown metadata "keyring"` cannot open a store that has had encryption on; see [rolling back](/docs/guides/encryption-at-rest#rolling-back).
+- `WAL file {file} has wrong magic at offset 0; refusing to start to avoid replaying corrupt data` from a server **older** than WAL format v2 — the WAL directory was written by a newer version, which no older version reads. An older version started on a data directory this version wrote refuses even earlier, at its store open (`store location: {D} is not a store directory, an empty directory or absent`); going back to it is the engine rollback below, which starts it with an empty WAL directory. An older version that refuses with `store format: refusing to open: unknown metadata "keyring"` cannot open a store that has had encryption on; see [rolling back](/docs/guides/encryption-at-rest#rolling-back).
 
-A store file that the embedded store cannot open at all is a different refusal, `store open: … redb panicked while opening it`; see the store location section above.
+A redb file that cannot be opened for its migration is a different refusal, `store open: … redb panicked while opening it`; see the store location section above.
 
 ### Cluster nodes not discovering each other
 
@@ -269,3 +323,29 @@ The following steps are forward-compatible troubleshooting guidance for when ful
 - Verify that nodes can resolve each other's hostnames or IP addresses
 - Check that the seed node addresses are correctly configured in each node's cluster configuration
 - Review server logs with `RUST_LOG=topgun_server=debug` to see cluster protocol messages and identify where discovery fails
+
+---
+
+## Server Stops by Itself
+
+Run the server under a supervisor that restarts it on a non-zero exit code (systemd `Restart=on-failure` with a `RestartSec=` of several seconds, or a Kubernetes restart policy). The cases below stop the node on purpose, and a restart is how it comes back.
+
+### Exit code 72: the store is broken
+
+**Symptom:** The server stops by itself with exit code 72. Before it stops it logs `write-behind store: the durable store is broken and stores nothing more in this process; writes are refused from now on and the node stops` (with `cause="io"` or `cause="corrupted"`) and `the durable store is broken; shutting the node down`, and `/health/ready` stops answering 200.
+
+**Cause:** RocksDB reported an I/O error or corruption. After either, RocksDB refuses every further write on that handle, so the server stops instead of acknowledging writes it can no longer store. Writes it acknowledged but did not store are kept in the write-ahead log and replayed at the next start. The `error` field carries RocksDB's own text; `io_kind` is always `"Other"`, so a full disk looks like any other I/O error.
+
+**Solutions:**
+- Check the disk of the data directory: free space, permissions (a directory that became read-only), and the system log for I/O errors. When the cause is gone, one restart brings the node back with every acknowledged write.
+- If every restart exits with code 1 and `store engine: cannot open …`, the cause is still there, or the store is damaged: fix the disk, or restore the data directory and the WAL directory from the same backup.
+
+### Exit code 134: `WAL fail-stop`
+
+**Symptom:** The server aborts with exit code 134 after logging `WAL fail-stop: unrecoverable condition, terminating process`, with `tier=B` and a `ctx` field that names what failed (for example `WAL fsync failed: …` or `WAL frame append failed: …`).
+
+**Cause:** Writing or syncing the write-ahead log to disk failed. After a failed sync the operating system may already have dropped the data it could not write and cleared the error, so a later sync that succeeds proves nothing about it. The server therefore stops instead of retrying, under every `TOPGUN_WAL_FSYNC_POLICY`, the default `batched` included. It also stops this way when its log writer makes no progress for 30 s while writes wait.
+
+**Solutions:**
+- There is nothing to retry inside the process. Check the disk of the WAL directory (`TOPGUN_WAL_DIR`): free space, permissions, and the system log for I/O errors.
+- Then let the supervisor restart the node: the restart replays the log.
