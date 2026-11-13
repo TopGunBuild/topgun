@@ -16,7 +16,7 @@ TopGun v2 is a complete rewrite. It's not a port — it's a new architecture bui
 - **Offline support**: Changes persist to IndexedDB and sync when reconnected.
 - **Conflict-free merges**: Automatic conflict resolution via LWW-Map and OR-Map, with causality tracked by logical clocks.
 - **Efficient delta sync**: Only changed data moves over the wire, via Merkle tree comparison.
-- **Pluggable storage**: Data lives in an embedded store inside the server (redb) — no database to run; bring your own client-side adapter.
+- **Pluggable storage**: Data lives in an embedded store inside the server (RocksDB) — no database to run; bring your own client-side adapter.
 - **Cluster-ready**: Server-side partitioning, pub/sub, and distributed locks (single-node stable; cluster-mode uses partition-routing — Raft-backed cluster locks in progress).
 - **Rust server, TypeScript client**: Type-safe SDK with a high-performance Rust backend.
 - **AI-native**: AI agents read and mutate your live data natively over MCP — the bundled `@topgunbuild/mcp-server` exposes your maps to Claude Desktop, Cursor, or any MCP client. Query, mutate, search, and subscribe without leaving your agent workflow.
@@ -39,7 +39,7 @@ This boots a Vite app with a working LWW-Map todo demo. For the backend, in a se
 npx @topgunbuild/server
 ```
 
-No Rust toolchain required — this downloads a prebuilt binary for your platform and starts the server instantly. The server runs on `ws://localhost:8080` with embedded storage at `./topgun.redb` — writes survive restart, no separate database required. Stop with `Ctrl-C`, restart, and your data is still there. To back it up, see [Backup and restore](#production) below.
+No Rust toolchain required — this downloads a prebuilt binary for your platform and starts the server instantly. The server runs on `ws://localhost:8080` with embedded storage in `./topgun-data` — writes survive restart, no separate database required. Stop with `Ctrl-C`, restart, and your data is still there. To back it up, see [Backup and restore](#production) below.
 
 **Contributor / monorepo path:**
 
@@ -210,7 +210,7 @@ Full docs: [topgun.build/docs](https://topgun.build/docs)
 |---------|-------------|
 | `@topgunbuild/core` | CRDTs, Hybrid Logical Clock, Merkle trees, message schemas |
 | `@topgunbuild/client` | Browser/Node.js SDK with IndexedDB persistence |
-| `server-rust` | Rust WebSocket server (axum), clustering, embedded redb storage |
+| `server-rust` | Rust WebSocket server (axum), clustering, embedded RocksDB storage |
 | `core-rust` | Rust port of CRDT primitives, depended on by `server-rust` (internal) |
 | `@topgunbuild/react` | React hooks: `useQuery`, `useMap`, `useMutation`, `useTopic` |
 | `@topgunbuild/adapters` | Storage adapters: IndexedDB |

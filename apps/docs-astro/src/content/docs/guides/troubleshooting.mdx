@@ -160,7 +160,7 @@ This guide covers common issues you may encounter when using TopGun, organized b
 **Cause:** The server keeps its data in an embedded store, because the Postgres backend has been removed. It refuses STORAGE_BACKEND=postgres, and it refuses to start while DATABASE_URL is set (an empty value counts as set), so a leftover variable cannot silently send your data to a different store than you expect.
 
 **Solutions:**
-- Unset `DATABASE_URL` (an empty value counts as set), and remove `STORAGE_BACKEND=postgres` if you set it. The server then starts on the embedded store (`STORAGE_BACKEND=redb`, the default). Check your shell, `.env` files, compose files and container environment.
+- Unset `DATABASE_URL` (an empty value counts as set), and remove `STORAGE_BACKEND=postgres` if you set it. The server then starts on the embedded store (`STORAGE_BACKEND=rocksdb`, the default). Check your shell, `.env` files, compose files and container environment.
 - Data kept by the old Postgres backend is not read by this server. There is no migration tool: it remains available with the server built from the tag `postgres-backend-last`.
 - See [Storage Backends](/docs/deploy/storage-backends) for the embedded store, its paths and backup
 - If the server starts on the default embedded store and you see write failures, check that the data directory is writable (defaults to `./topgun-data`; override with `TOPGUN_DATA_DIR`)

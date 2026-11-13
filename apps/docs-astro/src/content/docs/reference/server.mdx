@@ -11,7 +11,7 @@ import { Server } from 'lucide-react';
   <h1 className="text-4xl font-bold text-foreground">Server & CLI</h1>
 </div>
 
-The TopGun server is a Rust binary built on [axum](https://docs.rs/axum) and [tokio](https://tokio.rs). It manages client WebSocket connections, CRDT synchronization, Merkle delta sync, full-text and vector search, clustering, and durable storage (the embedded redb store).
+The TopGun server is a Rust binary built on [axum](https://docs.rs/axum) and [tokio](https://tokio.rs). It manages client WebSocket connections, CRDT synchronization, Merkle delta sync, full-text and vector search, clustering, and durable storage (the embedded RocksDB store).
 
 This page documents the user-facing surface: how to run it, what flags and environment variables it reads, the HTTP and WebSocket endpoints, and the Rust embed API for callers that want to host the server in-process. For operator-oriented setup with Docker Compose, Kubernetes, and tuning advice, see [Deploy](/docs/deploy).
 
@@ -33,7 +33,7 @@ PORT=8080 cargo run --bin topgun-server --release
 RUST_LOG=topgun_server=debug cargo run --bin topgun-server --release
 ```
 
-By default the server uses the embedded redb backend (no database to run, no Docker required). It binds to `0.0.0.0:8080` and keeps its store in the data directory `./topgun-data` in the working directory, with its write-ahead log in `./topgun-wal`.
+By default the server uses the embedded RocksDB backend (no database to run, no Docker required). It binds to `0.0.0.0:8080` and keeps its store in the data directory `./topgun-data` in the working directory, with its write-ahead log in `./topgun-wal`.
 
 ## CLI flags
 
@@ -57,8 +57,8 @@ All variables below correspond to direct `std::env::var(...)` reads or `tracing-
 
 | Variable | Type | Default | Consumer | Notes |
 |---|---|---|---|---|
-| `STORAGE_BACKEND` | string | `"redb"` | `bin/topgun_server.rs:109` | One of `redb` or `null`; any other value is refused at startup. `null` is in-memory ephemeral (test only). |
-| `TOPGUN_DATA_DIR` | path | `topgun-data` beside `TOPGUN_REDB_PATH` when that is set, else `./topgun-data` | `storage/datastores/redb.rs` | The store directory (used when `STORAGE_BACKEND=redb`); it holds `engine.redb`. A set-but-empty value is refused at startup. |
+| `STORAGE_BACKEND` | string | `"rocksdb"` | `bin/topgun_server.rs` | One of `rocksdb` or `null`; any other value is refused at startup. `redb` is a deprecated alias in this release: it is accepted with one warning, the store is RocksDB, and an existing redb store is migrated at start; the next release refuses it. `null` is in-memory ephemeral (test only). |
+| `TOPGUN_DATA_DIR` | path | `topgun-data` beside `TOPGUN_REDB_PATH` when that is set, else `./topgun-data` | `storage/datastores/redb.rs` | The store directory (used when `STORAGE_BACKEND=rocksdb`); it holds `engine.rocksdb/`. A set-but-empty value is refused at startup. |
 | `TOPGUN_REDB_PATH` | path | `./topgun.redb` | `storage/datastores/redb.rs` | The store file of earlier versions: migrated into the data directory once and kept as `{path}.pre-migration`; a small marker file then stays at this path so that an older binary refuses to start. Not the store. A set-but-empty value is refused at startup. See [Storage backends](/docs/deploy/storage-backends#upgrading-from-a-store-file). |
 | `TOPGUN_WAL_DIR` | path | `./topgun-wal` | `storage/datastores/write_behind.rs` | Directory of the write-ahead log. Keep it on the same volume as the data directory. |
 
