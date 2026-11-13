@@ -3617,9 +3617,9 @@ weaker than a test.
      inspecting it refuses (`store engine: cannot inspect …; nothing was changed`), never read as
      "no row". No served store reads as holding no key: its open writes the format rows in its
      first synced batch, and nothing deletes them; the one exception is a served store whose rows
-     are all still only in its engine log, whose first record was later corrupted from outside,
-     with an `engine.redb` planted beside it — that needs external corruption and an operator's
-     act, not a crash of this binary. The removal holds no `LOCK`: the contract is one server
+     are all still only in its engine log and whose first record was later corrupted from
+     outside: it is removed (and, with an `engine.redb` planted beside it, migrated over);
+     RocksDB's own recovery would discard those rows as well. The removal holds no `LOCK`: the contract is one server
      process per data directory, and a second start on the same directory can remove the
      running process's target until its first copy batch is wholly written (not claimed, below).
   6. *Refusals never move, delete or overwrite the redb files.* Too little free space

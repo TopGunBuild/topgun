@@ -235,7 +235,7 @@ This guide covers common issues you may encounter when using TopGun, organized b
 
 **Not a refusal:** `store engine: removing {D}/engine.rocksdb: it holds no row (a start was interrupted before its first write)` is a warning: a first start was stopped before its first write was wholly written (on an upgrade, while the first batch of the migration was still being written), and the server starts over. `store engine: the redb store is kept at {D}/engine.redb.pre-rocksdb; delete it once this store is confirmed` is logged at every start while the kept file exists; delete it once you no longer need a way back (below).
 
-**One server process per data directory.** Nothing stops a second server started on the same directory, and the removal above does not take RocksDB's lock, so a second server started while the first one creates its store can delete it.
+**One server process per data directory.** Nothing stops a second server started on the same directory, and the removal above does not take RocksDB's lock, so a second server started while the first one creates its store — or, during the engine migration, until its first copy batch is wholly written — can delete it.
 
 ### Upgrading to the RocksDB store and rolling back
 
