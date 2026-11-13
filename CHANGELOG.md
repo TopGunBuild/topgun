@@ -47,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     one. A `kill -9` while the first batch is being written can leave an `engine.rocksdb/` that
     the next start refuses as a second store (`store engine: two stores found: …`, exit 1, at
     every start); move `engine.rocksdb/` away and start again, which migrates `engine.redb`
-    anew.
+    anew (TODO-956).
   - **Refusals.** Two stores in one data directory, a kept file with no store, an
     `engine.rocksdb/` with engine data but no `CURRENT` file, an engine that does not open
     (another process's lock included), too little free space and a failed verification each exit
