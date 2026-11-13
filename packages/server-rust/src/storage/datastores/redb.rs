@@ -1443,7 +1443,7 @@ impl EngineMapDataStore<RedbKvEngine> {
         location: &StoreLocation,
         io: &MigrationIo,
     ) -> anyhow::Result<Self> {
-        Self::open_location_sealed_with(location, io, &Encryption::off())
+        Self::open_location_sealed_with(location, io, &Encryption::off(), true)
     }
 
     /// [`Self::open_location`] with the keys of `encryption`: the store is
@@ -1457,25 +1457,36 @@ impl EngineMapDataStore<RedbKvEngine> {
         location: &StoreLocation,
         encryption: &Encryption,
     ) -> anyhow::Result<Self> {
-        Self::open_location_sealed_with(location, &MigrationIo::default(), encryption)
+        Self::open_location_sealed_with(location, &MigrationIo::default(), encryption, true)
     }
 
-    fn open_location_sealed_with(
+    /// [`Self::open_location_sealed`] with the migration's I/O knobs; the
+    /// startup line is logged only with `log_location`, so a caller that has
+    /// already logged it for the same start (the RocksDB location open, which
+    /// delegates here) does not log it twice.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open_location_sealed`].
+    pub(crate) fn open_location_sealed_with(
         location: &StoreLocation,
         io: &MigrationIo,
         encryption: &Encryption,
+        log_location: bool,
     ) -> anyhow::Result<Self> {
         let resolved = Self::resolve(location)?;
         let Some(paths) = resolved.paths else {
             return Self::open_by_path(&resolved.data_dir);
         };
-        tracing::info!(
-            data_dir = %paths.data_dir.display(),
-            data_dir_source = %location.data_dir_source,
-            legacy_path = %paths.legacy_path.display(),
-            "store location: data directory {}",
-            paths.data_dir.display()
-        );
+        if log_location {
+            tracing::info!(
+                data_dir = %paths.data_dir.display(),
+                data_dir_source = %location.data_dir_source,
+                legacy_path = %paths.legacy_path.display(),
+                "store location: data directory {}",
+                paths.data_dir.display()
+            );
+        }
         Self::check_same_place(&paths)?;
         match data_dir_state(&paths.data_dir)? {
             DataDirState::Other => Err(refuse(
