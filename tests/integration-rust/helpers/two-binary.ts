@@ -221,6 +221,37 @@ export function requireWatermarkRollbackEnv(): TwoBinaryEnv {
   return env;
 }
 
+/** The build of the engine suites' older binary: the last one that stores in `engine.redb`. */
+export const ENGINE_OLD_COMMIT_PREFIX = '7692c380';
+
+const ENGINE_BUILD_HINT =
+  `Engine migration: build the server at ${ENGINE_OLD_COMMIT_PREFIX} (the last binary that stores in ` +
+  '`engine.redb`) in its own worktree and target directory (`git worktree add <scratch>/topgun-engine-old ' +
+  `${ENGINE_OLD_COMMIT_PREFIX}\`, then \`cargo build --release -p topgun-server --manifest-path ` +
+  '<scratch>/topgun-engine-old/Cargo.toml --target-dir <scratch>/topgun-engine-old-target`), build the ' +
+  'newer one in this checkout, and export ENGINE_OLD_SERVER_BINARY, ENGINE_OLD_SERVER_COMMIT (the full ' +
+  'commit the older binary was built from), RUST_SERVER_BINARY and NEW_SERVER_COMMIT.';
+
+/**
+ * Reads the variables of the engine upgrade, resume and rollback tests: the
+ * older binary is the build from ENGINE_OLD_COMMIT_PREFIX. Throws when one is
+ * missing or the commit is another one, since every property under test is
+ * a property of that binary's store and refusal.
+ */
+export function requireEngineEnv(): TwoBinaryEnv {
+  const env = requireOlderBinaryEnv(
+    'ENGINE_OLD_SERVER_BINARY',
+    'ENGINE_OLD_SERVER_COMMIT',
+    ENGINE_BUILD_HINT,
+  );
+  if (!env.oldCommit.startsWith(ENGINE_OLD_COMMIT_PREFIX)) {
+    throw new Error(
+      `ENGINE_OLD_SERVER_COMMIT is ${env.oldCommit}, not a commit starting ${ENGINE_OLD_COMMIT_PREFIX}. ${ENGINE_BUILD_HINT}`,
+    );
+  }
+  return env;
+}
+
 export function sha256OfFile(filePath: string): string {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }

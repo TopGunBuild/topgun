@@ -13,9 +13,12 @@ const optInSuites = [
       'encryption-rollback',
       'tenant-delete-rollback',
       'ttl-rollback',
+      'engine-upgrade',
+      'engine-migration-resume',
+      'engine-rollback',
     ],
     reason:
-      'each drives two server binaries and needs the older one by path: map-name-upgrade a 07d009f0 build (OLD_SERVER_BINARY, OLD_SERVER_COMMIT), map-name-rollback a b346e277 build (FORMAT_OLD_SERVER_BINARY, FORMAT_OLD_SERVER_COMMIT), watermark-rollback a 6a030bb6 build (WATERMARK_OLD_SERVER_BINARY, WATERMARK_OLD_SERVER_COMMIT), encryption-rollback a 727db547 build (ENC_OLD_SERVER_BINARY, ENC_OLD_SERVER_COMMIT), tenant-delete-rollback a 727db547 build (TENANT_OLD_SERVER_BINARY, TENANT_OLD_SERVER_COMMIT), ttl-rollback a 241e65bb build (TTL_OLD_SERVER_BINARY, TTL_OLD_SERVER_COMMIT); all also NEW_SERVER_COMMIT for the newer binary',
+      'each drives two server binaries and needs the older one by path: map-name-upgrade a 07d009f0 build (OLD_SERVER_BINARY, OLD_SERVER_COMMIT), map-name-rollback a b346e277 build (FORMAT_OLD_SERVER_BINARY, FORMAT_OLD_SERVER_COMMIT), watermark-rollback a 6a030bb6 build (WATERMARK_OLD_SERVER_BINARY, WATERMARK_OLD_SERVER_COMMIT), encryption-rollback a 727db547 build (ENC_OLD_SERVER_BINARY, ENC_OLD_SERVER_COMMIT), tenant-delete-rollback a 727db547 build (TENANT_OLD_SERVER_BINARY, TENANT_OLD_SERVER_COMMIT), ttl-rollback a 241e65bb build (TTL_OLD_SERVER_BINARY, TTL_OLD_SERVER_COMMIT), engine-upgrade, engine-migration-resume and engine-rollback a 7692c380 build (ENGINE_OLD_SERVER_BINARY, ENGINE_OLD_SERVER_COMMIT); all also NEW_SERVER_COMMIT for the newer binary',
     script: 'pnpm test:integration-rust:two-binary',
   },
   {
