@@ -4148,7 +4148,9 @@ weaker than a test.
   off), the pull case (`ttlMs` reaches a client that syncs later), the restart case and the
   eviction case; `tests/integration-rust/vector-search-restart.test.ts` —
   `AC13: an expired record is not returned` (vector and hybrid `semantic`, before and after a
-  restart); `tests/integration-rust/ttl-rollback.test.ts` (opt-in, two binaries).
+  restart); `tests/integration-rust/engine-upgrade.test.ts` (opt-in, two binaries) — a TTL record
+  written by the older binary keeps its TTL across the forward migration to RocksDB, then is hidden
+  and swept once it expires.
 - **Violation consequence:** an "expiring" record is kept and served for good, or reappears after a
   restart or an eviction, or lives longer than its TTL because it was re-anchored.
 - **Discovered by:** TODO-906 (SPEC-403 family); TODO-721.
