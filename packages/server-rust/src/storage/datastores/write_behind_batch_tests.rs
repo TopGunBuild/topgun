@@ -1961,7 +1961,12 @@ async fn b15_a_half_committed_after_its_sibling_plans_its_rows_after_the_sibling
     {
         let dir = tempfile::tempdir().expect("tempdir");
         let node = Node::open(dir.path());
-        let wb = node.write_behind(config()).await;
+        let wb = node
+            .write_behind(WriteBehindConfig {
+                write_delay_ms: 1,
+                ..config()
+            })
+            .await;
         let p = super::partition_for(MAP, "p0");
         let pk = keys_in_partition(MAP, "p", p, 6);
         let qk: Vec<String> = (0..)
@@ -2023,7 +2028,12 @@ async fn b15_a_half_committed_after_its_sibling_plans_its_rows_after_the_sibling
     {
         let dir = tempfile::tempdir().expect("tempdir");
         let node = Node::open(dir.path());
-        let wb = node.write_behind(config()).await;
+        let wb = node
+            .write_behind(WriteBehindConfig {
+                write_delay_ms: 1,
+                ..config()
+            })
+            .await;
         let p1 = super::partition_for(MAP, "a0");
         let p2 = (0..10_000)
             .map(|i| super::partition_for(MAP, &format!("b{i}")))

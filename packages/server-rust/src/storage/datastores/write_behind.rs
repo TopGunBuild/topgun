@@ -46,9 +46,23 @@ use self::wal_harness::BootSeedMode;
 /// WAL fields control crash-safe durability for acked writes.
 #[derive(Debug, Clone)]
 pub struct WriteBehindConfig {
-    /// Delay in milliseconds before a queued entry becomes eligible for flush.
+    /// How long, against the wall clock, a queued entry is held back before a
+    /// flush pass may take it, in milliseconds.
+    ///
+    /// Not read from the environment: production runs with `0`, where an entry
+    /// is due as soon as it is queued and `store_time` only orders a pass, so a
+    /// step of the wall clock cannot hold entries back. A non-zero value holds
+    /// every entry back until `store_time <= now - write_delay_ms` on the wall
+    /// clock; it exists for tests and benches that keep entries buffered.
     pub write_delay_ms: u64,
-    /// How often the background flush task runs, in milliseconds.
+    /// The longest a buffered write waits while the flush task is idle, in
+    /// milliseconds (the idle linger). While writes are due, passes run back
+    /// to back and this does not apply.
+    ///
+    /// At least [`MIN_FLUSH_INTERVAL_MS`]: `0` would make the idle loop spin.
+    /// Admission of new keys is bounded by about `capacity / (interval + pass
+    /// time)`, so a value of [`LEGACY_FLUSH_INTERVAL_WARN_MS`] or more, with a
+    /// non-zero capacity, logs a startup warning.
     pub flush_interval_ms: u64,
     /// Accepted and parsed, and currently without effect.
     ///
@@ -142,9 +156,10 @@ pub struct WriteBehindConfig {
     ///
     /// It must sit an order of magnitude above the longest LEGITIMATE
     /// non-advance, or the alarm fires on correct behaviour. The default is
-    /// derived from the OTHER defaults in this struct (write delay + flush
-    /// interval + the longest wait between two attempts of a refused entry,
-    /// and clear of the shutdown timeout), so raising `flush_interval_ms` or
+    /// derived from the OTHER defaults in this struct (the flush interval + the
+    /// longest wait between two attempts of a refused entry, and clear of the
+    /// shutdown timeout; there is no write delay), so raising `backoff_cap_ms`,
+    /// `flush_interval_ms` or
     /// `shutdown_timeout_ms` requires raising this alongside them. A store that
     /// refuses for longer than the bound is not a legitimate non-advance: the
     /// refused entry is retried until it is stored, its sequence stays
@@ -194,11 +209,21 @@ const WATCHDOG_TICK_FLOOR_MS: u64 = 100;
 /// rather than clamped.
 const MIN_WAL_WATERMARK_STALL_BOUND_MS: u64 = 6_000;
 
+/// The smallest flush interval: `0` would make the idle flush loop spin,
+/// because a zero sleep is ready at once.
+const MIN_FLUSH_INTERVAL_MS: u64 = 1;
+
+/// A flush interval from which startup warns. New-key admission is bounded by
+/// about `capacity / interval` while the flush task idles between writes, and
+/// at the default capacity of 10 000 this interval holds it at 2·10⁴ new keys
+/// per second, the node's admission target.
+const LEGACY_FLUSH_INTERVAL_WARN_MS: u64 = 500;
+
 impl Default for WriteBehindConfig {
     fn default() -> Self {
         Self {
-            write_delay_ms: 1000,
-            flush_interval_ms: 1000,
+            write_delay_ms: 0,
+            flush_interval_ms: 10,
             batch_size: 100,
             backoff_base_ms: 500,
             backoff_cap_ms: 5000,
@@ -222,17 +247,18 @@ impl WriteBehindConfig {
     ///
     /// | Env var | Field | Default |
     /// |---|---|---|
-    /// | `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | `flush_interval_ms` | 1000 ms |
+    /// | `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | `flush_interval_ms` | 10 ms — the idle linger; `0` is fatal; 500 ms or more (with a non-zero capacity) warns |
     /// | `TOPGUN_WRITEBEHIND_BATCH_SIZE` | `batch_size` | 100 — accepted and currently without effect |
     /// | `TOPGUN_WRITEBEHIND_CAPACITY` | `capacity` | 10 000 |
     /// | `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS` | `shutdown_timeout_ms` | 30 000 ms |
     /// | `TOPGUN_WAL_DIR` | `wal_dir` | `./topgun-wal` |
     /// | `TOPGUN_WAL_FSYNC_POLICY` | `wal_fsync_policy` | `batched` |
-    /// | `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS` | `wal_watermark_stall_bound_ms` | 60 000 ms — raise it alongside `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` / `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`, whose defaults this default is derived from |
+    /// | `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS` | `wal_watermark_stall_bound_ms` | 60 000 ms — raise it alongside `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` / `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`, whose defaults this default is derived from (with the backoff cap; there is no write delay) |
     /// | `TOPGUN_OR_DELTA_WAL` | `or_delta_wal` | `true` — the delta-framing kill-switch; `false` restores full-snapshot framing for every OR write |
     ///
     /// Fields not covered by env vars (`write_delay_ms`, `backoff_base_ms`,
-    /// `backoff_cap_ms`) retain their [`Self::default`] values.
+    /// `backoff_cap_ms`) retain their [`Self::default`] values; `write_delay_ms`
+    /// is therefore `0` in production.
     #[must_use]
     pub fn from_env() -> Self {
         Self::from_source(|key| std::env::var(key).ok())
@@ -262,6 +288,11 @@ impl WriteBehindConfig {
     /// effective bound, and silently disarms the two-sample confirmation that is
     /// the fatal stalled-watermark alarm's only false-positive guard. That is a
     /// fatal-path guard being disabled, not an alarm threshold being mis-set.
+    ///
+    /// Panics (refuses to start) if `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`
+    /// PARSES to a value below [`MIN_FLUSH_INTERVAL_MS`], that is `0`: honoured,
+    /// it would make the idle flush loop spin on a zero sleep. An unparseable
+    /// value warns and falls back, as for the other variables.
     #[must_use]
     pub fn from_source<F: Fn(&str) -> Option<String>>(get: F) -> Self {
         let defaults = Self::default();
@@ -269,22 +300,7 @@ impl WriteBehindConfig {
 
         // Parse TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS → flush_interval_ms (u64)
         if let Some(raw) = get("TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS") {
-            match raw.trim().parse::<u64>() {
-                Ok(ms) => {
-                    cfg.flush_interval_ms = ms;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        target: "topgun_server::storage::write_behind",
-                        var = "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS",
-                        value = %raw,
-                        error = %err,
-                        default = defaults.flush_interval_ms,
-                        "Failed to parse env var; using default"
-                    );
-                    cfg.flush_interval_ms = defaults.flush_interval_ms;
-                }
-            }
+            cfg.flush_interval_ms = Self::parse_flush_interval_ms(&raw, defaults.flush_interval_ms);
         }
 
         // Parse TOPGUN_WRITEBEHIND_BATCH_SIZE → batch_size (u32). The value is
@@ -387,7 +403,48 @@ impl WriteBehindConfig {
             cfg.or_delta_wal = Self::parse_or_delta_wal(&raw);
         }
 
+        // After every variable: the admission ceiling depends on the capacity
+        // as well, and with no capacity there is no ceiling to warn about.
+        if cfg.flush_interval_ms >= LEGACY_FLUSH_INTERVAL_WARN_MS && cfg.capacity != 0 {
+            tracing::warn!(
+                target: "topgun_server::storage::write_behind",
+                var = "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS",
+                flush_interval_ms = cfg.flush_interval_ms,
+                capacity = cfg.capacity,
+                "the write-behind flush interval is at least 500 ms: new-key admission is \
+                 limited to about capacity / interval"
+            );
+        }
+
         cfg
+    }
+
+    /// Parses one `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` value: an unparseable
+    /// value warns and falls back to `default`; one below
+    /// [`MIN_FLUSH_INTERVAL_MS`] is fatal (see [`Self::from_source`]).
+    fn parse_flush_interval_ms(raw: &str, default: u64) -> u64 {
+        match raw.trim().parse::<u64>() {
+            Ok(ms) if ms < MIN_FLUSH_INTERVAL_MS => {
+                panic!(
+                    "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS={ms} is invalid: it must be at least \
+                     {MIN_FLUSH_INTERVAL_MS} ms. Refusing to start: a zero interval makes the \
+                     idle write-behind flush loop spin. Set a value of at least \
+                     {MIN_FLUSH_INTERVAL_MS} or unset the variable (default {default})"
+                );
+            }
+            Ok(ms) => ms,
+            Err(err) => {
+                tracing::warn!(
+                    target: "topgun_server::storage::write_behind",
+                    var = "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS",
+                    value = %raw,
+                    error = %err,
+                    default,
+                    "Failed to parse env var; using default"
+                );
+                default
+            }
+        }
     }
 
     /// Parses one `TOPGUN_OR_DELTA_WAL` value.
@@ -1144,16 +1201,22 @@ impl PartitionQueue {
         self.remove(map, key)
     }
 
-    /// How many queued entries the store has refused at least once, and the
-    /// earliest first refusal among them.
-    pub fn retrying(&self) -> (u64, Option<tokio::time::Instant>) {
+    /// How many queued entries the store has refused at least once, the
+    /// earliest first refusal among them, and the earliest `store_time` of any
+    /// queued entry, refused or not. One walk gives all three.
+    pub fn retrying_and_oldest(&self) -> (u64, Option<tokio::time::Instant>, Option<i64>) {
         let mut count = 0;
         let mut earliest = None;
-        for entry in self.entries.values().filter(|entry| entry.retry_count > 0) {
-            count += 1;
-            earliest = earlier_refusal(earliest, entry.first_refused);
+        let mut oldest_store_time: Option<i64> = None;
+        for entry in self.entries.values() {
+            oldest_store_time =
+                Some(oldest_store_time.map_or(entry.store_time, |t| t.min(entry.store_time)));
+            if entry.retry_count > 0 {
+                count += 1;
+                earliest = earlier_refusal(earliest, entry.first_refused);
+            }
         }
-        (count, earliest)
+        (count, earliest, oldest_store_time)
     }
 
     /// Re-inserts an entry that failed flush and needs retry, and reports
@@ -5004,10 +5067,16 @@ impl WriteBehindDataStore {
     /// The newest `store_time` a pass may take: an entry whose `store_time` is
     /// later is not due yet.
     ///
-    /// A non-zero `write_delay_ms` holds every entry back that long against
-    /// the wall clock; production never sets one (`from_env` does not read it),
-    /// and tests and benches use it to keep entries buffered.
+    /// With no write delay (production) every queued entry is due, whatever
+    /// its `store_time`, so a backward step of the wall clock cannot hold
+    /// entries back; `store_time` then only orders a pass. A non-zero
+    /// `write_delay_ms` holds every entry back that long against the wall
+    /// clock; production never sets one (`from_env` does not read it), and
+    /// tests and benches use it to keep entries buffered.
     fn due_deadline(&self) -> i64 {
+        if self.config.write_delay_ms == 0 {
+            return i64::MAX;
+        }
         #[allow(clippy::cast_possible_wrap)]
         now_millis().saturating_sub(self.config.write_delay_ms as i64)
     }
@@ -5039,6 +5108,7 @@ impl WriteBehindDataStore {
             .staging
             .contains_key(&(map.to_string(), key.to_string()));
         if is_new_key && current >= self.config.capacity {
+            metrics::counter!(CAPACITY_REFUSALS_COUNTER).increment(1);
             anyhow::bail!("Write-behind capacity exceeded");
         }
         Ok(())
@@ -5048,23 +5118,38 @@ impl WriteBehindDataStore {
     /// gauges, one rate-limited warning while any entry is refused, and one
     /// line when none is left after a warning.
     ///
-    /// The queues are walked only while a refusal has happened and the last
-    /// walk still found a refused entry; a pass on a store that refuses
-    /// nothing pays one atomic load for that, and one more load and one gauge
-    /// set for the buffered count.
+    /// Every call walks the queues once, for the age of the oldest buffered
+    /// entry; the same walk counts the refused entries, which are reported
+    /// only while a refusal has happened and the last walk still found a
+    /// refused entry. The walk is O(queued entries) and allocates nothing; it
+    /// runs after every pass, also on every wake of a store-wide hold.
     fn report_retries(&self, schedule: &mut RetrySchedule) {
         metrics::gauge!(BUFFERED_ENTRIES_GAUGE)
             .set(count_as_gauge(self.pending_count.load(Ordering::Relaxed)));
-        if !self.retrying.load(Ordering::Relaxed) {
-            return;
-        }
         let now = tokio::time::Instant::now();
         let mut retrying = 0u64;
         let mut earliest = None;
+        let mut oldest_store_time: Option<i64> = None;
         for queue in &self.queues {
-            let (count, queue_earliest) = queue.value().retrying();
+            let (count, queue_earliest, queue_oldest) = queue.value().retrying_and_oldest();
             retrying += count;
             earliest = earlier_refusal(earliest, queue_earliest);
+            oldest_store_time = match (oldest_store_time, queue_oldest) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        // The pass has ended, so no entry is held outside the queues. Every
+        // production `store_time` is the wall clock at the write, and a
+        // rewrite keeps the key's first one.
+        let oldest_entry_age = oldest_store_time.map_or(std::time::Duration::ZERO, |first| {
+            std::time::Duration::from_millis(
+                u64::try_from(now_millis().saturating_sub(first)).unwrap_or(0),
+            )
+        });
+        metrics::gauge!(OLDEST_ENTRY_AGE_GAUGE).set(oldest_entry_age.as_secs_f64());
+        if !self.retrying.load(Ordering::Relaxed) {
+            return;
         }
         // Monotonic time since the first refusal, never the entry's
         // `store_time`: that is supplied by the caller and is not a time at
@@ -5120,10 +5205,12 @@ impl WriteBehindDataStore {
     }
 }
 
-/// Background task that periodically flushes eligible entries to the inner store.
+/// Background task that flushes due entries to the inner store.
 ///
-/// Runs until the shutdown signal is received. Wakes on either the configured
-/// interval or an explicit notify (from `soft_flush`).
+/// Runs until the shutdown signal is received. While a pass stores something
+/// and writes are still due, passes run back to back; otherwise it waits for
+/// the flush interval (the idle linger) or an explicit notify (from
+/// `soft_flush`).
 async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Receiver<bool>) {
     let interval = tokio::time::Duration::from_millis(store.config.flush_interval_ms);
     let mut schedule = RetrySchedule::default();
@@ -15659,10 +15746,13 @@ mod background_task_panic_tests {
             inner,
             WriteBehindConfig {
                 capacity: CAPACITY,
+                // A delay keeps `QUEUED`, an hour ahead, out of the pass; the
+                // held entries, written a second back, are due at once.
+                write_delay_ms: 1,
                 ..manual_flush_config()
             },
         );
-        let now = now_millis();
+        let now = now_millis() - 1_000;
         let held = u64::try_from(HELD.len()).expect("a small count");
 
         for key in HELD {
@@ -16048,8 +16138,8 @@ mod background_task_panic_tests {
             .await
             .expect("the first write is accepted");
 
-        // Its own time is an hour ahead: if its entry is due at once, that is
-        // only because it took over the first entry's time.
+        // Whatever the pass does with the first entry, no slot is left without
+        // an entry, and the second value is the one persisted.
         let mut park = store.test_park_between_stage_and_queue_insert(MAP, RACED_KEY);
         let write = {
             let store = Arc::clone(&store);
