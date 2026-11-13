@@ -1634,6 +1634,11 @@ const FLUSH_PASSES_COUNTER: &str = "topgun_write_behind_flush_passes_total";
 const FLUSH_PASS_ENTRIES_COUNTER: &str = "topgun_write_behind_flush_pass_entries_total";
 /// Seconds one committed flush pass took, one observation per pass.
 const FLUSH_PASS_SECONDS_HISTOGRAM: &str = "topgun_write_behind_flush_pass_seconds";
+/// Writes of keys that were not buffered, refused because the buffer was at
+/// its capacity.
+const CAPACITY_REFUSALS_COUNTER: &str = "topgun_write_behind_capacity_refusals_total";
+/// Seconds since the oldest buffered entry was written.
+const OLDEST_ENTRY_AGE_GAUGE: &str = "topgun_write_behind_oldest_entry_age_seconds";
 
 /// Registers the retry series at zero.
 ///
@@ -1682,12 +1687,29 @@ fn register_retry_metrics() {
         metrics::Unit::Seconds,
         "Seconds one committed write-behind flush pass took, from its selection to its settle"
     );
+    metrics::describe_counter!(
+        CAPACITY_REFUSALS_COUNTER,
+        "Writes of keys that were not buffered which the write-behind buffer refused because it \
+         was at its capacity (TOPGUN_WRITEBEHIND_CAPACITY); each is a temporary error, so the \
+         client keeps the write and sends it again"
+    );
+    metrics::describe_gauge!(
+        OLDEST_ENTRY_AGE_GAUGE,
+        "Seconds since the oldest buffered write-behind entry was written, whether or not the \
+         store has refused it, 0 when nothing is buffered; set after every flush pass, also \
+         during a store-wide hold. Wall-clock based: a rewrite of a buffered key keeps the \
+         key's first buffered time. Once the store is broken no pass runs and it keeps its last \
+         value. The refusal-specific signals are topgun_write_behind_oldest_refusal_age_seconds \
+         and topgun_write_behind_store_hold"
+    );
     metrics::counter!(FLUSH_REFUSALS_COUNTER).increment(0);
+    metrics::counter!(CAPACITY_REFUSALS_COUNTER).increment(0);
     metrics::counter!(FLUSH_PASSES_COUNTER).increment(0);
     metrics::counter!(FLUSH_PASS_ENTRIES_COUNTER).increment(0);
     metrics::gauge!(RETRYING_ENTRIES_GAUGE).set(0.0);
     metrics::gauge!(BUFFERED_ENTRIES_GAUGE).set(0.0);
     metrics::gauge!(OLDEST_REFUSAL_AGE_GAUGE).set(0.0);
+    metrics::gauge!(OLDEST_ENTRY_AGE_GAUGE).set(0.0);
     metrics::gauge!(STORE_HOLD_GAUGE).set(0.0);
 }
 
@@ -4979,6 +5001,49 @@ impl WriteBehindDataStore {
         stored
     }
 
+    /// The newest `store_time` a pass may take: an entry whose `store_time` is
+    /// later is not due yet.
+    ///
+    /// A non-zero `write_delay_ms` holds every entry back that long against
+    /// the wall clock; production never sets one (`from_env` does not read it),
+    /// and tests and benches use it to keep entries buffered.
+    fn due_deadline(&self) -> i64 {
+        #[allow(clippy::cast_possible_wrap)]
+        now_millis().saturating_sub(self.config.write_delay_ms as i64)
+    }
+
+    /// Refuses a write of a key that is not buffered while the buffer is at
+    /// its capacity: the one admission gate of every write path (`add`,
+    /// `remove`, each key of `remove_all`). A write of a buffered key is
+    /// always admitted.
+    ///
+    /// A soft bound, not a reservation. The check reads staging, and a key
+    /// whose entry is held by a flush pass counts as known: its staging slot
+    /// is cleared only once the entry is persisted. The check and the caller's
+    /// queue insert are separate steps with nothing held across them, and what
+    /// `PartitionQueue::insert` returns is not consulted.
+    ///
+    /// The bound that holds: `pending_count` can exceed `capacity` by at most
+    /// the number of entries a flush pass holds plus the number of writers
+    /// that are between this check and their insert. Every write of a key
+    /// that is in neither staging nor a flush pass is refused while
+    /// `pending_count >= capacity`. A pass holds at most the entries that were
+    /// due when it began, up to its limits (`batch_size` has no effect). The
+    /// formula and its precondition are on `WriteBehindConfig::capacity`.
+    fn admit_new_key(&self, map: &str, key: &str) -> anyhow::Result<()> {
+        if self.config.capacity == 0 {
+            return Ok(());
+        }
+        let current = self.pending_count.load(Ordering::Relaxed);
+        let is_new_key = !self
+            .staging
+            .contains_key(&(map.to_string(), key.to_string()));
+        if is_new_key && current >= self.config.capacity {
+            anyhow::bail!("Write-behind capacity exceeded");
+        }
+        Ok(())
+    }
+
     /// Reports the buffer and its refused entries at the end of a pass: the
     /// gauges, one rate-limited warning while any entry is refused, and one
     /// line when none is left after a warning.
@@ -5109,8 +5174,7 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
             return;
         }
 
-        #[allow(clippy::cast_possible_wrap)]
-        let deadline = now_millis().saturating_sub(store.config.write_delay_ms as i64);
+        let deadline = store.due_deadline();
         // Read once: every entry of the pass is judged against one instant.
         let now = tokio::time::Instant::now();
 
@@ -5126,13 +5190,12 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
         // entries behind its limits, or a write became due meanwhile, and
         // the next pass takes them. With nothing due the loop waits as
         // always, so a write made after the pass waits for its wake.
-        run_on = stored > 0 && schedule.hold_until.is_none() && !schedule.store_broken && {
-            #[allow(clippy::cast_possible_wrap)]
-            let deadline = now_millis().saturating_sub(store.config.write_delay_ms as i64);
-            store
-                .choose_probe(deadline, tokio::time::Instant::now())
-                .is_some()
-        };
+        run_on = stored > 0
+            && schedule.hold_until.is_none()
+            && !schedule.store_broken
+            && store
+                .choose_probe(store.due_deadline(), tokio::time::Instant::now())
+                .is_some();
     }
 }
 
@@ -5303,31 +5366,7 @@ impl MapDataStore for WriteBehindDataStore {
         let _in_flight = self.tenant_closes.enter(map)?;
 
         // Check capacity before insertion to avoid partial state on rejection
-        if self.config.capacity != 0 {
-            let current = self.pending_count.load(Ordering::Relaxed);
-            // A soft bound, not a reservation. The check reads staging, and a
-            // key whose entry is held by a flush pass counts as known: its
-            // staging slot is cleared only once the entry is persisted. The
-            // check and the insert below are separate steps with nothing held
-            // across them, and what `PartitionQueue::insert` returns is not
-            // consulted.
-            //
-            // The bound that holds: `pending_count` can exceed `capacity` by
-            // at most the number of entries a flush pass holds plus the number
-            // of writers that are between this check and their insert. Every
-            // write of a key that is in neither staging nor a flush pass is
-            // rejected while `pending_count >= capacity`. A pass holds every
-            // entry that was due when it began (`batch_size` has no effect), so the
-            // first of those two terms is itself bounded only by what was
-            // queued at that moment. The formula and its precondition are on
-            // `WriteBehindConfig::capacity`.
-            let is_new_key = !self
-                .staging
-                .contains_key(&(map.to_string(), key.to_string()));
-            if is_new_key && current >= self.config.capacity {
-                anyhow::bail!("Write-behind capacity exceeded");
-            }
-        }
+        self.admit_new_key(map, key)?;
 
         let partition_id = partition_for(map, key);
         // Seed before the first sequence of this partition is handed out, so the
@@ -5501,16 +5540,7 @@ impl MapDataStore for WriteBehindDataStore {
         // As in `add_with_witness`.
         let _in_flight = self.tenant_closes.enter(map)?;
 
-        // The same soft bound as in `add_with_witness`, where it is described.
-        if self.config.capacity != 0 {
-            let current = self.pending_count.load(Ordering::Relaxed);
-            let is_new_key = !self
-                .staging
-                .contains_key(&(map.to_string(), key.to_string()));
-            if is_new_key && current >= self.config.capacity {
-                anyhow::bail!("Write-behind capacity exceeded");
-            }
-        }
+        self.admit_new_key(map, key)?;
 
         let partition_id = partition_for(map, key);
         // Seed before the first sequence of this partition is handed out, so the
@@ -5702,14 +5732,8 @@ impl MapDataStore for WriteBehindDataStore {
         let now = now_millis();
 
         for key in keys {
-            // The same soft bound as in `add_with_witness`, checked per key.
-            if self.config.capacity != 0 {
-                let current = self.pending_count.load(Ordering::Relaxed);
-                let is_new_key = !self.staging.contains_key(&(map.to_string(), key.clone()));
-                if is_new_key && current >= self.config.capacity {
-                    anyhow::bail!("Write-behind capacity exceeded");
-                }
-            }
+            // Checked per key: a key refused here ends the call.
+            self.admit_new_key(map, key)?;
 
             let partition_id = partition_for(map, key);
             // Seed before the first sequence of this partition is handed out, so
