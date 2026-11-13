@@ -5,8 +5,9 @@
 //! The rows are evaluated after the location is resolved (L1, L2) and before
 //! any redb row; the first match wins. Every state with `engine.rocksdb/`
 //! absent that no row here claims is delegated, unchanged, to
-//! `RedbDataStore::open_location_sealed`, and a redb store it leaves behind is
-//! migrated in the same start. Every refusal is one ERROR line; it creates,
+//! the redb location open (`RedbDataStore::open_location_sealed_with`, which
+//! does not log the location line again), and a redb store it leaves behind
+//! is migrated in the same start. Every refusal is one ERROR line; it creates,
 //! moves or deletes nothing, and the store is only read, through a read-only
 //! engine that writes no file.
 
@@ -239,7 +240,8 @@ fn check_known_entries(data_dir: &Path) -> anyhow::Result<()> {
 
 /// What `engine.rocksdb/` holds, read without writing a file.
 enum Inspected {
-    /// No row: removable.
+    /// No row: removable. With `CURRENT`, a read-only open, which replays
+    /// the engine log and drops a torn tail, shows no mark and no key.
     Empty,
     /// A store with this mark (or none).
     Store(Option<Vec<u8>>),
@@ -256,11 +258,13 @@ fn cannot_inspect(rocks: &Path, e: impl std::fmt::Display) -> anyhow::Error {
     )
 }
 
-/// Inspects `engine.rocksdb/`. It is `Empty` only when it holds no `*.sst`,
-/// every `*.log` is empty, and either it has no `CURRENT` or a read-only walk
-/// finds no key; any error refuses, it is never read as "no key".
+/// Inspects `engine.rocksdb/`. It is `Empty` only when it holds no `*.sst`
+/// and either it has no `CURRENT` and every `*.log` is empty, or a read-only
+/// open — which replays the engine log and stops at a torn record, so a kill
+/// inside the first copy batch's write reads as no row — shows no mark and no
+/// key (`TG-ENG-008`); any error refuses, it is never read as "no key".
 fn inspect(rocks: &Path, config: &RocksConfig) -> anyhow::Result<Inspected> {
-    let (mut current, mut data) = (false, false);
+    let (mut current, mut sst, mut log_data) = (false, false, false);
     let entries = fs::read_dir(rocks).map_err(|e| cannot_inspect(rocks, e))?;
     for entry in entries {
         let entry = entry.map_err(|e| cannot_inspect(rocks, e))?;
@@ -270,17 +274,17 @@ fn inspect(rocks: &Path, config: &RocksConfig) -> anyhow::Result<Inspected> {
         if name == "CURRENT" {
             current = true;
         } else if ext.is_some_and(|e| e == "sst") {
-            data = true;
+            sst = true;
         } else if ext.is_some_and(|e| e == "log") {
             let len = entry
                 .metadata()
                 .map_err(|e| cannot_inspect(rocks, e))?
                 .len();
-            data |= len > 0;
+            log_data |= len > 0;
         }
     }
     if !current {
-        if data {
+        if sst || log_data {
             return Err(refuse(
                 RocksRow::UnfinishedCreate,
                 format!(
@@ -295,7 +299,7 @@ fn inspect(rocks: &Path, config: &RocksConfig) -> anyhow::Result<Inspected> {
         .map_err(|e| cannot_inspect(rocks, e))?;
     let mark =
         EngineMapDataStore::read_migration_mark(&engine).map_err(|e| cannot_inspect(rocks, e))?;
-    if !data && mark.is_none() {
+    if !sst && mark.is_none() {
         let snapshot = engine.snapshot().map_err(|e| cannot_inspect(rocks, e))?;
         if holds_no_key(&*snapshot).map_err(|e| cannot_inspect(rocks, e))? {
             return Ok(Inspected::Empty);
@@ -432,7 +436,13 @@ fn open_absent(
         // Nothing is created or changed before a refusal for lack of space.
         engine_migration::check_free_space(d, io)?;
     }
-    drop(RedbDataStore::open_location_sealed(location, encryption)?);
+    // The location line is already logged above, at the top of this open.
+    drop(RedbDataStore::open_location_sealed_with(
+        location,
+        &MigrationIo::default(),
+        encryption,
+        false,
+    )?);
     let engine = engine_migration::start(d, config, io)?;
     serve(engine, paths, encryption)
 }
@@ -516,8 +526,8 @@ mod tests {
     use super::*;
     use crate::storage::datastores::engine_migration::step;
     use crate::storage::datastores::engine_store::{
-        meta_key, RecordOp, KS_BACKUP, KS_PRIMARY, META_MIGRATION, META_SEAL_PASS,
-        META_WAL_IMPORT_PENDING, META_WAL_WATERMARK,
+        meta_key, RecordOp, KS_BACKUP, KS_PRIMARY, META_ACK_MODE, META_FORMAT, META_MIGRATION,
+        META_NEXT_MAP_ID, META_SEAL_PASS, META_WAL_IMPORT_PENDING, META_WAL_WATERMARK,
     };
     use crate::storage::datastores::kv_engine::{
         KeyRange, KvResult, KvSnapshot, WriteBatch, WriteOptions,
@@ -537,6 +547,7 @@ mod tests {
     const CHILD_DEADLINE: Duration = Duration::from_secs(300);
     const CHILD_ENV: &str = "TOPGUN_TEST_ROCKS_STORE_CHILD";
     const CHILD_RESULT: &str = "ROCKS-STORE-CHILD-RESULT ";
+    const LOCATION_LINE: &str = "store location: data directory";
 
     // -----------------------------------------------------------------------
     // Fixtures
@@ -897,6 +908,7 @@ mod tests {
         ] {
             assert!(logs.contains(line), "no {line:?} in {logs}");
         }
+        assert_eq!(count_lines(&logs, LOCATION_LINE), 1, "{logs}");
         assert_eq!(
             records(&opened.store, 300)[7],
             Some(rmp_serde::from_slice(&lww(7)).unwrap())
@@ -1019,6 +1031,15 @@ mod tests {
         let opened = opened.expect("both migrations");
         assert!(logs.contains("store format: migration complete"), "{logs}");
         assert!(logs.contains("store engine: migration complete"), "{logs}");
+        // One location line for the start that runs both migrations, and it
+        // comes before every other store line.
+        assert_eq!(count_lines(&logs, LOCATION_LINE), 1, "{logs}");
+        assert!(
+            logs.lines()
+                .next()
+                .is_some_and(|l| l.contains(LOCATION_LINE)),
+            "{logs}"
+        );
         assert!(root.k.exists() && root.kept().exists() && !root.redb().exists());
         assert!(MovedMarker::recognise(&root.l).unwrap());
         let rows = dump(&*opened.engine);
@@ -1202,6 +1223,245 @@ mod tests {
                 assert!(logs.contains("store engine: migrating"), "{name}: {logs}");
             }
         }
+    }
+
+    const FIRST_BATCH_TEST: &str = "storage::datastores::rocks_store::tests::r_c_kill_inside_the_first_batch_is_removed_and_migrated_anew";
+    /// RocksDB's engine log is written in blocks of this size, counted from
+    /// offset 0 of the file; a record larger than a block is split into
+    /// first, middle and last fragments.
+    const LOG_BLOCK: u64 = 32 * 1024;
+
+    /// A redb store whose first copy batch (40 rows) holds well over 64 KiB
+    /// of values: about 3 KiB per record, so its engine-log record spans at
+    /// least three log blocks.
+    fn wide_redb_source(root: &Root, rows: u64) {
+        let store = RedbDataStore::new(&root.d).expect("redb store");
+        let keys: Vec<String> = (0..rows).map(|i| format!("k{i:05}")).collect();
+        let values: Vec<Vec<u8>> = (0..rows)
+            .map(|i| {
+                rmp_serde::to_vec_named(&RecordValue::Lww {
+                    value: Value::String(format!("v{i}-{}", "x".repeat(3000))),
+                    timestamp: Timestamp {
+                        millis: i,
+                        counter: 0,
+                        node_id: "n".to_string(),
+                    },
+                    ttl_ms: None,
+                })
+                .expect("an LWW value encodes")
+            })
+            .collect();
+        let ops: Vec<RecordOp<'_>> = keys
+            .iter()
+            .zip(&values)
+            .map(|(key, bytes)| RecordOp::Put {
+                map: "users",
+                backup: false,
+                key,
+                bytes,
+            })
+            .collect();
+        store.write_records(&ops, SYNC).expect("fill");
+    }
+
+    /// Every `*.log` in `dir` by name, with its length.
+    fn engine_logs(dir: &Path) -> BTreeMap<String, u64> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".log"))
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    e.metadata().unwrap().len(),
+                )
+            })
+            .collect()
+    }
+
+    fn copy_dir(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &to.join(entry.file_name()));
+            } else {
+                fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+            }
+        }
+    }
+
+    fn count_lines(logs: &str, needle: &str) -> usize {
+        logs.lines().filter(|l| l.contains(needle)).count()
+    }
+
+    /// A kill inside the write of the first copy batch (`TG-ENG-008`): the
+    /// batch's engine-log record is cut at every interesting offset — a
+    /// `kill -9` keeps every byte already appended, so a prefix of the record
+    /// is exactly what it leaves — and the next start removes the row-less
+    /// `engine.rocksdb/` and migrates anew. The whole record (a kill right
+    /// after the synced write) resumes from its mark instead, and a torn first
+    /// record of a fresh install (no `engine.redb`) is removed and created
+    /// fresh.
+    #[test]
+    fn r_c_kill_inside_the_first_batch_is_removed_and_migrated_anew() {
+        if let Ok(spec) = std::env::var(CHILD_ENV) {
+            child(&spec);
+            return;
+        }
+        let template = Root::new();
+        wide_redb_source(&template, 150);
+        let source = dump_redb(&template.redb());
+        let fixture = fs::read(template.redb()).unwrap();
+        let fresh_root = || {
+            let root = Root::new();
+            fs::create_dir_all(&root.d).unwrap();
+            fs::write(root.redb(), &fixture).unwrap();
+            root
+        };
+        let reference = {
+            let root = fresh_root();
+            let opened = open(&root, &io(), &off()).expect("uninterrupted");
+            dump(&*opened.engine)
+        };
+        assert_eq!(reference, source);
+
+        // The engine log right after the create (A) and right after the first
+        // batch's synced write returned (B), each as an abort leaves it.
+        let a = fresh_root();
+        run_child(FIRST_BATCH_TEST, &a.root, &format!("{}:1", step::CREATED));
+        let b = fresh_root();
+        run_child(FIRST_BATCH_TEST, &b.root, &format!("{}:1", step::BATCH));
+        let (logs_a, logs_b) = (engine_logs(&a.rocks()), engine_logs(&b.rocks()));
+        let grown: Vec<_> = logs_b
+            .iter()
+            .filter(|(name, len)| logs_a.get(*name) != Some(len))
+            .collect();
+        assert_eq!(grown.len(), 1, "one log grew: {logs_a:?} → {logs_b:?}");
+        let (log, full) = (grown[0].0.clone(), *grown[0].1);
+        let pre = *logs_a.get(&log).expect("the same log after the create");
+        assert!(
+            full > pre && full - pre > 64 * 1024,
+            "the first batch's record spans three log blocks: pre {pre}, full {full}"
+        );
+        let names: Vec<String> = fs::read_dir(b.rocks())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !names
+                .iter()
+                .any(|n| Path::new(n).extension().is_some_and(|e| e == "sst")),
+            "nothing flushed: {names:?}"
+        );
+        // A prefix cut is what a kill leaves only when no stale bytes of a
+        // recycled log lie beyond it and the log is not compressed.
+        let options = names
+            .iter()
+            .find(|n| n.starts_with("OPTIONS-"))
+            .expect("an options file");
+        let options = fs::read_to_string(b.rocks().join(options)).unwrap();
+        for setting in ["recycle_log_file_num=0", "wal_compression=kNoCompression"] {
+            assert!(
+                options.lines().any(|l| l.trim() == setting),
+                "{setting} not in the options file"
+            );
+        }
+
+        let start_at = |cut: u64, delete_redb: bool| {
+            let root = Root::new();
+            fs::create_dir_all(&root.d).unwrap();
+            copy_dir(&b.rocks(), &root.rocks());
+            if !delete_redb {
+                fs::copy(b.redb(), root.redb()).unwrap();
+            }
+            fs::OpenOptions::new()
+                .write(true)
+                .open(root.rocks().join(&log))
+                .unwrap()
+                .set_len(cut)
+                .unwrap();
+            let (opened, logs) = open_logged(&root, &io(), &off());
+            (root, opened, logs)
+        };
+
+        let mut cuts = vec![pre + 1, pre + 6, pre + (full - pre) / 2, full - 1];
+        let mut boundary = (pre / LOG_BLOCK + 1) * LOG_BLOCK;
+        while boundary < full {
+            cuts.extend([boundary - 1, boundary, boundary + 1]);
+            boundary += LOG_BLOCK;
+        }
+        cuts.retain(|c| *c > pre && *c < full);
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut outcomes = Vec::new();
+        for &cut in &cuts {
+            let (root, opened, logs) = start_at(cut, false);
+            let outcome = match opened {
+                Err(e) => format!("refused: {e:#}"),
+                Ok(opened) => {
+                    let same = dump(&*opened.engine) == reference;
+                    drop(opened);
+                    format!(
+                        "served: removing={} migrating={} resuming={} same={same} redb={} kept_is_source={}",
+                        count_lines(&logs, "store engine: removing"),
+                        count_lines(&logs, "store engine: migrating"),
+                        count_lines(&logs, "store engine: resuming after"),
+                        root.redb().exists(),
+                        root.kept().exists() && dump_redb(&root.kept()) == source,
+                    )
+                }
+            };
+            outcomes.push((cut, outcome, logs));
+        }
+        eprintln!("first batch: log {log}, pre {pre}, full {full}");
+        for (cut, outcome, _) in &outcomes {
+            eprintln!("cut {cut}: {outcome}");
+        }
+        for (cut, outcome, logs) in &outcomes {
+            assert_eq!(
+                outcome,
+                "served: removing=1 migrating=1 resuming=0 same=true redb=false kept_is_source=true",
+                "cut {cut}: {logs}"
+            );
+            assert!(
+                logs.lines()
+                    .any(|l| l.contains("WARN") && l.contains("store engine: removing")),
+                "cut {cut}: the removal is a WARN: {logs}"
+            );
+            for line in ["two stores found", "cannot inspect", "resuming after"] {
+                assert!(!logs.contains(line), "cut {cut}: {line}: {logs}");
+            }
+        }
+
+        // The whole record: the mark is there, the migration resumes.
+        let (root, opened, logs) = start_at(full, false);
+        let opened = opened.unwrap_or_else(|e| panic!("whole record: {e:#}\n{logs}"));
+        assert_eq!(dump(&*opened.engine), reference);
+        assert!(logs.contains("store engine: resuming after"), "{logs}");
+        assert!(!logs.contains("store engine: removing"), "{logs}");
+        assert!(!root.redb().exists() && dump_redb(&root.kept()) == source);
+        drop(opened);
+
+        // A fresh install whose first record is torn: removed, created fresh.
+        let (root, opened, logs) = start_at(pre + (full - pre) / 2, true);
+        let opened = opened.unwrap_or_else(|e| panic!("fresh install: {e:#}\n{logs}"));
+        assert_eq!(count_lines(&logs, "store engine: removing"), 1, "{logs}");
+        assert!(!logs.contains("store engine: migrating"), "{logs}");
+        let rows = dump(&*opened.engine);
+        for key in [META_FORMAT, META_NEXT_MAP_ID, META_ACK_MODE] {
+            assert!(rows.contains_key(&meta_key(key)), "format row {key:?}");
+        }
+        assert!(
+            !rows.keys().any(|k| k[0] == KS_PRIMARY || k[0] == KS_BACKUP),
+            "no record survives the torn record"
+        );
+        assert!(MovedMarker::recognise(&root.l).unwrap(), "the stub at L");
+        let names: Vec<_> = fs::read_dir(&root.d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![OsString::from(ROCKS_DIR)]);
     }
 
     /// A RocksDB directory whose rows are only in its engine WAL: written,
