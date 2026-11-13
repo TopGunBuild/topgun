@@ -387,10 +387,10 @@ describe('Integration: the newer server binary replays the WAL frames the older 
   test('the first run of the newer binary migrates once and names the data directory it derived from TOPGUN_REDB_PATH', () => {
     expect(o.firstRunLog?.migrationComplete).toBe(1);
     expect(o.firstRunLog?.engineMigrationComplete).toBe(1);
-    // The RocksDB open logs the line, and so does the redb open it hands the
-    // legacy file's migration to, so this start may log it more than once;
-    // every one must name the same directory and source.
-    expect(o.firstRunLog?.locationLines.length).toBeGreaterThanOrEqual(1);
+    // The RocksDB open logs the line once, and the redb open it hands the
+    // legacy file's migration to logs it once more; both must name the same
+    // directory and source.
+    expect(o.firstRunLog?.locationLines.length).toBe(2);
     expect(new Set(o.firstRunLog?.locationLines.map((l) => JSON.stringify(l)))).toEqual(
       new Set([
         JSON.stringify({
