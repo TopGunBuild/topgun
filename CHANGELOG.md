@@ -35,6 +35,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `topgun-mcp --debug` logs only named config fields; the TopGun URL is reduced to its origin.
   - A request with a `Host` header that is not a valid URL authority no longer crashes the
     process.
+- **Changed (defaults): writes reach the store without a 1 s delay.** A write the server has
+  acknowledged used to wait in the write-behind buffer for at least one second before it was
+  stored, which limited the writes of new keys a node accepts to about
+  `capacity / (1 s + the wait to the next flush)`. Measured on a Mac with the open-loop load
+  harness offering 10 000 writes of new keys per second (values of tens of bytes): about 5 200
+  acknowledged per second on RocksDB, the rest refused as `Write-behind capacity exceeded`.
+  - **No write delay.** A write is due for the store as soon as it is buffered; the write delay
+    (never an environment variable) defaults to 0. When writes are due, flush passes run back to
+    back, each one engine commit of up to 1000 writes or 8 MiB.
+  - **`TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` defaults to `10`** (was `1000`) and is now the
+    longest a buffered write waits while the flush task is idle. `0` refuses to start (the idle
+    loop would spin). A value of `500` or more, with a non-zero `TOPGUN_WRITEBEHIND_CAPACITY`,
+    logs one startup `WARN`, `the write-behind flush interval is at least 500 ms: new-key
+    admission is limited to about capacity / interval`. **Remove an explicit
+    `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=1000`** copied from older example configurations: it
+    keeps the old ceiling of about 10⁴ new keys per second.
+  - **Two metrics**, present from the first scrape at 0:
+    `topgun_write_behind_capacity_refusals_total` (writes of new keys refused because the
+    buffer was at its capacity — a temporary error, the client resends) and
+    `topgun_write_behind_oldest_entry_age_seconds` (the age of the oldest buffered write, refused
+    or not; it keeps rising through a store outage).
+  - **Hot keys are coalesced less.** A key rewritten while its write is still buffered is stored
+    once; without the delay that window is about one pass or one flush interval instead of at
+    least a second, so a key rewritten many times a second is stored up to that many times a
+    second. The write-ahead log already wrote every write.
+  - **Large values (unchanged, now stated).** The buffer is bounded by keys, not bytes, and keeps
+    each buffered value twice: a buffer of large values can exhaust the process's memory before
+    the key bound refuses anything. The process is then killed and the write-ahead log replays
+    the acknowledged writes at the next start — a crash, not data loss. A byte bound is
+    TODO-963.
 
 - **Changed (on-disk format): the server stores its data in RocksDB.** The data directory now
   holds `engine.rocksdb/`, and the server moves an existing `engine.redb` there by itself, once,

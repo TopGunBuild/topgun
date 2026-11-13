@@ -147,7 +147,7 @@ The features below are **not implemented** in the current Rust server. The guide
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Crash-safe shutdown drain + WAL recovery</td>
         <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
-        <td className="py-3 px-4">TODO-339; write-behind can lose ~1s of buffered writes on unclean shutdown</td>
+        <td className="py-3 px-4">TODO-339; write-behind holds acked writes until its next flush pass, so an unclean shutdown can lose the writes buffered then</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Entry Processor</td>
