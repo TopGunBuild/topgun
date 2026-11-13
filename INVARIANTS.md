@@ -3573,7 +3573,7 @@ weaker than a test.
   by SPEC-409c.
 - **Status:** decided, **enforced**.
 
-### TG-ENG-008: A redb store is migrated into RocksDB once: resumable once its first batch is durable, verified, kept and never overwritten; no refusal moves, deletes or overwrites the redb files
+### TG-ENG-008: A redb store is migrated into RocksDB once: resumable after a process kill at every point, verified, kept and never overwritten; no refusal moves, deletes or overwrites the redb files
 
 - **Scope:** the engine migration (`engine_migration.rs` — `start`, `prepare_resume`, `resume`,
   `copy`, `verify`, `switch`) and the RocksDB rows of `rocks_store.rs` that lead to it or refuse
@@ -3598,19 +3598,30 @@ weaker than a test.
      instead of being replaced; then the mark is cleared alone by a raw synced batch, and the
      served store is a fresh `open_sealed` over the target, which runs any seal or unseal pass
      to its end (`TG-ENC-004`).
-  4. *Resumable once the first batch is durable.* A start killed at any point after the first
-     copy batch's write returned resumes from the durable mark at the next start (`store engine:
-     resuming after {key}` in `copying`, `store engine: resuming at the verification` at
-     `verified`) and ends with the same content as an uninterrupted migration. Every check of a
-     resume runs before the writable open of the target, so a refused resume leaves the target as
-     it was.
+  4. *Resumable at every kill point.* A start killed at any point after the first copy batch's
+     write returned resumes from the durable mark at the next start (`store engine: resuming
+     after {key}` in `copying`, `store engine: resuming at the verification` at `verified`) and
+     ends with the same content as an uninterrupted migration. A start killed earlier — inside
+     the create, or while the first batch's record is being appended to the engine log, which
+     leaves `CURRENT` and a log whose only record is torn — leaves a target with no row and no
+     mark, which clause 5 removes; the next start migrates anew, to the same content. Every check
+     of a resume runs before the writable open of the target, so a refused resume leaves the
+     target as it was.
   5. *An interrupted create without a row is removed and restarted.* A target that holds no
-     row — no `*.sst`, every `*.log` empty, and either no `CURRENT` or a read-only walk that finds
-     no key — is removed with one `WARN` (`store engine: removing {dir}: it holds no row …`) and
-     the rows are evaluated again. A target with engine data but no `CURRENT` is refused
-     (`… holds engine data but no CURRENT; …`), and an error while inspecting it refuses
-     (`store engine: cannot inspect …; nothing was changed`), never read as "no row". The
-     removal holds no `LOCK`: the contract is one server process per data directory.
+     row is removed with one `WARN` (`store engine: removing {dir}: it holds no row …`) and the
+     rows are evaluated again: without `CURRENT`, one with no `*.sst` and every `*.log` empty;
+     with `CURRENT`, one with no `*.sst` whose read-only open — which replays the engine log and
+     stops at a torn record — shows no mark and no key. A target with engine data but no
+     `CURRENT` is refused (`… holds engine data but no CURRENT; …`), a target with an `*.sst` but
+     no visible key or mark beside `engine.redb` is refused as two stores, and an error while
+     inspecting it refuses (`store engine: cannot inspect …; nothing was changed`), never read as
+     "no row". No served store reads as holding no key: its open writes the format rows in its
+     first synced batch, and nothing deletes them; the one exception is a served store whose rows
+     are all still only in its engine log and whose first record was later corrupted from
+     outside: it is removed (and, with an `engine.redb` planted beside it, migrated over);
+     RocksDB's own recovery would discard those rows as well. The removal holds no `LOCK`: the contract is one server
+     process per data directory, and a second start on the same directory can remove the
+     running process's target until its first copy batch is wholly written (not claimed, below).
   6. *Refusals never move, delete or overwrite the redb files.* Too little free space
      (`1.5 × the size of engine.redb + 64 MiB`, less what the target holds on a resume), two stores
      (`engine.rocksdb/` with rows and no mark beside `engine.redb`), a kept file with no store, a
@@ -3638,36 +3649,37 @@ weaker than a test.
   `r_c_two_stores_with_an_sst_and_no_mark_refused_not_removed`,
   `r_c_engine_data_without_current_is_refused`,
   `r_c_uninspectable_directory_is_refused_not_removed`, `r_c_kept_only_refused`,
-  `r_c_redb_pair_refused_by_the_rocksdb_classifier`, `r_c_free_space_refusal_changes_nothing`,
+  `r_c_redb_pair_refused_by_the_rocksdb_classifier`,
+  `r_c_kill_inside_the_first_batch_is_removed_and_migrated_anew` (the first batch's engine-log
+  record cut at every log-block boundary and inside its header: removed and migrated anew; the
+  whole record: resumed; a torn first record with no `engine.redb`: removed and created fresh),
+  `r_c_free_space_refusal_changes_nothing`,
   `r_c_resume_free_space_refusal_changes_nothing`, `r_c_resume_without_the_source_changes_nothing`,
   `r_c_resume_does_not_seal_the_source`, `r_c_mark_read_writes_no_engine_file`,
   `r_c_sealed_values_and_keyring_survive`, `r_c_migrated_store_with_watermark_opens_and_reopens`
   — in `rocks_store.rs`. Out of process, on the release binary against a `7692c380` build:
   `tests/integration-rust/engine-upgrade.test.ts` (LWW, OR and sealed records, a TTL record and a
   deleted tenant served after the migration; no second migration at the next start),
-  `engine-migration-resume.test.ts` (`kill -9` during the copy, after `verified` and after the
-  rename, each resumed to the content of an uninterrupted run; the state a kill before the first
-  batch leaves — a target without `CURRENT` — staged, and removed with the `WARN`),
+  `engine-migration-resume.test.ts` (`kill -9` inside the first batch's write, removed with the
+  `WARN` and migrated anew; during the copy, after `verified` and after the rename, each resumed;
+  each to the content of an uninterrupted run; the state a kill before the first batch leaves — a
+  target without `CURRENT` — staged, and removed with the `WARN`),
   `engine-rollback.test.ts` (the documented rollback, and an older binary refusing the migrated
   directory) — local, opt-in.
 - **Violation consequence:** a partly copied store served as complete; the only copy of the data
   moved, deleted or overwritten by a refused start; an operator's kept file replaced by the
   rename; a resume that skips rows.
-- **Known gap — the first batch.** A `kill -9` while the **first** copy batch is being appended to
-  RocksDB's own WAL can leave `engine.rocksdb/` with `CURRENT` and a non-empty `*.log` that holds
-  only a torn record: no row and no mark. Clause 5 does not remove it (a `*.log` is not empty),
-  and with `engine.redb` beside it every later start refuses with the two-stores line
-  (`store engine: two stores found: …`, exit 1) until an operator moves `engine.rocksdb/` away;
-  the copy never writes `engine.redb`, so the next start then migrates anew. Observed twice in development
-  runs of `engine-migration-resume`; that the record is torn is inferred, not decoded. Tracked by
-  TODO-956. The in-process crash target kills between engine writes, not inside one, so
-  it does not reach this instant.
+- **Kill points covered.** The in-process crash target aborts after engine writes; the first
+  batch's write is also cut inside its engine-log record, as prefixes of the bytes a `kill -9`
+  leaves (RocksDB appends the record and keeps no recycled log), and out of process a `kill -9`
+  is aimed at that write.
 - **Not claimed:** a power loss during the migration (process-crash model only, `TG-ENG-001`);
-  two server processes on one data directory; the bytes of the target across a refusal that
+  two server processes on one data directory (a second start can remove the running process's
+  target until its first copy batch is wholly written); the bytes of the target across a refusal that
   opens it read-only (no file is written, `r_c_mark_read_writes_no_engine_file`); a tool that
   exports RocksDB back to redb — there is none, and the way back is the kept file.
-- **Discovered by:** SPEC-409c; the first-batch gap by SPEC-409f.
-- **Status:** decided, **enforced** — except the first-batch instant above.
+- **Discovered by:** SPEC-409c; the first-batch gap by SPEC-409f, closed by SPEC-410.
+- **Status:** decided, **enforced**.
 
 ### TG-ENC-001: Plaintext DEKs never leave process memory; the `keyring` row is their only persistent form, its key ids are never reused, and the row is never deleted
 

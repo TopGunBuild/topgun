@@ -9,22 +9,26 @@
  * migrates a clone without interruption; its `store engine: migration
  * complete` line (rows, value bytes) and the sentinels are the reference.
  *
- * Four points:
+ * Five points:
  *
  * - before the first batch — staged, not aimed: a kill there falls in a
  *   sub-second window inside the create, which nothing outside the process can
  *   hit. The test leaves the state such a kill leaves (an `engine.rocksdb/`
  *   without `CURRENT` beside `engine.redb`) and starts the newer binary, which
  *   must log that it removes the empty directory, not refuse two stores.
- * - during the copy, after the `verified` mark, after the rename — aimed from
- *   outside: while the newer binary migrates, the test polls the data
- *   directory in a tight synchronous loop and sends SIGKILL the moment its
- *   trigger is seen. The copy: the engine WAL under `engine.rocksdb/` holds
- *   more than one copy batch, so at least the first batch and its mark are
- *   whole. (A kill while the first batch is still being appended leaves a WAL
- *   file with a torn record and no mark; the next start refuses that as two
- *   stores instead of resuming, so that instant is not claimed here.) The
- *   `verified` mark: the engine WAL grows by less than 1 KiB after at least
+ * - inside the first batch, during the copy, after the `verified` mark, after
+ *   the rename — aimed from outside: while the newer binary migrates, the test
+ *   polls the data directory in a tight synchronous loop and sends SIGKILL the
+ *   moment its trigger is seen. Inside the first batch: the engine WAL under
+ *   `engine.rocksdb/` (which has `CURRENT`) holds more bytes than a freshly
+ *   created engine's WAL, so the first batch's record is being appended; the
+ *   test measures that fresh size itself beforehand, by killing starts as soon
+ *   as `CURRENT` and a WAL file appear and taking the smallest WAL seen. A kill
+ *   that lands while the record is still torn leaves no row and no mark, and
+ *   the next start must remove `engine.rocksdb/` (one `WARN`) and migrate anew;
+ *   one that lands after the record is whole resumes from its mark and is a
+ *   miss. The copy: the engine WAL holds more than one copy batch, so at least
+ *   the first batch and its mark are whole. The `verified` mark: the engine WAL grows by less than 1 KiB after at least
  *   50 ms without growth (a copy batch is megabytes; the verification between
  *   the last batch and the mark only reads). The rename:
  *   `engine.redb.pre-rocksdb` exists. Which point a kill hit is then established from what the next
@@ -90,10 +94,14 @@ const MARK_MAX_BYTES = 1024;
 const COPY_TRIGGER_BYTES = 16 * 1024 * 1024;
 const AIM_DEADLINE_MS = 60_000;
 const MAX_ATTEMPTS = 6;
+/** The first batch's record is appended in a few milliseconds, so this point misses more often. */
+const FIRST_BATCH_MAX_ATTEMPTS = 20;
+/** Kills of fresh starts that measure a freshly created engine's WAL size. */
+const FRESH_LOG_SAMPLES = 3;
 const FIXTURE_TIMEOUT_MS = 600_000;
 const CASE_TIMEOUT_MS = 600_000;
 
-type Aimed = 'copy' | 'verified' | 'renamed';
+type Aimed = 'first-batch' | 'copy' | 'verified' | 'renamed';
 
 const filler = 'x'.repeat(BULK_VALUE_BYTES);
 
@@ -210,8 +218,10 @@ function engineLogSizes(rocks: string): Map<string, number> {
   let names: string[];
   try {
     names = fs.readdirSync(rocks);
-  } catch {
-    return sizes;
+  } catch (err) {
+    // Only an absent directory holds nothing; any other error fails the attempt.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return sizes;
+    throw err;
   }
   for (const name of names) {
     if (!name.endsWith('.log')) continue;
@@ -236,10 +246,18 @@ function growth(before: Map<string, number>, now: Map<string, number>): number {
  * and the SIGKILL — and returns what it saw. The newer binary logs a few lines
  * during this time, far less than a pipe holds, so it never blocks on output.
  */
-function aimAndKill(point: Aimed, l: Layout, pid: number): string {
+function aimAndKill(point: Aimed, l: Layout, pid: number, freshLog: number): string {
   const end = Date.now() + AIM_DEADLINE_MS;
   let seen = 'deadline passed';
-  if (point === 'copy') {
+  if (point === 'first-batch') {
+    while (Date.now() < end) {
+      const total = [...engineLogSizes(l.rocks).values()].reduce((a, b) => a + b, 0);
+      if (total > freshLog && fs.existsSync(path.join(l.rocks, 'CURRENT'))) {
+        seen = `engine WAL holds ${total} bytes, more than a fresh engine's ${freshLog}`;
+        break;
+      }
+    }
+  } else if (point === 'copy') {
     while (Date.now() < end) {
       const total = [...engineLogSizes(l.rocks).values()].reduce((a, b) => a + b, 0);
       if (total > COPY_TRIGGER_BYTES) {
@@ -299,20 +317,102 @@ function aimAndKill(point: Aimed, l: Layout, pid: number): string {
   return seen;
 }
 
+/** What a killed start left in `engine.rocksdb/`, read before the next start. */
+interface Engine {
+  current: boolean;
+  logBytes: number;
+  kinds: string[];
+}
+
+function engineState(rocks: string): Engine {
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(rocks).sort();
+  } catch (err) {
+    // Only an absent directory holds nothing; any other error fails the attempt.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  return {
+    current: names.includes('CURRENT'),
+    logBytes: [...engineLogSizes(rocks).values()].reduce((a, b) => a + b, 0),
+    kinds: [...new Set(names.map((n) => n.replace(/^[0-9]+/, '')))],
+  };
+}
+
 interface Attempt {
   trigger: string;
   killed: unknown;
   files: { redb: string; kept: string; rocks: string };
+  engine: Engine;
   resumedAfter: boolean;
   resumedAtVerification: boolean;
+  removing: number;
+  migrating: number;
+  twoStores: number;
   hit: string;
 }
 
-function classify(files: Attempt['files'], after: boolean, atVerification: boolean): string {
+function classify(a: Omit<Attempt, 'hit' | 'trigger' | 'killed'>, freshLog: number): string {
+  const { files, resumedAfter: after, resumedAtVerification: atVerification } = a;
+  if (
+    a.engine.current &&
+    a.engine.logBytes > freshLog &&
+    a.removing === 1 &&
+    a.migrating === 1 &&
+    !after &&
+    a.twoStores === 0 &&
+    files.redb === 'file' &&
+    files.kept === 'absent'
+  ) {
+    return 'first-batch';
+  }
   if (after && files.redb === 'file' && files.kept === 'absent') return 'copy';
   if (atVerification && files.redb === 'file' && files.kept === 'absent') return 'verified';
   if (atVerification && files.redb === 'absent' && files.kept === 'file') return 'renamed';
-  return `none of the three (files ${JSON.stringify(files)}, resume after: ${after}, at the verification: ${atVerification})`;
+  return `none of the four (files ${JSON.stringify(files)}, resume after: ${after}, at the verification: ${atVerification})`;
+}
+
+/**
+ * A freshly created engine's WAL size, measured by this test: starts on fresh
+ * clones are killed as soon as `CURRENT` and a WAL file both exist, before
+ * the first batch can be appended, and the smallest WAL seen is the fresh
+ * size (a kill that came late can only see more). Every sample is reported.
+ */
+async function measureFreshLog(
+  env: TwoBinaryEnv,
+  pristine: string,
+  root: string,
+  running: SpawnedBinary[],
+): Promise<{ freshLog: number; samples: number[] }> {
+  const samples: number[] = [];
+  for (let n = 0; n < FRESH_LOG_SAMPLES; n++) {
+    const dir = clone(pristine, root, `fresh-log-${n}`);
+    const l = layout(dir);
+    const victim = await spawnBinary({
+      binaryPath: env.newBinary,
+      commit: env.newCommit,
+      label: `NEW to be killed (fresh engine, sample ${n + 1})`,
+      env: storeEnv(dir, 'rocksdb'),
+      portTimeoutMs: 0,
+    });
+    running.push(victim);
+    const end = Date.now() + AIM_DEADLINE_MS;
+    let sizes = new Map<string, number>();
+    while (Date.now() < end) {
+      sizes = engineLogSizes(l.rocks);
+      if (sizes.size > 0 && fs.existsSync(path.join(l.rocks, 'CURRENT'))) break;
+    }
+    try {
+      process.kill(victim.process.pid as number, 'SIGKILL');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ESRCH') throw err;
+    }
+    await victim.waitForExit(10_000);
+    if (sizes.size === 0) throw new Error(`fresh engine sample ${n + 1}: no WAL file seen`);
+    samples.push([...sizes.values()].reduce((a, b) => a + b, 0));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  return { freshLog: Math.min(...samples), samples };
 }
 
 test(`the older binary is the build from ${ENGINE_OLD_COMMIT_PREFIX}`, () => {
@@ -323,6 +423,7 @@ describe('Integration: a killed engine migration completes at the next start', (
   let root: string | null = null;
   let pristine = '';
   let control: Content | null = null;
+  let freshLog = 0;
   const fixture: Record<string, unknown> = {};
   const running: SpawnedBinary[] = [];
 
@@ -369,6 +470,9 @@ describe('Integration: a killed engine migration completes at the next start', (
     fixture.controlStartMs = Date.now() - started;
     control = await content(server, 'control');
     await drainedStop(server);
+    const measured = await measureFreshLog(env, pristine, root, running);
+    freshLog = measured.freshLog;
+    fixture.freshLogSamples = measured.samples;
     process.stderr.write(
       `[engine-migration-resume] fixture:\n${JSON.stringify({ fixture, control }, null, 2)}\n`,
     );
@@ -421,14 +525,21 @@ describe('Integration: a killed engine migration completes at the next start', (
     CASE_TIMEOUT_MS,
   );
 
-  for (const point of ['copy', 'verified', 'renamed'] as Aimed[]) {
+  const titles: Record<Aimed, string> = {
+    'first-batch': 'inside the first batch',
+    copy: 'during the copy',
+    verified: 'after the verified mark',
+    renamed: 'after the rename',
+  };
+  for (const point of ['first-batch', 'copy', 'verified', 'renamed'] as Aimed[]) {
     test(
-      `kill -9 ${point === 'copy' ? 'during the copy' : `after the ${point === 'verified' ? 'verified mark' : 'rename'}`}: the next start completes with the same content`,
+      `kill -9 ${titles[point]}: the next start completes with the same content`,
       async () => {
         const env = requireEngineEnv();
         const attempts: Attempt[] = [];
         let resumed: Record<string, unknown> | null = null;
-        for (let n = 0; n < MAX_ATTEMPTS && !resumed; n++) {
+        const maxAttempts = point === 'first-batch' ? FIRST_BATCH_MAX_ATTEMPTS : MAX_ATTEMPTS;
+        for (let n = 0; n < maxAttempts && !resumed; n++) {
           const dir = clone(pristine, root as string, `${point}-${n}`);
           const l = layout(dir);
           // Not awaited for a port: the kill lands before the server listens.
@@ -440,24 +551,26 @@ describe('Integration: a killed engine migration completes at the next start', (
             portTimeoutMs: 0,
           });
           running.push(victim);
-          const trigger = aimAndKill(point, l, victim.process.pid as number);
+          const trigger = aimAndKill(point, l, victim.process.pid as number, freshLog);
           const killed = await victim.waitForExit(10_000);
           const files = { redb: kindOf(l.redb), kept: kindOf(l.kept), rocks: kindOf(l.rocks) };
+          const engine = engineState(l.rocks);
 
           const next = await startNew(env, dir, `NEW after the kill (${point}, attempt ${n + 1})`);
           running.push(next);
-          const after = linesWith(next, 'store engine: resuming after').length > 0;
-          const atVerification =
-            linesWith(next, 'store engine: resuming at the verification').length > 0;
-          const hit = classify(files, after, atVerification);
-          attempts.push({
-            trigger,
-            killed,
+          const seen = {
             files,
-            resumedAfter: after,
-            resumedAtVerification: atVerification,
-            hit,
-          });
+            engine,
+            resumedAfter: linesWith(next, 'store engine: resuming after').length > 0,
+            resumedAtVerification:
+              linesWith(next, 'store engine: resuming at the verification').length > 0,
+            removing: linesWith(next, 'store engine: removing').filter((x) => x.includes('WARN'))
+              .length,
+            migrating: linesWith(next, MIGRATING_LINE).length,
+            twoStores: linesWith(next, 'two stores found').length,
+          };
+          const hit = classify(seen, freshLog);
+          attempts.push({ trigger, killed, ...seen, hit });
           if (hit === point) {
             resumed = {
               killed,
@@ -472,7 +585,7 @@ describe('Integration: a killed engine migration completes at the next start', (
           fs.rmSync(dir, { recursive: true, force: true });
         }
         process.stderr.write(
-          `[engine-migration-resume] ${point}:\n${JSON.stringify({ attempts, resumed }, null, 2)}\n`,
+          `[engine-migration-resume] ${point}:\n${JSON.stringify({ freshLog, attempts, resumed }, null, 2)}\n`,
         );
         // A point never hit is a failure with every attempt listed, never a pass.
         expect({ hit: resumed !== null, attempts: resumed ? undefined : attempts }).toEqual({
