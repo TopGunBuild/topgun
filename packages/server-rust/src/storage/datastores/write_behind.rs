@@ -13321,6 +13321,464 @@ mod tests {
             "{err}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // No write delay, the idle linger, the admission gate and the head age
+    // -----------------------------------------------------------------------
+
+    /// The map the admission and pacing tests write to.
+    const T411_MAP: &str = "m";
+
+    /// The value of an unlabelled series in a Prometheus rendering.
+    fn t411_value(rendered: &str, name: &str) -> Option<f64> {
+        rendered
+            .lines()
+            .find(|line| line.starts_with(&format!("{name} ")))
+            .and_then(|line| line[name.len() + 1..].parse().ok())
+    }
+
+    /// Asks for one pass and lets the runtime's clock run in 1 ms steps until
+    /// it has closed. The epoch moves by two through every pass, an empty one
+    /// included.
+    async fn t411_one_pass(store: &WriteBehindDataStore) {
+        let opened_at = store.flush_pass_epoch.load(Ordering::SeqCst);
+        store.soft_flush().await.expect("soft_flush");
+        let closed = poll_until(10_000, || {
+            let epoch = store.flush_pass_epoch.load(Ordering::SeqCst);
+            epoch >= opened_at + 2 && epoch.is_multiple_of(2)
+        })
+        .await;
+        assert!(closed.is_some(), "the requested pass never closed");
+    }
+
+    /// The `retry_count` of the queued entry of `key`, if one is queued.
+    fn t411_retry_count(store: &WriteBehindDataStore, key: &str) -> Option<u32> {
+        store
+            .queues
+            .get(&partition_for(T411_MAP, key))
+            .and_then(|queue| {
+                queue
+                    .entries
+                    .get(&(T411_MAP.to_string(), key.to_string()))
+                    .map(|entry| entry.retry_count)
+            })
+    }
+
+    #[test]
+    fn t411_default_config_stores_a_write_within_two_flush_intervals() {
+        paused_runtime().block_on(async {
+            let spy = Arc::new(SpyDataStore::new());
+            let store = schedule_store(&spy, WriteBehindConfig::default());
+            store
+                .add(T411_MAP, "k", &lww("v", 1), now_millis())
+                .await
+                .expect("accepted");
+            advance(20).await;
+            let stored_within_20_ms = spy.accepted_for("k");
+
+            let calls = spy.call_count();
+            let epoch = store.flush_pass_epoch.load(Ordering::SeqCst);
+            advance(1_000).await;
+            let epoch_rise = store.flush_pass_epoch.load(Ordering::SeqCst) - epoch;
+            assert_eq!(
+                (stored_within_20_ms, spy.call_count() - calls),
+                (1, 0),
+                "(stored within two intervals, store calls during the idle second)"
+            );
+            assert!(
+                epoch_rise <= 2 * (1_000 / 10 + 2),
+                "the idle loop must wait the interval between wakes, not spin: the pass epoch \
+                 rose by {epoch_rise} in one second"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn t411_a_write_ahead_of_the_wall_clock_is_due_at_once() {
+        let spy = Arc::new(SpyDataStore::new());
+        let store = schedule_store(
+            &spy,
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 60_000,
+                ..WriteBehindConfig::default()
+            },
+        );
+        store
+            .add(T411_MAP, "ahead", &lww("v", 1), now_millis() + 3_600_000)
+            .await
+            .expect("accepted");
+        store.soft_flush().await.expect("soft_flush");
+        let began = std::time::Instant::now();
+        while spy.accepted_for("ahead") == 0 && began.elapsed() < std::time::Duration::from_secs(5)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            spy.accepted_for("ahead"),
+            1,
+            "with no write delay an entry stored an hour ahead of the wall clock is due at once"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS")]
+    fn t411_flush_interval_zero_refuses_to_start() {
+        let _ = WriteBehindConfig::from_source(config_source(&[(
+            "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS",
+            "0",
+        )]));
+    }
+
+    #[test]
+    fn t411_flush_interval_parses_and_falls_back() {
+        let parsed = WriteBehindConfig::from_source(config_source(&[(
+            "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS",
+            "10",
+        )]));
+        let fallback = WriteBehindConfig::from_source(config_source(&[(
+            "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS",
+            "x",
+        )]));
+        assert_eq!(
+            (parsed.flush_interval_ms, fallback.flush_interval_ms),
+            (10, 10)
+        );
+    }
+
+    #[test]
+    fn t411_a_legacy_flush_interval_warns() {
+        #[derive(Clone)]
+        struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for CapturedLog {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        const LINE: &str = "the write-behind flush interval is at least 500 ms: new-key \
+                            admission is limited to about capacity / interval";
+
+        // How often the line is logged for one variable set. Scoped, never a
+        // global install: the test binary is shared and runs in parallel.
+        fn lines_for(vars: &[(&str, &str)]) -> usize {
+            let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let writer = CapturedLog(Arc::clone(&captured));
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                let _ = WriteBehindConfig::from_source(config_source(vars));
+            });
+            let text = String::from_utf8(captured.lock().unwrap().clone()).expect("utf-8 log");
+            text.matches(LINE).count()
+        }
+
+        const VAR: &str = "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS";
+        assert_eq!(
+            [
+                lines_for(&[(VAR, "500")]),
+                lines_for(&[(VAR, "1000")]),
+                lines_for(&[(VAR, "499")]),
+                lines_for(&[(VAR, "10")]),
+                lines_for(&[(VAR, "1000"), ("TOPGUN_WRITEBEHIND_CAPACITY", "0")]),
+            ],
+            [1, 1, 0, 0, 0],
+            "[500, 1000, 499, 10, 1000 with capacity 0]"
+        );
+    }
+
+    #[test]
+    fn t411_capacity_refusals_are_counted_on_every_write_path() {
+        const REFUSALS: &str = "topgun_write_behind_capacity_refusals_total";
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let readings = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                // The wall-clock delay pins every entry written at the wall
+                // clock, so no pass can drain the two accepted keys.
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        capacity: 2,
+                        write_delay_ms: 600_000,
+                        flush_interval_ms: 60_000,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                let before = t411_value(&handle.render(), REFUSALS);
+                let accepted = [
+                    store
+                        .add(T411_MAP, "a", &lww("v", 1), now_millis())
+                        .await
+                        .is_ok(),
+                    store
+                        .add(T411_MAP, "b", &lww("v", 1), now_millis())
+                        .await
+                        .is_ok(),
+                ];
+                let refused = [
+                    store
+                        .add(T411_MAP, "c", &lww("v", 1), now_millis())
+                        .await
+                        .is_err(),
+                    store.remove(T411_MAP, "d", now_millis()).await.is_err(),
+                    store
+                        .remove_all(T411_MAP, &["e".to_string(), "f".to_string()])
+                        .await
+                        .is_err(),
+                ];
+                let after_refusals = t411_value(&handle.render(), REFUSALS);
+                let rewrite = store
+                    .add(T411_MAP, "a", &lww("v2", 2), now_millis())
+                    .await
+                    .is_ok();
+                let after_rewrite = t411_value(&handle.render(), REFUSALS);
+                (
+                    before,
+                    accepted,
+                    refused,
+                    after_refusals,
+                    rewrite,
+                    after_rewrite,
+                )
+            })
+        });
+        assert_eq!(
+            readings,
+            (
+                Some(0.0),
+                [true, true],
+                [true, true, true],
+                Some(3.0),
+                true,
+                Some(3.0)
+            ),
+            "(counter before, accepted, refused, counter after refusals, rewrite accepted, \
+             counter after rewrite)"
+        );
+    }
+
+    #[tokio::test]
+    async fn t411_a_pass_that_stores_nothing_ends_the_run() {
+        let spy = Arc::new(SpyDataStore::new());
+        spy.refuse_everything(true);
+        let store = schedule_store(
+            &spy,
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 60_000,
+                backoff_base_ms: 0,
+                backoff_cap_ms: 0,
+                capacity: 0,
+                ..WriteBehindConfig::default()
+            },
+        );
+        store
+            .add(T411_MAP, "k", &lww("v", 1), now_millis())
+            .await
+            .expect("accepted");
+        store.soft_flush().await.expect("soft_flush");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            spy.call_count(),
+            1,
+            "a pass that stored nothing must end the run, even with its entry due again"
+        );
+    }
+
+    #[test]
+    fn t411_oldest_entry_age_counts_a_refused_entry() {
+        const AGE: &str = "topgun_write_behind_oldest_entry_age_seconds";
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let (after_split, after_rewrite) = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                spy.refuse_key("A");
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        write_delay_ms: 0,
+                        flush_interval_ms: 60_000,
+                        capacity: 0,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                store
+                    .add(T411_MAP, "A", &lww("a", 1), now_millis() - 5_000)
+                    .await
+                    .unwrap();
+                store
+                    .add(T411_MAP, "B", &lww("b", 1), now_millis() - 1_000)
+                    .await
+                    .unwrap();
+                t411_one_pass(&store).await;
+                let after_split = (
+                    spy.calls_for("A") >= 2,
+                    spy.accepted_for("B"),
+                    t411_retry_count(&store, "A"),
+                    store.store_hold.load(Ordering::SeqCst),
+                    t411_value(&handle.render(), AGE).map(|age| (5.0..6.0).contains(&age)),
+                );
+
+                // A rewrite keeps the key's first buffered time.
+                store
+                    .add(T411_MAP, "A", &lww("a2", 2), now_millis())
+                    .await
+                    .unwrap();
+                t411_one_pass(&store).await;
+                let after_rewrite = (
+                    t411_retry_count(&store, "A").is_some(),
+                    t411_value(&handle.render(), AGE),
+                );
+                (after_split, after_rewrite)
+            })
+        });
+        assert_eq!(
+            after_split,
+            (true, 1, Some(1), false, Some(true)),
+            "(A refused in the commit and alone, B stored, A's retry count, hold, age in [5, 6))"
+        );
+        assert!(
+            after_rewrite.0 && after_rewrite.1.is_some_and(|age| (5.0..6.0).contains(&age)),
+            "after a rewrite of the refused key the head age must still count its first write: \
+             (A buffered, age) = {after_rewrite:?}"
+        );
+    }
+
+    #[test]
+    fn t411_oldest_entry_age_moves_during_a_hold() {
+        const AGE: &str = "topgun_write_behind_oldest_entry_age_seconds";
+        const HOLD: &str = "topgun_write_behind_store_hold";
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let (held, during_the_hold, healed) = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                spy.refuse_everything(true);
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        write_delay_ms: 0,
+                        flush_interval_ms: 10,
+                        capacity: 0,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                store
+                    .add(T411_MAP, "A", &lww("a", 1), now_millis() - 5_000)
+                    .await
+                    .unwrap();
+                store
+                    .add(T411_MAP, "B", &lww("b", 1), now_millis() - 1_000)
+                    .await
+                    .unwrap();
+                t411_one_pass(&store).await;
+                let rendered = handle.render();
+                let held = (
+                    t411_value(&rendered, HOLD),
+                    t411_value(&rendered, AGE).map(|age| (5.0..6.0).contains(&age)),
+                );
+
+                store
+                    .add(T411_MAP, "C", &lww("c", 1), now_millis() - 9_000)
+                    .await
+                    .unwrap();
+                advance(20).await;
+                let rendered = handle.render();
+                let during_the_hold = (
+                    t411_value(&rendered, HOLD),
+                    t411_value(&rendered, AGE).map(|age| (9.0..10.0).contains(&age)),
+                );
+
+                spy.refuse_everything(false);
+                advance(1_000).await;
+                let healed = (
+                    store.pending_operation_count(),
+                    t411_value(&handle.render(), AGE),
+                );
+                (held, during_the_hold, healed)
+            })
+        });
+        assert_eq!(
+            (held, during_the_hold, healed),
+            (
+                (Some(1.0), Some(true)),
+                (Some(1.0), Some(true)),
+                (0, Some(0.0))
+            ),
+            "((hold, age in [5, 6)) after the refused pass, (hold, age in [9, 10)) 20 ms into \
+             the hold, (buffered, age) once the store accepts)"
+        );
+    }
+
+    /// A reading, not a gate: the cost of one `report_retries` call over a
+    /// full buffer during a store-wide hold, when the flush loop calls it on
+    /// every wake of the interval. Run with `cargo test --release -p
+    /// topgun-server t411_report_retries_walk -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a timing reading, run on demand in release"]
+    fn t411_report_retries_walk_over_a_full_buffer_during_a_hold() {
+        const ENTRIES: u64 = 10_000;
+        const CALLS: usize = 1_000;
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let mut calls = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                // The wall-clock delay keeps every entry queued.
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        write_delay_ms: 600_000,
+                        flush_interval_ms: 3_600_000,
+                        capacity: 0,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                for i in 0..ENTRIES {
+                    store
+                        .add(T411_MAP, &format!("k{i}"), &lww("v", 1), now_millis())
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(store.pending_operation_count(), ENTRIES);
+                store.retrying.store(true, Ordering::Relaxed);
+                let mut schedule = RetrySchedule {
+                    hold_until: Some(
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+                    ),
+                    ..RetrySchedule::default()
+                };
+                (0..CALLS)
+                    .map(|_| {
+                        let began = std::time::Instant::now();
+                        store.report_retries(&mut schedule);
+                        began.elapsed()
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
+        calls.sort_unstable();
+        let median_us = calls[CALLS / 2].as_secs_f64() * 1e6;
+        let max_us = calls.last().expect("calls").as_secs_f64() * 1e6;
+        println!(
+            "report_retries over {ENTRIES} buffered entries during a hold: median {median_us:.1} \
+             us, max {max_us:.1} us per call ({CALLS} calls)"
+        );
+    }
 }
 
 // Declared after the inline `mod tests` so that module's literal opening line
