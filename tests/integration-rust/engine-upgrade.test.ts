@@ -149,7 +149,9 @@ async function served(port: number, tag: string): Promise<Record<string, unknown
 async function metric(port: number, series: string): Promise<number> {
   const text = await (await fetch(`http://127.0.0.1:${port}/metrics`)).text();
   const line = text.split('\n').find((l) => l.startsWith(`${series} `));
-  return line ? Number(line.slice(series.length + 1)) : 0;
+  // An absent series must not read as 0: a renamed metric would then look like a sweep that has not run yet.
+  if (line === undefined) throw new Error(`/metrics has no series ${series}`);
+  return Number(line.slice(series.length + 1));
 }
 
 /** The `store_engine` field of the boot summary line, if any line carries one. */
@@ -276,6 +278,11 @@ describe('Integration: a sealed store with a TTL record migrates to RocksDB', ()
   test('the migrated store holds every record with its first stamp, tag and TTL, and no plaintext', () => {
     // Read before expiry, or the TTL record would be compared after it was deleted.
     expect(o.firstHeldAt).toBeLessThan(o.writtenAt + TTL_MS);
+    // An empty Merkle read on both sides would compare equal, so the older binary's leaves are counted first.
+    expect(Object.keys(o.oldHeld.lww).sort()).toEqual(['k0', 'k1', 'k2']);
+    expect(Object.keys(o.oldHeld.or)).toEqual(['k']);
+    expect(o.oldHeld.or.k.records).toHaveLength(OR_VALUES.length);
+    expect(Object.keys(o.oldHeld.ttl)).toEqual(['t']);
     expect(o.firstHeld).toEqual(o.oldHeld);
     expect(o.firstServed).toEqual(o.oldServed);
     expect(o.plainInRocks).toBe(0);
