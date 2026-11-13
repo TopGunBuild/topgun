@@ -152,6 +152,14 @@ describe('Integration: the newer server binary replays the WAL frames the older 
   let dataDir: string | null = null;
   const running: SpawnedBinary[] = [];
 
+  /** The one `store location` line each start of the newer binary logs. */
+  function expectedLocation(): StoreLog['locationLines'][number] {
+    return {
+      dataDir: path.join(dataDir as string, 'topgun-data'),
+      dataDirSource: 'derived from TOPGUN_REDB_PATH',
+    };
+  }
+
   function start(binaryPath: string, commit: string, label: string): Promise<SpawnedBinary> {
     const dir = dataDir as string;
     return spawnBinary({
@@ -387,23 +395,16 @@ describe('Integration: the newer server binary replays the WAL frames the older 
   test('the first run of the newer binary migrates once and names the data directory it derived from TOPGUN_REDB_PATH', () => {
     expect(o.firstRunLog?.migrationComplete).toBe(1);
     expect(o.firstRunLog?.engineMigrationComplete).toBe(1);
-    // The RocksDB open logs the line once, and the redb open it hands the
-    // legacy file's migration to logs it once more; both must name the same
-    // directory and source.
-    expect(o.firstRunLog?.locationLines.length).toBe(2);
-    expect(new Set(o.firstRunLog?.locationLines.map((l) => JSON.stringify(l)))).toEqual(
-      new Set([
-        JSON.stringify({
-          dataDir: path.join(dataDir as string, 'topgun-data'),
-          dataDirSource: 'derived from TOPGUN_REDB_PATH',
-        }),
-      ]),
-    );
+    // One line per start, although this start runs both migrations: the
+    // RocksDB open logs it, and the redb open it hands the legacy file's
+    // migration to does not log it again.
+    expect(o.firstRunLog?.locationLines).toEqual([expectedLocation()]);
   });
 
   test('the second run of the newer binary does not migrate again and says the pre-migration file is kept', () => {
     expect(o.secondRunLog?.migrationComplete).toBe(0);
     expect(o.secondRunLog?.engineMigrationComplete).toBe(0);
     expect(o.secondRunLog?.preMigrationKept).toBe(1);
+    expect(o.secondRunLog?.locationLines).toEqual([expectedLocation()]);
   });
 });
