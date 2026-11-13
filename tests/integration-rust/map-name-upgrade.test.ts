@@ -49,6 +49,7 @@ import {
   BinaryExit,
   TwoBinaryEnv,
 } from './helpers/two-binary';
+import { COMPLETE_LINE } from './helpers/engine-migration';
 
 const CONTROL_MAP = 'user_profiles';
 const REFUSED_BY_OLD = ['user-profiles', 'users/profiles'];
@@ -91,7 +92,8 @@ interface Observed {
   /** The store directory as files once the first run of the newer binary has stopped. */
   afterFirstRun?: {
     dataDirIsDirectory: boolean;
-    engineFileIsFile: boolean;
+    engineDirIsDirectory: boolean;
+    keptEngineFileIsFile: boolean;
     marker: MovedMarkerState;
     preMigrationIsFile: boolean;
   };
@@ -101,7 +103,10 @@ interface Observed {
 
 /** The store lines of one run of the newer binary. */
 interface StoreLog {
+  /** The legacy file into the data directory. */
   migrationComplete: number;
+  /** The data directory's redb store into RocksDB, which the same start runs next. */
+  engineMigrationComplete: number;
   preMigrationKept: number;
   /** `data_dir` and `data_dir_source` of every `store location: data directory` line. */
   locationLines: Array<{ dataDir?: string; dataDirSource?: string }>;
@@ -110,7 +115,8 @@ interface StoreLog {
 function storeLog(server: SpawnedBinary): StoreLog {
   const lines = plainLines(server.stdout());
   return {
-    migrationComplete: lines.filter((l) => l.includes('migration complete')).length,
+    migrationComplete: lines.filter((l) => l.includes('store format: migration complete')).length,
+    engineMigrationComplete: lines.filter((l) => l.includes(COMPLETE_LINE)).length,
     preMigrationKept: lines.filter((l) => l.includes('pre-migration store file is kept')).length,
     locationLines: lines
       .filter((l) => l.includes('store location: data directory'))
@@ -270,7 +276,14 @@ describe('Integration: the newer server binary replays the WAL frames the older 
     o.firstRunLog = storeLog(first);
     o.afterFirstRun = {
       dataDirIsDirectory: isKind(path.join(dataDir, 'topgun-data'), 'directory'),
-      engineFileIsFile: isKind(path.join(dataDir, 'topgun-data', 'engine.redb'), 'file'),
+      engineDirIsDirectory: isKind(
+        path.join(dataDir, 'topgun-data', 'engine.rocksdb'),
+        'directory',
+      ),
+      keptEngineFileIsFile: isKind(
+        path.join(dataDir, 'topgun-data', 'engine.redb.pre-rocksdb'),
+        'file',
+      ),
       marker: movedMarkerState(path.join(dataDir, 'topgun.redb')),
       preMigrationIsFile: isKind(path.join(dataDir, 'topgun.redb.pre-migration'), 'file'),
     };
@@ -364,7 +377,8 @@ describe('Integration: the newer server binary replays the WAL frames the older 
 
   test('after the first run of the newer binary the store is a data directory, with the marker file and the pre-migration file beside it', () => {
     expect(o.afterFirstRun?.dataDirIsDirectory).toBe(true);
-    expect(o.afterFirstRun?.engineFileIsFile).toBe(true);
+    expect(o.afterFirstRun?.engineDirIsDirectory).toBe(true);
+    expect(o.afterFirstRun?.keptEngineFileIsFile).toBe(true);
     expect(o.afterFirstRun?.marker.kind).toBe('file');
     expect(o.afterFirstRun?.marker.firstLine).toBe('TOPGUN-STORE-MOVED 1');
     expect(o.afterFirstRun?.preMigrationIsFile).toBe(true);
@@ -372,16 +386,24 @@ describe('Integration: the newer server binary replays the WAL frames the older 
 
   test('the first run of the newer binary migrates once and names the data directory it derived from TOPGUN_REDB_PATH', () => {
     expect(o.firstRunLog?.migrationComplete).toBe(1);
-    expect(o.firstRunLog?.locationLines).toEqual([
-      {
-        dataDir: path.join(dataDir as string, 'topgun-data'),
-        dataDirSource: 'derived from TOPGUN_REDB_PATH',
-      },
-    ]);
+    expect(o.firstRunLog?.engineMigrationComplete).toBe(1);
+    // The RocksDB open logs the line, and so does the redb open it hands the
+    // legacy file's migration to, so this start may log it more than once;
+    // every one must name the same directory and source.
+    expect(o.firstRunLog?.locationLines.length).toBeGreaterThanOrEqual(1);
+    expect(new Set(o.firstRunLog?.locationLines.map((l) => JSON.stringify(l)))).toEqual(
+      new Set([
+        JSON.stringify({
+          dataDir: path.join(dataDir as string, 'topgun-data'),
+          dataDirSource: 'derived from TOPGUN_REDB_PATH',
+        }),
+      ]),
+    );
   });
 
   test('the second run of the newer binary does not migrate again and says the pre-migration file is kept', () => {
     expect(o.secondRunLog?.migrationComplete).toBe(0);
+    expect(o.secondRunLog?.engineMigrationComplete).toBe(0);
     expect(o.secondRunLog?.preMigrationKept).toBe(1);
   });
 });
