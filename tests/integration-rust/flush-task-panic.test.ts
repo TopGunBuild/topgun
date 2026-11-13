@@ -3,7 +3,7 @@
  * order and says so with its exit code.
  *
  * A write is acknowledged once it is in the write-ahead log; a background task
- * carries it to the store about a second later. When that task dies, nothing
+ * carries it to the store at its next flush pass. When that task dies, nothing
  * would flush again while the process lives. This test makes it die and then
  * checks what a process supervisor and an operator would see: the process ends
  * by itself, with a code that is not a clean stop, and after a restart every
@@ -19,15 +19,18 @@
  * what tells them apart is not the sentinel: the flush task is dead in both,
  * and the only code left that persists an entry is the drain at shutdown. That
  * drain is reached only when something is still queued, and a flush pass takes
- * every entry at least one second old. So the arms differ by what is queued
- * when the task dies:
+ * at most PASS_LIMIT entries of what is queued. So the arms differ by what is
+ * queued when the task dies:
  *
  * - PANIC-THEN-ORDERLY-EXIT — one acknowledged write after the sentinel and
- *   nothing else. The dying pass holds that one entry, the queue is empty, the
- *   shutdown has nothing to persist and completes: exit code 70.
- * - PANIC-IN-SHUTDOWN — a continuous stream of distinct keys. Entries younger
- *   than a second are still queued when the task dies, the shutdown drain meets
- *   the sentinel and panics as well: exit code 71.
+ *   nothing else. The next wake (the default 10 ms interval) takes that one
+ *   entry into the dying pass, the queue is empty, the shutdown has nothing to
+ *   persist and completes: exit code 70.
+ * - PANIC-IN-SHUTDOWN — a continuous stream of distinct keys against a server
+ *   whose flush interval is long enough that more than PASS_LIMIT of them are
+ *   acknowledged before the next wake. The dying pass takes at most PASS_LIMIT,
+ *   so the rest are still queued when the task dies, and the shutdown drain
+ *   meets the sentinel and panics as well: exit code 71.
  *
  * Each arm checks that its own setup held (its precondition) before it says
  * anything. A precondition that did not hold is an error of the scenario — the
@@ -56,11 +59,10 @@ import * as path from 'path';
 
 import {
   SEAM_BOOT_TEXT,
-  LagScrape,
-  allZero,
   lwwPut,
   requireFaultBinary,
-  scrapeLag,
+  waitEarlyWritesStored,
+  waitIdleBaseline,
 } from './helpers/fault-binary';
 import { TestClient } from './helpers/test-client';
 import {
@@ -99,8 +101,21 @@ const BINARY_FAILED_TEXT = 'write-behind background task failed; shutting the no
 const DRAIN_FAILED_TEXT = 'write-behind drain did not complete on a failed store';
 const DEADLINE_PASSED_TEXT = 'shutdown on a failed store passed its deadline';
 
-/** An entry is taken by a flush pass once it is this old; fixed in the server binary. */
-const WRITE_DELAY_MS = 1_000;
+/** The most entries one flush pass takes: the server's `PASS_MAX_ENTRIES`. */
+const PASS_LIMIT = 1_000;
+/** The server's default flush interval, which the orderly arm runs with. */
+const DEFAULT_FLUSH_INTERVAL_MS = 10;
+/**
+ * The flush interval of the PANIC-IN-SHUTDOWN arm's server
+ * (`TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`). Chosen so that `r · (I − 1 s) ≥
+ * 2 · PASS_LIMIT` for the stream's acknowledged-write rate `r` on the fault
+ * build (sequential, `per_op`): after the pass that stores the early writes the
+ * next wake comes one interval later, and step 2 runs on for at most about
+ * 0.8 s of it (one 100 ms poll and the 700 ms lag wait); the rest is margin.
+ * The server's startup warning about an interval of 500 ms or more is expected
+ * in this arm's log and not asserted.
+ */
+const PANIC_IN_SHUTDOWN_FLUSH_INTERVAL_MS = 6_000;
 /** Given to the server explicitly, so the deadline below is a known number. */
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 /**
@@ -113,12 +128,15 @@ const EXIT_WAIT_MARGIN_MS = 5_000;
 
 const ACK_WAIT_MS = 5_000;
 const CONNECT_WAIT_MS = 5_000;
+const SCRAPE_WAIT_MS = 2_000;
 /**
- * How long after the last acknowledgement the early writes had all reached the
- * store on the real binary: write delay, one flush tick, and the 600 ms tick
- * that refreshes the gauge.
+ * How long after the last acknowledgement step 2 sees the early writes in the
+ * store at the default interval, with no write delay: the 10 ms interval, one
+ * pass, one 100 ms poll, the 700 ms wait for a lag sample that postdates the
+ * store, and one more poll, about 0.9 s. The PANIC-IN-SHUTDOWN arm adds its
+ * own interval, since its early writes are stored at the next wake.
  */
-const FLUSH_OBSERVED_MS = 2_400;
+const FLUSH_OBSERVED_MS = 1_000;
 /** Room on top of that for a slower host; the wait ends as soon as the sign is seen. */
 const FLUSH_MARGIN_MS = 3_600;
 const FLUSH_POLL_MS = 100;
@@ -129,12 +147,16 @@ const FLUSH_POLL_MS = 100;
  * one the server had a chance to answer.
  */
 const STREAM_PAUSE_MS = 0;
-/** The flush task dies one to two seconds into the stream; a stream this long with no refusal is a failure. */
-const STREAM_MAX_MS = 15_000;
+/**
+ * The flush task dies at the first wake after the stream starts, within one
+ * interval of the PANIC-IN-SHUTDOWN arm; a stream this long with no refusal is
+ * a failure.
+ */
+const STREAM_MAX_MS = PANIC_IN_SHUTDOWN_FLUSH_INTERVAL_MS + 15_000;
 const LOG_POLL_MS = 5;
 const RESTART_STOP_MS = 15_000;
-/** Bounds a hung arm: boot, the flush wait, the wait for the exit, and the restart. */
-const ARM_TIMEOUT_MS = 180_000;
+/** Bounds a hung arm: boot, the idle and flush waits, the stream, the wait for the exit, and the restart. */
+const ARM_TIMEOUT_MS = 180_000 + 3 * PANIC_IN_SHUTDOWN_FLUSH_INTERVAL_MS;
 
 /**
  * The setup of an arm did not hold, so the arm has no result: not a pass and
@@ -274,8 +296,8 @@ interface Observed {
   unpersistedEntries: number | null;
   /** Stream arm: every write of the stream, in order. */
   stream: WriteSeen[];
-  /** Stream arm: acknowledged writes sent later than the store's line minus the write delay. */
-  ackedInsideWriteDelay: number | null;
+  /** Stream arm: acknowledged writes of the stream, counted from the client's answers. */
+  ackedStreamWrites: number | null;
   /** Stream arm: the first write that was not acknowledged. */
   refused: WriteSeen | null;
   /** Key to the last acknowledged value, per map. */
@@ -311,6 +333,8 @@ async function runArm(arm: Arm): Promise<Observed> {
   let reader: TestClient | null = null;
   let summary = `flush-task-panic arm=${arm} commit=${env.commit} aborted=before the server was launched`;
 
+  const flushIntervalMs =
+    arm === 'PANIC-IN-SHUTDOWN' ? PANIC_IN_SHUTDOWN_FLUSH_INTERVAL_MS : DEFAULT_FLUSH_INTERVAL_MS;
   const storeEnv: Record<string, string> = {
     STORAGE_BACKEND: 'redb',
     TOPGUN_REDB_PATH: path.join(dataDir, 'topgun.redb'),
@@ -327,7 +351,13 @@ async function runArm(arm: Arm): Promise<Observed> {
       binaryPath: env.binary,
       commit: env.commit,
       label: `flush-task-panic ${arm}`,
-      env: { ...storeEnv, TOPGUN_FAULT_STORE_PANIC_FILE: sentinel },
+      env: {
+        ...storeEnv,
+        TOPGUN_FAULT_STORE_PANIC_FILE: sentinel,
+        ...(arm === 'PANIC-IN-SHUTDOWN'
+          ? { TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS: String(flushIntervalMs) }
+          : {}),
+      },
     });
     const launched = server;
     const sha256Before = launched.sha256;
@@ -373,6 +403,20 @@ async function runArm(arm: Arm): Promise<Observed> {
       // makes the server write a record of its own, and one opened after the
       // sentinel would put an entry in the queue that this arm does not count.
       writer = await connectWithin(port, 'flush-panic-writer', CONNECT_WAIT_MS);
+      const connectedAt = Date.now();
+      const flushTiming = { pollMs: FLUSH_POLL_MS, scrapeWaitMs: SCRAPE_WAIT_MS };
+
+      // Before step 1: wait until the buffer is idle, the record the
+      // connection wrote included, and take the stored-entries counter as the
+      // baseline. The wait spans at least one interval of this arm's server.
+      const idle = await waitIdleBaseline(
+        port,
+        connectedAt,
+        flushIntervalMs,
+        connectedAt + flushIntervalMs + FLUSH_OBSERVED_MS + FLUSH_MARGIN_MS,
+        flushTiming,
+      );
+      note(`before step 1: ${idle.detail}`);
 
       // Step 1: several distinct keys, each acknowledged.
       for (const [i, key] of EARLY_KEYS.entries()) {
@@ -385,29 +429,27 @@ async function runArm(arm: Arm): Promise<Observed> {
       const lastEarlyAckAt = Date.now();
       note(`step 1: ${EARLY_KEYS.length} early writes acknowledged`);
 
-      // Step 2: wait until they are in the store. The sign is the lag gauge:
-      // first a scrape with a sample of 1 or more — taken after the last
-      // acknowledgement, so a zero from before the writes cannot pass — and
-      // after it a scrape with at least one sample and every sample at zero.
-      let riseAfterMs: number | null = null;
-      let flushedAfterMs: number | null = null;
-      let lastScrape: LagScrape = {};
-      const flushDeadline = lastEarlyAckAt + FLUSH_OBSERVED_MS + FLUSH_MARGIN_MS;
-      while (flushedAfterMs === null && Date.now() < flushDeadline) {
-        lastScrape = await scrapeLag(port);
-        const at = Date.now() - lastEarlyAckAt;
-        if (riseAfterMs === null && Object.values(lastScrape).some((lag) => lag >= 1)) {
-          riseAfterMs = at;
-        } else if (riseAfterMs !== null && allZero(lastScrape)) {
-          flushedAfterMs = at;
+      // Step 2: wait until they are in the store. The sign: the stored-entries
+      // counter has risen by the early writes over the idle baseline while
+      // nothing is buffered, and then a lag scrape taken at least 700 ms later
+      // reads zero on every partition. A counter that never rises, or an
+      // early write still buffered, keeps the sign from being seen.
+      const flushWindowMs = flushIntervalMs + FLUSH_OBSERVED_MS + FLUSH_MARGIN_MS;
+      if (idle.e0 === null) {
+        preconditionNotMet = `before step 1: the write-behind buffer was ${idle.detail}, so there is no baseline for step 2`;
+      } else {
+        const flushed = await waitEarlyWritesStored(
+          port,
+          idle.e0,
+          EARLY_KEYS.length,
+          lastEarlyAckAt,
+          lastEarlyAckAt + flushWindowMs,
+          flushTiming,
+        );
+        note(`step 2: ${flushed.detail}`);
+        if (flushed.flushedAfterMs === null) {
+          preconditionNotMet = `step 2: within ${flushWindowMs} ms of the last early acknowledgement no scrape showed the early writes stored with nothing buffered, followed at least 700 ms later by a lag scrape with every lag at 0 (${flushed.detail}), so the early writes are not known to be in the store`;
         }
-        if (flushedAfterMs === null) await sleep(FLUSH_POLL_MS);
-      }
-      note(
-        `step 2: lag rose after ${riseAfterMs} ms, all zero after ${flushedAfterMs} ms; last scrape ${JSON.stringify(lastScrape)}`,
-      );
-      if (flushedAfterMs === null) {
-        preconditionNotMet = `step 2: no scrape with a lag of 1 or more followed by a scrape with every lag at 0 within ${FLUSH_OBSERVED_MS + FLUSH_MARGIN_MS} ms of the last early acknowledgement (rise after ${riseAfterMs} ms, last scrape ${JSON.stringify(lastScrape)}), so the early writes are not known to be in the store`;
       }
 
       // Step 3: from here on persisting an entry panics. The file is never removed.
@@ -442,8 +484,9 @@ async function runArm(arm: Arm): Promise<Observed> {
             refused = seen;
           }
         }
+        const streamMs = Date.now() - streamStartedAt;
         note(
-          `step 4: ${stream.length} writes sent, ${stream.length - 1} acknowledged; the first not acknowledged (${refused.key}) saw: ${refused.answer} ${JSON.stringify(refused.frame)}`,
+          `step 4: ${stream.length} writes sent, ${stream.length - 1} acknowledged in ${streamMs} ms (${Math.round(((stream.length - 1) * 1000) / Math.max(streamMs, 1))} acknowledged writes/s); the first not acknowledged (${refused.key}) saw: ${refused.answer} ${JSON.stringify(refused.frame)}`,
         );
       }
 
@@ -476,7 +519,7 @@ async function runArm(arm: Arm): Promise<Observed> {
       // Step 6: was the arm's setup what it was meant to be?
       let drainedEntries: number | null = null;
       let unpersistedEntries: number | null = null;
-      let ackedInsideWriteDelay: number | null = null;
+      let ackedStreamWrites: number | null = null;
       if (arm === 'PANIC-THEN-ORDERLY-EXIT' && shutdownReportLines.length > 0) {
         drainedEntries = field(shutdownReportLines[0], 'drained_entries');
         unpersistedEntries = field(shutdownReportLines[0], 'unpersisted_entries');
@@ -484,16 +527,18 @@ async function runArm(arm: Arm): Promise<Observed> {
           preconditionNotMet = `the shutdown report carries drained_entries=${drainedEntries} unpersisted_entries=${unpersistedEntries}; the arm needs drained_entries=0 (nothing queued outside the dead batch) and unpersisted_entries=1 (the dead batch is the one late write)`;
         }
       }
-      if (arm === 'PANIC-IN-SHUTDOWN' && seenAt !== null) {
-        const from = seenAt - WRITE_DELAY_MS;
-        ackedInsideWriteDelay = stream.filter(
-          (seen) => seen.answer === 'OP_ACK' && seen.sentAt > from,
-        ).length;
+      if (arm === 'PANIC-IN-SHUTDOWN') {
+        // Counted from the stream's own answers only, never from the outcome
+        // the arm asserts. Every acknowledged stream write is a distinct key
+        // that was queued after the sentinel, where no pass persists anything,
+        // and the dead batch holds at most PASS_LIMIT entries: so more than
+        // PASS_LIMIT acknowledged writes leave at least one queued outside it.
+        ackedStreamWrites = stream.filter((seen) => seen.answer === 'OP_ACK').length;
         note(
-          `step 6: ${ackedInsideWriteDelay} acknowledged writes were sent later than ${WRITE_DELAY_MS} ms before the store's line was read`,
+          `step 6: ${ackedStreamWrites} writes of the stream were acknowledged; the dead batch holds at most ${PASS_LIMIT}`,
         );
-        if (preconditionNotMet === null && ackedInsideWriteDelay === 0) {
-          preconditionNotMet = `no acknowledged write of the stream was sent later than ${WRITE_DELAY_MS} ms before the store's line was read, so nothing is known to have been queued outside the dead batch`;
+        if (preconditionNotMet === null && ackedStreamWrites <= PASS_LIMIT) {
+          preconditionNotMet = `only ${ackedStreamWrites} writes of the stream were acknowledged, not more than the ${PASS_LIMIT} entries one flush pass takes, so nothing is known to have been queued outside the dead batch`;
         }
       }
 
@@ -550,7 +595,7 @@ async function runArm(arm: Arm): Promise<Observed> {
         `binary_failed_lines=${binaryFailedLines.length} shutdown_report_lines=${shutdownReportLines.length} ` +
         `drain_failed_lines=${drainFailedLines.length} deadline_passed_lines=${deadlinePassedLines.length} ` +
         `drained_entries=${drainedEntries} unpersisted_entries=${unpersistedEntries} ` +
-        `stream_writes=${stream.length} acked_inside_write_delay=${ackedInsideWriteDelay} ` +
+        `stream_writes=${stream.length} acked_stream_writes=${ackedStreamWrites} flush_interval_ms=${flushIntervalMs} ` +
         `refused_write_saw=${JSON.stringify(refused ? refused.answer : null)} ` +
         `acked_keys=${Object.values(acked).reduce((sum, rows) => sum + Object.keys(rows).length, 0)} ` +
         `read_back=${readBackOk ? 'ok' : 'fail'} restart_exit=${JSON.stringify(restartExit)}`;
@@ -571,7 +616,7 @@ async function runArm(arm: Arm): Promise<Observed> {
         drainedEntries,
         unpersistedEntries,
         stream,
-        ackedInsideWriteDelay,
+        ackedStreamWrites,
         refused,
         acked,
         readBack,
@@ -659,7 +704,7 @@ describe('Integration: a server whose flush task panicked ends by itself with a 
         }
         expect({
           ...endOfProcess(o),
-          ackedWritesInsideTheWriteDelay: (o.ackedInsideWriteDelay as number) >= 1,
+          ackedStreamWritesAboveOnePass: (o.ackedStreamWrites as number) > PASS_LIMIT,
           refusedWriteWasAcknowledged: o.refused === null || o.refused.answer === 'OP_ACK',
         }).toEqual({
           exit: { code: 71, signal: null },
@@ -670,7 +715,7 @@ describe('Integration: a server whose flush task panicked ends by itself with a 
           shutdownReportLines: 0,
           readBackAfterRestart: o.acked,
           restartExitOnSigterm: { code: 0, signal: null },
-          ackedWritesInsideTheWriteDelay: true,
+          ackedStreamWritesAboveOnePass: true,
           refusedWriteWasAcknowledged: false,
         });
       },
