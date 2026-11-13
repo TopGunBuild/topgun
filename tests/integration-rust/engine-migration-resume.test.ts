@@ -288,7 +288,14 @@ function aimAndKill(point: Aimed, l: Layout, pid: number): string {
       }
     }
   }
-  process.kill(pid, 'SIGKILL');
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch (err) {
+    // A victim that exited on its own before the trigger is a missed attempt,
+    // recorded as such so the attempts dump still reaches the report.
+    if ((err as NodeJS.ErrnoException).code !== 'ESRCH') throw err;
+    return `${seen}; the process had already exited, no SIGKILL sent`;
+  }
   return seen;
 }
 
@@ -302,10 +309,10 @@ interface Attempt {
 }
 
 function classify(files: Attempt['files'], after: boolean, atVerification: boolean): string {
-  if (after) return 'copy';
+  if (after && files.redb === 'file' && files.kept === 'absent') return 'copy';
   if (atVerification && files.redb === 'file' && files.kept === 'absent') return 'verified';
   if (atVerification && files.redb === 'absent' && files.kept === 'file') return 'renamed';
-  return `none of the three (files ${JSON.stringify(files)}, no resume line)`;
+  return `none of the three (files ${JSON.stringify(files)}, resume after: ${after}, at the verification: ${atVerification})`;
 }
 
 test(`the older binary is the build from ${ENGINE_OLD_COMMIT_PREFIX}`, () => {
