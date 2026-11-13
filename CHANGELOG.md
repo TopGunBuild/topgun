@@ -115,7 +115,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     fails already at its open exits 1 (`store engine: cannot open …`) at every start until the
     cause is gone. Every other RocksDB error is retried as before.
   - **Throughput above the write buffer's limit.** Measured on a Mac with the in-process load
-    harness (open loop, 60 s, three runs per build, default settings): at 10 000 offered writes/s
+    harness (open loop, 60 s, three runs per build, default settings; release build of `5de49bfe`,
+    which differs from this version only by the `max_open_files` floor and the refusal logging): at 10 000 offered writes/s
     this version acknowledges 5 231–5 234 writes/s against 6 466–6 495 on the redb build before it,
     about 19 % fewer, at a lower durable p99 (16.8–18.9 ms against 61.3–77.1 ms); the rest are
     refused as a temporary error, which clients retry. The cause is the write-behind flush loop,
@@ -145,7 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     frames are unfsynced — one window per node instead of one per partition. `per_op`
     acknowledges a write only after an fsync that covers it. Measured with the WAL append
     benchmark on a Mac M1 Max (10 concurrent writers over 271 partitions, 100-byte values, three
-    10 s runs per policy, release build of `df0f0317`, whose server and benchmark sources are
+    10 s runs per policy, release build of `df0f0317`, whose server and `wal_append` sources are
     those of `4820cc02`): `per_op` 1 091–1 210 writes/s against 20 492–22 211 for `batched`. In
     an earlier A/B on the same benchmark group commit raised `per_op` 3.3-fold over the
     per-partition log it replaces (medians 1 231 and 1 356 writes/s against 269 and 286). Linux

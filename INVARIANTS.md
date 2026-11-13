@@ -3618,8 +3618,8 @@ weaker than a test.
      table-per-map migration, a source another handle holds open, a verification difference —
      each exits 1, and none moves, deletes or overwrites `engine.redb` or
      `engine.redb.pre-rocksdb`. With `engine.rocksdb/` holding rows (`open_present`) every check
-     runs before the target's writable open and the source is only read; too little free space and
-     a kept file with no store are refused before any open; these change nothing. Every other start
+     runs before the target's writable open and the source is only read; a kept file with no store,
+     and too little free space when `engine.redb` is already there, are refused before any open; these change nothing. Every other start
      reaches the migration's refusals only after `open_absent` has removed a row-less target
      (clause 5) and opened `engine.redb` writable (`RedbDataStore::open_location_sealed`): its
      records are unchanged — or sealed, by the seal pass of that open, when encryption was just
