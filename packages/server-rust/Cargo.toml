@@ -143,7 +143,7 @@ path = "benches/load_harness/main.rs"
 harness = false
 
 # Long-duration soak harness (G4b): drives the REAL out-of-process topgun-server
-# binary against an on-disk redb + WAL, exercising client churn, kill -9 crash
+# binary against an on-disk RocksDB store + WAL, exercising client churn, kill -9 crash
 # loops (real WAL recovery), convergence/divergence detection, memory-growth
 # monitoring, and panic capture. Distinct from load_harness, which boots the
 # server in-process on a NullDataStore and therefore cannot kill -9 or recover.
