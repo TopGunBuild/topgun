@@ -3573,7 +3573,7 @@ weaker than a test.
   by SPEC-409c.
 - **Status:** decided, **enforced**.
 
-### TG-ENG-008: A redb store is migrated into RocksDB once: resumable once its first batch is durable, verified, kept and never overwritten; every refusal is without side effects
+### TG-ENG-008: A redb store is migrated into RocksDB once: resumable once its first batch is durable, verified, kept and never overwritten; no refusal moves, deletes or overwrites the redb files
 
 - **Scope:** the engine migration (`engine_migration.rs` — `start`, `prepare_resume`, `resume`,
   `copy`, `verify`, `switch`) and the RocksDB rows of `rocks_store.rs` that lead to it or refuse
@@ -3611,12 +3611,21 @@ weaker than a test.
      (`… holds engine data but no CURRENT; …`), and an error while inspecting it refuses
      (`store engine: cannot inspect …; nothing was changed`), never read as "no row". The
      removal holds no `LOCK`: the contract is one server process per data directory.
-  6. *Refusals without side effects.* Too little free space (`1.5 × the size of engine.redb +
-     64 MiB`, less what the target holds on a resume), two stores (`engine.rocksdb/` with rows and
-     no mark beside `engine.redb`), a kept file with no store, a mark that cannot be read, a
-     resume whose source is gone, a source that carries an unfinished table-per-map migration, a
-     source another handle holds open, a verification difference — each exits 1 and creates,
-     moves and deletes nothing; `engine.redb` and `engine.redb.pre-rocksdb` stay byte for byte.
+  6. *Refusals never move, delete or overwrite the redb files.* Too little free space
+     (`1.5 × the size of engine.redb + 64 MiB`, less what the target holds on a resume), two stores
+     (`engine.rocksdb/` with rows and no mark beside `engine.redb`), a kept file with no store, a
+     mark that cannot be read, a resume whose source is gone, a source that carries an unfinished
+     table-per-map migration, a source another handle holds open, a verification difference —
+     each exits 1, and none moves, deletes or overwrites `engine.redb` or
+     `engine.redb.pre-rocksdb`. With `engine.rocksdb/` holding rows (`open_present`) every check
+     runs before the target's writable open and the source is only read; too little free space and
+     a kept file with no store are refused before any open; these change nothing. Every other start
+     reaches the migration's refusals only after `open_absent` has removed a row-less target
+     (clause 5) and opened `engine.redb` writable (`RedbDataStore::open_location_sealed`): its
+     records are unchanged — or sealed, by the seal pass of that open, when encryption was just
+     turned on — but its bytes may change, and a table-per-map file at `L` has been migrated into
+     it. A verification difference, and a kept file found right before the rename (clause 3), leave
+     the created and filled target, refused until it is moved away.
 - **Maintaining code:** `storage/datastores/engine_migration.rs` — `start`, `prepare_resume`,
   `resume`, `copy_verify_switch`, `copy`, `write_mark`, `verify`, `switch`, `check_free_space`,
   `Source::open` (the read-only overlay); `storage/datastores/rocks_store.rs` — `inspect`,
@@ -3649,7 +3658,7 @@ weaker than a test.
   only a torn record: no row and no mark. Clause 5 does not remove it (a `*.log` is not empty),
   and with `engine.redb` beside it every later start refuses with the two-stores line
   (`store engine: two stores found: …`, exit 1) until an operator moves `engine.rocksdb/` away;
-  `engine.redb` is untouched, so the next start then migrates anew. Observed twice in development
+  the copy never writes `engine.redb`, so the next start then migrates anew. Observed twice in development
   runs of `engine-migration-resume`; that the record is torn is inferred, not decoded. Tracked by
   TODO-956. The in-process crash target kills between engine writes, not inside one, so
   it does not reach this instant.

@@ -51,7 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Refusals.** Two stores in one data directory, a kept file with no store, an
     `engine.rocksdb/` with engine data but no `CURRENT` file, an engine that does not open
     (another process's lock included), too little free space and a failed verification each exit
-    1 and create, move or delete nothing. The reason is always on stderr as
+    1, and none moves, deletes or overwrites `engine.redb` or `engine.redb.pre-rocksdb`, but
+    not every refusal changes nothing: an `engine.rocksdb/` holding no row is removed before the
+    start looks further; the migration's own refusals come after `engine.redb` was opened for
+    writing — its records are unchanged, or sealed when encryption was just turned on, but its
+    bytes may change; and a failed verification leaves the filled `engine.rocksdb/`, refused until
+    it is moved away. The reason is always on stderr as
     `Error: store open: refusing to start: …`; most refusals also log one `ERROR` line, but some
     — a raw I/O error while checking the location, `store engine: cannot open` or
     `store engine: cannot create` of the migration's target, a failed copy-batch or seal-pass
