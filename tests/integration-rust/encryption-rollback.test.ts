@@ -2,16 +2,15 @@
  * Integration: an older binary refuses a data directory that has had
  * encryption at rest on.
  *
- * The newer binary keeps the wrapped data keys in a `keyring` metadata row of
- * the data directory, and keeps that row after encryption is turned off again.
- * The older binary (built at 727db547) does not know the row and refuses the
- * store at its open — before it opens the WAL and before it accepts a
- * connection — so it never reads sealed values as if they were plain. Three
- * cases:
+ * The newer binary stores in `engine.rocksdb/` inside the data directory, a
+ * layout the older binary (built at 727db547) does not know: it refuses the
+ * data directory at its store open with its row L3 line — before it opens the
+ * WAL and before it accepts a connection — so it never reads sealed values as
+ * if they were plain. Three cases:
  *
  * - E-A clean stop and E-B `kill -9` — the newer binary writes with encryption
  *   on and stops; the older binary started on the directory exits non-zero
- *   naming the unknown metadata, never prints `PORT=`, and changes no file of
+ *   with its L3 line, never prints `PORT=`, and changes no file of
  *   the WAL directory and not the marker file at the old store path; the newer
  *   binary started again with the key serves every value. After the clean stop
  *   the WAL directory holds no segment.
@@ -42,6 +41,7 @@ import {
   BinaryExit,
   TreeSnapshot,
 } from './helpers/two-binary';
+import { storeEnv } from './helpers/engine-migration';
 
 const ENC_OLD_COMMIT_PREFIX = '727db547';
 
@@ -109,15 +109,15 @@ const CASE_TIMEOUT_MS = 300_000;
 
 const CLEAN_EXIT: BinaryExit = { code: 0, signal: null };
 
-function storeEnv(dir: string, extra: Record<string, string> = {}): Record<string, string> {
-  return {
-    STORAGE_BACKEND: 'redb',
-    TOPGUN_DATA_DIR: path.join(dir, 'topgun-data'),
-    TOPGUN_REDB_PATH: path.join(dir, 'topgun.redb'),
-    TOPGUN_WAL_DIR: path.join(dir, 'wal'),
-    TOPGUN_WAL_FSYNC_POLICY: 'per_op',
-    ...extra,
-  };
+const PER_OP = { TOPGUN_WAL_FSYNC_POLICY: 'per_op' };
+
+/**
+ * The older binary's row L3 refusal, as `git show 727db547:packages/server-rust/src/storage/datastores/redb.rs`
+ * words it: `"store location: {} is not a store directory, an empty directory or absent"`, the
+ * placeholder being the data directory.
+ */
+function l3Line(dataDir: string): string {
+  return `store location: ${dataDir} is not a store directory, an empty directory or absent`;
 }
 
 function keyEnv(dir: string, mode: 'on' | 'off'): Record<string, string> {
@@ -174,7 +174,7 @@ async function readAll(port: number, tag: string): Promise<Record<string, unknow
   return values;
 }
 
-/** The WAL directory's files and the marker file at the old store path are hashed; the engine file is not, as an open commits. */
+/** The WAL directory's files and the marker file at the old store path are hashed; the store is not, as an open commits. */
 function guardedSnapshot(dir: string): TreeSnapshot {
   return treeSnapshot(dir, (rel) => rel.startsWith(`wal${path.sep}`) || rel === 'topgun.redb');
 }
@@ -197,7 +197,7 @@ function unreplayedLines(server: SpawnedBinary): string[] {
 interface RefusedStart {
   exit: BinaryExit | null;
   printedPort: boolean;
-  unknownMetadata: boolean;
+  l3Refusal: boolean;
 }
 
 async function startExpectingRefusal(
@@ -224,7 +224,9 @@ async function startExpectingRefusal(
   return {
     exit,
     printedPort,
-    unknownMetadata: `${server.stdout()}\n${server.stderr()}`.includes('unknown metadata'),
+    l3Refusal: `${server.stdout()}\n${server.stderr()}`.includes(
+      l3Line(env.TOPGUN_DATA_DIR as string),
+    ),
   };
 }
 
@@ -263,7 +265,7 @@ function rollbackCase(title: string, tag: string, run: Run): void {
         binaryPath: binaries.newBinary,
         commit: binaries.newCommit,
         label: `${tag}: NEW on`,
-        env: storeEnv(dir, { ...keyEnv(dir, 'on'), ...flush }),
+        env: storeEnv(dir, 'rocksdb', { ...PER_OP, ...keyEnv(dir, 'on'), ...flush }),
       });
       running.push(first);
       if (first.port === null) throw new Error(`NEW did not start:\n${first.stderr()}`);
@@ -280,7 +282,7 @@ function rollbackCase(title: string, tag: string, run: Run): void {
           binaryPath: binaries.newBinary,
           commit: binaries.newCommit,
           label: `${tag}: NEW off`,
-          env: storeEnv(dir, keyEnv(dir, 'off')),
+          env: storeEnv(dir, 'rocksdb', { ...PER_OP, ...keyEnv(dir, 'off') }),
         });
         running.push(off);
         o.offStop = await off.stop('SIGTERM', STOP_TIMEOUT_MS);
@@ -288,14 +290,19 @@ function rollbackCase(title: string, tag: string, run: Run): void {
       o.segmentsAfterStop = walSegments(dir);
 
       o.before = guardedSnapshot(dir);
-      o.refused = await startExpectingRefusal(running, binaries, `${tag}: OLD`, storeEnv(dir));
+      o.refused = await startExpectingRefusal(
+        running,
+        binaries,
+        `${tag}: OLD`,
+        storeEnv(dir, 'redb', PER_OP),
+      );
       o.after = guardedSnapshot(dir);
 
       const again = await spawnBinary({
         binaryPath: binaries.newBinary,
         commit: binaries.newCommit,
         label: `${tag}: NEW again`,
-        env: storeEnv(dir, keyEnv(dir, mode)),
+        env: storeEnv(dir, 'rocksdb', { ...PER_OP, ...keyEnv(dir, mode) }),
       });
       running.push(again);
       o.againPort = again.port;
@@ -325,12 +332,12 @@ function rollbackCase(title: string, tag: string, run: Run): void {
       });
     }
 
-    test('the older binary exits non-zero on unknown metadata and never prints PORT=', () => {
+    test('the older binary exits non-zero with its L3 line and never prints PORT=', () => {
       expect(o.refused?.printedPort).toBe(false);
       expect(o.refused?.exit).not.toBeNull();
       expect(typeof o.refused?.exit?.code).toBe('number');
       expect(o.refused?.exit?.code).not.toBe(0);
-      expect(o.refused?.unknownMetadata).toBe(true);
+      expect(o.refused?.l3Refusal).toBe(true);
     });
 
     test('the refused start changed no file of the WAL directory and not the marker file', () => {

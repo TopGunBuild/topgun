@@ -4,24 +4,25 @@
  *
  * The older binary (built at 6a030bb6) keeps each WAL partition's applied
  * watermark in a `.applied` file of the WAL directory. The newer binary keeps
- * it in the data directory, committed with the records it covers, imports the
- * older binary's `.applied` files once and deletes them, and marks the data
- * directory so that the older binary refuses it at its store open — before it
- * opens the WAL and before it listens — instead of replaying the WAL against a
- * watermark it cannot see. At a clean stop the newer binary writes the
- * watermarks back as `.applied` rollback hints; after `kill -9` there are none.
- * Three cases:
+ * it in the data directory, committed with the records it covers, and imports
+ * the older binary's `.applied` files once and deletes them. It stores in
+ * `engine.rocksdb/` inside the data directory, a layout the older binary does
+ * not know, so the older binary refuses the data directory at its store open
+ * with its row L3 line — before it opens the WAL and before it listens —
+ * instead of replaying the WAL against a watermark it cannot see. At a clean
+ * stop the newer binary writes the watermarks back as `.applied` rollback
+ * hints; after `kill -9` there are none. Three cases:
  *
  * - W-A clean stop and W-B `kill -9` — the newer binary writes on a fresh
  *   directory and stops; the WAL directory holds `wal-collected`, and rollback
  *   hints only after the clean stop; the older binary started on the directory
- *   exits non-zero naming the unknown metadata, never prints `PORT=`, and
+ *   exits non-zero with its L3 line, never prints `PORT=`, and
  *   changes no file of the WAL directory and not the marker file at the old
  *   store path; the newer binary started again serves every value.
  * - W-C — a directory written only by the older binary is opened by the newer
  *   one: its `.applied` files are gone while the newer binary runs, the values
- *   are served, and the older binary started afterwards refuses the directory,
- *   so the import marked it.
+ *   are served, and the older binary started afterwards refuses the directory
+ *   the newer binary migrated.
  *
  * Two binaries are needed, each given by path together with the commit it was
  * built from (WATERMARK_OLD_SERVER_BINARY / WATERMARK_OLD_SERVER_COMMIT for the
@@ -48,6 +49,7 @@ import {
   BinaryExit,
   TreeSnapshot,
 } from './helpers/two-binary';
+import { storeEnv } from './helpers/engine-migration';
 
 const MAP = 'watermark_items';
 const KEYS = ['k0', 'k1', 'k2', 'k3', 'k4', 'k5'];
@@ -67,15 +69,23 @@ function valueOf(key: string, run: string): Record<string, string> {
   return { key, run };
 }
 
-function storeEnv(dir: string, extra: Record<string, string> = {}): Record<string, string> {
-  return {
-    STORAGE_BACKEND: 'redb',
-    TOPGUN_DATA_DIR: path.join(dir, 'topgun-data'),
-    TOPGUN_REDB_PATH: path.join(dir, 'topgun.redb'),
-    TOPGUN_WAL_DIR: path.join(dir, 'wal'),
-    TOPGUN_WAL_FSYNC_POLICY: 'per_op',
-    ...extra,
-  };
+const PER_OP = { TOPGUN_WAL_FSYNC_POLICY: 'per_op' };
+
+function oldEnv(dir: string): Record<string, string> {
+  return storeEnv(dir, 'redb', PER_OP);
+}
+
+function newEnv(dir: string, extra: Record<string, string> = {}): Record<string, string> {
+  return storeEnv(dir, 'rocksdb', { ...PER_OP, ...extra });
+}
+
+/**
+ * The older binary's row L3 refusal, as `git show 6a030bb6:packages/server-rust/src/storage/datastores/redb.rs`
+ * words it: `"store location: {} is not a store directory, an empty directory or absent"`, the
+ * placeholder being the data directory.
+ */
+function l3Line(dataDir: string): string {
+  return `store location: ${dataDir} is not a store directory, an empty directory or absent`;
 }
 
 function freshDir(tag: string): string {
@@ -85,8 +95,8 @@ function freshDir(tag: string): string {
 /** The WAL directory as files, without decoding any. */
 interface WalFiles {
   collected: boolean;
-  /** Partitions with at least one segment file. */
-  segmentPartitions: number[];
+  /** Every segment file, whatever its naming: a stream segment counts as much as a partition one. */
+  segments: string[];
   /** Size of every `partition-NNN.applied` file, by partition. */
   applied: Record<number, number>;
   /** Names of every `.applied` / `.applied.tmp` file. */
@@ -96,28 +106,26 @@ interface WalFiles {
 function walFiles(walDir: string): WalFiles {
   const files: WalFiles = {
     collected: false,
-    segmentPartitions: [],
+    segments: [],
     applied: {},
     appliedNames: [],
   };
   if (!fs.existsSync(walDir)) return files;
-  const segments = new Set<number>();
   for (const name of fs.readdirSync(walDir)) {
-    const segment = /^partition-(\d+)-\d+\.log$/.exec(name);
     const applied = /^partition-(\d+)\.applied$/.exec(name);
     if (name === 'wal-collected') files.collected = true;
-    if (segment) segments.add(parseInt(segment[1], 10));
+    if (name.endsWith('.log')) files.segments.push(name);
     if (applied) {
       files.applied[parseInt(applied[1], 10)] = fs.statSync(path.join(walDir, name)).size;
     }
     if (/\.applied(\.tmp)?$/.test(name)) files.appliedNames.push(name);
   }
-  files.segmentPartitions = [...segments].sort((a, b) => a - b);
+  files.segments.sort();
   files.appliedNames.sort();
   return files;
 }
 
-/** The WAL directory's files and the marker file at the old store path are hashed; the engine file is not, as an open commits. */
+/** The WAL directory's files and the marker file at the old store path are hashed; the store is not, as an open commits. */
 function guardedSnapshot(dir: string): TreeSnapshot {
   return treeSnapshot(dir, (rel) => rel.startsWith(`wal${path.sep}`) || rel === 'topgun.redb');
 }
@@ -216,6 +224,7 @@ interface RefusedStart {
   exit: BinaryExit | null;
   printedPort: boolean;
   output: string;
+  dataDir: string;
 }
 
 /**
@@ -249,7 +258,12 @@ async function startExpectingRefusal(
     exit = null;
     await server.stop('SIGKILL', 5_000);
   }
-  return { exit, printedPort, output: `${server.stdout()}\n${server.stderr()}` };
+  return {
+    exit,
+    printedPort,
+    output: `${server.stdout()}\n${server.stderr()}`,
+    dataDir: env.TOPGUN_DATA_DIR as string,
+  };
 }
 
 function refusedAsOlder(start: RefusedStart | undefined): void {
@@ -257,7 +271,7 @@ function refusedAsOlder(start: RefusedStart | undefined): void {
   expect(start?.exit).not.toBeNull();
   expect(typeof start?.exit?.code).toBe('number');
   expect(start?.exit?.code).not.toBe(0);
-  expect(start?.output).toContain('unknown metadata');
+  expect(start?.output).toContain(l3Line(start?.dataDir as string));
 }
 
 test(`the older binary is the build from ${WATERMARK_OLD_COMMIT_PREFIX}`, () => {
@@ -295,8 +309,8 @@ function refusalCase(title: string, tag: string, stop: 'SIGTERM' | 'SIGKILL'): v
       // the restarted newer binary must replay it.
       const firstEnv =
         stop === 'SIGKILL'
-          ? storeEnv(dir, { TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS: '600000' })
-          : storeEnv(dir);
+          ? newEnv(dir, { TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS: '600000' })
+          : newEnv(dir);
       const [first, port] = await startServing(
         running,
         env.newBinary,
@@ -315,7 +329,7 @@ function refusalCase(title: string, tag: string, stop: 'SIGTERM' | 'SIGKILL'): v
         env.oldBinary,
         env.oldCommit,
         `${tag}: OLD`,
-        storeEnv(dir),
+        oldEnv(dir),
       );
       o.after = guardedSnapshot(dir);
 
@@ -323,7 +337,7 @@ function refusalCase(title: string, tag: string, stop: 'SIGTERM' | 'SIGKILL'): v
         binaryPath: env.newBinary,
         commit: env.newCommit,
         label: `${tag}: NEW again`,
-        env: storeEnv(dir),
+        env: newEnv(dir),
       });
       running.push(again);
       o.againPort = again.port;
@@ -361,7 +375,7 @@ function refusalCase(title: string, tag: string, stop: 'SIGTERM' | 'SIGKILL'): v
         const hints = Object.values(o.wal?.applied ?? {});
         expect(hints.length).toBeGreaterThanOrEqual(1);
         expect(hints.filter((size) => size !== 8)).toEqual([]);
-        expect(o.wal?.segmentPartitions).toEqual([]);
+        expect(o.wal?.segments).toEqual([]);
       });
     } else {
       test('after kill -9 the WAL directory holds no .applied file', () => {
@@ -369,7 +383,7 @@ function refusalCase(title: string, tag: string, stop: 'SIGTERM' | 'SIGKILL'): v
       });
     }
 
-    test('the older binary exits non-zero within 30 s on unknown metadata and never prints PORT=', () => {
+    test('the older binary exits non-zero within 30 s with its L3 line and never prints PORT=', () => {
       refusedAsOlder(o.refused);
     });
 
@@ -426,7 +440,7 @@ describe('Integration: W-C, the newer binary imports a directory the older binar
       env.oldBinary,
       env.oldCommit,
       'wc: OLD',
-      storeEnv(dir),
+      oldEnv(dir),
     );
     o.oldWrites = await writeAll(oldPort, 'wc-old', 'old');
     await sleep(FLUSH_SETTLE_MS);
@@ -438,7 +452,7 @@ describe('Integration: W-C, the newer binary imports a directory the older binar
       binaryPath: env.newBinary,
       commit: env.newCommit,
       label: 'wc: NEW',
-      env: storeEnv(dir),
+      env: newEnv(dir),
     });
     running.push(fresh);
     o.newPort = fresh.port;
@@ -449,13 +463,13 @@ describe('Integration: W-C, the newer binary imports a directory the older binar
     o.newUnreplayed = unreplayedLines(fresh);
     o.newStop = await fresh.stop('SIGTERM', STOP_TIMEOUT_MS);
 
-    // --- The older binary meets the marker the import wrote.
+    // --- The older binary meets the directory the newer one migrated.
     o.refused = await startExpectingRefusal(
       running,
       env.oldBinary,
       env.oldCommit,
       'wc: OLD again',
-      storeEnv(dir),
+      oldEnv(dir),
     );
 
     // Straight to stderr: the suite silences console.log.
@@ -489,7 +503,7 @@ describe('Integration: W-C, the newer binary imports a directory the older binar
     expect(o.newStop).toEqual(CLEAN_EXIT);
   });
 
-  test('the older binary started afterwards refuses the directory: the import marked it', () => {
+  test('the older binary started afterwards refuses the directory the newer one migrated', () => {
     refusedAsOlder(o.refused);
   });
 });
