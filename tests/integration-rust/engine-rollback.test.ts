@@ -285,6 +285,13 @@ describe('Integration: undrained-old-stop, a write the older binary left above i
     o.copyServes = await readKeys(probe.port, ['base', 'w'], 'copy');
     await probe.stop('SIGTERM');
     fs.rmSync(copy, { recursive: true, force: true });
+    // A copy that serves nothing (or fails the read) would also serve no w, so
+    // (i) would pass on a broken probe; base must be read back first.
+    if (o.copyServes.base?.key !== 'base') {
+      throw new ScenarioPreconditionError(
+        `(i) the copy serves no base, so it cannot tell whether w is in engine.redb: ${JSON.stringify(o.copyServes)}`,
+      );
+    }
     if (o.copyServes.w !== undefined) {
       throw new ScenarioPreconditionError(
         `(i) w is in engine.redb before the upgrade: a copy started with an empty WAL directory serves ${JSON.stringify(o.copyServes.w)}`,
