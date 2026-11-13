@@ -1231,9 +1231,10 @@ mod tests {
     /// first, middle and last fragments.
     const LOG_BLOCK: u64 = 32 * 1024;
 
-    /// A redb store whose first copy batch (40 rows) holds well over 64 KiB
-    /// of values: about 3 KiB per record, so its engine-log record spans at
-    /// least three log blocks.
+    /// A redb store whose first copy batch — 40 rows under the test's `io()`,
+    /// of the 150-row fixture that takes four — holds well over 64 KiB of
+    /// values: about 3 KiB per record, so its engine-log record spans at least
+    /// three log blocks.
     fn wide_redb_source(root: &Root, rows: u64) {
         let store = RedbDataStore::new(&root.d).expect("redb store");
         let keys: Vec<String> = (0..rows).map(|i| format!("k{i:05}")).collect();

@@ -218,8 +218,10 @@ function engineLogSizes(rocks: string): Map<string, number> {
   let names: string[];
   try {
     names = fs.readdirSync(rocks);
-  } catch {
-    return sizes;
+  } catch (err) {
+    // Only an absent directory holds nothing; any other error fails the attempt.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return sizes;
+    throw err;
   }
   for (const name of names) {
     if (!name.endsWith('.log')) continue;
@@ -326,8 +328,9 @@ function engineState(rocks: string): Engine {
   let names: string[] = [];
   try {
     names = fs.readdirSync(rocks).sort();
-  } catch {
-    // An absent directory holds nothing.
+  } catch (err) {
+    // Only an absent directory holds nothing; any other error fails the attempt.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
   return {
     current: names.includes('CURRENT'),
