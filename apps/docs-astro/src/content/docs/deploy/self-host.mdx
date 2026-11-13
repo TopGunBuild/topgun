@@ -109,6 +109,15 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+          # The store open, including a one-time migration of an older store, runs
+          # before the server listens; this gives it up to 30 minutes before the
+          # liveness probe may restart the pod.
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 180
           livenessProbe:
             httpGet:
               path: /health/live
