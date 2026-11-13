@@ -331,15 +331,16 @@ impl ServerSupervisor {
             .env("JWT_SECRET", &self.config.jwt_secret)
             // Crash recovery (AC1/G4b) asserts that DURABLE state survives a
             // `kill -9` and is re-served residency-independently. It does NOT
-            // assert the in-flight write-behind window is durable — acked writes
-            // buffer ~1s before persisting, and losing that window on an unclean
-            // kill is an accepted demo-tier tradeoff tracked separately (TODO-339).
+            // assert the in-flight write-behind window is durable — an acked write
+            // stays buffered for up to one flush interval plus a pass before it
+            // persists, and losing that window on an unclean kill is an accepted
+            // demo-tier tradeoff tracked separately (TODO-339).
             // So the buffer must be flushed to redb+WAL before the kill, otherwise
             // the recovery checkpoint races the flush and reports phantom one-behind
             // losses. The checkpoint pauses churn and quiesces; a fast flush
             // interval guarantees the (now-static) backlog drains inside that
-            // window regardless of load. Operator can override to exercise the
-            // production-default flush cadence explicitly.
+            // window regardless of load. Operator can override it, as the no-drain
+            // validator does to keep the buffer unflushed until the kill.
             .env(
                 "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS",
                 std::env::var("TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS")

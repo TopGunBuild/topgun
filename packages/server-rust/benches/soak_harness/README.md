@@ -159,17 +159,19 @@ silently degrade durability). Under correctly-applied `PerOp` every WAL frame is
 The acked == durable assertion does **NOT** depend on the pre-kill quiesce drain. By default the
 recovery checkpoint sleeps `quiesce` to let the write-behind buffer flush before the kill (which
 scopes the assertion to durable-state recovery). With `--no-pre-kill-drain` the checkpoint settles
-only the in-flight ACK pipeline (~250ms, far under the flush interval) and kills the server
+only the in-flight ACK pipeline (~250ms, far under the validator's flush interval) and kills the server
 **without** flushing the buffer, so recovery must rebuild every acked write from the WAL alone —
 the honest acked == durable test (LWW convergence + delta-sync + full-scan read-backs stay HARD;
 the OR-Map strict pre==post root equality is relaxed under no-drain because add/remove churn leaves
 acked-but-unsettled tags that recovery legitimately surfaces post-restart — recovered-more, not
 loss).
 
-The no-drain validator must run the **production** write-behind flush cadence
-(`TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=1000`); the harness default fast flush (100ms) would drain
-the buffer inside the ack-settle and mask the WAL path. The Hetzner runner pins this automatically
-when `NO_PRE_KILL_DRAIN=1`. The storage-layer behavioral proof is independent of the soak and lives
+The no-drain validator must keep every acked write buffered until the kill
+(`TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=600000`): the server has no write delay and, idle, flushes after
+the flush interval, and nothing in the server asks for an earlier pass. The harness default fast flush
+(100ms), or the production 10 ms default, would drain the buffer inside the ack-settle and mask the WAL
+path. The Hetzner runner pins this automatically when `NO_PRE_KILL_DRAIN=1`. A partly flushed buffer at
+`kill -9` is no longer exercised by this validator (TODO-964). The storage-layer behavioral proof is independent of the soak and lives
 in `crash_safety_proptest.rs` (`acked_equals_durable_from_env_string_perop`, which derives the
 policy from the `perop` env string with a never-flush config and is red-on-revert of the parser
 fix).
