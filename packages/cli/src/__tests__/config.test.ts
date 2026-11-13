@@ -38,7 +38,7 @@ describe('topgun config', () => {
       // Uses the STORAGE_BACKEND key
       const envContent = `
 TOPGUN_NO_AUTH=1
-STORAGE_BACKEND=redb
+STORAGE_BACKEND=rocksdb
 PORT=8080
 METRICS_PORT=9091
 `;
@@ -51,7 +51,7 @@ METRICS_PORT=9091
 
         expect(output).toContain('TopGun Configuration');
         expect(output).toContain('Storage');
-        expect(output).toContain('redb');
+        expect(output).toContain('rocksdb');
         expect(output).toContain('Server');
         expect(output).toContain('Port: 8080');
       });
@@ -59,7 +59,7 @@ METRICS_PORT=9091
   });
 
   describe('--storage', () => {
-    it('should update .env with valid storage backend (redb)', () => {
+    it('should update .env with valid storage backend (rocksdb)', () => {
       const envContent = `
 TOPGUN_NO_AUTH=1
 STORAGE_BACKEND=null
@@ -67,23 +67,23 @@ PORT=8080
 `;
 
       withTempEnv(envContent, () => {
-        const output = execSync(`node ${CLI_PATH} config --storage redb`, {
+        const output = execSync(`node ${CLI_PATH} config --storage rocksdb`, {
           encoding: 'utf8',
           cwd: CLI_CWD,
         });
 
-        expect(output).toContain('Storage backend set to: redb');
+        expect(output).toContain('Storage backend set to: rocksdb');
         expect(output).toContain('Configuration updated');
 
         const envPath = path.join(CLI_CWD, '.env');
         const updatedContent = fs.readFileSync(envPath, 'utf8');
         // Must write the STORAGE_BACKEND key
-        expect(updatedContent).toContain('STORAGE_BACKEND=redb');
+        expect(updatedContent).toContain('STORAGE_BACKEND=rocksdb');
       });
     });
 
     it('should reject the old "memory" value and accept "null" instead', () => {
-      const envContent = `STORAGE_BACKEND=redb`;
+      const envContent = `STORAGE_BACKEND=rocksdb`;
 
       withTempEnv(envContent, () => {
         const result = runCli(['config', '--storage', 'memory']);
@@ -93,7 +93,7 @@ PORT=8080
         const allOutput = result.stdout + result.stderr;
         expect(allOutput).toContain('Invalid storage type: memory');
         expect(allOutput).toContain('Valid options:');
-        expect(allOutput).toContain('redb');
+        expect(allOutput).toContain('rocksdb');
         expect(allOutput).not.toContain('postgres');
         expect(allOutput).toContain('null');
       });
@@ -116,7 +116,7 @@ PORT=8080
     });
 
     it('should show error for invalid storage type', () => {
-      const envContent = `STORAGE_BACKEND=redb`;
+      const envContent = `STORAGE_BACKEND=rocksdb`;
 
       withTempEnv(envContent, () => {
         const result = runCli(['config', '--storage', 'invalid']);
@@ -141,7 +141,7 @@ PORT=8080
       expect(output).toContain('--show');
       expect(output).toContain('--storage');
       // Updated help should mention new valid values
-      expect(output).toContain('redb');
+      expect(output).toContain('rocksdb');
     });
   });
 });

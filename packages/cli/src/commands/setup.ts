@@ -5,7 +5,7 @@ import path from 'path';
 import { execSync } from 'child_process';
 
 interface SetupConfig {
-  storage: 'redb' | 'null';
+  storage: 'rocksdb' | 'null';
   installK6: boolean;
   devContainer: boolean;
 }
@@ -18,7 +18,7 @@ async function setup(options: SetupOptions) {
   console.log(chalk.bold('\n TopGun Setup Wizard\n'));
 
   let config: SetupConfig = {
-    storage: 'redb',
+    storage: 'rocksdb',
     installK6: false,
     devContainer: false,
   };
@@ -32,12 +32,12 @@ async function setup(options: SetupOptions) {
         message: 'Storage backend:',
         choices: [
           {
-            name: 'redb (recommended — embedded, zero dependencies, boots instantly)',
-            value: 'redb',
+            name: 'rocksdb (recommended — embedded, zero dependencies, boots instantly)',
+            value: 'rocksdb',
           },
           { name: 'null (ephemeral, data lost on restart — for testing)', value: 'null' },
         ],
-        default: 'redb',
+        default: 'rocksdb',
       },
       {
         type: 'confirm',
@@ -102,7 +102,7 @@ async function setup(options: SetupOptions) {
   }
 
   // Step 4: Storage is embedded, nothing to start
-  const storageLabel = config.storage === 'null' ? 'ephemeral in-memory' : 'embedded redb';
+  const storageLabel = config.storage === 'null' ? 'ephemeral in-memory' : 'embedded RocksDB';
   console.log(chalk.cyan(`\n[4/4] Skipping database (${storageLabel} mode)`));
   console.log(
     chalk.green(
