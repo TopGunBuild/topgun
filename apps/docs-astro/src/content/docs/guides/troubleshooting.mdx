@@ -344,7 +344,7 @@ Run the server under a supervisor that restarts it on a non-zero exit code (syst
 
 ### Exit code 134: `WAL fail-stop`
 
-**Symptom:** The server aborts with exit code 134 after logging `WAL fail-stop: unrecoverable condition, terminating process`, with `tier=B` and a `ctx` field that names what failed (for example `WAL fsync failed: …` or `WAL frame append failed: …`).
+**Symptom:** The server aborts (signal `SIGABRT`: a shell reports exit code 134, systemd reports the signal `ABRT`) after logging `WAL fail-stop: unrecoverable condition, terminating process`, with `tier=B` and a `ctx` field that names what failed (for example `WAL fsync failed: …` or `WAL frame append failed: …`).
 
 **Cause:** Writing or syncing the write-ahead log to disk failed. After a failed sync the operating system may already have dropped the data it could not write and cleared the error, so a later sync that succeeds proves nothing about it. The server therefore stops instead of retrying, under every `TOPGUN_WAL_FSYNC_POLICY`, the default `batched` included. It also stops this way when its log writer makes no progress for 30 s while writes wait.
 

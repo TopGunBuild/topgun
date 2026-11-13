@@ -39,7 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     256 MiB engine budget, not through the server binary) on an `engine.redb` of 1 000 000 rows of
     1 KiB values in 100 maps (2.16 GB): 6.56 s, 152 362 rows/s; `engine.rocksdb/` came out at
     0.49 × the redb file (1.05 GB), and the migration used at most 1.45 GB of free space on the
-    way. Time grows with the number of rows; Linux is not measured. While the kept file exists
+    way. Time grows with the number of rows; Linux is not measured. Measured at `949d8872`, before
+    RocksDB was opened with `avoid_flush_during_recovery=false` and a `max_open_files` limit. While the kept file exists
     the node holds both stores.
   - **Resumable, with one gap.** Every copy batch (at most 10 000 rows or 8 MiB of values) is
     synced together with the mark that says how far the copy got, so a start killed after the
@@ -63,12 +64,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     write — reach only stderr. Run one server process per data directory: a start that finds an
     `engine.rocksdb/` holding no row removes it without RocksDB's lock. The troubleshooting
     guide lists each refusal and what to do.
-  - **Older binaries refuse.** Every binary built before this version finds no `engine.redb` in a
-    migrated data directory and refuses it at its store open
+  - **Older binaries refuse.** Every data-directory binary built before this version finds no
+    `engine.redb` in a migrated data directory and refuses it at its store open
     (`store location: {D} is not a store directory, an empty directory or absent`), exit 1,
     before it opens the WAL and before it listens, changing no file (tested for the build of
-    `7692c380`). This also replaces the refusals named in the entries below: a binary from before
-    encryption at rest or before the applied-watermark move now stops at this line first.
+    `7692c380`). This also replaces the refusals named in the entries below: a data-directory
+    binary from before encryption at rest or before the applied-watermark move now stops at this
+    line first. A binary from before the data-directory layout (such as `07d009f0` or `b346e277`)
+    reads only `TOPGUN_REDB_PATH` and stops on the marker file there with
+    `Error: I/O error: invalid data`, as before.
   - **Rollback** is a return to the kept file: stop this version until its stop exits 0 and logs
     `drained=true`, move `{D}/engine.rocksdb` away, rename `{D}/engine.redb.pre-rocksdb` to
     `{D}/engine.redb`, move the WAL directory away and create an empty one (its new segments are
@@ -112,7 +116,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     cause is gone. Every other RocksDB error is retried as before.
   - **Throughput above the write buffer's limit.** Measured on a Mac with the in-process load
     harness (open loop, 60 s, three runs per build, default settings): at 10 000 offered writes/s
-    this version acknowledges 5 231–5 234 writes/s against 6 467–6 495 on the redb build before it,
+    this version acknowledges 5 231–5 234 writes/s against 6 466–6 495 on the redb build before it,
     about 19 % fewer, at a lower durable p99 (16.8–18.9 ms against 61.3–77.1 ms); the rest are
     refused as a temporary error, which clients retry. The cause is the write-behind flush loop,
     which falls into step with the faster store passes (TODO-930), not the store itself. At
@@ -123,7 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (a 67.9 MB file), three runs each. This is not a general ratio.
   - **Build and binary.** RocksDB is compiled into the server binary (Apache-2.0, see `NOTICE`),
     without any compression library. The macOS arm64 release binary grew from 17 409 504 bytes
-    (`7692c380`) to 24 036 000 bytes, about 6.3 MiB; Linux is not measured here. Building it needs
+    (`7692c380`) to 24 036 000 bytes, about 6.3 MiB (file sizes of local release builds, read
+    with `stat`); Linux is not measured here. Building it needs
     `clang` and `libclang`; the container image builds on `rust:1.93.1-bookworm`, the toolchain of
     `rust-toolchain.toml`.
 
@@ -139,9 +144,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     frame is written and fsyncs once the oldest unfsynced frame of the node is 10 ms old or 100
     frames are unfsynced — one window per node instead of one per partition. `per_op`
     acknowledges a write only after an fsync that covers it. Measured with the WAL append
-    benchmark on a Mac M1 Max (10 concurrent writers): `per_op` 1 231–1 356 writes/s, 3.3 times
-    the 269–286 of the per-partition log it replaces, against 18 680–18 887 for `batched`;
-    Linux is not measured.
+    benchmark on a Mac M1 Max (10 concurrent writers over 271 partitions, 100-byte values, three
+    10 s runs per policy, release build of `df0f0317`, whose server and benchmark sources are
+    those of `4820cc02`): `per_op` 1 091–1 210 writes/s against 20 492–22 211 for `batched`. In
+    an earlier A/B on the same benchmark group commit raised `per_op` 3.3-fold over the
+    per-partition log it replaces (medians 1 231 and 1 356 writes/s against 269 and 286). Linux
+    is not measured.
   - **Behaviour change: a failed WAL fsync stops the node, also under `batched`.** It used to log
     `WAL batch fsync failed; acked frames may not be durable` and go on. After a failed fsync the
     operating system may already have dropped the unwritten data and cleared the error, so a
