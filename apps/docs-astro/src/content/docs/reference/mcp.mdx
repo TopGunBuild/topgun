@@ -59,10 +59,14 @@ The server starts when the host AI client spawns it. No long-running process req
 
 ### HTTP
 
-For remote MCP clients or shared deployments, run the server as a long-lived HTTP service.
+For remote MCP clients or shared deployments, run the server as a long-lived HTTP service. Every request must carry a
+secret you choose, the server listens on `127.0.0.1` unless you allow more, and browsers on other origins are refused.
 
 ```bash
-# Default port 3000
+# The secret every HTTP request must send; at least 32 characters
+export TOPGUN_MCP_HTTP_TOKEN=$(openssl rand -base64 32)
+
+# Default: 127.0.0.1, port 3000
 npx @topgunbuild/mcp-server --http --port 3000
 
 # With auth, restricted maps, mutations disabled
@@ -72,6 +76,45 @@ npx @topgunbuild/mcp-server --http --port 3000 \
   --maps tasks,users \
   --no-mutations
 ```
+
+- **Secret.** `TOPGUN_MCP_HTTP_TOKEN` is required with `--http` and is read from the environment only (a command-line
+  value would be visible in the process list). It must be at least 32 characters of `A-Z a-z 0-9 - . _ ~ + /`,
+  optionally followed by `=` padding; `openssl rand -base64 32` produces one. An absent, short or malformed value
+  refuses the start.
+- **Every request needs it**, `/health` included, as `Authorization: Bearer <secret>`; without the exact secret the
+  answer is `401` and nothing runs. A health probe that cannot send a header can use a TCP check; a Kubernetes
+  `httpGet` probe can send it with `httpHeaders`.
+- **What the secret grants.** Every holder of the secret acts as the TopGun identity of `--token` / `TOPGUN_TOKEN`:
+  the tools run with that identity's permissions. A separate identity per HTTP caller is not yet supported.
+- **Bind address.** The server binds `127.0.0.1`. `--host <ip>` (or `TOPGUN_MCP_HOST`) takes an IP address, not a
+  name; an address other than `127.0.0.0/8` or `::1` also needs `--allow-public-bind` (or
+  `TOPGUN_MCP_ALLOW_PUBLIC_BIND=1`), and the server then logs a warning at start. The transport speaks plain HTTP,
+  so the secret travels in clear: put TLS in front of it when it is reachable from the network.
+- **Browsers.** A request carrying an `Origin` header gets `403` unless that origin is allowlisted. The command line
+  allowlists none; a browser deployment passes `corsOrigins` to `HTTPTransport` (below). `*` is refused.
+- **Refused starts.** An unsafe or malformed setting — the secret, the host, or a `--port` / `TOPGUN_MCP_PORT` that is
+  not an integer from 1 to 65535 — exits with code 1 and one line on stderr, `topgun-mcp: refusing to start: …`.
+
+To serve HTTP from your own process, construct the transport and start it with the server:
+
+```typescript
+import { HTTPTransport, TopGunMCPServer } from '@topgunbuild/mcp-server';
+
+const server = new TopGunMCPServer({ topgunUrl: 'ws://localhost:8080' });
+
+const http = new HTTPTransport({
+  port: 3000,
+  bearerToken: process.env.TOPGUN_MCP_HTTP_TOKEN!,
+  // Optional: browser origins allowed to call it; '*' is refused.
+  corsOrigins: ['https://app.example.com'],
+});
+
+await http.start(server);
+```
+
+The constructor throws `HTTPTransportConfigError` (with a `field` naming the setting) on a missing or malformed
+`bearerToken`, a hostname or a non-loopback `host` without `allowPublicBind: true`, and a `corsOrigins` entry that is
+`*` or not an origin of the form `scheme://host[:port]`.
 
 ## Programmatic API
 
@@ -111,7 +154,7 @@ await server.start();
 | `debug` | `false` | Verbose logging. |
 | `client` | none | Pre-built `TopGunClient` instance (overrides `topgunUrl` + `authToken`). |
 
-`server.start()` spawns the transport (stdio or HTTP) and registers tool handlers.
+`server.start()` serves stdio and registers tool handlers; for HTTP, construct `HTTPTransport` and call `start(server)` (see [HTTP](#http)).
 
 ## Tools
 

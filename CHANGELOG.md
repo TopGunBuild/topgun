@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Security (breaking for `topgun-mcp --http` and `HTTPTransport` users): the MCP HTTP transport
+  requires a bearer secret, binds loopback by default and refuses cross-origin requests.**
+  - `topgun-mcp --http` now binds `127.0.0.1` (it bound `0.0.0.0`) and requires
+    `TOPGUN_MCP_HTTP_TOKEN`: at least 32 characters of `A-Z a-z 0-9 - . _ ~ + /` with optional
+    trailing `=` (`openssl rand -base64 32`), read from the environment only. Every request,
+    `/health` included, must send `Authorization: Bearer <secret>`; without the exact secret the
+    answer is `401` and nothing runs. Previously anyone who reached the port ran every enabled
+    tool, mutations included, with the server's TopGun identity.
+  - A request whose `Origin` is not allowlisted gets `403`; the default allowlist is empty (it was
+    `*`), and `*` is refused.
+  - New `--host <ip>` / `TOPGUN_MCP_HOST` (an IP literal) and `--allow-public-bind` /
+    `TOPGUN_MCP_ALLOW_PUBLIC_BIND=1`, required for an address outside `127.0.0.0/8` and `::1`.
+  - An unsafe or malformed setting — the secret, the host, or a `--port` / `TOPGUN_MCP_PORT` that
+    is not an integer from 1 to 65535 (such a port was parsed leniently before) — exits with code
+    1 and one stderr line, `topgun-mcp: refusing to start: …`. stdio mode needs nothing new.
+  - Library: `HTTPServerConfig.bearerToken` is required (so `createHTTPServer`'s config argument
+    is too), `host` defaults to `127.0.0.1`, `corsOrigins` to `[]`; the constructor throws the new
+    `HTTPTransportConfigError` (with a `field`) on these settings, and `isLoopbackHost` is
+    exported. `address()` returns the bound address.
+  - A request with a `Host` header that is not a valid URL authority no longer crashes the
+    process.
+
 - **Changed (on-disk format): the server stores its data in RocksDB.** The data directory now
   holds `engine.rocksdb/`, and the server moves an existing `engine.redb` there by itself, once,
   at the first start of this version. Nothing has to be run by hand, and the redb store is kept.
