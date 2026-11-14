@@ -38,9 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Changed (defaults): writes reach the store without a 1 s delay.** A write the server has
   acknowledged used to wait in the write-behind buffer for at least one second before it was
   stored, which limited the writes of new keys a node accepts to about
-  `capacity / (1 s + the wait to the next flush)`. Measured on a Mac with the open-loop load
-  harness offering 10 000 writes of new keys per second (values of tens of bytes): about 5 200
-  acknowledged per second on RocksDB, the rest refused as `Write-behind capacity exceeded`.
+  `capacity / (1 s + the wait to the next flush)`. Measured on a Mac (M1 Max) with the open-loop
+  load harness, the server in-process on RocksDB, offering writes of new keys with values of tens
+  of bytes, and counting the writes acknowledged per second over 60 s after a 10 s warm-up: at
+  10 000 writes/s the previous release acknowledged about 5 150 per second and refused the rest
+  as `Write-behind capacity exceeded`; this release acknowledged all 10 000 and refused none. At
+  2·10⁴ writes/s this release acknowledged 19 206–19 331 per second, against 19 130–19 222 for the
+  previous release run with `TOPGUN_WRITEBEHIND_CAPACITY=0`: on that Mac the acknowledgement path
+  carries about 1.9·10⁴ writes/s with or without this change (TODO-965).
   - **No write delay.** A write is due for the store as soon as it is buffered; the write delay
     (never an environment variable) defaults to 0. Each flush pass is one engine commit of up to
     1000 writes or 8 MiB. A pass cut by one of those limits is followed by the next one at once;
