@@ -312,6 +312,9 @@ describe('HTTP Transport', () => {
       expect(
         () => new HTTPTransport({ bearerToken: TOKEN, host: '0.0.0.0', allowPublicBind: true }),
       ).not.toThrow();
+      // A name may resolve anywhere, so allowPublicBind does not admit one either.
+      const named = configError({ bearerToken: TOKEN, host: 'localhost', allowPublicBind: true });
+      expect(named.message).toContain('must be an IP address');
     });
 
     it('T14: refuses every other IPv6 spelling of loopback, IPv4-mapped forms included', () => {
