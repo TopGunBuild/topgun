@@ -14,6 +14,13 @@ describe('parsePort', () => {
     },
   );
 
+  it('applies the same rule to a number', () => {
+    expect(parsePort(3000)).toBe(3000);
+    for (const value of [0, -1, 65536, 1.5, NaN, Infinity]) {
+      expect(() => parsePort(value)).toThrow('must be an integer from 1 to 65535');
+    }
+  });
+
   it('refuses a missing value', () => {
     expect(() => parsePort(undefined)).toThrow('got no value');
   });

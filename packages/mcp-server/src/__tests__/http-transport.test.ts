@@ -8,15 +8,31 @@
  */
 
 import { TopGunMCPServer } from '../TopGunMCPServer';
-import { HTTPTransport, HTTPTransportConfigError, type HTTPServerConfig } from '../transport/http';
+import {
+  HTTPTransport,
+  HTTPTransportConfigError,
+  createHTTPServer,
+  type HTTPServerConfig,
+} from '../transport/http';
 import * as http from 'node:http';
 import * as net from 'node:net';
 
 // 48 characters of the b64token alphabet; every helper request sends it unless a test overrides.
 const TOKEN = 'test-token-0123456789-abcdefghijklmnopqrstuvwxyz';
 
-// Bound to port 0, so the port is read back from the transport after start().
+// The transport refuses port 0, so each start takes a port the OS just handed out.
 let port = 0;
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.on('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port: free } = probe.address() as net.AddressInfo;
+      probe.close(() => resolve(free));
+    });
+  });
+}
 
 // Mock the WebSocket used by TopGunMCPServer's internal TopGunClient so the client
 // does not open a real undici connection to ws://localhost:8080. Without a mock, the
@@ -176,7 +192,7 @@ describe('HTTP Transport', () => {
   let server: TopGunMCPServer;
 
   async function startTransport(config: Partial<HTTPServerConfig> = {}): Promise<void> {
-    transport = new HTTPTransport({ port: 0, bearerToken: TOKEN, ...config });
+    transport = new HTTPTransport({ port: await freePort(), bearerToken: TOKEN, ...config });
     await transport.start(server);
     port = transport.address()!.port;
   }
@@ -242,9 +258,10 @@ describe('HTTP Transport', () => {
       const data = JSON.parse(response.body);
       expect(data.name).toBe('topgun-mcp-server');
       expect(data.version).toBe('1.0.0');
-      expect(data.transport).toBe('http+sse');
+      // Only stateless tools/call works over HTTP, so SSE is not advertised.
+      expect(data.transport).toBe('http');
       expect(data.mcpPath).toBe('/mcp');
-      expect(data.eventPath).toBe('/mcp/events');
+      expect(data.eventPath).toBeUndefined();
     });
 
     it('should execute tool via POST /mcp with tools/call', async () => {
@@ -311,6 +328,25 @@ describe('HTTP Transport', () => {
 
       const data = JSON.parse(response.body);
       expect(data.error).toBe('Not found');
+    });
+  });
+
+  describe('Config', () => {
+    it('T16: refuses a port that is not an integer from 1 to 65535', () => {
+      for (const bad of [0, -1, 65536, 1.5, NaN, '3e3' as unknown as number]) {
+        const error = configError({ bearerToken: TOKEN, port: bad });
+        expect(error.field).toBe('port');
+        expect(error.message).toMatch(/^port must be an integer from 1 to 65535, got /);
+      }
+      expect(() => new HTTPTransport({ bearerToken: TOKEN, port: 65535 })).not.toThrow();
+    });
+
+    it('T17: refuses a missing config with HTTPTransportConfigError, not a TypeError', async () => {
+      expect(configError(undefined).field).toBe('bearerToken');
+      expect(configError(null).field).toBe('bearerToken');
+      await expect(
+        createHTTPServer(server, undefined as unknown as HTTPServerConfig),
+      ).rejects.toBeInstanceOf(HTTPTransportConfigError);
     });
   });
 
@@ -471,20 +507,57 @@ describe('HTTP Transport', () => {
   });
 
   describe('CORS', () => {
-    it('T8: refuses an origin that is not allowlisted, null included, without CORS headers', async () => {
-      for (const [method, origin] of [
-        ['GET', 'http://evil.example'],
-        ['OPTIONS', 'http://evil.example'],
-        ['GET', 'null'],
-      ]) {
+    it('T8: refuses an authenticated request from an origin that is not allowlisted, null included', async () => {
+      for (const origin of ['http://evil.example', 'null']) {
         const response = await makeRequest({
-          method,
-          path: method === 'GET' ? '/health' : '/mcp',
+          method: 'GET',
+          path: '/health',
           headers: { Origin: origin },
         });
-        expect([method, origin, response.statusCode]).toEqual([method, origin, 403]);
+        expect([origin, response.statusCode]).toEqual([origin, 403]);
         expect(response.headers['access-control-allow-origin']).toBeUndefined();
         expect(JSON.parse(response.body)).toEqual({ error: 'origin not allowed' });
+      }
+
+      // A preflight is 204 for every origin; only an allowlisted one gets CORS headers.
+      const preflight = await makeRequest({
+        method: 'OPTIONS',
+        path: '/mcp',
+        headers: { Origin: 'http://evil.example' },
+        auth: null,
+      });
+      expect(preflight.statusCode).toBe(204);
+      expect(preflight.headers['access-control-allow-origin']).toBeUndefined();
+      expect(preflight.headers['access-control-allow-methods']).toBeUndefined();
+      expect(preflight.headers['access-control-allow-headers']).toBeUndefined();
+    });
+
+    it('T8b: answers an unauthenticated request the same whatever Origin it sends', async () => {
+      await restart({ corsOrigins: ['http://allowed.example'] });
+
+      const seen = [];
+      for (const origin of [undefined, 'http://evil.example', 'http://allowed.example', 'null']) {
+        const response = await makeRequest({
+          method: 'GET',
+          path: '/health',
+          headers: origin === undefined ? {} : { Origin: origin },
+          auth: null,
+        });
+        seen.push({
+          status: response.statusCode,
+          body: response.body,
+          wwwAuthenticate: response.headers['www-authenticate'],
+          acao: response.headers['access-control-allow-origin'],
+        });
+      }
+      expect(seen[0]).toEqual({
+        status: 401,
+        body: JSON.stringify({ error: 'unauthorized' }),
+        wwwAuthenticate: 'Bearer',
+        acao: undefined,
+      });
+      for (const other of seen.slice(1)) {
+        expect(other).toEqual(seen[0]);
       }
     });
 
@@ -515,6 +588,23 @@ describe('HTTP Transport', () => {
       for (const corsOrigins of [['*'], ['http://a.example/'], ['null']]) {
         expect(configError({ bearerToken: TOKEN, corsOrigins }).field).toBe('corsOrigins');
       }
+    });
+
+    it('T10b: refuses a default port or an upper-case host, naming the serialized form', () => {
+      for (const [entry, serialized] of [
+        ['https://app.example.com:443', 'https://app.example.com'],
+        ['http://app.example.com:80', 'http://app.example.com'],
+        ['http://App.Example', 'http://app.example'],
+      ]) {
+        const error = configError({ bearerToken: TOKEN, corsOrigins: [entry] });
+        expect(error.field).toBe('corsOrigins');
+        expect(error.message).toContain(`write '${serialized}'`);
+      }
+      // A non-default port is part of the origin and is kept.
+      expect(
+        () =>
+          new HTTPTransport({ bearerToken: TOKEN, corsOrigins: ['https://app.example.com:8443'] }),
+      ).not.toThrow();
     });
 
     it('T11: sends no ACAO under the default config', async () => {

@@ -10,6 +10,7 @@ import { createServer, type Server as HTTPServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { isIP } from 'node:net';
 import { logger } from '../logger';
+import { parsePort } from '../port';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { TopGunMCPServer } from '../TopGunMCPServer';
 
@@ -18,7 +19,7 @@ import type { TopGunMCPServer } from '../TopGunMCPServer';
  */
 export interface HTTPServerConfig {
   /**
-   * Port to listen on
+   * Port to listen on: an integer from 1 to 65535.
    * @default 3000
    */
   port?: number;
@@ -99,7 +100,7 @@ const BEARER_TOKEN_MIN_LENGTH = 32;
  */
 export class HTTPTransportConfigError extends Error {
   constructor(
-    readonly field: 'bearerToken' | 'host' | 'corsOrigins',
+    readonly field: 'bearerToken' | 'host' | 'port' | 'corsOrigins',
     message: string,
   ) {
     super(message);
@@ -121,7 +122,9 @@ function sha256(value: string): Buffer {
   return createHash('sha256').update(value).digest();
 }
 
-function resolveConfig(config: HTTPServerConfig): ResolvedHTTPConfig {
+function resolveConfig(given: HTTPServerConfig | undefined): ResolvedHTTPConfig {
+  // A JavaScript caller may pass nothing; that is a missing bearerToken, not a TypeError.
+  const config: Partial<HTTPServerConfig> = given ?? {};
   const token: unknown = config.bearerToken;
   if (
     typeof token !== 'string' ||
@@ -149,6 +152,13 @@ function resolveConfig(config: HTTPServerConfig): ResolvedHTTPConfig {
     );
   }
 
+  let port: number;
+  try {
+    port = parsePort(config.port ?? DEFAULT_HTTP_CONFIG.port);
+  } catch (error) {
+    throw new HTTPTransportConfigError('port', `port ${(error as Error).message}`);
+  }
+
   const corsOrigins = config.corsOrigins ?? [];
   for (const entry of corsOrigins) {
     if (entry === '*') {
@@ -157,16 +167,19 @@ function resolveConfig(config: HTTPServerConfig): ResolvedHTTPConfig {
         "corsOrigins must not contain '*': every request carries a bearer credential",
       );
     }
-    if (!isSerializedOrigin(entry)) {
+    const origin = serializedOrigin(entry);
+    if (origin !== entry) {
+      // Named, not substituted: the allowlist holds exactly what the operator wrote.
+      const hint = origin && origin !== 'null' ? `; write '${origin}'` : '';
       throw new HTTPTransportConfigError(
         'corsOrigins',
-        `corsOrigins entries must be serialized origins (scheme://host[:port], no path or trailing slash), got '${String(entry)}'`,
+        `corsOrigins entries must be serialized origins (scheme://host[:port], no path, no trailing slash, no default port), got '${String(entry)}'${hint}`,
       );
     }
   }
 
   return {
-    port: config.port ?? DEFAULT_HTTP_CONFIG.port,
+    port,
     host,
     bearerDigest: sha256(token),
     corsOrigins: [...corsOrigins],
@@ -176,14 +189,12 @@ function resolveConfig(config: HTTPServerConfig): ResolvedHTTPConfig {
   };
 }
 
-function isSerializedOrigin(entry: unknown): boolean {
-  if (typeof entry !== 'string') return false;
+function serializedOrigin(entry: unknown): string | undefined {
+  if (typeof entry !== 'string') return undefined;
   try {
-    const origin = new URL(entry).origin;
-    // An opaque origin serializes as 'null' and never matches a browser's Origin safely.
-    return origin !== 'null' && origin === entry;
+    return new URL(entry).origin;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -197,7 +208,8 @@ export class HTTPTransport {
   private activeSessions = new Map<string, SSEServerTransport>();
 
   /**
-   * @throws {HTTPTransportConfigError} on a missing or malformed `bearerToken`, a hostname or a
+   * @throws {HTTPTransportConfigError} on a missing config or `bearerToken`, a malformed
+   * `bearerToken`, a `port` that is not an integer from 1 to 65535, a hostname or a
    * non-loopback `host` without `allowPublicBind`, and a `corsOrigins` entry that is `*` or not
    * a serialized origin.
    */
@@ -267,23 +279,18 @@ export class HTTPTransport {
     mcpServer: TopGunMCPServer,
   ): Promise<void> {
     // The gate runs before routing, before the body is read and before an SSE session is
-    // connected, so a refused request runs nothing.
+    // connected, so a refused request runs nothing. The bearer is checked before the origin, so
+    // an unauthenticated caller gets the same 401 whatever Origin it sends and cannot probe the
+    // allowlist.
     res.setHeader('Vary', 'Origin');
     const origin = req.headers.origin;
-    if (origin !== undefined) {
-      if (!this.config.corsOrigins.includes(origin)) {
-        res.writeHead(403, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'origin not allowed' }));
-        return;
-      }
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-      res.setHeader('Access-Control-Max-Age', '86400');
-    }
+    const allowedOrigin =
+      origin !== undefined && this.config.corsOrigins.includes(origin) ? origin : undefined;
 
-    // Browsers send no credentials on a preflight, so it is answered without the bearer check.
+    // Browsers send no credentials on a preflight, so it is answered without the bearer check;
+    // it is 204 for every origin, and only an allowlisted one gets CORS headers.
     if (req.method === 'OPTIONS') {
+      if (allowedOrigin) this.setCorsHeaders(res, allowedOrigin);
       res.writeHead(204);
       res.end();
       return;
@@ -294,6 +301,13 @@ export class HTTPTransport {
       res.end(JSON.stringify({ error: 'unauthorized' }));
       return;
     }
+
+    if (origin !== undefined && !allowedOrigin) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'origin not allowed' }));
+      return;
+    }
+    if (allowedOrigin) this.setCorsHeaders(res, allowedOrigin);
 
     // A fixed base: only the path is used, and a malformed Host header must not make URL parsing throw.
     const pathname = new URL(req.url || '/', 'http://localhost').pathname;
@@ -315,9 +329,9 @@ export class HTTPTransport {
         JSON.stringify({
           name: config.name,
           version: config.version,
-          transport: 'http+sse',
+          // Only stateless tools/call over POST works; SSE session messaging does not.
+          transport: 'http',
           mcpPath: this.config.mcpPath,
-          eventPath: this.config.eventPath,
         }),
       );
       return;
@@ -407,7 +421,7 @@ export class HTTPTransport {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(
           JSON.stringify({
-            error: 'Unsupported method. Use SSE transport for full MCP support.',
+            error: 'Unsupported method: only tools/call is supported over HTTP.',
           }),
         );
       }
@@ -430,6 +444,13 @@ export class HTTPTransport {
       req.on('end', () => resolve(body));
       req.on('error', reject);
     });
+  }
+
+  private setCorsHeaders(res: ServerResponse, origin: string): void {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Max-Age', '86400');
   }
 
   /**
