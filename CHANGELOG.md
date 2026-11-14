@@ -53,10 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     writes arriving meanwhile are stored together instead of in many small passes.
   - **`TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` defaults to `100`** (was `1000`) and is now the
     longest a buffered write waits while the flush task is idle, the window in which a pass
-    forms. Measured with the same harness at 2·10⁴ writes/s: a 10 ms linger formed passes of
-    about 270 writes and acknowledged 3–4 % fewer writes per second than the previous release;
-    100 ms formed passes of about 800 and matched it. `0` refuses to start (the idle
-    loop would spin). A value of `500` or more, with a non-zero `TOPGUN_WRITEBEHIND_CAPACITY`,
+    forms. Measured with the same harness and conditions at 2·10⁴ writes/s, against the previous
+    release run with `TOPGUN_WRITEBEHIND_CAPACITY=0`: a 10 ms linger, run with capacity `0`,
+    formed passes of about 270 writes and acknowledged 3–4 % fewer writes per second than that
+    comparator; 100 ms, at the default capacity, formed passes of about 800 and matched it. `0`
+    refuses to start (see the breaking change below). A value of `500` or more, with a non-zero `TOPGUN_WRITEBEHIND_CAPACITY`,
     logs one startup `WARN`, `the write-behind flush interval is at least 500 ms: new-key
     admission is limited to about capacity / interval`. **Remove an explicit
     `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=1000`** copied from older example configurations: it
@@ -75,6 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the key bound refuses anything. The process is then killed and the write-ahead log replays
     the acknowledged writes at the next start — a crash, not data loss. A byte bound is
     TODO-963.
+
+- **Breaking (server, configuration): `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=0` refuses to
+  start.** Earlier releases accepted `0`; with no write delay the idle flush loop would spin, so the
+  server now exits at startup with a message naming the variable. Set a positive value, or remove
+  the variable to take the default of `100`.
 
 - **Changed (on-disk format): the server stores its data in RocksDB.** The data directory now
   holds `engine.rocksdb/`, and the server moves an existing `engine.redb` there by itself, once,

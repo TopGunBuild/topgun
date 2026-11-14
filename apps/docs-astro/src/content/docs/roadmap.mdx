@@ -146,8 +146,8 @@ The features below are **not implemented** in the current Rust server. The guide
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Crash-safe shutdown drain + WAL recovery</td>
-        <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned</td>
-        <td className="py-3 px-4">TODO-339; write-behind holds acked writes until its next flush pass, so an unclean shutdown can lose the writes buffered then</td>
+        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
+        <td className="py-3 px-4">A graceful stop drains the write-behind buffer; writes still buffered at an unclean shutdown are replayed from the write-ahead log at the next start. The default <code>batched</code> fsync policy can lose the last ~10 ms fsync window on an operating-system crash or power loss; <code>per_op</code> closes it</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Entry Processor</td>
