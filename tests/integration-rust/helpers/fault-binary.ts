@@ -80,8 +80,16 @@ export async function scrapeLag(port: number): Promise<LagScrape> {
  * reports zero.
  */
 export async function scrapeGauge(port: number, name: string): Promise<number | null> {
+  return seriesValue(await scrapeMetrics(port), name);
+}
+
+async function scrapeMetrics(port: number): Promise<string> {
   const resp = await fetch(`http://localhost:${port}/metrics`);
-  const body = await resp.text();
+  return resp.text();
+}
+
+/** The value of an unlabelled series in one `/metrics` body, or `null` when it is not rendered. */
+function seriesValue(body: string, name: string): number | null {
   for (const line of body.split('\n')) {
     const [series, sample] = line.trim().split(/\s+/);
     if (series !== name) continue;
@@ -126,11 +134,16 @@ async function withinMs<T>(work: Promise<T>, ms: number, what: string): Promise<
   }
 }
 
+/** Both series from one scrape, so they come from the same pass end. */
 async function readFlush(port: number, scrapeWaitMs: number): Promise<FlushReading> {
-  const what = `scrape of /metrics on port ${port}`;
+  const body = await withinMs(
+    scrapeMetrics(port),
+    scrapeWaitMs,
+    `scrape of /metrics on port ${port}`,
+  );
   return {
-    entries: await withinMs(scrapeGauge(port, FLUSH_PASS_ENTRIES), scrapeWaitMs, what),
-    buffered: await withinMs(scrapeGauge(port, BUFFERED_ENTRIES), scrapeWaitMs, what),
+    entries: seriesValue(body, FLUSH_PASS_ENTRIES),
+    buffered: seriesValue(body, BUFFERED_ENTRIES),
   };
 }
 
