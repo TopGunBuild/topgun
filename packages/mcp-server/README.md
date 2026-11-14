@@ -90,6 +90,8 @@ Options:
   --no-subscriptions      Disable subscription operations
   --http                  Start HTTP transport instead of stdio
   --port, -p <port>       HTTP port (default: 3000)
+  --host <ip>             HTTP bind address (default: 127.0.0.1)
+  --allow-public-bind     Allow a non-loopback --host
   --debug, -d             Enable debug logging
   --help, -h              Show help
   --version, -v           Show version
@@ -175,17 +177,37 @@ Example: "Explain query on tasks where status='done'"
 
 ## HTTP Transport
 
-For web-based MCP clients, you can start the server with HTTP transport:
+For MCP clients over the network, you can start the server with HTTP transport; it serves only `tools/call`. It needs a secret that every request
+presents, and it listens on `127.0.0.1` unless you allow more:
 
 ```bash
+export TOPGUN_MCP_HTTP_TOKEN=$(openssl rand -base64 32)
 topgun-mcp --http --port 3000
+curl -H "Authorization: Bearer $TOPGUN_MCP_HTTP_TOKEN" http://127.0.0.1:3000/health
 ```
+
+- `TOPGUN_MCP_HTTP_TOKEN` (environment only) must be at least 32 characters of `A-Z a-z 0-9 - . _ ~ + /`, optionally
+  followed by `=` padding. Without it, or with a short or malformed value, the start is refused.
+- Every request, `/health` included, must send `Authorization: Bearer <secret>`; otherwise the answer is `401` and
+  nothing runs.
+- `--host <ip>` / `TOPGUN_MCP_HOST` takes an IP address, not a name. An address outside `127.0.0.0/8` and `::1` also
+  needs `--allow-public-bind` / `TOPGUN_MCP_ALLOW_PUBLIC_BIND=1`; the server then logs a warning. The transport is
+  plain HTTP: put TLS in front of it when it is reachable from the network.
+- An authenticated request with an `Origin` header gets `403` unless the origin is allowlisted (a request without
+  the secret gets the same `401` whatever its `Origin`). The CLI allowlists none, on purpose; pass `corsOrigins` to
+  `HTTPTransport` for a browser deployment. Each entry is a serialized origin such as `https://app.example.com`
+  (no path, no trailing slash, no default port); `*` is refused.
+- An unsafe or malformed setting (secret, host, or a port that is not an integer from 1 to 65535) exits with code 1
+  and one line on stderr: `topgun-mcp: refusing to start: …`. `HTTPTransport` applies the same port rule.
+
+Library use: `new HTTPTransport({ bearerToken, host?, allowPublicBind?, port?, corsOrigins? })`, then
+`start(server)`. The constructor throws `HTTPTransportConfigError` (with a `field`) on the settings above.
 
 Endpoints:
 - `GET /health` - Health check
 - `GET /mcp` - Server info
-- `GET /mcp/events` - SSE connection
-- `POST /mcp` - Stateless tool calls
+- `POST /mcp` - Stateless tool calls (`tools/call`); this is the only MCP method the HTTP transport serves
+- `GET /mcp/events` - opens an SSE stream, but SSE session messaging is not supported yet
 
 ## Environment Variables
 
@@ -194,7 +216,10 @@ Endpoints:
 | `TOPGUN_URL` | TopGun server URL |
 | `TOPGUN_TOKEN` | Authentication token |
 | `TOPGUN_MAPS` | Comma-separated allowed maps |
-| `TOPGUN_MCP_PORT` | HTTP port (with --http) |
+| `TOPGUN_MCP_PORT` | HTTP port (with --http), an integer from 1 to 65535 |
+| `TOPGUN_MCP_HTTP_TOKEN` | Required with --http: the secret every HTTP request must send as `Authorization: Bearer` |
+| `TOPGUN_MCP_HOST` | HTTP bind address, an IP literal (default `127.0.0.1`) |
+| `TOPGUN_MCP_ALLOW_PUBLIC_BIND` | `1` or `true` allows a non-loopback `TOPGUN_MCP_HOST` |
 | `TOPGUN_DEBUG` | Enable debug (true/false) |
 
 ## Security
@@ -202,7 +227,9 @@ Endpoints:
 - Use `allowedMaps` to restrict access to specific maps
 - Use `enableMutations: false` for read-only access
 - Use authentication tokens in production
-- The MCP server runs locally - data never leaves your machine
+- Over HTTP, every holder of `TOPGUN_MCP_HTTP_TOKEN` acts as the TopGun identity of `--token` / `TOPGUN_TOKEN`; a
+  separate identity per HTTP caller is not yet supported
+- Keep the HTTP transport on loopback, or put TLS in front of it: plain HTTP sends the bearer secret in clear
 
 ## License
 

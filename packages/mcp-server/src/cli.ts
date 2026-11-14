@@ -14,16 +14,20 @@
  *   --no-subscriptions    Disable subscription operations
  *   --http                Start HTTP transport instead of stdio
  *   --port <port>         HTTP port (default: 3000)
+ *   --host <ip>           HTTP bind address (default: 127.0.0.1)
+ *   --allow-public-bind   Allow a non-loopback --host
  *   --debug               Enable debug logging
  *   --help                Show help
  *   --version             Show version
  */
 
 import { createRequire } from 'node:module';
+import { isIP } from 'node:net';
 import { TopGunMCPServer } from './TopGunMCPServer';
-import { HTTPTransport } from './transport/http';
+import { HTTPTransport, HTTPTransportConfigError, isLoopbackHost } from './transport/http';
+import { parsePort } from './port';
 import type { MCPServerConfig } from './types';
-import { createLogger } from './logger';
+import { configForLog, createLogger } from './logger';
 
 const require = createRequire(import.meta.url);
 const { version: VERSION } = require('../package.json') as { version: string };
@@ -35,7 +39,10 @@ interface CLIOptions {
   mutations: boolean;
   subscriptions: boolean;
   http: boolean;
-  port: number;
+  // Kept raw and parsed only for --http, so a bad TOPGUN_MCP_PORT cannot affect stdio.
+  port: string | undefined;
+  host: string;
+  allowPublicBind: boolean;
   debug: boolean;
   help: boolean;
   version: boolean;
@@ -49,7 +56,9 @@ function parseArgs(args: string[]): CLIOptions {
     mutations: true,
     subscriptions: true,
     http: false,
-    port: parseInt(process.env.TOPGUN_MCP_PORT || '3000', 10),
+    port: process.env.TOPGUN_MCP_PORT ?? '3000',
+    host: process.env.TOPGUN_MCP_HOST ?? '127.0.0.1',
+    allowPublicBind: /^(1|true)$/i.test(process.env.TOPGUN_MCP_ALLOW_PUBLIC_BIND ?? ''),
     debug: process.env.TOPGUN_DEBUG === 'true',
     help: false,
     version: false,
@@ -88,7 +97,16 @@ function parseArgs(args: string[]): CLIOptions {
 
       case '--port':
       case '-p':
-        options.port = parseInt(args[++i], 10);
+        options.port = args[++i];
+        break;
+
+      case '--host':
+        // A missing value becomes '' so the transport refuses it instead of silently using the default.
+        options.host = args[++i] ?? '';
+        break;
+
+      case '--allow-public-bind':
+        options.allowPublicBind = true;
         break;
 
       case '--debug':
@@ -137,11 +155,30 @@ OPTIONS:
   --no-subscriptions      Disable subscription operations
 
   --http                  Start HTTP transport instead of stdio
-                          Use this for web-based MCP clients
+                          for MCP clients over the network; serves
+                          only tools/call (POST /mcp)
 
   --port, -p <port>       HTTP server port (only with --http)
                           Default: 3000
                           Env: TOPGUN_MCP_PORT
+
+  --host <ip>             HTTP bind address, an IP literal (only with --http)
+                          Default: 127.0.0.1
+                          Env: TOPGUN_MCP_HOST
+
+  --allow-public-bind     Allow a non-loopback --host (only with --http)
+                          Env: TOPGUN_MCP_ALLOW_PUBLIC_BIND=1
+
+                          Browser origins: the CLI allows none, on purpose
+                          (MCP clients are not browsers); a request with an
+                          Origin header gets 403. To serve a browser, use the
+                          library's HTTPTransport with its corsOrigins option.
+
+  TOPGUN_MCP_HTTP_TOKEN   Required with --http (environment only): the secret
+                          every HTTP request must send as
+                          'Authorization: Bearer <token>'; at least 32
+                          characters. Generate one with:
+                          openssl rand -base64 32
 
   --debug, -d             Enable debug logging to stderr
                           Env: TOPGUN_DEBUG=true
@@ -158,8 +195,8 @@ EXAMPLES:
   # Start with specific maps and auth token
   topgun-mcp --url ws://prod.example.com:8080 --token <jwt> --maps tasks,users
 
-  # Start HTTP server for web clients
-  topgun-mcp --http --port 4000
+  # Start the HTTP transport for MCP clients over the network (tools/call only)
+  TOPGUN_MCP_HTTP_TOKEN=$(openssl rand -base64 32) topgun-mcp --http --port 4000
 
   # Read-only mode (no mutations)
   topgun-mcp --no-mutations
@@ -202,6 +239,54 @@ For more information, visit: https://github.com/topgunbuild/topgun
 `);
 }
 
+// The CLI's names for the transport settings, so a refusal names what the operator sets.
+// corsOrigins has no CLI name: the CLI never sets it.
+const CLI_FIELD_NAMES: Partial<Record<HTTPTransportConfigError['field'], string>> = {
+  bearerToken: 'TOPGUN_MCP_HTTP_TOKEN',
+  host: '--host / TOPGUN_MCP_HOST',
+  port: '--port / TOPGUN_MCP_PORT',
+};
+
+function refuseToStart(reason: string): never {
+  process.stderr.write(`topgun-mcp: refusing to start: ${reason}\n`);
+  process.exit(1);
+}
+
+function createHTTPTransport(options: CLIOptions): { transport: HTTPTransport; port: number } {
+  let port: number;
+  try {
+    port = parsePort(options.port);
+  } catch (error) {
+    refuseToStart(`${CLI_FIELD_NAMES.port} ${(error as Error).message}`);
+  }
+
+  // A hostname is left to the transport's "must be an IP address" refusal.
+  const { host, allowPublicBind } = options;
+  if (isIP(host) !== 0 && !isLoopbackHost(host) && !allowPublicBind) {
+    refuseToStart(
+      `--host ${host} is not a loopback address; pass --allow-public-bind (or TOPGUN_MCP_ALLOW_PUBLIC_BIND=1) to bind it`,
+    );
+  }
+
+  try {
+    const transport = new HTTPTransport({
+      port,
+      host,
+      allowPublicBind,
+      // Read only here, so stdio needs no new variable.
+      bearerToken: process.env.TOPGUN_MCP_HTTP_TOKEN ?? '',
+      debug: options.debug,
+    });
+    return { transport, port };
+  } catch (error) {
+    if (error instanceof HTTPTransportConfigError) {
+      const name = CLI_FIELD_NAMES[error.field] ?? error.field;
+      refuseToStart(name + error.message.slice(error.field.length));
+    }
+    throw error;
+  }
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
 
@@ -228,7 +313,11 @@ async function main(): Promise<void> {
   // Create logger
   const logger = createLogger({ debug: options.debug, name: 'topgun-mcp-cli' });
 
-  logger.debug({ config }, 'Starting with config');
+  logger.debug({ config: configForLog(config) }, 'Starting with config');
+
+  // Validated before the server is built, so a refused start never creates a TopGun client
+  // holding the auth token.
+  const http = options.http ? createHTTPTransport(options) : undefined;
 
   // Create server
   const server = new TopGunMCPServer(config);
@@ -244,23 +333,20 @@ async function main(): Promise<void> {
   process.on('SIGTERM', shutdown);
 
   try {
-    if (options.http) {
-      // Start HTTP transport
-      const httpTransport = new HTTPTransport({
-        port: options.port,
-        debug: options.debug,
-      });
+    if (http) {
+      await http.transport.start(server);
 
-      await httpTransport.start(server);
+      const { host } = options;
+      const { port } = http;
+      if (!isLoopbackHost(host)) {
+        logger.warn(
+          `MCP HTTP transport is bound to non-loopback ${host}:${port}: it is reachable from the network; every request needs the bearer token, and plain HTTP sends that token in clear — put TLS in front of it`,
+        );
+      }
 
-      logger.info({ port: options.port }, 'TopGun MCP Server (HTTP) listening');
-      logger.info(
-        {
-          health: `http://localhost:${options.port}/health`,
-          mcp: `http://localhost:${options.port}/mcp`,
-        },
-        'Endpoints',
-      );
+      const base = isIP(host) === 6 ? `http://[${host}]:${port}` : `http://${host}:${port}`;
+      logger.info({ host, port }, 'TopGun MCP Server (HTTP) listening');
+      logger.info({ health: `${base}/health`, mcp: `${base}/mcp` }, 'Endpoints');
     } else {
       // Start stdio transport (default)
       await server.start();
