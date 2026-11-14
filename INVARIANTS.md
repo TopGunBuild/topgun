@@ -1455,8 +1455,10 @@ weaker than a test.
   `an_uncut_pass_waits_for_the_interval`,
   `oldest_entry_age_counts_a_refused_entry`,
   `oldest_entry_age_ignores_a_store_time_ahead_of_the_clock`,
-  `oldest_entry_age_moves_during_a_hold` and
-  `the_report_walks_the_queues_at_most_once_a_second`. All run in CI (`cargo test`).
+  `oldest_entry_age_moves_during_a_hold`,
+  `the_report_walks_the_queues_at_most_once_a_second`,
+  `an_emptied_buffer_is_reported_at_once` and
+  `a_hold_that_ends_and_begins_again_between_reports_is_walked`. All run in CI (`cargo test`).
   Which test holds which bound: one refused record, b04 (n = 1000, at most 21 writes); the
   meeting case, b06; the store that refuses everything, `a_store_that_refuses_everything_gets_a_bounded_number_of_calls`
   and b05; the store that goes down right after an accepted probe, b14 (n = 1000: at most
