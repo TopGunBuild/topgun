@@ -90,8 +90,10 @@ npx @topgunbuild/mcp-server --http --port 3000 \
   name; an address other than `127.0.0.0/8` or `::1` also needs `--allow-public-bind` (or
   `TOPGUN_MCP_ALLOW_PUBLIC_BIND=1`), and the server then logs a warning at start. The transport speaks plain HTTP,
   so the secret travels in clear: put TLS in front of it when it is reachable from the network.
-- **Browsers.** A request carrying an `Origin` header gets `403` unless that origin is allowlisted. The command line
-  allowlists none; a browser deployment passes `corsOrigins` to `HTTPTransport` (below). `*` is refused.
+- **Browsers.** An authenticated request carrying an `Origin` header gets `403` unless that origin is allowlisted; a
+  request without the secret gets the same `401` whatever its `Origin`. The command line allowlists none, on purpose;
+  a browser deployment passes `corsOrigins` to `HTTPTransport` (below). `*` is refused.
+- **What it serves.** `POST /mcp` with `tools/call`; other MCP methods, and SSE sessions, are not supported over HTTP.
 - **Refused starts.** An unsafe or malformed setting — the secret, the host, or a `--port` / `TOPGUN_MCP_PORT` that is
   not an integer from 1 to 65535 — exits with code 1 and one line on stderr, `topgun-mcp: refusing to start: …`.
 
@@ -113,8 +115,9 @@ await http.start(server);
 ```
 
 The constructor throws `HTTPTransportConfigError` (with a `field` naming the setting) on a missing or malformed
-`bearerToken`, a hostname or a non-loopback `host` without `allowPublicBind: true`, and a `corsOrigins` entry that is
-`*` or not an origin of the form `scheme://host[:port]`.
+`bearerToken`, a `port` that is not an integer from 1 to 65535, a hostname or a non-loopback `host` without
+`allowPublicBind: true`, and a `corsOrigins` entry that is `*` or not a serialized origin of the form
+`scheme://host[:port]` (no path, no trailing slash, no default port such as `:443`).
 
 ## Programmatic API
 

@@ -193,10 +193,12 @@ curl -H "Authorization: Bearer $TOPGUN_MCP_HTTP_TOKEN" http://127.0.0.1:3000/hea
 - `--host <ip>` / `TOPGUN_MCP_HOST` takes an IP address, not a name. An address outside `127.0.0.0/8` and `::1` also
   needs `--allow-public-bind` / `TOPGUN_MCP_ALLOW_PUBLIC_BIND=1`; the server then logs a warning. The transport is
   plain HTTP: put TLS in front of it when it is reachable from the network.
-- A request with an `Origin` header gets `403` unless the origin is allowlisted. The CLI allowlists none; pass
-  `corsOrigins` to `HTTPTransport` for a browser deployment (`*` is refused).
+- An authenticated request with an `Origin` header gets `403` unless the origin is allowlisted (a request without
+  the secret gets the same `401` whatever its `Origin`). The CLI allowlists none, on purpose; pass `corsOrigins` to
+  `HTTPTransport` for a browser deployment. Each entry is a serialized origin such as `https://app.example.com`
+  (no path, no trailing slash, no default port); `*` is refused.
 - An unsafe or malformed setting (secret, host, or a port that is not an integer from 1 to 65535) exits with code 1
-  and one line on stderr: `topgun-mcp: refusing to start: …`.
+  and one line on stderr: `topgun-mcp: refusing to start: …`. `HTTPTransport` applies the same port rule.
 
 Library use: `new HTTPTransport({ bearerToken, host?, allowPublicBind?, port?, corsOrigins? })`, then
 `start(server)`. The constructor throws `HTTPTransportConfigError` (with a `field`) on the settings above.
@@ -204,8 +206,8 @@ Library use: `new HTTPTransport({ bearerToken, host?, allowPublicBind?, port?, c
 Endpoints:
 - `GET /health` - Health check
 - `GET /mcp` - Server info
-- `GET /mcp/events` - SSE connection
-- `POST /mcp` - Stateless tool calls
+- `POST /mcp` - Stateless tool calls (`tools/call`); this is the only MCP method the HTTP transport serves
+- `GET /mcp/events` - opens an SSE stream, but SSE session messaging is not supported yet
 
 ## Environment Variables
 
