@@ -136,13 +136,13 @@ const CONNECT_WAIT_MS = 5_000;
 const SCRAPE_WAIT_MS = 2_000;
 /**
  * How long after the last acknowledgement step 2 sees the early writes in the
- * store, with no write delay: the 10 ms flush interval, one pass, one 100 ms
+ * store, with no write delay: the 100 ms flush interval, one pass, one 100 ms
  * poll, the 700 ms wait for a lag sample that postdates the store, and one
- * more poll, about 0.9 s.
+ * more poll, about 1.0 s.
  */
-const FLUSH_OBSERVED_MS = 1_000;
+const FLUSH_OBSERVED_MS = 1_100;
 /** The server's flush interval (its default), which the idle wait spans at least once. */
-const FLUSH_INTERVAL_MS = 10;
+const FLUSH_INTERVAL_MS = 100;
 /** Room on top of that for a slower host; the wait ends as soon as the sign is seen. */
 const FLUSH_MARGIN_MS = 3_600;
 const FLUSH_POLL_MS = 100;

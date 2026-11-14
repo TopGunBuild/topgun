@@ -225,7 +225,7 @@ impl Default for WriteBehindConfig {
     fn default() -> Self {
         Self {
             write_delay_ms: 0,
-            flush_interval_ms: 10,
+            flush_interval_ms: 100,
             batch_size: 100,
             backoff_base_ms: 500,
             backoff_cap_ms: 5000,
@@ -249,7 +249,7 @@ impl WriteBehindConfig {
     ///
     /// | Env var | Field | Default |
     /// |---|---|---|
-    /// | `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | `flush_interval_ms` | 10 ms — the idle linger; `0` is fatal; 500 ms or more (with a non-zero capacity) warns |
+    /// | `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | `flush_interval_ms` | 100 ms — the idle linger; `0` is fatal; 500 ms or more (with a non-zero capacity) warns |
     /// | `TOPGUN_WRITEBEHIND_BATCH_SIZE` | `batch_size` | 100 — accepted and currently without effect |
     /// | `TOPGUN_WRITEBEHIND_CAPACITY` | `capacity` | 10 000 |
     /// | `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS` | `shutdown_timeout_ms` | 30 000 ms |
@@ -13385,20 +13385,20 @@ mod tests {
                 .add(T411_MAP, "k", &lww("v", 1), now_millis())
                 .await
                 .expect("accepted");
-            advance(20).await;
-            let stored_within_20_ms = spy.accepted_for("k");
+            advance(200).await;
+            let stored_within_two_intervals = spy.accepted_for("k");
 
             let calls = spy.call_count();
             let epoch = store.flush_pass_epoch.load(Ordering::SeqCst);
             advance(1_000).await;
             let epoch_rise = store.flush_pass_epoch.load(Ordering::SeqCst) - epoch;
             assert_eq!(
-                (stored_within_20_ms, spy.call_count() - calls),
+                (stored_within_two_intervals, spy.call_count() - calls),
                 (1, 0),
                 "(stored within two intervals, store calls during the idle second)"
             );
             assert!(
-                epoch_rise <= 2 * (1_000 / 10 + 2),
+                epoch_rise <= 2 * (1_000 / 100 + 2),
                 "the idle loop must wait the interval between wakes, not spin: the pass epoch \
                  rose by {epoch_rise} in one second"
             );
@@ -13454,7 +13454,7 @@ mod tests {
         )]));
         assert_eq!(
             (parsed.flush_interval_ms, fallback.flush_interval_ms),
-            (10, 10)
+            (10, 100)
         );
     }
 

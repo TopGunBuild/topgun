@@ -4287,7 +4287,7 @@ async fn recovery_checkpoint(
         // The server has no write delay and flushes, when idle, after the flush
         // interval, so the runner sets TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=600000
         // for the no-drain validator; the harness's default fast flush, or the
-        // production 10 ms default, would drain the buffer inside this settle and
+        // production 100 ms default, would drain the buffer inside this settle and
         // mask the WAL durability path.
         const ACK_SETTLE: Duration = Duration::from_millis(250);
         tokio::time::sleep(ACK_SETTLE).await;

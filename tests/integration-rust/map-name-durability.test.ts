@@ -45,7 +45,7 @@ const VALUE = { name: 'Alice', plan: 'pro' };
 const SIGNAL_TIMEOUT_MS = 10_000;
 /**
  * An upper wait. Write-behind tries a write at its next pass (no write delay,
- * a 10 ms idle interval), then retries a refused one with 1 s, 2 s and 4 s of
+ * a 100 ms idle interval), then retries a refused one with 1 s, 2 s and 4 s of
  * backoff in between. Entries are retried one after another, so two refused
  * maps take about twice as long.
  */

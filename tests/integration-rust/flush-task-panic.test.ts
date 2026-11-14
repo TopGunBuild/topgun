@@ -23,7 +23,7 @@
  * queued when the task dies:
  *
  * - PANIC-THEN-ORDERLY-EXIT — one acknowledged write after the sentinel and
- *   nothing else. The next wake (the default 10 ms interval) takes that one
+ *   nothing else. The next wake (the default 100 ms interval) takes that one
  *   entry into the dying pass, the queue is empty, the shutdown has nothing to
  *   persist and completes: exit code 70.
  * - PANIC-IN-SHUTDOWN — a continuous stream of distinct keys against a server
@@ -104,7 +104,7 @@ const DEADLINE_PASSED_TEXT = 'shutdown on a failed store passed its deadline';
 /** The most entries one flush pass takes: the server's `PASS_MAX_ENTRIES`. */
 const PASS_LIMIT = 1_000;
 /** The server's default flush interval, which the orderly arm runs with. */
-const DEFAULT_FLUSH_INTERVAL_MS = 10;
+const DEFAULT_FLUSH_INTERVAL_MS = 100;
 /**
  * The flush interval of the PANIC-IN-SHUTDOWN arm's server
  * (`TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`). Chosen so that `r · (I − 1 s) ≥
@@ -134,12 +134,12 @@ const CONNECT_WAIT_MS = 5_000;
 const SCRAPE_WAIT_MS = 2_000;
 /**
  * How long after the last acknowledgement step 2 sees the early writes in the
- * store at the default interval, with no write delay: the 10 ms interval, one
+ * store at the default interval, with no write delay: the 100 ms interval, one
  * pass, one 100 ms poll, the 700 ms wait for a lag sample that postdates the
- * store, and one more poll, about 0.9 s. The PANIC-IN-SHUTDOWN arm adds its
+ * store, and one more poll, about 1.0 s. The PANIC-IN-SHUTDOWN arm adds its
  * own interval, since its early writes are stored at the next wake.
  */
-const FLUSH_OBSERVED_MS = 1_000;
+const FLUSH_OBSERVED_MS = 1_100;
 /** Room on top of that for a slower host; the wait ends as soon as the sign is seen. */
 const FLUSH_MARGIN_MS = 3_600;
 const FLUSH_POLL_MS = 100;

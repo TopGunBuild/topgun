@@ -173,7 +173,7 @@ const NOT_READ = 'n/a: this arm does not write the key';
 
 const ACK_WAIT_MS = 5_000;
 const PROBE_WAIT_MS = 5_000;
-/** An upper wait: with no write delay the control write is stored at the next pass, within one 10 ms flush interval and a pass; the rest is slack. */
+/** An upper wait: with no write delay the control write is stored at the next pass, within one 100 ms flush interval and a pass; the rest is slack. */
 const CONTROL_FLUSH_WAIT_MS = 3_000;
 /**
  * How long the store refuses the one write before anything is read. The retry
