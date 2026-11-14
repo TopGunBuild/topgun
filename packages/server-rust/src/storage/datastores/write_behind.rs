@@ -3062,6 +3062,14 @@ impl WriteBehindDataStore {
         entry.first_refused
     }
 
+    /// When the queued entry of the key was first buffered, if one is queued.
+    #[cfg(test)]
+    pub(crate) fn test_buffered_at(&self, map: &str, key: &str) -> Option<tokio::time::Instant> {
+        let queue = self.queues.get(&partition_for(map, key))?;
+        let entry = queue.entries.get(&(map.to_string(), key.to_string()))?;
+        Some(entry.buffered_at)
+    }
+
     /// How many flush passes have ended. The epoch is bumped once when a pass
     /// opens and once when it closes, so half of it counts the closed ones.
     #[cfg(test)]
@@ -13086,7 +13094,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_first_refusal_time_survives_a_rewrite_and_a_retirement() {
+    async fn the_first_refusal_and_buffered_times_survive_a_rewrite_and_a_retirement() {
         let spy = Arc::new(SpyDataStore::retaining());
         spy.refuse_key("A");
         let store = schedule_store(&spy, schedule_config());
@@ -13094,12 +13102,19 @@ mod tests {
             .add(SCHEDULE_MAP, "A", &lww("a1", 1), 1)
             .await
             .unwrap();
+        let first_buffered = store.test_buffered_at(SCHEDULE_MAP, "A");
         poll_until(30_000, || calls_answered(&spy) >= 1)
             .await
             .expect("the first refusal");
         let first_refusal = spy.timeline()[0].returned;
+        // Both belong to the key, not to one write of it. The paused clock
+        // has moved since the first write, so a later write's own instant
+        // differs from it.
         let kept = |store: &WriteBehindDataStore| {
-            first_refusal.is_some() && store.test_first_refused(SCHEDULE_MAP, "A") == first_refusal
+            first_refusal.is_some()
+                && store.test_first_refused(SCHEDULE_MAP, "A") == first_refusal
+                && first_buffered.is_some()
+                && store.test_buffered_at(SCHEDULE_MAP, "A") == first_buffered
         };
         let after_the_refusal = kept(&store);
 
