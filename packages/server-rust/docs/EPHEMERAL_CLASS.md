@@ -315,7 +315,8 @@ through `open_over_store` (959-2); refusal 4 in `build_services` (959-2).
 
 #### Per-op verdicts of an ephemeral write
 
-The owner rule (D3) and the budget check (D8) are exact only under the key writer, at apply. In the `OP_BATCH`
+The owner rule (D3) and the budget check (D8) are exact only at apply (the owner rule under the key writer, the
+budgets by the D8 reservation). In the `OP_BATCH`
 contract an apply-time refusal would come after earlier ops of the sub-batch are applied, and a transient error names
 no op: the exchange ends in one `ERROR` and the client re-sends the whole batch (the `transient` sink,
 `network/handlers/websocket.rs:1320-1323`, `network/handlers/websocket.rs:1556-1575`). One key held by another owner
@@ -376,12 +377,12 @@ own dispatch and its own response.
   is, and re-applies those that were applied — LWW-idempotent (the value is the desired state), at the cost of a
   duplicate fan-out per re-applied key. "Applied at most once" is per request; a re-send is a new request.
 - **A re-sent remove answered `retry {423}` is done.** When the handle's desired state for a key is *removed* and the
-  verdict for that key is `retry {423}`, the handle marks the key settled and does not retry it. Reason, edge case: the
-  owner rule refuses only when the live record is stamped by **another** owner (D3), so the handle's own record is not
-  there — either the first, unanswered remove was applied, or grace removed it, and another owner has since taken the
-  key. The handle's desired state ("no record of mine") already holds; retrying would show `blocked` for a state that is
-  reached, and would keep retrying for as long as the other owner stays. A PUT answered `retry {423}` stays `blocked`
-  and is retried, because its desired state (a record of mine) does not hold.
+  verdict for that key is `retry {423}`, the handle reports the key `published` (its desired state is reached) and does
+  not retry it. Reason, edge case: the owner rule refuses only when the live record is stamped by **another** owner
+  (D3), so the handle's own record is not there — either the first, unanswered remove was applied, or grace removed it,
+  and another owner has since taken the key. The handle's desired state ("no record of mine") already holds; retrying
+  would show `blocked` for a state that is reached, and would keep retrying for as long as the other owner stays. A PUT
+  answered `retry {423}` stays `blocked` and is retried, because its desired state (a record of mine) does not hold.
 - **No atomicity loss.** Ephemeral ops carry no cross-op atomicity requirement: the handle sends the current desired
   value per key (D7), each op is independent, and a request is only a transport grouping.
 
@@ -562,17 +563,17 @@ Deferred (TODO-959).
 - **Cross-connection order is not guaranteed.** Each connection has its own lane. Under takeover
   (`network/handlers/websocket.rs:543-558`), or on a reconnect of the same handle while the server still finishes the
   old connection, the old connection's request in progress when its read loop exited — at most one per connection,
-  because the closed flag is checked at every intercept — can apply after the new connection's first requests,
-  including its re-publish of the same key; the older value then stands until the handle writes that key again. The
-  window is that request's remaining singletons, each bounded by the operation timeout (5000 ms,
-  `bootstrap.rs:82`). The bound rests on two facts of the code: the old connection's handler waits for every in-flight
-  frame task before `registry.remove` (`network/handlers/websocket.rs:488-506`), and an envelope's task walks its inner
-  messages one at a time, awaiting each (`network/handlers/websocket.rs:1631-1680`), so when the cancel token fires
-  every earlier request of the envelope has finished and every later one meets the closed flag at its intercept. 959-5a
-  proves it with `tg_eph_003_takeover_late_apply_is_one_request`: an old connection holds an envelope of several
-  `EPHEMERAL_WRITE`s, a second connection of the same identity takes over while the first of them is in progress, and
-  only that request applies after the takeover; the later ones are neither applied nor answered. Two tabs of one profile writing one key are two concurrent writers under one owner (D3),
-  ordered by apply as any two LWW writers are.
+  because the closed flag is checked at every intercept — can apply after the new connection's first requests, including
+  its re-publish of the same key; the older value then stands until the handle writes that key again. The window is that
+  request's remaining singletons, each bounded by the operation timeout (5000 ms, `bootstrap.rs:82`). The bound rests on
+  two facts of the code: the old connection's handler waits for every in-flight frame task before `registry.remove`
+  (`network/handlers/websocket.rs:488-506`), and an envelope's task walks its inner messages one at a time, awaiting
+  each (`network/handlers/websocket.rs:1631-1680`), so when the cancel token fires every earlier request of the envelope
+  has finished and every later one meets the closed flag at its intercept. 959-5a proves it with
+  `tg_eph_003_takeover_late_apply_is_one_request`: an old connection holds an envelope of several `EPHEMERAL_WRITE`s, a
+  second connection of the same identity takes over while the first of them is in progress, and only that request
+  applies after the takeover; the later ones are neither applied nor answered. Two tabs of one profile writing one key
+  are two concurrent writers under one owner (D3), ordered by apply as any two LWW writers are.
 - **The lane's cost.** Ephemeral frames waiting for their turn hold permits, so a connection with many pipelined
   ephemeral requests delays its own durable frames until the lane advances; each waiting request waits at most for its
   predecessors' singletons, each bounded by the operation timeout. Other connections are not affected. While all 32
@@ -1210,24 +1211,25 @@ fifth method is needed: the `EPHEMERAL_WRITE` dispatcher maps a singleton's erro
     The 409 still protects the map (nothing is merged or read) and is counted on `topgun_operation_errors_total`; the
     client-visible signal for a durable handle on an ephemeral map is the 409 its `OP_BATCH` writes get (D7).
     Answering every non-batch refusal with a frame is a change to all non-batch operations and is outside this design;
-    it is tracked by **TODO-680**, which is a **precondition of 959-5b** (the step that adds the `SyncService` 409s).
-    Edge case that decides it: a durable client whose `SYNC_INIT` meets a map that has become ephemeral would wait for
-    a sync of that map that never completes, with no failure signal on the client. The `CLIENT_OP` 409 lands in 959-5a,
-    in a build that cannot resolve any map ephemeral until 959-9 reads the list, and 959-9 comes after 959-5b, so no
-    shipped binary has a silent class refusal.
+    it is tracked by **TODO-680**, which is a **precondition of 959-9** (enablement). Edge case that decides it: a
+    durable client whose `SYNC_INIT` meets a map that has become ephemeral would wait for a sync of that map that never
+    completes, with no failure signal on the client. Before 959-9 reads `TOPGUN_EPHEMERAL_MAPS` no map resolves
+    ephemeral (959-2 passes `EphemeralConfig::default()`), so neither the `CLIENT_OP` 409 of 959-5a nor the
+    `SyncService` 409s of 959-5b can be silent in a shipped build; the precondition sits on the step that makes them
+    reachable.
 - **No `writeConcern` refusal** (D1).
 - **Why `ephemeral_not_owner` is transient.** A user who cleared site data has a new device id, and a guest who logs
   in has a new principal (D3). Their old record still holds the key until grace ends, and a permanent refusal would
   make them absent for good.
-- **Client.** `WriteRejectionCause` (`core/src/WriteRejection.ts:27-34`) gains only `'storage_class_mismatch'`, for
-  the durable `SyncEngine`'s `OP_BATCH` path. The ephemeral handle produces no `WriteRejection`s: it routes
+- **Client.** `WriteRejectionCause` (`core/src/WriteRejection.ts:27-34`) gains only `'storage_class_mismatch'`, for the
+  durable `SyncEngine`'s `OP_BATCH` path. The ephemeral handle produces no `WriteRejection`s: it routes
   `EPHEMERAL_WRITE_RESP` by message type and `requestId` (a handle-local counter that never meets an op-log id) and
   reports each key's state through its own status events, from that key's verdict: `published` (`applied`), `blocked`
-  (`retry {423}` on a put; on a remove it is settled, D2), `capacity` (`retry {507}`), `retrying` (any other `retry`, or a request unanswered within the
-  request timeout), `refused` (`refused {code}`). It retries `blocked`, `capacity` and `retrying` keys with its own
-  backoff and never re-sends a key that was `applied`. It sends at most one op per key per request, because it holds
-  one desired value per key (D7). It may have several requests outstanding, and a key's state follows only the verdict
-  of the latest request that carried it (D2).
+  (`retry {423}` on a put; a remove answered `retry {423}` is `published`, D2), `capacity` (`retry {507}`), `retrying`
+  (any other `retry`, or a request unanswered within the request timeout), `refused` (`refused {code}`). It retries
+  `blocked`, `capacity` and `retrying` keys with its own backoff and never re-sends a key that was `applied`. It sends
+  at most one op per key per request, because it holds one desired value per key (D7). It may have several requests
+  outstanding, and a key's state follows only the verdict of the latest request that carried it (D2).
 
 **D10.2 — Live aggregate refusal.**
 
@@ -1355,9 +1357,9 @@ amended: `TG-SYNC-001` and `TG-SYNC-003` hold unchanged (D2).
 
 ## Acceptor
 
-Against the project's result acceptor — its end-goal targets T1–T12, its mandatory architecture practices (§2) and
-its per-component verdicts (§4: **Б** blocks a target; **П** has a ceiling below the target that must be raised before the target is claimed;
-**Д** reaches it):
+Against the project's result acceptor — its end-goal targets T1–T12, its mandatory architecture practices (§2) and its
+per-component verdicts (§4: **Б** blocks a target; **П** has a ceiling below the target that must be raised before the
+target is claimed; **Д** reaches it):
 
 - **T1.** Ephemeral writes skip the WAL and write-behind, so they never consume the durable path's T1 budget. Their
   cost is the in-memory apply plus fan-out.
@@ -1424,12 +1426,12 @@ builders and through the record-store factory, which both `CrdtService` and `App
 | **959-3** | Behaviour-neutral preparation: `OperationError` classification moves onto the type (D10.1). `transient_rank()`, `batch_error_rank()`, `is_redispatchable()` become exhaustive methods with today's values, the three `websocket.rs` functions are deleted, and the `metrics.rs` label match becomes `e.error_kind()`. No wire, metric or verdict changes. | `service/operation.rs` (three methods), `network/handlers/websocket.rs` (`network/handlers/websocket.rs:1153-1242` deleted; call sites use the methods), `service/middleware/metrics.rs` (`service/middleware/metrics.rs:97-110` → `e.error_kind()`) (3) | — | — | — | — |
 | **959-4** | The ephemeral write message pair and the server-side class carrier, with no handler yet: `EPHEMERAL_WRITE` / `EPHEMERAL_WRITE_RESP` types and their `classify` arms; `OperationContext.storage_class` (`Durable` in `new`) and `Operation::set_storage_class`. An `EPHEMERAL_WRITE` reaching a server of this step is classified `RequiresPartitionSplit`, logged at `warn` and answered with nothing; nothing is applied (`network/handlers/websocket.rs:992-1000`). TS: Zod schemas for both messages in `packages/core`; cross-language fixtures for both (`core-rust/tests/cross_lang_compat.rs` and the TS fixture generator, not forced). | `core-rust/src/messages/sync.rs` (payload types `EphemeralWritePayload`, `EphemeralWriteRespPayload`, `EphemeralOpResult`; inline round-trip tests), `core-rust/src/messages/mod.rs` (the two `Message` variants and their `pub use`), `service/classify.rs` (two arms of the exhaustive `classify` match: `EphemeralWrite` → `RequiresPartitionSplit`, `EphemeralWriteResp` → `ServerToClient`), `service/operation.rs` (`OperationContext` field set in `new`; `set_storage_class`), `service/middleware/timeout.rs` (its inline-test `OperationContext` literal, `service/middleware/timeout.rs:106`) (5) | — | `EphemeralWritePayload`, `EphemeralWriteRespPayload`, `EphemeralOpResult`, `OperationContext::storage_class` | 959-3 | — |
 | **959-5a** | The class check on the write paths and the `EPHEMERAL_WRITE` handler: mismatch in either direction and OR ops on an ephemeral map refused with 409 in all three validation branches (HTTP push included, through `OperationContext::new`); the handler (singleton dispatch per op, positional verdicts, one `EPHEMERAL_WRITE_RESP`, `message_cost` = op count, the rate-limited answer for a top-level frame and per inner request of a refused envelope, the ephemeral lane with the closed flag checked at every intercept, a lost worker reply mapped to `retry {500}`, refusal metric) and the `ttlMs` strip before apply (D1). Tests also include `tg_eph_003_takeover_late_apply_is_one_request` (D2 "Stated limits") and `tg_eph_003_lost_worker_reply_is_retry_500` (a singleton whose reply sender is dropped is answered `retry {500}`, and the next request of the connection still runs). Tests include the **two-request reorder**: two `EPHEMERAL_WRITE`s of one connection write one key, the first held long enough to finish after the second would without the lane (for example, behind several ops of one partition ahead of the key's op); the key ends with the second request's value and the first answer leaves before the second — top-level, inside one envelope, and an envelope followed by a top-level frame; and a request whose turn comes after the read loop exited is neither dispatched nor answered, both as a top-level frame and as a later `EPHEMERAL_WRITE` inside an envelope whose earlier one was in progress when the lane closed (the later request is skipped; the envelope's non-ephemeral messages after it are dispatched). TS: client cause `'storage_class_mismatch'`. Load harness fire-and-wait: durable scenario against the base, multi-key ephemeral scenario against T1/T2, one-connection pipelined throughput reported. | `service/operation.rs` (`StorageClassMismatch` and its arms in `disposition`, `wire_code`, `error_kind`, `ALL_ERROR_KINDS`, the three 959-3 methods and the test guard `one_of_every_error_variant`, `service/operation.rs:907-944` — one file), `service/domain/crdt.rs` (check in the validation pass of `handle_op_batch` and in `handle_client_op`, `service/domain/crdt.rs:294`; the `ttlMs` strip for ephemeral ops), `network/handlers/websocket.rs` (intercept beside `network/handlers/websocket.rs:930`; `dispatch_ephemeral_write`; `message_cost` arm; the rate-limited `EPHEMERAL_WRITE_RESP`s in the read loop, `network/handlers/websocket.rs:401-430`; the lane ticket made at `network/handlers/websocket.rs:461` and threaded through the private `dispatch_message` / `dispatch_envelope` / `dispatch_one_message` — same file, nothing else forced) (3) | the load-harness ephemeral scenario (new, under `benches/load_harness/`) | `OperationError::StorageClassMismatch`, `EphemeralVerdict` (server-side mapping) | 959-4 | EPH-003 (write paths, response), EPH-006 (strip) |
-| **959-5b** | The 409 surface beyond the write path: every `SyncService` operation on an ephemeral map (`ORMAP_PUSH_DIFF` included), HTTP `/sync` pull, `SEARCH`/`SEARCH_SUB`/`HYBRID_SEARCH`/`HYBRID_SEARCH_SUB`, `VECTOR_SEARCH`. | `service/domain/sync.rs` (one check in the dispatch, `service/domain/sync.rs:1938-1955`, by the payload's map name, before the handler; the factory is reached at `service/domain/sync.rs:1628`), `network/handlers/http_sync.rs` (pull refusal and its counter increment), `service/domain/search/mod.rs` (search, hybrid search and their subscriptions, through the factory it holds, `service/domain/search/mod.rs:1577-1584`, and the counter increment), `service/domain/query.rs` (`VECTOR_SEARCH`, `service/domain/query.rs:701`, through the factory `QueryService` already holds, `service/domain/query.rs:476`, `service/domain/query.rs:569-579`, and the counter increment) (4) | — | — | 959-5a, **TODO-680** | EPH-003 (sync, pull, search, vector search) |
+| **959-5b** | The 409 surface beyond the write path: every `SyncService` operation on an ephemeral map (`ORMAP_PUSH_DIFF` included), HTTP `/sync` pull, `SEARCH`/`SEARCH_SUB`/`HYBRID_SEARCH`/`HYBRID_SEARCH_SUB`, `VECTOR_SEARCH`. | `service/domain/sync.rs` (one check in the dispatch, `service/domain/sync.rs:1938-1955`, by the payload's map name, before the handler; the factory is reached at `service/domain/sync.rs:1628`), `network/handlers/http_sync.rs` (pull refusal and its counter increment), `service/domain/search/mod.rs` (search, hybrid search and their subscriptions, through the factory it holds, `service/domain/search/mod.rs:1577-1584`, and the counter increment), `service/domain/query.rs` (`VECTOR_SEARCH`, `service/domain/query.rs:701`, through the factory `QueryService` already holds, `service/domain/query.rs:476`, `service/domain/query.rs:569-579`, and the counter increment) (4) | — | — | 959-5a | EPH-003 (sync, pull, search, vector search) |
 | **959-6a** | Ownership bookkeeping, no write-path change: `EphemeralRegistry` with `conn_owner`, owner entries and live sets; fix-once with the registered-connection re-check under the owner-entry lock; `unfix` on disconnect; production and simulation wiring. | `storage/ephemeral.rs` (`EphemeralRegistry`, fix/unfix), `storage/factory.rs` (holds the registry, `ephemeral()` accessor), `network/connection.rs` (identity-bound observer slot, called from `claim_device_ownership`), `bootstrap.rs` (register the bind observer and the `on_disconnect` unfix), `sim/cluster.rs` (same wiring for simulation) (5) | — | `EphemeralRegistry`, `OwnerId`, `IdentityBoundObserver` | 959-5b | EPH-005 (bookkeeping) |
 | **959-6b** | Owner rule and liveness at apply: owner stamp, first-write fix of an identity-less connection, owner rule (423, a `retry` verdict through the 959-5a handler with no handler change), liveness at apply. | `service/domain/crdt.rs` (stamp, rule, liveness at apply, first-write fix), `service/operation.rs` (`EphemeralNotOwner` with its arms) (2) | simulation tests | `Admission` | 959-6a | EPH-004, EPH-005 (apply) |
 | **959-7** | Grace and TTL removal: the `ttlMs` deadline (the strip is already in 959-5a), the removal tick, owner-gone, the tick's production and simulation wiring, removal metrics. | `storage/ephemeral.rs` (deadline queue, tick, chunking, backlog), `service/domain/crdt.rs` (remover implementation, re-check; the strip hands the deadline to the registry), `bootstrap.rs` (spawn the tick, register metrics), `sim/cluster.rs` (spawn the tick in simulation) (4) | simulation tests | `EphemeralRemover` | 959-6b | EPH-005 (removal), EPH-006 (deadline, removal) |
 | **959-8** | Budgets: cost accounting, atomic admission at apply (owner reservation under the owner-entry lock, node reservation by compare-and-set; 507, a `retry` verdict per op), 413 in validation, budget metrics. Test `tg_eph_007_concurrent_growth_never_exceeds_cap`. | `storage/ephemeral.rs` (accounting), `service/domain/crdt.rs` (507 at apply; 413 in the validation pass), `service/operation.rs` (`EphemeralCapacity` with its arms), `bootstrap.rs` (register metrics) (4) | — | `EphemeralBudget` | 959-7 | EPH-007 |
-| **959-9** | Enablement and public surface: `TOPGUN_EPHEMERAL_MAPS` / `TOPGUN_EPHEMERAL_GRACE_MS` / `TOPGUN_EPHEMERAL_MAX_MB` / `TOPGUN_EPHEMERAL_MAX_KB_PER_OWNER`, cluster refusal (D2 refusal 1), startup line; handshake hash; `GET /api/admin/storage-classes`; tenant drop clears the tenant's ephemeral maps and registry entries; a vector-index registration on an ephemeral map is refused with 409. TS: `client.ephemeral(name)` handle (desired state, `EPHEMERAL_WRITE` with a handle-local `requestId`, `EPHEMERAL_WRITE_RESP` routed to the handle in `client/src/sync/ClientMessageHandlers.ts` and never to `SyncEngine`, overlapping requests with the latest-request rule per key, the request timeout, re-publish, `dispose()` on `pagehide`, per-key status events), `useEphemeral`, the hash warning. Docs: CLAUDE.md variables and a docs-astro guide with the D3 keying and D7 warnings. Integration tests, including a durable op and an ephemeral request in flight on one connection whose verdicts each reach only their own sender, and the **two-request reorder through the handle**: the handle sends request 1 for a key, then request 2 with a newer value while 1 is unanswered (and, in a second case, re-sends after its request timeout while the original is still on the server); the key ends with the newest value, its status is `published` from the latest request's verdict, and a late answer of the earlier request does not change it. | `bin/topgun_server.rs` (environment, cluster refusal before `bin/topgun_server.rs:1058`, startup line), `core-rust/src/messages/client_events.rs` (hash field), `network/handlers/websocket.rs` (emit the hash, `network/handlers/websocket.rs:219`, `network/handlers/websocket.rs:380`), `network/handlers/admin.rs` (endpoint; tenant drop, `network/handlers/admin.rs:888-898`; vector-index refusal before `network/handlers/admin.rs:1666`, with its counter increment), `network/module.rs` (route, beside `network/module.rs:723`) (5) | integration tests | `EphemeralHandle` (TS) | 959-8, **TODO-931**, **TODO-747 and TODO-972 traced** | EPH-002 (environment, cluster) |
+| **959-9** | Enablement and public surface: `TOPGUN_EPHEMERAL_MAPS` / `TOPGUN_EPHEMERAL_GRACE_MS` / `TOPGUN_EPHEMERAL_MAX_MB` / `TOPGUN_EPHEMERAL_MAX_KB_PER_OWNER`, cluster refusal (D2 refusal 1), startup line; handshake hash; `GET /api/admin/storage-classes`; tenant drop clears the tenant's ephemeral maps and registry entries; a vector-index registration on an ephemeral map is refused with 409. TS: `client.ephemeral(name)` handle (desired state, `EPHEMERAL_WRITE` with a handle-local `requestId`, `EPHEMERAL_WRITE_RESP` routed to the handle in `client/src/sync/ClientMessageHandlers.ts` and never to `SyncEngine`, overlapping requests with the latest-request rule per key, the request timeout, re-publish, `dispose()` on `pagehide`, per-key status events), `useEphemeral`, the hash warning. Docs: CLAUDE.md variables and a docs-astro guide with the D3 keying and D7 warnings. Integration tests, including a durable op and an ephemeral request in flight on one connection whose verdicts each reach only their own sender, and the **two-request reorder through the handle**: the handle sends request 1 for a key, then request 2 with a newer value while 1 is unanswered (and, in a second case, re-sends after its request timeout while the original is still on the server); the key ends with the newest value, its status is `published` from the latest request's verdict, and a late answer of the earlier request does not change it. | `bin/topgun_server.rs` (environment, cluster refusal before `bin/topgun_server.rs:1058`, startup line), `core-rust/src/messages/client_events.rs` (hash field), `network/handlers/websocket.rs` (emit the hash, `network/handlers/websocket.rs:219`, `network/handlers/websocket.rs:380`), `network/handlers/admin.rs` (endpoint; tenant drop, `network/handlers/admin.rs:888-898`; vector-index refusal before `network/handlers/admin.rs:1666`, with its counter increment), `network/module.rs` (route, beside `network/module.rs:723`) (5) | integration tests | `EphemeralHandle` (TS) | 959-8, **TODO-931**, **TODO-680**, **TODO-747 and TODO-972 traced** | EPH-002 (environment, cluster) |
 | **959-10** | Ephemeral journal ring and its filter rule. | `service/domain/journal.rs` (ring), `service/domain/persistence.rs` (filter rule, 409), `service/domain/crdt.rs` (route ephemeral events), `bootstrap.rs` (construct, read `TOPGUN_EPHEMERAL_JOURNAL_CAPACITY`), `bin/topgun_server.rs` (startup line) (5) | — | the journal ring selector | 959-9, **TODO-933** | journal statements |
 | **959-11** | Live aggregates: shared accumulators, coalesced per-group deltas, the narrowed D10.2 refusal. TS: QueryHandle live aggregates. | `service/domain/aggregate.rs` (new), `service/domain/mod.rs` (`mod` decl), `service/domain/query.rs`, the fan-out module as TODO-931 leaves it (`service/domain/crdt.rs` today), `bootstrap.rs` (read `TOPGUN_LIVE_AGGREGATE_WINDOW_MS`, construct, log the effective window) (5) | — | `AggregateAccumulator` | **TODO-931**, **TODO-971** | TG-AGG-001 |
 | TODO-297 | Rooms: client sugar over an ephemeral map plus a topic. | TS only | — | — | 959-9 | — |
@@ -1450,18 +1452,19 @@ builders and through the record-store factory, which both `CrdtService` and `App
   a field to either.
 - **Exemptions:** none. Every step is ≤ 5 counted production files without a shape exemption. Counts: 959-1 5, 959-2
   5, 959-3 3, 959-4 5, 959-5a 3, 959-5b 4, 959-6a 5, 959-6b 2, 959-7 4, 959-8 4, 959-9 5, 959-10 5, 959-11 5.
-- **Order:** 959-1 → 959-2 → 959-3 → 959-4 → 959-5a → 959-5b (after TODO-680) → 959-6a → 959-6b → 959-7 → 959-8 → 959-9 (after TODO-931
-  and the TODO-747/972 traces) → 959-10 (after TODO-933) and TODO-297. 959-11 comes after TODO-931 and TODO-971, in
-  parallel with the rest.
+- **Order:** 959-1 → 959-2 → 959-3 → 959-4 → 959-5a → 959-5b → 959-6a → 959-6b → 959-7 → 959-8 → 959-9 (after TODO-931,
+  TODO-680 and the TODO-747/972 traces) → 959-10 (after TODO-933) and TODO-297. 959-11 comes after TODO-931 and
+  TODO-971, in parallel with the rest.
 - **Before the TODO-844/850 freeze.** The cluster reservations (D9) are recorded on those TODOs.
 - **Simulation tests.** Every step that changes behaviour in `service/domain/` carries simulation tests (CLAUDE.md
   "Simulation Testing"). 959-5a and 959-5b carry the 409 surfaces (959-5b: an `ORMAP_PUSH_DIFF` to an ephemeral map
   stores nothing); 959-6a wires the simulation node; 959-6b carries liveness at apply under a delayed dispatch (a write
   dispatched **directly to the CRDT service after the owner's `unfix`** is dropped — the WebSocket handler drains its
-  frame tasks before `remove()` (D6), so this case cannot be produced through it) and the per-op 423 verdict in a mixed ephemeral request (the other
-  ops `applied`, none re-applied on the blocked key's retry); 959-7 carries owner-gone removal under a node restart.
-  959-6a proves the fix/`remove()` race by unit tests that force both interleavings. 959-3 and 959-4 are
-  behaviour-neutral (959-4's message is decoded and not handled) and carry none; existing tests must pass unchanged.
+  frame tasks before `remove()` (D6), so this case cannot be produced through it) and the per-op 423 verdict in a mixed
+  ephemeral request (the other ops `applied`, none re-applied on the blocked key's retry); 959-7 carries owner-gone
+  removal under a node restart. 959-6a proves the fix/`remove()` race by unit tests that force both interleavings. 959-3
+  and 959-4 are behaviour-neutral (959-4's message is decoded and not handled) and carry none; existing tests must pass
+  unchanged.
 - **Load harness.** 959-5a changes `service/domain/crdt.rs` and `network/handlers/`, so it runs the fire-and-wait load
   harness as D2 "Cost" states.
 
