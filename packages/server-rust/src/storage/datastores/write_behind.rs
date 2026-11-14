@@ -4154,6 +4154,11 @@ struct PassSelection {
     /// Entries whose encoding failed, with the error: each is refused alone
     /// and is in no commit.
     unencodable: Vec<(DelayedEntry, anyhow::Error)>,
+    /// A pass limit stopped the taking while a further candidate was left:
+    /// the entry cap with another candidate to take, or the byte cap with its
+    /// entry put back. `false` when the selectable candidates ran out. The
+    /// flush loop runs the next pass at once only after a cut one.
+    cut: bool,
 }
 
 /// How the halving of a refused commit treats it.
@@ -4383,9 +4388,10 @@ impl WriteBehindDataStore {
     /// entry with the smallest `(next_attempt, sequence)` — the slot that
     /// keeps a refused entry reachable under sustained load — then entries in
     /// `pass_order`, until the pass holds [`PASS_MAX_ENTRIES`] or the next
-    /// entry would carry it over [`PASS_MAX_VALUE_BYTES`]. Every taken
-    /// entry's WAL sequences are registered in flight once no queue guard is
-    /// held. Untaken entries stay queued, untouched.
+    /// entry would carry it over [`PASS_MAX_VALUE_BYTES`]; either limit marks
+    /// the selection `cut`. Every taken entry's WAL sequences are registered
+    /// in flight once no queue guard is held. Untaken entries stay queued,
+    /// untouched.
     fn select_pass(&self, scope: PassScope) -> PassSelection {
         let selectable = |entry: &DelayedEntry| match scope {
             PassScope::Due { deadline, now } => entry.is_due(deadline, now),
@@ -4423,8 +4429,10 @@ impl WriteBehindDataStore {
         let mut prepared: Vec<PreparedEntry> = Vec::new();
         let mut unencodable = Vec::new();
         let mut value_bytes = 0usize;
+        let mut cut = false;
         for i in order {
             if prepared.len() + unencodable.len() >= PASS_MAX_ENTRIES {
+                cut = true;
                 break;
             }
             let (_, partition, map, key) = &candidates[i];
@@ -4449,6 +4457,7 @@ impl WriteBehindDataStore {
                         && value_bytes.saturating_add(len) > PASS_MAX_VALUE_BYTES
                     {
                         self.put_back(entry);
+                        cut = true;
                         break;
                     }
                     value_bytes = value_bytes.saturating_add(len);
@@ -4464,6 +4473,7 @@ impl WriteBehindDataStore {
         PassSelection {
             prepared,
             unencodable,
+            cut,
         }
     }
 
@@ -4954,7 +4964,9 @@ impl WriteBehindDataStore {
         });
     }
 
-    /// One pass of the flush task; returns how many entries it stored.
+    /// One pass of the flush task; returns how many entries it stored and
+    /// whether its selection was cut by a pass limit (`false` when it made no
+    /// selection).
     ///
     /// The pass never waits on behalf of an entry: when an entry may be
     /// attempted again is written on the entry, and a later pass honours it.
@@ -4963,13 +4975,13 @@ impl WriteBehindDataStore {
         schedule: &mut RetrySchedule,
         deadline: i64,
         now: tokio::time::Instant,
-    ) -> usize {
+    ) -> (usize, bool) {
         let base = self.config.backoff_base_ms;
         let cap = self.config.backoff_cap_ms;
 
         // A broken store stores nothing more in this process (`TG-WB-010`).
         if schedule.store_broken {
-            return 0;
+            return (0, false);
         }
 
         let began = tokio::time::Instant::now();
@@ -4978,10 +4990,10 @@ impl WriteBehindDataStore {
             // The store is being left alone: nothing is taken and no call is
             // made, whoever woke the pass.
             if now < until {
-                return 0;
+                return (0, false);
             }
             let Some((partition, (map, key))) = self.choose_probe(deadline, now) else {
-                return 0;
+                return (0, false);
             };
             #[cfg(test)]
             self.pass_probe_park().await;
@@ -4996,7 +5008,7 @@ impl WriteBehindDataStore {
                 .get_mut(&partition)
                 .and_then(|mut queue| queue.take(&map, &key));
             let Some(probe) = taken else {
-                return 0;
+                return (0, false);
             };
             self.register_in_flight(partition, &probe.wal_sequences);
             // The probe is one entry committed alone, whatever refuses it, so
@@ -5018,7 +5030,7 @@ impl WriteBehindDataStore {
                         )
                         .await;
                     if let BatchEnd::Broken(_) = outcome.end {
-                        return 0;
+                        return (0, false);
                     }
                     stored += outcome.stored;
                     outcome.stored > 0
@@ -5032,7 +5044,7 @@ impl WriteBehindDataStore {
                 schedule.hold_until =
                     Some(returned + retry_backoff(base, cap, schedule.failed_probes));
                 self.publish_hold(schedule);
-                return 0;
+                return (0, false);
             }
             // The store answers again: the hold ends and this same pass goes
             // on over everything that is due. A store that just took the probe
@@ -5045,6 +5057,7 @@ impl WriteBehindDataStore {
         }
 
         let selection = self.select_pass(PassScope::Due { deadline, now });
+        let cut = selection.cut;
         for (entry, err) in selection.unencodable {
             // Refused alone before any commit is formed: the store never saw
             // the record, so it says nothing about the store.
@@ -5061,7 +5074,7 @@ impl WriteBehindDataStore {
             metrics::counter!(FLUSH_PASS_ENTRIES_COUNTER).increment(stored as u64);
             metrics::histogram!(FLUSH_PASS_SECONDS_HISTOGRAM).record(began.elapsed().as_secs_f64());
         }
-        stored
+        (stored, cut)
     }
 
     /// The newest `store_time` a pass may take: an entry whose `store_time` is
@@ -5207,15 +5220,17 @@ impl WriteBehindDataStore {
 
 /// Background task that flushes due entries to the inner store.
 ///
-/// Runs until the shutdown signal is received. While a pass stores something
-/// and writes are still due, passes run back to back; otherwise it waits for
-/// the flush interval (the idle linger) or an explicit notify (from
-/// `soft_flush`).
+/// Runs until the shutdown signal is received. A pass that a pass limit cut,
+/// and that stored something, is followed by the next one at once, so a
+/// backlog drains in full passes; after any other pass it waits for the flush
+/// interval (the idle linger) or an explicit notify (from `soft_flush`), so
+/// writes arriving meanwhile are batched instead of forming small passes.
 async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Receiver<bool>) {
     let interval = tokio::time::Duration::from_millis(store.config.flush_interval_ms);
     let mut schedule = RetrySchedule::default();
-    // Set after a pass that stored something while the store is neither held
-    // nor broken: the next pass starts at once instead of after the interval.
+    // Set after a cut pass that stored something while the store is neither
+    // held nor broken: the next pass starts at once instead of after the
+    // interval.
     let mut run_on = false;
 
     loop {
@@ -5267,22 +5282,17 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
 
         #[cfg(test)]
         store.flush_pass_epoch.fetch_add(1, Ordering::SeqCst);
-        let stored = store.run_flush_pass(&mut schedule, deadline, now).await;
+        let (stored, cut) = store.run_flush_pass(&mut schedule, deadline, now).await;
         store.report_retries(&mut schedule);
         #[cfg(test)]
         store.flush_pass_epoch.fetch_add(1, Ordering::SeqCst);
 
-        // A pass that stored nothing ends the run, and so does a hold or a
-        // broken store; a pass that stored something may have left due
-        // entries behind its limits, or a write became due meanwhile, and
-        // the next pass takes them. With nothing due the loop waits as
-        // always, so a write made after the pass waits for its wake.
-        run_on = stored > 0
-            && schedule.hold_until.is_none()
-            && !schedule.store_broken
-            && store
-                .choose_probe(store.due_deadline(), tokio::time::Instant::now())
-                .is_some();
+        // Only a cut pass left due entries queued, and they stay due and
+        // queued, so the next pass takes them at once. A pass that took
+        // everything due lingers for the interval, which batches the writes
+        // made meanwhile. A pass that stored nothing ends the run, and so
+        // does a hold or a broken store.
+        run_on = cut && stored > 0 && schedule.hold_until.is_none() && !schedule.store_broken;
     }
 }
 
@@ -13568,31 +13578,134 @@ mod tests {
         );
     }
 
+    /// A config whose interval no test outlasts, so every pass after the
+    /// first one a `soft_flush` asks for is a run-on.
+    fn t411_pacing_config() -> WriteBehindConfig {
+        WriteBehindConfig {
+            write_delay_ms: 0,
+            flush_interval_ms: 60_000,
+            capacity: 0,
+            ..WriteBehindConfig::default()
+        }
+    }
+
+    /// Waits in real time, up to five seconds, until the spy has `count` calls.
+    async fn t411_wait_for_calls(spy: &SpyDataStore, count: usize) {
+        let began = std::time::Instant::now();
+        while spy.call_count() < count && began.elapsed() < std::time::Duration::from_secs(5) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
     #[tokio::test]
     async fn t411_a_pass_that_stores_nothing_ends_the_run() {
         let spy = Arc::new(SpyDataStore::new());
-        spy.refuse_everything(true);
         let store = schedule_store(
             &spy,
             WriteBehindConfig {
-                write_delay_ms: 0,
-                flush_interval_ms: 60_000,
                 backoff_base_ms: 0,
                 backoff_cap_ms: 0,
-                capacity: 0,
-                ..WriteBehindConfig::default()
+                ..t411_pacing_config()
             },
         );
-        store
-            .add(T411_MAP, "k", &lww("v", 1), now_millis())
-            .await
-            .expect("accepted");
+        // One more than a pass takes, every one refused at encoding: the pass
+        // is cut and stores nothing, and with no backoff its entries are due
+        // again at once.
+        for i in 0..=PASS_MAX_ENTRIES {
+            let key = format!("k{i}");
+            store.test_refuse_encoding(T411_MAP, &key);
+            store
+                .add(T411_MAP, &key, &lww("v", 1), now_millis())
+                .await
+                .expect("accepted");
+        }
+        let passes = store.test_passes_closed();
         store.soft_flush().await.expect("soft_flush");
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert_eq!(
-            spy.call_count(),
-            1,
-            "a pass that stored nothing must end the run, even with its entry due again"
+            (store.test_passes_closed() - passes, spy.call_count()),
+            (1, 0),
+            "(passes, store calls): a cut pass that stored nothing must end the run, \
+             even with its entries due again"
+        );
+    }
+
+    #[tokio::test]
+    async fn t411_a_pass_cut_by_the_byte_cap_runs_on() {
+        let spy = Arc::new(SpyDataStore::new());
+        let store = schedule_store(&spy, t411_pacing_config());
+        // Two of these fit under the pass's byte limit and a third does not.
+        let large = "x".repeat(3 * 1024 * 1024);
+        for key in ["a", "b", "c"] {
+            store
+                .add(T411_MAP, key, &lww(&large, 1), now_millis())
+                .await
+                .expect("accepted");
+        }
+        let passes = store.test_passes_closed();
+        store.soft_flush().await.expect("soft_flush");
+        t411_wait_for_calls(&spy, 3).await;
+        assert_eq!(
+            (spy.call_count(), store.test_passes_closed() - passes),
+            (3, 2),
+            "(adds, passes): a pass the byte limit cut must be followed at once by the next"
+        );
+    }
+
+    #[tokio::test]
+    async fn t411_a_pass_cut_by_the_entry_cap_runs_on() {
+        let spy = Arc::new(SpyDataStore::new());
+        let store = schedule_store(&spy, t411_pacing_config());
+        for i in 0..=PASS_MAX_ENTRIES {
+            store
+                .add(T411_MAP, &format!("k{i}"), &lww("v", 1), now_millis())
+                .await
+                .expect("accepted");
+        }
+        let passes = store.test_passes_closed();
+        store.soft_flush().await.expect("soft_flush");
+        t411_wait_for_calls(&spy, PASS_MAX_ENTRIES + 1).await;
+        assert_eq!(
+            (spy.call_count(), store.test_passes_closed() - passes),
+            (PASS_MAX_ENTRIES + 1, 2),
+            "(adds, passes): a pass the entry limit cut must be followed at once by the next"
+        );
+    }
+
+    #[tokio::test]
+    async fn t411_an_uncut_pass_waits_for_the_interval() {
+        let spy = Arc::new(SpyDataStore::new());
+        let (inner, _about_to_panic) = super::background_task_panic_tests::PanickingAddStore::over(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            0,
+        );
+        let mut pass_parked = inner.arm_park();
+        let store = WriteBehindDataStore::new(inner, t411_pacing_config());
+        store
+            .add(T411_MAP, "a", &lww("v", 1), now_millis())
+            .await
+            .expect("accepted");
+        let passes = store.test_passes_closed();
+        store.soft_flush().await.expect("soft_flush");
+        pass_parked.wait_parked().await;
+        // Due at once, and a write does not wake the loop: only a run-on
+        // would take it before the interval.
+        store
+            .add(T411_MAP, "b", &lww("v", 1), now_millis())
+            .await
+            .expect("accepted");
+        pass_parked.release();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            (
+                spy.accepted_for("a"),
+                spy.accepted_for("b"),
+                store.pending_operation_count(),
+                store.test_passes_closed() - passes,
+            ),
+            (1, 0, 1, 1),
+            "(a stored, b stored, buffered, passes): a pass that took everything due must \
+             wait for the interval, so a write made during it stays buffered"
         );
     }
 
@@ -14327,7 +14440,7 @@ mod background_task_panic_tests {
     /// An armed park holds the next `add` on entry, before the count is taken:
     /// the flush task then sits inside a pass, holding its batch, for as long
     /// as the test needs to act around it.
-    struct PanickingAddStore {
+    pub(super) struct PanickingAddStore {
         inner: Arc<dyn MapDataStore>,
         panic_on: u64,
         adds: AtomicU64,
@@ -14343,7 +14456,7 @@ mod background_task_panic_tests {
         }
 
         /// Over `inner`, which receives every `add` that does not panic.
-        fn over(
+        pub(super) fn over(
             inner: Arc<dyn MapDataStore>,
             panic_on: u64,
         ) -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<()>) {
@@ -14359,7 +14472,7 @@ mod background_task_panic_tests {
         }
 
         /// Parks the next `add` on entry. Dropping the handle releases it.
-        fn arm_park(&self) -> TestParkHandle {
+        pub(super) fn arm_park(&self) -> TestParkHandle {
             let (gate, handle) = TestParkHandle::arm();
             *self
                 .park
