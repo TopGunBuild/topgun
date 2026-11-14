@@ -177,7 +177,7 @@ Example: "Explain query on tasks where status='done'"
 
 ## HTTP Transport
 
-For web-based MCP clients, you can start the server with HTTP transport. It needs a secret that every request
+For MCP clients over the network, you can start the server with HTTP transport; it serves only `tools/call`. It needs a secret that every request
 presents, and it listens on `127.0.0.1` unless you allow more:
 
 ```bash

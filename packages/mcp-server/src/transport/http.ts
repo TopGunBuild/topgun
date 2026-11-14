@@ -1,7 +1,7 @@
 /**
- * HTTP/SSE Transport for MCP Server
+ * HTTP transport for the MCP server
  *
- * Provides HTTP-based transport for web MCP clients
+ * Serves MCP clients over the network: stateless tools/call over POST, behind a bearer secret.
  */
 
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
@@ -57,7 +57,7 @@ export interface HTTPServerConfig {
   mcpPath?: string;
 
   /**
-   * Path for SSE events
+   * Path of the SSE stream; SSE session messaging is not supported yet.
    * @default '/mcp/events'
    */
   eventPath?: string;
@@ -343,7 +343,7 @@ export class HTTPTransport {
       return;
     }
 
-    // MCP POST request (for clients that don't support SSE)
+    // Stateless tools/call over POST: the one MCP method this transport serves
     if (pathname === this.config.mcpPath && req.method === 'POST') {
       await this.handleMCPRequest(req, res, mcpServer);
       return;

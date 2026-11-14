@@ -155,7 +155,8 @@ OPTIONS:
   --no-subscriptions      Disable subscription operations
 
   --http                  Start HTTP transport instead of stdio
-                          Use this for web-based MCP clients
+                          for MCP clients over the network; serves
+                          only tools/call (POST /mcp)
 
   --port, -p <port>       HTTP server port (only with --http)
                           Default: 3000
@@ -194,7 +195,7 @@ EXAMPLES:
   # Start with specific maps and auth token
   topgun-mcp --url ws://prod.example.com:8080 --token <jwt> --maps tasks,users
 
-  # Start HTTP server for web clients
+  # Start the HTTP transport for MCP clients over the network (tools/call only)
   TOPGUN_MCP_HTTP_TOKEN=$(openssl rand -base64 32) topgun-mcp --http --port 4000
 
   # Read-only mode (no mutations)
