@@ -2174,6 +2174,9 @@ pub struct WriteBehindDataStore {
     /// How many times the end-of-pass report has walked the queues.
     #[cfg(test)]
     report_walks: AtomicU64,
+    /// How many staging lookups the capacity check has made.
+    #[cfg(test)]
+    admission_probes: AtomicU64,
     /// Keys whose put encoding fails, because no value a test can build fails
     /// to encode, and a record that cannot be encoded must be refused alone.
     #[cfg(test)]
@@ -2406,6 +2409,8 @@ impl WriteBehindDataStore {
             flush_pass_epoch: AtomicU64::new(0),
             #[cfg(test)]
             report_walks: AtomicU64::new(0),
+            #[cfg(test)]
+            admission_probes: AtomicU64::new(0),
             #[cfg(test)]
             encode_refusals: Mutex::new(BTreeSet::new()),
             store_hold: AtomicBool::new(false),
@@ -4147,9 +4152,23 @@ struct RetrySchedule {
     /// Disarmed once that commit is resolved, or when a hold starts by any
     /// other path; never armed at process start.
     split_to_singles: bool,
-    /// When the end-of-pass report last walked the queues, and whether a hold
-    /// was in force then; `None` before the first walk.
-    last_walk: Option<(tokio::time::Instant, bool)>,
+    /// How many times a hold has begun or ended. The report compares it with
+    /// the count its last walk saw, so a hold that ends and another that
+    /// begins between two reports still walks at once.
+    hold_changes: u64,
+    /// The end-of-pass report's last walk of the queues; `None` before the
+    /// first.
+    last_walk: Option<LastWalk>,
+}
+
+/// What the report's last walk of the queues saw.
+struct LastWalk {
+    at: tokio::time::Instant,
+    /// `RetrySchedule::hold_changes` at the walk.
+    hold_changes: u64,
+    /// The walk found a queued entry, so its gauges and the retry warning
+    /// stand until a walk that finds none.
+    found_entries: bool,
 }
 
 /// One refused entry, named in the retry warning so an operator has a
@@ -4826,6 +4845,7 @@ impl WriteBehindDataStore {
         schedule.hold_until = Some(
             returned + retry_backoff(self.config.backoff_base_ms, self.config.backoff_cap_ms, 0),
         );
+        schedule.hold_changes += 1;
         schedule.warning_armed = true;
         schedule.example = Some(example);
         schedule.split_to_singles = false;
@@ -5093,6 +5113,7 @@ impl WriteBehindDataStore {
             // is not known to be down, so its next refused commit is halved to
             // single entries before it may start another hold.
             schedule.hold_until = None;
+            schedule.hold_changes += 1;
             schedule.failed_probes = 0;
             schedule.split_to_singles = true;
             self.publish_hold(schedule);
@@ -5171,21 +5192,28 @@ impl WriteBehindDataStore {
         if current.saturating_add(at_most_new) <= capacity {
             return Ok(());
         }
-        let new_keys = keys
-            .iter()
-            .map(AsRef::as_ref)
-            .filter(|key| {
-                !self
-                    .staging
-                    .contains_key(&(map.to_string(), (*key).to_string()))
-            })
-            .collect::<std::collections::HashSet<&str>>()
-            .len();
-        if new_keys > 0
-            && current.saturating_add(u64::try_from(new_keys).unwrap_or(u64::MAX)) > capacity
-        {
-            metrics::counter!(CAPACITY_REFUSALS_COUNTER).increment(1);
-            anyhow::bail!("Write-behind capacity exceeded");
+        // The places left for new keys. The call is refused at the first new
+        // key past them, so a refusal looks up at most `room + 1` new keys
+        // however many the call names; one probe buffer serves every lookup.
+        let room = capacity.saturating_sub(current);
+        let mut new_keys = std::collections::HashSet::new();
+        let mut probe = (map.to_string(), String::new());
+        for key in keys.iter().map(AsRef::as_ref) {
+            if new_keys.contains(key) {
+                continue;
+            }
+            probe.1.clear();
+            probe.1.push_str(key);
+            #[cfg(test)]
+            self.admission_probes.fetch_add(1, Ordering::SeqCst);
+            if self.staging.contains_key(&probe) {
+                continue;
+            }
+            new_keys.insert(key);
+            if u64::try_from(new_keys.len()).unwrap_or(u64::MAX) > room {
+                metrics::counter!(CAPACITY_REFUSALS_COUNTER).increment(1);
+                anyhow::bail!("Write-behind capacity exceeded");
+            }
         }
         Ok(())
     }
@@ -5199,20 +5227,23 @@ impl WriteBehindDataStore {
     /// of the oldest buffered entry, and the refused entries, which are
     /// reported only while a refusal has happened and the last walk still
     /// found a refused entry. The walk runs at most once per
-    /// `REPORT_WALK_INTERVAL` and at once when a store-wide hold begins or
-    /// ends, so its gauges are at most that old; between walks the call does
-    /// nothing more.
+    /// `REPORT_WALK_INTERVAL`, and at once when a store-wide hold has begun or
+    /// ended since the last walk or when the buffer is empty and the last walk
+    /// found entries, so an emptied buffer reads zero age and clears the
+    /// warning without waiting; between walks the call does nothing more. The
+    /// report runs after every pass, and a pass runs every flush interval
+    /// also when nothing is buffered (`flush_loop`).
     fn report_retries(&self, schedule: &mut RetrySchedule) {
-        metrics::gauge!(BUFFERED_ENTRIES_GAUGE)
-            .set(count_as_gauge(self.pending_count.load(Ordering::Relaxed)));
+        let pending = self.pending_count.load(Ordering::Relaxed);
+        metrics::gauge!(BUFFERED_ENTRIES_GAUGE).set(count_as_gauge(pending));
         let now = tokio::time::Instant::now();
-        let held = schedule.hold_until.is_some();
-        if schedule.last_walk.is_some_and(|(at, was_held)| {
-            was_held == held && now.saturating_duration_since(at) < REPORT_WALK_INTERVAL
+        if schedule.last_walk.as_ref().is_some_and(|walk| {
+            walk.hold_changes == schedule.hold_changes
+                && !(pending == 0 && walk.found_entries)
+                && now.saturating_duration_since(walk.at) < REPORT_WALK_INTERVAL
         }) {
             return;
         }
-        schedule.last_walk = Some((now, held));
         #[cfg(test)]
         self.report_walks.fetch_add(1, Ordering::SeqCst);
         let mut retrying = 0u64;
@@ -5227,6 +5258,11 @@ impl WriteBehindDataStore {
                 (a, b) => a.or(b),
             };
         }
+        schedule.last_walk = Some(LastWalk {
+            at: now,
+            hold_changes: schedule.hold_changes,
+            found_entries: oldest_buffered.is_some(),
+        });
         // The pass has ended, so no entry is held outside the queues. A
         // rewrite keeps the key's first buffered instant.
         let oldest_entry_age = oldest_buffered.map_or(std::time::Duration::ZERO, |first| {
@@ -13990,6 +14026,10 @@ mod tests {
                     }
                     let held = poll_until(10_000, || store.store_hold.load(Ordering::SeqCst)).await;
                     assert!(held.is_some(), "the refused commit must start a hold");
+                    // Counted from the confirmed hold over exactly 3 s of the
+                    // paused clock, whose wakes come every millisecond: walks
+                    // at least 1 s apart and at most about 1 s apart give 2 or
+                    // 3 in any such window, wherever the hold began.
                     let walks = store.report_walks.load(Ordering::SeqCst);
                     advance(3_000).await;
                     let walks_in_the_hold = store.report_walks.load(Ordering::SeqCst) - walks;
@@ -14009,10 +14049,186 @@ mod tests {
                 })
             });
         assert!(
-            (2..=4).contains(&walks_in_the_hold) && walked_when_the_hold_ended,
+            (2..=3).contains(&walks_in_the_hold) && walked_when_the_hold_ended,
             "the report must walk the queues about once a second during a hold, not on every \
              1 ms wake, and at once when the hold ends: (walks in 3 s of hold, walked at its \
              end) = ({walks_in_the_hold}, {walked_when_the_hold_ended})"
+        );
+    }
+
+    #[test]
+    fn an_emptied_buffer_is_reported_at_once() {
+        const AGE: &str = "topgun_write_behind_oldest_entry_age_seconds";
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let readings = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                // The flush task's first pass is a minute away: the test runs
+                // the passes and the reports itself, with its own schedule.
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        write_delay_ms: 0,
+                        flush_interval_ms: 60_000,
+                        capacity: 0,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                let mut schedule = RetrySchedule::default();
+                store
+                    .add(PACING_MAP, "A", &lww("a", 1), now_millis())
+                    .await
+                    .unwrap();
+                advance(2_000).await;
+                store.report_retries(&mut schedule);
+                let while_buffered = rendered_value(&handle.render(), AGE);
+                let walks = store.report_walks.load(Ordering::SeqCst);
+                let now = tokio::time::Instant::now();
+                let (stored, _) = store
+                    .run_flush_pass(&mut schedule, store.due_deadline(), now)
+                    .await;
+                // The same instant: well inside the walk interval.
+                store.report_retries(&mut schedule);
+                (
+                    while_buffered,
+                    stored,
+                    store.pending_operation_count(),
+                    store.report_walks.load(Ordering::SeqCst) - walks,
+                    rendered_value(&handle.render(), AGE),
+                )
+            })
+        });
+        assert_eq!(
+            readings,
+            (Some(2.0), 1, 0, 1, Some(0.0)),
+            "(age while buffered, stored, buffered after the pass, walks after it, age after \
+             it): a buffer emptied inside the walk interval must be walked and read zero age \
+             at once"
+        );
+    }
+
+    #[test]
+    fn a_hold_that_ends_and_begins_again_between_reports_is_walked() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let walks = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        write_delay_ms: 0,
+                        flush_interval_ms: 60_000,
+                        capacity: 0,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                // Of never-refused entries the newest is the probe, so B is;
+                // the store refuses A alone.
+                spy.refuse_key("A");
+                for key in ["A", "B"] {
+                    store
+                        .add(PACING_MAP, key, &lww("v", 1), now_millis())
+                        .await
+                        .unwrap();
+                }
+                let example = || RefusedExample {
+                    map: PACING_MAP.to_string(),
+                    key: "A".to_string(),
+                    attempts: 1,
+                    error: "refused".to_string(),
+                };
+                let mut schedule = RetrySchedule::default();
+                let walks = || store.report_walks.load(Ordering::SeqCst);
+                let now = tokio::time::Instant::now();
+                // Every step below lies inside one walk interval.
+                store.report_retries(&mut schedule);
+                let first = walks();
+                store.start_hold(&mut schedule, now, example());
+                let at_the_hold = walks() - first;
+                // The hold ends as an accepted probe ends it, and another
+                // begins before any report: the hold flag reads as before.
+                schedule.hold_until = None;
+                schedule.hold_changes += 1;
+                let before = walks();
+                store.start_hold(&mut schedule, now, example());
+                let at_the_flip = walks() - before;
+                // The probe is due 0.5 s on, still inside the walk interval:
+                // it is accepted and ends the hold, and the refused A stays.
+                advance(600).await;
+                let before = walks();
+                store
+                    .run_flush_pass(
+                        &mut schedule,
+                        store.due_deadline(),
+                        tokio::time::Instant::now(),
+                    )
+                    .await;
+                store.report_retries(&mut schedule);
+                (
+                    at_the_hold,
+                    at_the_flip,
+                    (
+                        schedule.hold_until.is_none(),
+                        spy.accepted_for("B"),
+                        store.pending_operation_count(),
+                        walks() - before,
+                    ),
+                )
+            })
+        });
+        assert_eq!(
+            walks,
+            (1, 1, (true, 1, 1, 1)),
+            "(walks when a hold began, walks when one ended and another began between two \
+             reports, (hold ended, B stored, buffered, walks) after the probe pass): each change \
+             of the hold must be walked at once, also when something stays buffered"
+        );
+    }
+
+    #[test]
+    fn a_refused_remove_all_stops_at_the_first_new_key_past_the_capacity() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let readings = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        capacity: 3,
+                        write_delay_ms: 600_000,
+                        flush_interval_ms: 60_000,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                for key in ["a", "b"] {
+                    store
+                        .add(PACING_MAP, key, &lww("v", 1), now_millis())
+                        .await
+                        .unwrap();
+                }
+                // One place is left. A buffered key, then a hundred thousand
+                // new ones, the first named twice.
+                let keys = ["a", "n0"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .chain((0..100_000).map(|n| format!("n{n}")))
+                    .collect::<Vec<_>>();
+                let before = store.admission_probes.load(Ordering::SeqCst);
+                let refused = store.remove_all(PACING_MAP, &keys).await.is_err();
+                (
+                    refused,
+                    store.admission_probes.load(Ordering::SeqCst) - before,
+                    store.pending_operation_count(),
+                )
+            })
+        });
+        assert_eq!(
+            readings,
+            (true, 3, 2),
+            "(refused, staging lookups, buffered after it): the check must stop at the second \
+             new key, after looking up `a`, `n0` and `n1`, not walk the whole call"
         );
     }
 
