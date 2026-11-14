@@ -1039,9 +1039,10 @@ weaker than a test.
 - **`hard_flush` exits already tracked elsewhere** — the abort at the shutdown timeout, the
   error and timeout exits, a dropped `hard_flush` future (TODO-768).
 - **`capacity` as a hard limit.** Decided: there is no hard limit and none is planned. The
-  one admission gate of every write path, `admit_new_key`, keeps a soft bound; each write it
+  one admission gate of every write path, `admit_new_keys`, keeps a soft bound; each write it
   refuses counts in `topgun_write_behind_capacity_refusals_total`
-  (`t411_capacity_refusals_are_counted_on_every_write_path`). A bound on buffered bytes is not
+  (`capacity_refusals_are_counted_on_every_write_path`); a `remove_all` is admitted or refused
+  whole (`remove_all_is_admitted_or_refused_whole`). A bound on buffered bytes is not
   there yet (TODO-963). With `C = capacity > 0` and `L = 1000`, the most entries one
   flush pass takes: `pending_count <= C - 1 + W + H` and `H <= min(L, C - 1 + W)`, so the count
   stays below `2 * (C + W)` and below `C + W + L`. `W` is the number of writes of
@@ -1444,14 +1445,16 @@ weaker than a test.
   `b18_a_new_healthy_key_waits_at_most_its_queue_position_in_passes` and
   `b19_a_run_of_passes_yields_and_stops_at_the_shutdown_signal`, and in `write_behind.rs` the
   tests of the defaults and the head age:
-  `t411_default_config_stores_a_write_within_two_flush_intervals`,
-  `t411_a_write_ahead_of_the_wall_clock_is_due_at_once`,
-  `t411_a_pass_that_stores_nothing_ends_the_run`,
-  `t411_a_pass_cut_by_the_byte_cap_runs_on`,
-  `t411_a_pass_cut_by_the_entry_cap_runs_on`,
-  `t411_an_uncut_pass_waits_for_the_interval`,
-  `t411_oldest_entry_age_counts_a_refused_entry` and
-  `t411_oldest_entry_age_moves_during_a_hold`. All run in CI (`cargo test`).
+  `default_config_stores_a_write_within_two_flush_intervals`,
+  `a_write_ahead_of_the_wall_clock_is_due_at_once`,
+  `a_pass_that_stores_nothing_ends_the_run`,
+  `a_pass_cut_by_the_byte_cap_runs_on`,
+  `a_pass_cut_by_the_entry_cap_runs_on`,
+  `an_uncut_pass_waits_for_the_interval`,
+  `oldest_entry_age_counts_a_refused_entry`,
+  `oldest_entry_age_ignores_a_store_time_ahead_of_the_clock`,
+  `oldest_entry_age_moves_during_a_hold` and
+  `the_report_walks_the_queues_at_most_once_a_second`. All run in CI (`cargo test`).
   Which test holds which bound: one refused record, b04 (n = 1000, at most 21 writes); the
   meeting case, b06; the store that refuses everything, `a_store_that_refuses_everything_gets_a_bounded_number_of_calls`
   and b05; the store that goes down right after an accepted probe, b14 (n = 1000: at most

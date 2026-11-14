@@ -1035,6 +1035,11 @@ fn b05_a_store_that_refuses_every_commit_starts_a_hold_after_three_calls() {
                 fill(&wb, &keys, 1, |i| lww(&format!("v{i}"), 1)).await;
                 node.engine.refuse_every_write(Some(Refusal::Unknown));
 
+                // Another test's thread can register the warning's callsite
+                // while this test's subscriber is being installed and cache
+                // it as uninteresting; re-reading the interest of every
+                // callsite here, with the subscriber installed, undoes that.
+                tracing::callsite::rebuild_interest_cache();
                 // The hold's start, before its first probe (500 ms later).
                 let mark = node.engine.mark();
                 wb.soft_flush().await.expect("soft_flush");

@@ -64,9 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     keeps the old ceiling of about 10⁴ new keys per second.
   - **Two metrics**, present from the first scrape at 0:
     `topgun_write_behind_capacity_refusals_total` (writes of new keys refused because the
-    buffer was at its capacity — a temporary error, the client resends) and
+    buffer was at its capacity — a temporary error, the client resends; a `remove_all` is
+    admitted or refused whole and counts once) and
     `topgun_write_behind_oldest_entry_age_seconds` (the age of the oldest buffered write, refused
-    or not; it keeps rising through a store outage).
+    or not, counted on the server's clock from when it was buffered; it keeps rising through a
+    store outage).
   - **Hot keys are coalesced less.** A key rewritten while its write is still buffered is stored
     once; without the delay that window is about one pass or one flush interval instead of at
     least a second, so a key rewritten many times a second is stored up to that many times a

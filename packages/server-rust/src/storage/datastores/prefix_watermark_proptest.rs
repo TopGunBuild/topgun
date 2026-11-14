@@ -4325,6 +4325,7 @@ fn queued_entry(store_time: i64, sequence: u64) -> DelayedEntry {
             value: lww(sequence),
         },
         store_time,
+        buffered_at: tokio::time::Instant::now(),
         sequence,
         retry_count: 0,
         next_attempt: None,

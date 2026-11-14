@@ -1970,6 +1970,7 @@ fn tg_or_003_ac7b_an_or_delta_survivor_carries_the_retired_sequences_forward() {
             },
         },
         store_time: 0,
+        buffered_at: tokio::time::Instant::now(),
         sequence: 1,
         retry_count: 0,
         next_attempt: None,
