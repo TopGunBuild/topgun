@@ -123,8 +123,8 @@ Interpretation:
 **TODO-530 is now CLOSED** (SPEC-325a/b): the empty-map-on-restart failure no longer
 reproduces — query/Merkle now read from the datastore and the recovery gates are HARD.
 But the crash-loop path is **still RED at load**, now because of **TODO-546**
-(ack-before-durable): the write-behind buffer acks writes ~1s before they are persisted,
-so at a real backlog a `kill -9` loses acked-but-unflushed writes and post-restart keys
+(ack-before-durable): the write-behind buffer acks a write before it is persisted (by up to one
+flush interval plus a pass), so at a real backlog a `kill -9` loses acked-but-unflushed writes and post-restart keys
 are a few increments **behind** (partial, non-zero Merkle root — not empty). Run the full
 crash-loop 72h soak as the TODO-546 reproducer/validator. To exercise everything *except*
 recovery in the meantime, set `CRASH_INTERVAL=0` (churn + steady convergence + memory +

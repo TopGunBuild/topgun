@@ -35,6 +35,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `topgun-mcp --debug` logs only named config fields; the TopGun URL is reduced to its origin.
   - A request with a `Host` header that is not a valid URL authority no longer crashes the
     process.
+- **Changed (defaults): writes reach the store without a 1 s delay.** A write the server has
+  acknowledged used to wait in the write-behind buffer for at least one second before it was
+  stored, which limited the writes of new keys a node accepts to about
+  `capacity / (1 s + the wait to the next flush)`. Measured on a Mac (M1 Max) with the open-loop
+  load harness, the server in-process on RocksDB, offering writes of new keys with values of tens
+  of bytes, and counting the writes acknowledged per second over 60 s after a 10 s warm-up: at
+  10 000 writes/s the previous release acknowledged about 5 150 per second and refused the rest
+  as `Write-behind capacity exceeded`; this release acknowledged all 10 000 and refused none. At
+  2·10⁴ writes/s this release acknowledged 19 206–19 331 per second, against 19 130–19 222 for the
+  previous release run with `TOPGUN_WRITEBEHIND_CAPACITY=0`: on that Mac the acknowledgement path
+  carries about 1.9·10⁴ writes/s with or without this change (TODO-965).
+  - **No write delay.** A write is due for the store as soon as it is buffered; the write delay
+    (never an environment variable) defaults to 0. Each flush pass is one engine commit of up to
+    1000 writes or 8 MiB. A pass cut by one of those limits is followed by the next one at once;
+    after a pass that took every due write the flush task waits up to the flush interval, so
+    writes arriving meanwhile are stored together instead of in many small passes.
+  - **`TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` defaults to `100`** (was `1000`) and is now the
+    longest a buffered write waits while the flush task is idle, the window in which a pass
+    forms. Measured with the same harness and conditions at 2·10⁴ writes/s, against the previous
+    release run with `TOPGUN_WRITEBEHIND_CAPACITY=0`: a 10 ms linger, run with capacity `0`,
+    formed passes of about 270 writes and acknowledged 3–4 % fewer writes per second than that
+    comparator; 100 ms, at the default capacity, formed passes of about 800 and matched it. `0`
+    refuses to start (see the breaking change below). A value of `500` or more, with a non-zero `TOPGUN_WRITEBEHIND_CAPACITY`,
+    logs one startup `WARN`, `the write-behind flush interval is at least 500 ms: new-key
+    admission is limited to about capacity / interval`. **Remove an explicit
+    `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=1000`** copied from older example configurations: it
+    keeps the old ceiling of about 10⁴ new keys per second.
+  - **Two metrics**, present from the first scrape at 0:
+    `topgun_write_behind_capacity_refusals_total` (writes of new keys refused because the
+    buffer was at its capacity — a temporary error, the client resends; a `remove_all` is
+    admitted or refused whole and counts once) and
+    `topgun_write_behind_oldest_entry_age_seconds` (the age of the oldest buffered write, refused
+    or not, counted on the server's clock from when it was buffered; it keeps rising through a
+    store outage).
+  - **Hot keys are coalesced less.** A key rewritten while its write is still buffered is stored
+    once; without the delay that window is about one pass or one flush interval instead of at
+    least a second, so a key rewritten many times a second is stored up to that many times a
+    second. The write-ahead log already wrote every write.
+  - **Large values (unchanged, now stated).** The buffer is bounded by keys, not bytes, and keeps
+    each buffered value twice: a buffer of large values can exhaust the process's memory before
+    the key bound refuses anything. The process is then killed and the write-ahead log replays
+    the acknowledged writes at the next start — a crash, not data loss. A byte bound is
+    TODO-963.
+
+- **Breaking (server, configuration): `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=0` refuses to
+  start.** Earlier releases accepted `0`; with no write delay the idle flush loop would spin, so the
+  server now exits at startup with a message naming the variable. Set a positive value, or remove
+  the variable to take the default of `100`.
 
 - **Changed (on-disk format): the server stores its data in RocksDB.** The data directory now
   holds `engine.rocksdb/`, and the server moves an existing `engine.redb` there by itself, once,
@@ -428,9 +476,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1000 buffered writes or 8 MiB of encoded values, whichever comes first, and stores them,
   together with how far the write-ahead log has been stored, in one store commit instead of
   one store call per write (on RocksDB not synced at once; see "When the store is synced"
-  above). While writes are still due, the next pass starts at once instead
-  of waiting for `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`, so a full buffer is emptied in a few
-  passes. What changes for whoever runs the server:
+  above). A pass that one of those limits cut is followed by the next one
+  without waiting for `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`, so a full buffer is emptied in a
+  few passes. What changes for whoever runs the server:
   - **One refused record no longer holds up the others.** When the storage refuses a commit of
     several writes, the server splits it in two halves and commits each, again and again, until
     the refused record is alone; every other write of the pass is stored in that pass, at a

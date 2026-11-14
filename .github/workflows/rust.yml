@@ -642,12 +642,15 @@ jobs:
         # frame is fdatasync'd BEFORE the ingress write acks, so acked == durable on
         # an unclean kill -9 — even without a pre-kill buffer drain. This step
         # confirms that invariant on the ubuntu CI runner using the same contract as
-        # hetzner-soak-runner.sh (NO_PRE_KILL_DRAIN=1 + WAL_FSYNC=per_op + FLUSH=1000):
+        # hetzner-soak-runner.sh (NO_PRE_KILL_DRAIN=1 + WAL_FSYNC=per_op + FLUSH=600000):
         #   - --wal-fsync per_op: every WAL frame fsynced before ack (WAL on critical path)
-        #   - TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=1000: production flush cadence so the
-        #     write-behind buffer is genuinely on the recovery critical path (fast flush
-        #     would drain the buffer before kill -9, making acked==durable trivially true
-        #     for the wrong reason)
+        #   - TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=600000: the server has no write delay
+        #     and, idle, flushes after this interval; nothing in the server asks for an
+        #     earlier pass, so no acked write is flushed before kill -9 and the WAL is
+        #     the only way back (a short interval would drain the buffer before the
+        #     kill, making acked==durable trivially true for the wrong reason).
+        #     Not covered any more: a partly flushed buffer at kill -9 (watermark
+        #     advance and WAL collection after partial flushes, then a crash) — TODO-964
         #   - --no-pre-kill-drain: no pre-kill buffer flush, WAL is the ONLY safety net
         #
         # Reuses the already-built binary (steps.soak.outputs.bin) — no rebuild needed.
@@ -660,7 +663,7 @@ jobs:
         # (owner: stabilization-program G4b gate). Mirrors the SPEC-329 non-blocking
         # soak-loaded promotion pattern (see "Why non-blocking for now" above).
         run: |
-          export TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=1000
+          export TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=600000
           ${{ steps.soak.outputs.bin }} \
             --duration 75 --crash-interval 15 --steady-interval 10 \
             --churn-clients 16 --keyspace 200 --quiesce 5 \

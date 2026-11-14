@@ -91,10 +91,12 @@ fn never_flush_config() -> WriteBehindConfig {
 
 /// Entries are due at once, but the timer never fires within a test: a flush
 /// pass runs only when a test requests one, and then takes everything that is
-/// due.
+/// due. Every entry its users write has `store_time` `0` or `1000` and is due
+/// at once; the one-millisecond delay keeps the wall-clock deadline, so an
+/// entry written at `not_yet_due()` stays out of every requested pass.
 fn requested_flush_config() -> WriteBehindConfig {
     WriteBehindConfig {
-        write_delay_ms: 0,
+        write_delay_ms: 1,
         ..never_flush_config()
     }
 }
@@ -4323,6 +4325,7 @@ fn queued_entry(store_time: i64, sequence: u64) -> DelayedEntry {
             value: lww(sequence),
         },
         store_time,
+        buffered_at: tokio::time::Instant::now(),
         sequence,
         retry_count: 0,
         next_attempt: None,

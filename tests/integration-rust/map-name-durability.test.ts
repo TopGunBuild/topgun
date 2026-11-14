@@ -11,7 +11,7 @@
  *
  * `per_op` makes every acknowledged write durable in the WAL at once, so a
  * missing record after the restart cannot be an fsync race. The server is given
- * time to run its write-behind flush (delay, then every retry) before it is
+ * time to run its write-behind flush (the first pass, then every retry) before it is
  * stopped, and is stopped gracefully, so a missing record cannot be an
  * interrupted flush either.
  *
@@ -44,9 +44,10 @@ const VALUE = { name: 'Alice', plan: 'pro' };
 
 const SIGNAL_TIMEOUT_MS = 10_000;
 /**
- * Write-behind holds a write for 1 s, then tries it up to three times with
- * 1 s and 2 s of backoff in between. Entries are retried one after another, so
- * two refused maps take about twice as long.
+ * An upper wait. Write-behind tries a write at its next pass (no write delay,
+ * a 100 ms idle interval), then retries a refused one with 1 s, 2 s and 4 s of
+ * backoff in between. Entries are retried one after another, so two refused
+ * maps take about twice as long.
  */
 const FLUSH_SETTLE_MS = 10_000;
 

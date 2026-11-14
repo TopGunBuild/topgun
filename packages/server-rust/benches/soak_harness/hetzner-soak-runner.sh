@@ -32,13 +32,16 @@ WAL_FSYNC="${WAL_FSYNC:-per_op}"
 # so recovery must rebuild every acked write from the WAL alone — the honest
 # acked == durable assertion (does not depend on a pre-kill drain).
 NO_PRE_KILL_DRAIN="${NO_PRE_KILL_DRAIN:-0}"
-# The no-drain validator must run the PRODUCTION write-behind flush cadence
-# (1000ms): the harness's default fast flush (100ms) would drain the buffer to
-# redb inside the brief pre-snapshot ack-settle and mask the WAL durability path,
-# making acked == durable trivially true for the wrong reason. Pin production
-# cadence here so the WAL is genuinely on the critical recovery path.
+# The no-drain validator must keep every acked write buffered until the kill:
+# the server has no write delay and, idle, flushes after the flush interval, and
+# nothing in the server asks for an earlier pass. A 600 s interval therefore
+# leaves the buffer unflushed and the WAL as the only recovery path; a short one
+# would drain the buffer inside the brief pre-snapshot ack-settle and make
+# acked == durable trivially true for the wrong reason. Not covered any more: a
+# partly flushed buffer at kill -9 (watermark advance and WAL collection after
+# partial flushes, then a crash) — TODO-964.
 if [ "${NO_PRE_KILL_DRAIN}" = "1" ]; then
-  export TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS="${TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS:-1000}"
+  export TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS="${TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS:-600000}"
 fi
 # Calibrated slope ceiling for the 72h run. The OR tombstone leak the soak drives
 # is ~3-5 MB/h; the former 25 MB/h sat above it and false-GREENed a real leak.

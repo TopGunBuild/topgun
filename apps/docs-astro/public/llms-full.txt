@@ -969,7 +969,7 @@ From the application's perspective, this is invisible: `useQuery` subscribers re
 <AlertBox
   variant="info"
   title="Write-behind buffer"
-  text="The server batches writes through a write-behind buffer (default flush interval: 1 s). An unclean server shutdown can lose buffered writes not yet flushed to the durable backend. WAL-recovery support is tracked on the roadmap (TODO-339)."
+  text="The server batches writes through a write-behind buffer, which stores them at its next flush pass (with no write delay; an idle buffer waits at most 100 ms). Every acknowledged write is in the server's write-ahead log first, so writes still buffered at an unclean shutdown are replayed from it at the next start. Under the default batched WAL fsync policy, an operating-system crash or power loss can still lose the writes of the last fsync window (about 10 ms); TOPGUN_WAL_FSYNC_POLICY=per_op closes that window at a throughput cost."
 />
 
 ---

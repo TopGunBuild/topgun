@@ -65,7 +65,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { LagScrape, allZero, lwwPut, scrapeLag } from './helpers/fault-binary';
+import { lwwPut, waitEarlyWritesStored, waitIdleBaseline } from './helpers/fault-binary';
 import { TestClient } from './helpers/test-client';
 import {
   spawnBinary,
@@ -135,11 +135,14 @@ const ACK_WAIT_MS = 5_000;
 const CONNECT_WAIT_MS = 5_000;
 const SCRAPE_WAIT_MS = 2_000;
 /**
- * How long after the last acknowledgement the early writes had all reached the
- * store on the real binary: write delay, one flush tick, and the 600 ms tick
- * that refreshes the gauge.
+ * How long after the last acknowledgement step 2 sees the early writes in the
+ * store, with no write delay: the 100 ms flush interval, one pass, one 100 ms
+ * poll, the 700 ms wait for a lag sample that postdates the store, and one
+ * more poll, about 1.0 s.
  */
-const FLUSH_OBSERVED_MS = 2_400;
+const FLUSH_OBSERVED_MS = 1_100;
+/** The server's flush interval (its default), which the idle wait spans at least once. */
+const FLUSH_INTERVAL_MS = 100;
 /** Room on top of that for a slower host; the wait ends as soon as the sign is seen. */
 const FLUSH_MARGIN_MS = 3_600;
 const FLUSH_POLL_MS = 100;
@@ -409,6 +412,19 @@ async function runArm(arm: Arm): Promise<Observed> {
     // One connection for the whole arm, kept open until the process has
     // ended: a server that waited for its clients to leave would not exit.
     writer = await connectWithin(port, 'store-broken-writer', CONNECT_WAIT_MS);
+    const connectedAt = Date.now();
+    const flushTiming = { pollMs: FLUSH_POLL_MS, scrapeWaitMs: SCRAPE_WAIT_MS };
+
+    // Before step 1: wait until the buffer is idle, the record the connection
+    // wrote included, and take the stored-entries counter as the baseline.
+    const idle = await waitIdleBaseline(
+      port,
+      connectedAt,
+      FLUSH_INTERVAL_MS,
+      connectedAt + FLUSH_INTERVAL_MS + FLUSH_OBSERVED_MS + FLUSH_MARGIN_MS,
+      flushTiming,
+    );
+    note(`before step 1: ${idle.detail}`);
 
     // Step 1: several distinct keys, each acknowledged.
     for (const [i, key] of EARLY_KEYS.entries()) {
@@ -420,33 +436,28 @@ async function runArm(arm: Arm): Promise<Observed> {
     const lastEarlyAckAt = Date.now();
     note(`step 1: ${EARLY_KEYS.length} early writes acknowledged`);
 
-    // Step 2: wait until they are in the store. The sign is the lag gauge:
-    // first a scrape with a sample of 1 or more — taken after the last
-    // acknowledgement, so a zero from before the writes cannot pass — and
-    // after it a scrape with at least one sample and every sample at zero.
-    let riseAfterMs: number | null = null;
+    // Step 2: wait until they are in the store. The sign: the stored-entries
+    // counter has risen by the early writes over the idle baseline while
+    // nothing is buffered, and then a lag scrape taken at least 700 ms later
+    // reads zero on every partition. A counter that never rises, or an early
+    // write still buffered, keeps the sign from being seen.
     let flushedAfterMs: number | null = null;
-    let lastScrape: LagScrape = {};
-    const flushDeadline = lastEarlyAckAt + FLUSH_OBSERVED_MS + FLUSH_MARGIN_MS;
-    while (flushedAfterMs === null && Date.now() < flushDeadline) {
-      lastScrape = await within(
-        scrapeLag(port),
-        SCRAPE_WAIT_MS,
-        `scrape of /metrics on port ${port}`,
+    if (idle.e0 === null) {
+      preconditionNotMet = `before step 1: the write-behind buffer was ${idle.detail}, so there is no baseline for step 2`;
+    } else {
+      const flushed = await waitEarlyWritesStored(
+        port,
+        idle.e0,
+        EARLY_KEYS.length,
+        lastEarlyAckAt,
+        lastEarlyAckAt + FLUSH_OBSERVED_MS + FLUSH_MARGIN_MS,
+        flushTiming,
       );
-      const at = Date.now() - lastEarlyAckAt;
-      if (riseAfterMs === null && Object.values(lastScrape).some((lag) => lag >= 1)) {
-        riseAfterMs = at;
-      } else if (riseAfterMs !== null && allZero(lastScrape)) {
-        flushedAfterMs = at;
+      note(`step 2: ${flushed.detail}`);
+      flushedAfterMs = flushed.flushedAfterMs;
+      if (flushedAfterMs === null) {
+        preconditionNotMet = `step 2: within ${FLUSH_OBSERVED_MS + FLUSH_MARGIN_MS} ms of the last early acknowledgement no scrape showed the early writes stored with nothing buffered, followed at least 700 ms later by a lag scrape with every lag at 0 (${flushed.detail}), so the early writes are not known to be in the store`;
       }
-      if (flushedAfterMs === null) await sleep(FLUSH_POLL_MS);
-    }
-    note(
-      `step 2: lag rose after ${riseAfterMs} ms, all zero after ${flushedAfterMs} ms; last scrape ${JSON.stringify(lastScrape)}`,
-    );
-    if (flushedAfterMs === null) {
-      preconditionNotMet = `step 2: no scrape with a lag of 1 or more followed by a scrape with every lag at 0 within ${FLUSH_OBSERVED_MS + FLUSH_MARGIN_MS} ms of the last early acknowledgement (rise after ${riseAfterMs} ms, last scrape ${JSON.stringify(lastScrape)}), so the early writes are not known to be in the store`;
     }
 
     // Step 3: from here on RocksDB cannot create a file in its directory.

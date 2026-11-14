@@ -1035,6 +1035,11 @@ fn b05_a_store_that_refuses_every_commit_starts_a_hold_after_three_calls() {
                 fill(&wb, &keys, 1, |i| lww(&format!("v{i}"), 1)).await;
                 node.engine.refuse_every_write(Some(Refusal::Unknown));
 
+                // Another test's thread can register the warning's callsite
+                // while this test's subscriber is being installed and cache
+                // it as uninteresting; re-reading the interest of every
+                // callsite here, with the subscriber installed, undoes that.
+                tracing::callsite::rebuild_interest_cache();
                 // The hold's start, before its first probe (500 ms later).
                 let mark = node.engine.mark();
                 wb.soft_flush().await.expect("soft_flush");
@@ -1961,7 +1966,12 @@ async fn b15_a_half_committed_after_its_sibling_plans_its_rows_after_the_sibling
     {
         let dir = tempfile::tempdir().expect("tempdir");
         let node = Node::open(dir.path());
-        let wb = node.write_behind(config()).await;
+        let wb = node
+            .write_behind(WriteBehindConfig {
+                write_delay_ms: 1,
+                ..config()
+            })
+            .await;
         let p = super::partition_for(MAP, "p0");
         let pk = keys_in_partition(MAP, "p", p, 6);
         let qk: Vec<String> = (0..)
@@ -2023,7 +2033,12 @@ async fn b15_a_half_committed_after_its_sibling_plans_its_rows_after_the_sibling
     {
         let dir = tempfile::tempdir().expect("tempdir");
         let node = Node::open(dir.path());
-        let wb = node.write_behind(config()).await;
+        let wb = node
+            .write_behind(WriteBehindConfig {
+                write_delay_ms: 1,
+                ..config()
+            })
+            .await;
         let p1 = super::partition_for(MAP, "a0");
         let p2 = (0..10_000)
             .map(|i| super::partition_for(MAP, &format!("b{i}")))

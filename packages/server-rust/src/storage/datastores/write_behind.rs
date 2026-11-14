@@ -46,9 +46,25 @@ use self::wal_harness::BootSeedMode;
 /// WAL fields control crash-safe durability for acked writes.
 #[derive(Debug, Clone)]
 pub struct WriteBehindConfig {
-    /// Delay in milliseconds before a queued entry becomes eligible for flush.
+    /// How long, against the wall clock, a queued entry is held back before a
+    /// flush pass may take it, in milliseconds.
+    ///
+    /// Not read from the environment: production runs with `0`, where an entry
+    /// is due as soon as it is queued and `store_time` only orders a pass, so a
+    /// step of the wall clock cannot hold entries back. A non-zero value holds
+    /// every entry back until `store_time <= now - write_delay_ms` on the wall
+    /// clock; it exists for tests and benches that keep entries buffered.
     pub write_delay_ms: u64,
-    /// How often the background flush task runs, in milliseconds.
+    /// The longest a buffered write waits while the flush task is idle, in
+    /// milliseconds (the idle linger). A pass that a pass limit cut is
+    /// followed by the next one at once; after any other pass the flush task
+    /// waits this long, so writes arriving meanwhile go into one pass.
+    ///
+    /// At least [`MIN_FLUSH_INTERVAL_MS`]: `0` would make the idle loop spin.
+    /// Admission of new keys is bounded by about `capacity / (interval + 2 ×
+    /// pass time)` (a key holds its place until the pass that took it is
+    /// stored), so a value of [`LEGACY_FLUSH_INTERVAL_WARN_MS`] or more, with
+    /// a non-zero capacity, logs a startup warning.
     pub flush_interval_ms: u64,
     /// Accepted and parsed, and currently without effect.
     ///
@@ -142,9 +158,10 @@ pub struct WriteBehindConfig {
     ///
     /// It must sit an order of magnitude above the longest LEGITIMATE
     /// non-advance, or the alarm fires on correct behaviour. The default is
-    /// derived from the OTHER defaults in this struct (write delay + flush
-    /// interval + the longest wait between two attempts of a refused entry,
-    /// and clear of the shutdown timeout), so raising `flush_interval_ms` or
+    /// derived from the OTHER defaults in this struct (the flush interval + the
+    /// longest wait between two attempts of a refused entry, and clear of the
+    /// shutdown timeout; there is no write delay), so raising `backoff_cap_ms`,
+    /// `flush_interval_ms` or
     /// `shutdown_timeout_ms` requires raising this alongside them. A store that
     /// refuses for longer than the bound is not a legitimate non-advance: the
     /// refused entry is retried until it is stored, its sequence stays
@@ -194,11 +211,21 @@ const WATCHDOG_TICK_FLOOR_MS: u64 = 100;
 /// rather than clamped.
 const MIN_WAL_WATERMARK_STALL_BOUND_MS: u64 = 6_000;
 
+/// The smallest flush interval: `0` would make the idle flush loop spin,
+/// because a zero sleep is ready at once.
+const MIN_FLUSH_INTERVAL_MS: u64 = 1;
+
+/// A flush interval from which startup warns. New-key admission is bounded by
+/// about `capacity / interval` while the flush task idles between writes, and
+/// at the default capacity of 10 000 this interval holds it at 2·10⁴ new keys
+/// per second, the node's admission target.
+const LEGACY_FLUSH_INTERVAL_WARN_MS: u64 = 500;
+
 impl Default for WriteBehindConfig {
     fn default() -> Self {
         Self {
-            write_delay_ms: 1000,
-            flush_interval_ms: 1000,
+            write_delay_ms: 0,
+            flush_interval_ms: 100,
             batch_size: 100,
             backoff_base_ms: 500,
             backoff_cap_ms: 5000,
@@ -222,17 +249,18 @@ impl WriteBehindConfig {
     ///
     /// | Env var | Field | Default |
     /// |---|---|---|
-    /// | `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | `flush_interval_ms` | 1000 ms |
+    /// | `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | `flush_interval_ms` | 100 ms — the idle linger; `0` is fatal; 500 ms or more (with a non-zero capacity) warns |
     /// | `TOPGUN_WRITEBEHIND_BATCH_SIZE` | `batch_size` | 100 — accepted and currently without effect |
     /// | `TOPGUN_WRITEBEHIND_CAPACITY` | `capacity` | 10 000 |
     /// | `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS` | `shutdown_timeout_ms` | 30 000 ms |
     /// | `TOPGUN_WAL_DIR` | `wal_dir` | `./topgun-wal` |
     /// | `TOPGUN_WAL_FSYNC_POLICY` | `wal_fsync_policy` | `batched` |
-    /// | `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS` | `wal_watermark_stall_bound_ms` | 60 000 ms — raise it alongside `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` / `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`, whose defaults this default is derived from |
+    /// | `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS` | `wal_watermark_stall_bound_ms` | 60 000 ms — raise it alongside `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` / `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`, whose defaults this default is derived from (with the backoff cap; there is no write delay) |
     /// | `TOPGUN_OR_DELTA_WAL` | `or_delta_wal` | `true` — the delta-framing kill-switch; `false` restores full-snapshot framing for every OR write |
     ///
     /// Fields not covered by env vars (`write_delay_ms`, `backoff_base_ms`,
-    /// `backoff_cap_ms`) retain their [`Self::default`] values.
+    /// `backoff_cap_ms`) retain their [`Self::default`] values; `write_delay_ms`
+    /// is therefore `0` in production.
     #[must_use]
     pub fn from_env() -> Self {
         Self::from_source(|key| std::env::var(key).ok())
@@ -262,6 +290,11 @@ impl WriteBehindConfig {
     /// effective bound, and silently disarms the two-sample confirmation that is
     /// the fatal stalled-watermark alarm's only false-positive guard. That is a
     /// fatal-path guard being disabled, not an alarm threshold being mis-set.
+    ///
+    /// Panics (refuses to start) if `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`
+    /// PARSES to a value below [`MIN_FLUSH_INTERVAL_MS`], that is `0`: honoured,
+    /// it would make the idle flush loop spin on a zero sleep. An unparseable
+    /// value warns and falls back, as for the other variables.
     #[must_use]
     pub fn from_source<F: Fn(&str) -> Option<String>>(get: F) -> Self {
         let defaults = Self::default();
@@ -269,22 +302,7 @@ impl WriteBehindConfig {
 
         // Parse TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS → flush_interval_ms (u64)
         if let Some(raw) = get("TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS") {
-            match raw.trim().parse::<u64>() {
-                Ok(ms) => {
-                    cfg.flush_interval_ms = ms;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        target: "topgun_server::storage::write_behind",
-                        var = "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS",
-                        value = %raw,
-                        error = %err,
-                        default = defaults.flush_interval_ms,
-                        "Failed to parse env var; using default"
-                    );
-                    cfg.flush_interval_ms = defaults.flush_interval_ms;
-                }
-            }
+            cfg.flush_interval_ms = Self::parse_flush_interval_ms(&raw, defaults.flush_interval_ms);
         }
 
         // Parse TOPGUN_WRITEBEHIND_BATCH_SIZE → batch_size (u32). The value is
@@ -387,7 +405,48 @@ impl WriteBehindConfig {
             cfg.or_delta_wal = Self::parse_or_delta_wal(&raw);
         }
 
+        // After every variable: the admission ceiling depends on the capacity
+        // as well, and with no capacity there is no ceiling to warn about.
+        if cfg.flush_interval_ms >= LEGACY_FLUSH_INTERVAL_WARN_MS && cfg.capacity != 0 {
+            tracing::warn!(
+                target: "topgun_server::storage::write_behind",
+                var = "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS",
+                flush_interval_ms = cfg.flush_interval_ms,
+                capacity = cfg.capacity,
+                "the write-behind flush interval is at least 500 ms: new-key admission is \
+                 limited to about capacity / interval"
+            );
+        }
+
         cfg
+    }
+
+    /// Parses one `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` value: an unparseable
+    /// value warns and falls back to `default`; one below
+    /// [`MIN_FLUSH_INTERVAL_MS`] is fatal (see [`Self::from_source`]).
+    fn parse_flush_interval_ms(raw: &str, default: u64) -> u64 {
+        match raw.trim().parse::<u64>() {
+            Ok(ms) if ms < MIN_FLUSH_INTERVAL_MS => {
+                panic!(
+                    "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS={ms} is invalid: it must be at least \
+                     {MIN_FLUSH_INTERVAL_MS} ms. Refusing to start: a zero interval makes the \
+                     idle write-behind flush loop spin. Set a value of at least \
+                     {MIN_FLUSH_INTERVAL_MS} or unset the variable (default {default})"
+                );
+            }
+            Ok(ms) => ms,
+            Err(err) => {
+                tracing::warn!(
+                    target: "topgun_server::storage::write_behind",
+                    var = "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS",
+                    value = %raw,
+                    error = %err,
+                    default,
+                    "Failed to parse env var; using default"
+                );
+                default
+            }
+        }
     }
 
     /// Parses one `TOPGUN_OR_DELTA_WAL` value.
@@ -913,6 +972,12 @@ pub(crate) struct DelayedEntry {
     /// Wall-clock millis when first enqueued. Preserved on coalesce so the
     /// key flushes on its original schedule.
     pub store_time: i64,
+    /// When the key's write was first buffered, on the server's monotonic
+    /// clock; preserved on coalesce and retirement as `store_time` is. The
+    /// head-age gauge reads this, not `store_time`: a store time is the
+    /// caller's and can lie ahead of the server clock, and a wall-clock step
+    /// moves it.
+    pub buffered_at: tokio::time::Instant,
     /// Global ordering counter for fairness during flush.
     pub sequence: u64,
     /// Number of failed flush attempts so far.
@@ -956,6 +1021,7 @@ impl DelayedEntry {
             key: key.to_string(),
             operation,
             store_time,
+            buffered_at: tokio::time::Instant::now(),
             sequence,
             retry_count: 0,
             next_attempt: None,
@@ -970,6 +1036,7 @@ impl DelayedEntry {
     /// while the store refuses it would be attempted in every pass.
     fn inherit_from(&mut self, replaced: &DelayedEntry) {
         self.store_time = replaced.store_time;
+        self.buffered_at = replaced.buffered_at;
         self.retry_count = replaced.retry_count;
         self.next_attempt = replaced.next_attempt;
         self.first_refused = replaced.first_refused;
@@ -1144,16 +1211,28 @@ impl PartitionQueue {
         self.remove(map, key)
     }
 
-    /// How many queued entries the store has refused at least once, and the
-    /// earliest first refusal among them.
-    pub fn retrying(&self) -> (u64, Option<tokio::time::Instant>) {
+    /// How many queued entries the store has refused at least once, the
+    /// earliest first refusal among them, and the earliest `buffered_at` of
+    /// any queued entry, refused or not. One walk gives all three.
+    pub fn retrying_and_oldest(
+        &self,
+    ) -> (
+        u64,
+        Option<tokio::time::Instant>,
+        Option<tokio::time::Instant>,
+    ) {
         let mut count = 0;
         let mut earliest = None;
-        for entry in self.entries.values().filter(|entry| entry.retry_count > 0) {
-            count += 1;
-            earliest = earlier_refusal(earliest, entry.first_refused);
+        let mut oldest_buffered: Option<tokio::time::Instant> = None;
+        for entry in self.entries.values() {
+            oldest_buffered =
+                Some(oldest_buffered.map_or(entry.buffered_at, |t| t.min(entry.buffered_at)));
+            if entry.retry_count > 0 {
+                count += 1;
+                earliest = earlier_refusal(earliest, entry.first_refused);
+            }
         }
-        (count, earliest)
+        (count, earliest, oldest_buffered)
     }
 
     /// Re-inserts an entry that failed flush and needs retry, and reports
@@ -1223,6 +1302,7 @@ impl PartitionQueue {
             .wal_sequences
             .extend(retired.wal_sequences.iter().copied());
         survivor.store_time = survivor.store_time.min(retired.store_time);
+        survivor.buffered_at = survivor.buffered_at.min(retired.buffered_at);
         // The retry schedule belongs to the key, not to one entry of it: a key
         // rewritten while the store refuses it must not be attempted more
         // often than a key that is left alone, and must not look as if the
@@ -1634,6 +1714,11 @@ const FLUSH_PASSES_COUNTER: &str = "topgun_write_behind_flush_passes_total";
 const FLUSH_PASS_ENTRIES_COUNTER: &str = "topgun_write_behind_flush_pass_entries_total";
 /// Seconds one committed flush pass took, one observation per pass.
 const FLUSH_PASS_SECONDS_HISTOGRAM: &str = "topgun_write_behind_flush_pass_seconds";
+/// Writes of keys that were not buffered, refused because the buffer was at
+/// its capacity.
+const CAPACITY_REFUSALS_COUNTER: &str = "topgun_write_behind_capacity_refusals_total";
+/// Seconds since the oldest buffered entry was written.
+const OLDEST_ENTRY_AGE_GAUGE: &str = "topgun_write_behind_oldest_entry_age_seconds";
 
 /// Registers the retry series at zero.
 ///
@@ -1682,12 +1767,29 @@ fn register_retry_metrics() {
         metrics::Unit::Seconds,
         "Seconds one committed write-behind flush pass took, from its selection to its settle"
     );
+    metrics::describe_counter!(
+        CAPACITY_REFUSALS_COUNTER,
+        "Writes of keys that were not buffered which the write-behind buffer refused because it \
+         was at its capacity (TOPGUN_WRITEBEHIND_CAPACITY); each is a temporary error, so the \
+         client keeps the write and sends it again"
+    );
+    metrics::describe_gauge!(
+        OLDEST_ENTRY_AGE_GAUGE,
+        "Seconds since the oldest buffered write-behind entry was written, whether or not the \
+         store has refused it, 0 when nothing is buffered; set after every flush pass, also \
+         during a store-wide hold. Wall-clock based: a rewrite of a buffered key keeps the \
+         key's first buffered time. Once the store is broken no pass runs and it keeps its last \
+         value. The refusal-specific signals are topgun_write_behind_oldest_refusal_age_seconds \
+         and topgun_write_behind_store_hold"
+    );
     metrics::counter!(FLUSH_REFUSALS_COUNTER).increment(0);
+    metrics::counter!(CAPACITY_REFUSALS_COUNTER).increment(0);
     metrics::counter!(FLUSH_PASSES_COUNTER).increment(0);
     metrics::counter!(FLUSH_PASS_ENTRIES_COUNTER).increment(0);
     metrics::gauge!(RETRYING_ENTRIES_GAUGE).set(0.0);
     metrics::gauge!(BUFFERED_ENTRIES_GAUGE).set(0.0);
     metrics::gauge!(OLDEST_REFUSAL_AGE_GAUGE).set(0.0);
+    metrics::gauge!(OLDEST_ENTRY_AGE_GAUGE).set(0.0);
     metrics::gauge!(STORE_HOLD_GAUGE).set(0.0);
 }
 
@@ -2069,6 +2171,12 @@ pub struct WriteBehindDataStore {
     /// batch is in no queue.
     #[cfg(test)]
     flush_pass_epoch: AtomicU64,
+    /// How many times the end-of-pass report has walked the queues.
+    #[cfg(test)]
+    report_walks: AtomicU64,
+    /// How many staging lookups the capacity check has made.
+    #[cfg(test)]
+    admission_probes: AtomicU64,
     /// Keys whose put encoding fails, because no value a test can build fails
     /// to encode, and a record that cannot be encoded must be refused alone.
     #[cfg(test)]
@@ -2299,6 +2407,10 @@ impl WriteBehindDataStore {
             test_parks: TestParks::default(),
             #[cfg(test)]
             flush_pass_epoch: AtomicU64::new(0),
+            #[cfg(test)]
+            report_walks: AtomicU64::new(0),
+            #[cfg(test)]
+            admission_probes: AtomicU64::new(0),
             #[cfg(test)]
             encode_refusals: Mutex::new(BTreeSet::new()),
             store_hold: AtomicBool::new(false),
@@ -2953,6 +3065,14 @@ impl WriteBehindDataStore {
         let queue = self.queues.get(&partition_for(map, key))?;
         let entry = queue.entries.get(&(map.to_string(), key.to_string()))?;
         entry.first_refused
+    }
+
+    /// When the queued entry of the key was first buffered, if one is queued.
+    #[cfg(test)]
+    pub(crate) fn test_buffered_at(&self, map: &str, key: &str) -> Option<tokio::time::Instant> {
+        let queue = self.queues.get(&partition_for(map, key))?;
+        let entry = queue.entries.get(&(map.to_string(), key.to_string()))?;
+        Some(entry.buffered_at)
     }
 
     /// How many flush passes have ended. The epoch is bumped once when a pass
@@ -3975,6 +4095,11 @@ fn injected_store_fault() -> anyhow::Result<()> {
 const RETRY_WARN_ATTEMPTS: u32 = 3;
 /// The retry warning is emitted at most once per this interval.
 const RETRY_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// The end-of-pass report walks every queue at most once per this interval
+/// (and at once when a store-wide hold begins or ends): a pass or a hold wake
+/// comes every flush interval, which can be 1 ms, and the walk is O(buffered
+/// entries).
+const REPORT_WALK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Entries one pass commits at most. With the byte limit below it bounds the
 /// one engine write a pass makes, and so how long that write holds the
@@ -4027,6 +4152,23 @@ struct RetrySchedule {
     /// Disarmed once that commit is resolved, or when a hold starts by any
     /// other path; never armed at process start.
     split_to_singles: bool,
+    /// How many times a hold has begun or ended. The report compares it with
+    /// the count its last walk saw, so a hold that ends and another that
+    /// begins between two reports still walks at once.
+    hold_changes: u64,
+    /// The end-of-pass report's last walk of the queues; `None` before the
+    /// first.
+    last_walk: Option<LastWalk>,
+}
+
+/// What the report's last walk of the queues saw.
+struct LastWalk {
+    at: tokio::time::Instant,
+    /// `RetrySchedule::hold_changes` at the walk.
+    hold_changes: u64,
+    /// The walk found a queued entry, so its gauges and the retry warning
+    /// stand until a walk that finds none.
+    found_entries: bool,
 }
 
 /// One refused entry, named in the retry warning so an operator has a
@@ -4069,6 +4211,11 @@ struct PassSelection {
     /// Entries whose encoding failed, with the error: each is refused alone
     /// and is in no commit.
     unencodable: Vec<(DelayedEntry, anyhow::Error)>,
+    /// A pass limit stopped the taking while a further candidate was left:
+    /// the entry cap with another candidate to take, or the byte cap with its
+    /// entry put back. `false` when the selectable candidates ran out. The
+    /// flush loop runs the next pass at once only after a cut one.
+    cut: bool,
 }
 
 /// How the halving of a refused commit treats it.
@@ -4298,9 +4445,10 @@ impl WriteBehindDataStore {
     /// entry with the smallest `(next_attempt, sequence)` — the slot that
     /// keeps a refused entry reachable under sustained load — then entries in
     /// `pass_order`, until the pass holds [`PASS_MAX_ENTRIES`] or the next
-    /// entry would carry it over [`PASS_MAX_VALUE_BYTES`]. Every taken
-    /// entry's WAL sequences are registered in flight once no queue guard is
-    /// held. Untaken entries stay queued, untouched.
+    /// entry would carry it over [`PASS_MAX_VALUE_BYTES`]; either limit marks
+    /// the selection `cut`. Every taken entry's WAL sequences are registered
+    /// in flight once no queue guard is held. Untaken entries stay queued,
+    /// untouched.
     fn select_pass(&self, scope: PassScope) -> PassSelection {
         let selectable = |entry: &DelayedEntry| match scope {
             PassScope::Due { deadline, now } => entry.is_due(deadline, now),
@@ -4338,8 +4486,14 @@ impl WriteBehindDataStore {
         let mut prepared: Vec<PreparedEntry> = Vec::new();
         let mut unencodable = Vec::new();
         let mut value_bytes = 0usize;
+        let mut cut = false;
         for i in order {
             if prepared.len() + unencodable.len() >= PASS_MAX_ENTRIES {
+                // A collected candidate is left, but it may be gone from its
+                // queue by now (the `continue` below): the run-on pass then
+                // starts without a backlog, and if it stores nothing the run
+                // ends. The cost is at most one pass the cut did not need.
+                cut = true;
                 break;
             }
             let (_, partition, map, key) = &candidates[i];
@@ -4364,6 +4518,7 @@ impl WriteBehindDataStore {
                         && value_bytes.saturating_add(len) > PASS_MAX_VALUE_BYTES
                     {
                         self.put_back(entry);
+                        cut = true;
                         break;
                     }
                     value_bytes = value_bytes.saturating_add(len);
@@ -4379,6 +4534,7 @@ impl WriteBehindDataStore {
         PassSelection {
             prepared,
             unencodable,
+            cut,
         }
     }
 
@@ -4689,6 +4845,7 @@ impl WriteBehindDataStore {
         schedule.hold_until = Some(
             returned + retry_backoff(self.config.backoff_base_ms, self.config.backoff_cap_ms, 0),
         );
+        schedule.hold_changes += 1;
         schedule.warning_armed = true;
         schedule.example = Some(example);
         schedule.split_to_singles = false;
@@ -4869,7 +5026,9 @@ impl WriteBehindDataStore {
         });
     }
 
-    /// One pass of the flush task; returns how many entries it stored.
+    /// One pass of the flush task; returns how many entries it stored and
+    /// whether its selection was cut by a pass limit (`false` when it made no
+    /// selection).
     ///
     /// The pass never waits on behalf of an entry: when an entry may be
     /// attempted again is written on the entry, and a later pass honours it.
@@ -4878,13 +5037,13 @@ impl WriteBehindDataStore {
         schedule: &mut RetrySchedule,
         deadline: i64,
         now: tokio::time::Instant,
-    ) -> usize {
+    ) -> (usize, bool) {
         let base = self.config.backoff_base_ms;
         let cap = self.config.backoff_cap_ms;
 
         // A broken store stores nothing more in this process (`TG-WB-010`).
         if schedule.store_broken {
-            return 0;
+            return (0, false);
         }
 
         let began = tokio::time::Instant::now();
@@ -4893,10 +5052,10 @@ impl WriteBehindDataStore {
             // The store is being left alone: nothing is taken and no call is
             // made, whoever woke the pass.
             if now < until {
-                return 0;
+                return (0, false);
             }
             let Some((partition, (map, key))) = self.choose_probe(deadline, now) else {
-                return 0;
+                return (0, false);
             };
             #[cfg(test)]
             self.pass_probe_park().await;
@@ -4911,7 +5070,7 @@ impl WriteBehindDataStore {
                 .get_mut(&partition)
                 .and_then(|mut queue| queue.take(&map, &key));
             let Some(probe) = taken else {
-                return 0;
+                return (0, false);
             };
             self.register_in_flight(partition, &probe.wal_sequences);
             // The probe is one entry committed alone, whatever refuses it, so
@@ -4933,7 +5092,7 @@ impl WriteBehindDataStore {
                         )
                         .await;
                     if let BatchEnd::Broken(_) = outcome.end {
-                        return 0;
+                        return (0, false);
                     }
                     stored += outcome.stored;
                     outcome.stored > 0
@@ -4947,19 +5106,21 @@ impl WriteBehindDataStore {
                 schedule.hold_until =
                     Some(returned + retry_backoff(base, cap, schedule.failed_probes));
                 self.publish_hold(schedule);
-                return 0;
+                return (0, false);
             }
             // The store answers again: the hold ends and this same pass goes
             // on over everything that is due. A store that just took the probe
             // is not known to be down, so its next refused commit is halved to
             // single entries before it may start another hold.
             schedule.hold_until = None;
+            schedule.hold_changes += 1;
             schedule.failed_probes = 0;
             schedule.split_to_singles = true;
             self.publish_hold(schedule);
         }
 
         let selection = self.select_pass(PassScope::Due { deadline, now });
+        let cut = selection.cut;
         for (entry, err) in selection.unencodable {
             // Refused alone before any commit is formed: the store never saw
             // the record, so it says nothing about the store.
@@ -4976,30 +5137,140 @@ impl WriteBehindDataStore {
             metrics::counter!(FLUSH_PASS_ENTRIES_COUNTER).increment(stored as u64);
             metrics::histogram!(FLUSH_PASS_SECONDS_HISTOGRAM).record(began.elapsed().as_secs_f64());
         }
-        stored
+        (stored, cut)
+    }
+
+    /// The newest `store_time` a pass may take: an entry whose `store_time` is
+    /// later is not due yet.
+    ///
+    /// With no write delay (production) every queued entry is due, whatever
+    /// its `store_time`, so a backward step of the wall clock cannot hold
+    /// entries back; `store_time` then only orders a pass. A non-zero
+    /// `write_delay_ms` holds every entry back that long against the wall
+    /// clock; production never sets one (`from_env` does not read it), and
+    /// tests and benches use it to keep entries buffered.
+    fn due_deadline(&self) -> i64 {
+        if self.config.write_delay_ms == 0 {
+            return i64::MAX;
+        }
+        #[allow(clippy::cast_possible_wrap)]
+        now_millis().saturating_sub(self.config.write_delay_ms as i64)
+    }
+
+    /// Refuses a write call whose keys that are not buffered would take the
+    /// buffer past its capacity: the one admission gate of every write path
+    /// (`add`, `remove`, `remove_all`). A call is admitted or refused whole, so
+    /// a refused `remove_all` has buffered none of its keys and the client
+    /// resends exactly what was refused; a refusal counts once. It is admitted
+    /// while `pending_count + n <= capacity`, `n` the distinct keys of the call
+    /// that are not buffered — for one key, while `pending_count < capacity`.
+    /// A call whose keys are all buffered is always admitted.
+    ///
+    /// Staging is read only when the call could reach past the capacity were
+    /// every one of its keys new; below that no key is looked up and nothing
+    /// is allocated on the write path.
+    ///
+    /// A soft bound, not a reservation. The check reads staging, and a key
+    /// whose entry is held by a flush pass counts as known: its staging slot
+    /// is cleared only once the entry is persisted. The check and the caller's
+    /// queue inserts are separate steps with nothing held across them, and
+    /// what `PartitionQueue::insert` returns is not consulted.
+    ///
+    /// The bound that holds: `pending_count` can exceed `capacity` by at most
+    /// the number of entries a flush pass holds plus the number of new keys
+    /// of the calls that are between this check and their inserts. A pass
+    /// holds at most the entries that were due when it began, up to its
+    /// limits (`batch_size` has no effect). The formula and its precondition
+    /// are on `WriteBehindConfig::capacity`.
+    fn admit_new_keys<K: AsRef<str>>(&self, map: &str, keys: &[K]) -> anyhow::Result<()> {
+        let capacity = self.config.capacity;
+        if capacity == 0 {
+            return Ok(());
+        }
+        let current = self.pending_count.load(Ordering::Relaxed);
+        let at_most_new = u64::try_from(keys.len()).unwrap_or(u64::MAX);
+        if current.saturating_add(at_most_new) <= capacity {
+            return Ok(());
+        }
+        // The places left for new keys. The call is refused at the first new
+        // key past them, so a refusal looks up at most `room + 1` new keys
+        // however many the call names; one probe buffer serves every lookup.
+        let room = capacity.saturating_sub(current);
+        let mut new_keys = std::collections::HashSet::new();
+        let mut probe = (map.to_string(), String::new());
+        for key in keys.iter().map(AsRef::as_ref) {
+            if new_keys.contains(key) {
+                continue;
+            }
+            probe.1.clear();
+            probe.1.push_str(key);
+            #[cfg(test)]
+            self.admission_probes.fetch_add(1, Ordering::SeqCst);
+            if self.staging.contains_key(&probe) {
+                continue;
+            }
+            new_keys.insert(key);
+            if u64::try_from(new_keys.len()).unwrap_or(u64::MAX) > room {
+                metrics::counter!(CAPACITY_REFUSALS_COUNTER).increment(1);
+                anyhow::bail!("Write-behind capacity exceeded");
+            }
+        }
+        Ok(())
     }
 
     /// Reports the buffer and its refused entries at the end of a pass: the
     /// gauges, one rate-limited warning while any entry is refused, and one
     /// line when none is left after a warning.
     ///
-    /// The queues are walked only while a refusal has happened and the last
-    /// walk still found a refused entry; a pass on a store that refuses
-    /// nothing pays one atomic load for that, and one more load and one gauge
-    /// set for the buffered count.
+    /// The buffered-entries gauge is set on every call. The rest comes from
+    /// one walk of the queues, O(queued entries) and allocation-free: the age
+    /// of the oldest buffered entry, and the refused entries, which are
+    /// reported only while a refusal has happened and the last walk still
+    /// found a refused entry. The walk runs at most once per
+    /// `REPORT_WALK_INTERVAL`, and at once when a store-wide hold has begun or
+    /// ended since the last walk or when the buffer is empty and the last walk
+    /// found entries, so an emptied buffer reads zero age and clears the
+    /// warning without waiting; between walks the call does nothing more. The
+    /// report runs after every pass, and a pass runs every flush interval
+    /// also when nothing is buffered (`flush_loop`).
     fn report_retries(&self, schedule: &mut RetrySchedule) {
-        metrics::gauge!(BUFFERED_ENTRIES_GAUGE)
-            .set(count_as_gauge(self.pending_count.load(Ordering::Relaxed)));
-        if !self.retrying.load(Ordering::Relaxed) {
+        let pending = self.pending_count.load(Ordering::Relaxed);
+        metrics::gauge!(BUFFERED_ENTRIES_GAUGE).set(count_as_gauge(pending));
+        let now = tokio::time::Instant::now();
+        if schedule.last_walk.as_ref().is_some_and(|walk| {
+            walk.hold_changes == schedule.hold_changes
+                && !(pending == 0 && walk.found_entries)
+                && now.saturating_duration_since(walk.at) < REPORT_WALK_INTERVAL
+        }) {
             return;
         }
-        let now = tokio::time::Instant::now();
+        #[cfg(test)]
+        self.report_walks.fetch_add(1, Ordering::SeqCst);
         let mut retrying = 0u64;
         let mut earliest = None;
+        let mut oldest_buffered: Option<tokio::time::Instant> = None;
         for queue in &self.queues {
-            let (count, queue_earliest) = queue.value().retrying();
+            let (count, queue_earliest, queue_oldest) = queue.value().retrying_and_oldest();
             retrying += count;
             earliest = earlier_refusal(earliest, queue_earliest);
+            oldest_buffered = match (oldest_buffered, queue_oldest) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        schedule.last_walk = Some(LastWalk {
+            at: now,
+            hold_changes: schedule.hold_changes,
+            found_entries: oldest_buffered.is_some(),
+        });
+        // The pass has ended, so no entry is held outside the queues. A
+        // rewrite keeps the key's first buffered instant.
+        let oldest_entry_age = oldest_buffered.map_or(std::time::Duration::ZERO, |first| {
+            now.saturating_duration_since(first)
+        });
+        metrics::gauge!(OLDEST_ENTRY_AGE_GAUGE).set(oldest_entry_age.as_secs_f64());
+        if !self.retrying.load(Ordering::Relaxed) {
+            return;
         }
         // Monotonic time since the first refusal, never the entry's
         // `store_time`: that is supplied by the caller and is not a time at
@@ -5055,15 +5326,19 @@ impl WriteBehindDataStore {
     }
 }
 
-/// Background task that periodically flushes eligible entries to the inner store.
+/// Background task that flushes due entries to the inner store.
 ///
-/// Runs until the shutdown signal is received. Wakes on either the configured
-/// interval or an explicit notify (from `soft_flush`).
+/// Runs until the shutdown signal is received. A pass that a pass limit cut,
+/// and that stored something, is followed by the next one at once, so a
+/// backlog drains in full passes; after any other pass it waits for the flush
+/// interval (the idle linger) or an explicit notify (from `soft_flush`), so
+/// writes arriving meanwhile are batched instead of forming small passes.
 async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Receiver<bool>) {
     let interval = tokio::time::Duration::from_millis(store.config.flush_interval_ms);
     let mut schedule = RetrySchedule::default();
-    // Set after a pass that stored something while the store is neither held
-    // nor broken: the next pass starts at once instead of after the interval.
+    // Set after a cut pass that stored something while the store is neither
+    // held nor broken: the next pass starts at once instead of after the
+    // interval.
     let mut run_on = false;
 
     loop {
@@ -5109,30 +5384,23 @@ async fn flush_loop(store: Arc<WriteBehindDataStore>, mut shutdown_rx: watch::Re
             return;
         }
 
-        #[allow(clippy::cast_possible_wrap)]
-        let deadline = now_millis().saturating_sub(store.config.write_delay_ms as i64);
+        let deadline = store.due_deadline();
         // Read once: every entry of the pass is judged against one instant.
         let now = tokio::time::Instant::now();
 
         #[cfg(test)]
         store.flush_pass_epoch.fetch_add(1, Ordering::SeqCst);
-        let stored = store.run_flush_pass(&mut schedule, deadline, now).await;
+        let (stored, cut) = store.run_flush_pass(&mut schedule, deadline, now).await;
         store.report_retries(&mut schedule);
         #[cfg(test)]
         store.flush_pass_epoch.fetch_add(1, Ordering::SeqCst);
 
-        // A pass that stored nothing ends the run, and so does a hold or a
-        // broken store; a pass that stored something may have left due
-        // entries behind its limits, or a write became due meanwhile, and
-        // the next pass takes them. With nothing due the loop waits as
-        // always, so a write made after the pass waits for its wake.
-        run_on = stored > 0 && schedule.hold_until.is_none() && !schedule.store_broken && {
-            #[allow(clippy::cast_possible_wrap)]
-            let deadline = now_millis().saturating_sub(store.config.write_delay_ms as i64);
-            store
-                .choose_probe(deadline, tokio::time::Instant::now())
-                .is_some()
-        };
+        // Only a cut pass left due entries queued, and they stay due and
+        // queued, so the next pass takes them at once. A pass that took
+        // everything due lingers for the interval, which batches the writes
+        // made meanwhile. A pass that stored nothing ends the run, and so
+        // does a hold or a broken store.
+        run_on = cut && stored > 0 && schedule.hold_until.is_none() && !schedule.store_broken;
     }
 }
 
@@ -5303,31 +5571,7 @@ impl MapDataStore for WriteBehindDataStore {
         let _in_flight = self.tenant_closes.enter(map)?;
 
         // Check capacity before insertion to avoid partial state on rejection
-        if self.config.capacity != 0 {
-            let current = self.pending_count.load(Ordering::Relaxed);
-            // A soft bound, not a reservation. The check reads staging, and a
-            // key whose entry is held by a flush pass counts as known: its
-            // staging slot is cleared only once the entry is persisted. The
-            // check and the insert below are separate steps with nothing held
-            // across them, and what `PartitionQueue::insert` returns is not
-            // consulted.
-            //
-            // The bound that holds: `pending_count` can exceed `capacity` by
-            // at most the number of entries a flush pass holds plus the number
-            // of writers that are between this check and their insert. Every
-            // write of a key that is in neither staging nor a flush pass is
-            // rejected while `pending_count >= capacity`. A pass holds every
-            // entry that was due when it began (`batch_size` has no effect), so the
-            // first of those two terms is itself bounded only by what was
-            // queued at that moment. The formula and its precondition are on
-            // `WriteBehindConfig::capacity`.
-            let is_new_key = !self
-                .staging
-                .contains_key(&(map.to_string(), key.to_string()));
-            if is_new_key && current >= self.config.capacity {
-                anyhow::bail!("Write-behind capacity exceeded");
-            }
-        }
+        self.admit_new_keys(map, &[key])?;
 
         let partition_id = partition_for(map, key);
         // Seed before the first sequence of this partition is handed out, so the
@@ -5501,16 +5745,7 @@ impl MapDataStore for WriteBehindDataStore {
         // As in `add_with_witness`.
         let _in_flight = self.tenant_closes.enter(map)?;
 
-        // The same soft bound as in `add_with_witness`, where it is described.
-        if self.config.capacity != 0 {
-            let current = self.pending_count.load(Ordering::Relaxed);
-            let is_new_key = !self
-                .staging
-                .contains_key(&(map.to_string(), key.to_string()));
-            if is_new_key && current >= self.config.capacity {
-                anyhow::bail!("Write-behind capacity exceeded");
-            }
-        }
+        self.admit_new_keys(map, &[key])?;
 
         let partition_id = partition_for(map, key);
         // Seed before the first sequence of this partition is handed out, so the
@@ -5698,19 +5933,12 @@ impl MapDataStore for WriteBehindDataStore {
         }
         // As in `add_with_witness`, once for every key of the call.
         let _in_flight = self.tenant_closes.enter(map)?;
+        // Once for the whole call: a refused call buffers none of its keys.
+        self.admit_new_keys(map, keys)?;
 
         let now = now_millis();
 
         for key in keys {
-            // The same soft bound as in `add_with_witness`, checked per key.
-            if self.config.capacity != 0 {
-                let current = self.pending_count.load(Ordering::Relaxed);
-                let is_new_key = !self.staging.contains_key(&(map.to_string(), key.clone()));
-                if is_new_key && current >= self.config.capacity {
-                    anyhow::bail!("Write-behind capacity exceeded");
-                }
-            }
-
             let partition_id = partition_for(map, key);
             // Seed before the first sequence of this partition is handed out, so
             // the watermark this write eventually advances already accounts for
@@ -9561,6 +9789,7 @@ mod tests {
                 cell: Arc::clone(&cell),
             },
             store_time: 0,
+            buffered_at: tokio::time::Instant::now(),
             sequence: 1,
             retry_count: 0,
             next_attempt: None,
@@ -12901,7 +13130,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_first_refusal_time_survives_a_rewrite_and_a_retirement() {
+    async fn the_first_refusal_and_buffered_times_survive_a_rewrite_and_a_retirement() {
         let spy = Arc::new(SpyDataStore::retaining());
         spy.refuse_key("A");
         let store = schedule_store(&spy, schedule_config());
@@ -12909,12 +13138,19 @@ mod tests {
             .add(SCHEDULE_MAP, "A", &lww("a1", 1), 1)
             .await
             .unwrap();
+        let first_buffered = store.test_buffered_at(SCHEDULE_MAP, "A");
         poll_until(30_000, || calls_answered(&spy) >= 1)
             .await
             .expect("the first refusal");
         let first_refusal = spy.timeline()[0].returned;
+        // Both belong to the key, not to one write of it. The paused clock
+        // has moved since the first write, so a later write's own instant
+        // differs from it.
         let kept = |store: &WriteBehindDataStore| {
-            first_refusal.is_some() && store.test_first_refused(SCHEDULE_MAP, "A") == first_refusal
+            first_refusal.is_some()
+                && store.test_first_refused(SCHEDULE_MAP, "A") == first_refusal
+                && first_buffered.is_some()
+                && store.test_buffered_at(SCHEDULE_MAP, "A") == first_buffered
         };
         let after_the_refusal = kept(&store);
 
@@ -12997,6 +13233,8 @@ mod tests {
                 let at_9s = handle.render();
                 spy.refuse_everything(false);
                 let _ = poll_until(60_000, || store.test_is_idle()).await;
+                // The report walks the queues at most once a second.
+                advance(1_100).await;
                 (at_8s, at_9s, handle.render())
             })
         });
@@ -13010,7 +13248,8 @@ mod tests {
         let second = (
             value_of(&at_9s, RETRYING).map(|retrying| retrying >= 1.0),
             value_of(&at_9s, BUFFERED),
-            value_of(&at_9s, AGE).map(|age| age >= 8.0),
+            // At most one walk interval old.
+            value_of(&at_9s, AGE).map(|age| age >= 7.0),
             value_of(&at_9s, HOLD),
         );
         let third = (
@@ -13208,6 +13447,907 @@ mod tests {
         assert!(
             err.to_string().starts_with("Cannot initialise WAL: "),
             "{err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // No write delay, the idle linger, the admission gate and the head age
+    // -----------------------------------------------------------------------
+
+    /// The map the admission and pacing tests write to.
+    const PACING_MAP: &str = "m";
+
+    /// The value of an unlabelled series in a Prometheus rendering.
+    fn rendered_value(rendered: &str, name: &str) -> Option<f64> {
+        rendered
+            .lines()
+            .find(|line| line.starts_with(&format!("{name} ")))
+            .and_then(|line| line[name.len() + 1..].parse().ok())
+    }
+
+    /// Asks for one pass and lets the runtime's clock run in 1 ms steps until
+    /// it has closed. The epoch moves by two through every pass, an empty one
+    /// included.
+    async fn one_requested_pass(store: &WriteBehindDataStore) {
+        let opened_at = store.flush_pass_epoch.load(Ordering::SeqCst);
+        store.soft_flush().await.expect("soft_flush");
+        let closed = poll_until(10_000, || {
+            let epoch = store.flush_pass_epoch.load(Ordering::SeqCst);
+            epoch >= opened_at + 2 && epoch.is_multiple_of(2)
+        })
+        .await;
+        assert!(closed.is_some(), "the requested pass never closed");
+    }
+
+    /// The `retry_count` of the queued entry of `key`, if one is queued.
+    fn queued_retry_count(store: &WriteBehindDataStore, key: &str) -> Option<u32> {
+        store
+            .queues
+            .get(&partition_for(PACING_MAP, key))
+            .and_then(|queue| {
+                queue
+                    .entries
+                    .get(&(PACING_MAP.to_string(), key.to_string()))
+                    .map(|entry| entry.retry_count)
+            })
+    }
+
+    #[test]
+    fn default_config_stores_a_write_within_two_flush_intervals() {
+        paused_runtime().block_on(async {
+            let spy = Arc::new(SpyDataStore::new());
+            let store = schedule_store(&spy, WriteBehindConfig::default());
+            store
+                .add(PACING_MAP, "k", &lww("v", 1), now_millis())
+                .await
+                .expect("accepted");
+            advance(200).await;
+            let stored_within_two_intervals = spy.accepted_for("k");
+
+            let calls = spy.call_count();
+            let epoch = store.flush_pass_epoch.load(Ordering::SeqCst);
+            advance(1_000).await;
+            let epoch_rise = store.flush_pass_epoch.load(Ordering::SeqCst) - epoch;
+            assert_eq!(
+                (stored_within_two_intervals, spy.call_count() - calls),
+                (1, 0),
+                "(stored within two intervals, store calls during the idle second)"
+            );
+            assert!(
+                epoch_rise <= 2 * (1_000 / 100 + 2),
+                "the idle loop must wait the interval between wakes, not spin: the pass epoch \
+                 rose by {epoch_rise} in one second"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn a_write_ahead_of_the_wall_clock_is_due_at_once() {
+        let spy = Arc::new(SpyDataStore::new());
+        let store = schedule_store(
+            &spy,
+            WriteBehindConfig {
+                write_delay_ms: 0,
+                flush_interval_ms: 60_000,
+                ..WriteBehindConfig::default()
+            },
+        );
+        store
+            .add(PACING_MAP, "ahead", &lww("v", 1), now_millis() + 3_600_000)
+            .await
+            .expect("accepted");
+        store.soft_flush().await.expect("soft_flush");
+        let began = std::time::Instant::now();
+        while spy.accepted_for("ahead") == 0 && began.elapsed() < std::time::Duration::from_secs(5)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            spy.accepted_for("ahead"),
+            1,
+            "with no write delay an entry stored an hour ahead of the wall clock is due at once"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS")]
+    fn flush_interval_zero_refuses_to_start() {
+        let _ = WriteBehindConfig::from_source(config_source(&[(
+            "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS",
+            "0",
+        )]));
+    }
+
+    #[test]
+    fn flush_interval_parses_and_falls_back() {
+        let parsed = WriteBehindConfig::from_source(config_source(&[(
+            "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS",
+            "10",
+        )]));
+        let fallback = WriteBehindConfig::from_source(config_source(&[(
+            "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS",
+            "x",
+        )]));
+        assert_eq!(
+            (parsed.flush_interval_ms, fallback.flush_interval_ms),
+            (10, 100)
+        );
+    }
+
+    #[test]
+    fn a_legacy_flush_interval_warns() {
+        #[derive(Clone)]
+        struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for CapturedLog {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        const LINE: &str = "the write-behind flush interval is at least 500 ms: new-key \
+                            admission is limited to about capacity / interval";
+
+        // How often the line is logged for one variable set. Scoped, never a
+        // global install: the test binary is shared and runs in parallel.
+        fn lines_for(vars: &[(&str, &str)]) -> usize {
+            let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let writer = CapturedLog(Arc::clone(&captured));
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                let _ = WriteBehindConfig::from_source(config_source(vars));
+            });
+            let text = String::from_utf8(captured.lock().unwrap().clone()).expect("utf-8 log");
+            text.matches(LINE).count()
+        }
+
+        const VAR: &str = "TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS";
+        assert_eq!(
+            [
+                lines_for(&[(VAR, "500")]),
+                lines_for(&[(VAR, "1000")]),
+                lines_for(&[(VAR, "499")]),
+                lines_for(&[(VAR, "10")]),
+                lines_for(&[(VAR, "1000"), ("TOPGUN_WRITEBEHIND_CAPACITY", "0")]),
+            ],
+            [1, 1, 0, 0, 0],
+            "[500, 1000, 499, 10, 1000 with capacity 0]"
+        );
+    }
+
+    #[test]
+    fn capacity_refusals_are_counted_on_every_write_path() {
+        const REFUSALS: &str = "topgun_write_behind_capacity_refusals_total";
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let readings = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                // The wall-clock delay pins every entry written at the wall
+                // clock, so no pass can drain the two accepted keys.
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        capacity: 2,
+                        write_delay_ms: 600_000,
+                        flush_interval_ms: 60_000,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                let before = rendered_value(&handle.render(), REFUSALS);
+                let accepted = [
+                    store
+                        .add(PACING_MAP, "a", &lww("v", 1), now_millis())
+                        .await
+                        .is_ok(),
+                    store
+                        .add(PACING_MAP, "b", &lww("v", 1), now_millis())
+                        .await
+                        .is_ok(),
+                ];
+                let refused = [
+                    store
+                        .add(PACING_MAP, "c", &lww("v", 1), now_millis())
+                        .await
+                        .is_err(),
+                    store.remove(PACING_MAP, "d", now_millis()).await.is_err(),
+                    store
+                        .remove_all(PACING_MAP, &["e".to_string(), "f".to_string()])
+                        .await
+                        .is_err(),
+                ];
+                let after_refusals = rendered_value(&handle.render(), REFUSALS);
+                let rewrite = store
+                    .add(PACING_MAP, "a", &lww("v2", 2), now_millis())
+                    .await
+                    .is_ok();
+                let after_rewrite = rendered_value(&handle.render(), REFUSALS);
+                (
+                    before,
+                    accepted,
+                    refused,
+                    after_refusals,
+                    rewrite,
+                    after_rewrite,
+                )
+            })
+        });
+        assert_eq!(
+            readings,
+            (
+                Some(0.0),
+                [true, true],
+                [true, true, true],
+                Some(3.0),
+                true,
+                Some(3.0)
+            ),
+            "(counter before, accepted, refused, counter after refusals, rewrite accepted, \
+             counter after rewrite)"
+        );
+    }
+
+    /// A config whose interval no test outlasts, so every pass after the
+    /// first one a `soft_flush` asks for is a run-on.
+    fn pacing_config() -> WriteBehindConfig {
+        WriteBehindConfig {
+            write_delay_ms: 0,
+            flush_interval_ms: 60_000,
+            capacity: 0,
+            ..WriteBehindConfig::default()
+        }
+    }
+
+    /// Waits in real time, up to five seconds, until the spy has `count` calls.
+    async fn wait_for_store_calls(spy: &SpyDataStore, count: usize) {
+        let began = std::time::Instant::now();
+        while spy.call_count() < count && began.elapsed() < std::time::Duration::from_secs(5) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pass_that_stores_nothing_ends_the_run() {
+        let spy = Arc::new(SpyDataStore::new());
+        let store = schedule_store(
+            &spy,
+            WriteBehindConfig {
+                backoff_base_ms: 0,
+                backoff_cap_ms: 0,
+                ..pacing_config()
+            },
+        );
+        // One more than a pass takes, every one refused at encoding: the pass
+        // is cut and stores nothing, and with no backoff its entries are due
+        // again at once.
+        for i in 0..=PASS_MAX_ENTRIES {
+            let key = format!("k{i}");
+            store.test_refuse_encoding(PACING_MAP, &key);
+            store
+                .add(PACING_MAP, &key, &lww("v", 1), now_millis())
+                .await
+                .expect("accepted");
+        }
+        let passes = store.test_passes_closed();
+        store.soft_flush().await.expect("soft_flush");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            (store.test_passes_closed() - passes, spy.call_count()),
+            (1, 0),
+            "(passes, store calls): a cut pass that stored nothing must end the run, \
+             even with its entries due again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pass_cut_by_the_byte_cap_runs_on() {
+        let spy = Arc::new(SpyDataStore::new());
+        let store = schedule_store(&spy, pacing_config());
+        // Two of these fit under the pass's byte limit and a third does not.
+        let large = "x".repeat(3 * 1024 * 1024);
+        for key in ["a", "b", "c"] {
+            store
+                .add(PACING_MAP, key, &lww(&large, 1), now_millis())
+                .await
+                .expect("accepted");
+        }
+        let passes = store.test_passes_closed();
+        store.soft_flush().await.expect("soft_flush");
+        wait_for_store_calls(&spy, 3).await;
+        assert_eq!(
+            (spy.call_count(), store.test_passes_closed() - passes),
+            (3, 2),
+            "(adds, passes): a pass the byte limit cut must be followed at once by the next"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pass_cut_by_the_entry_cap_runs_on() {
+        let spy = Arc::new(SpyDataStore::new());
+        let store = schedule_store(&spy, pacing_config());
+        for i in 0..=PASS_MAX_ENTRIES {
+            store
+                .add(PACING_MAP, &format!("k{i}"), &lww("v", 1), now_millis())
+                .await
+                .expect("accepted");
+        }
+        let passes = store.test_passes_closed();
+        store.soft_flush().await.expect("soft_flush");
+        wait_for_store_calls(&spy, PASS_MAX_ENTRIES + 1).await;
+        assert_eq!(
+            (spy.call_count(), store.test_passes_closed() - passes),
+            (PASS_MAX_ENTRIES + 1, 2),
+            "(adds, passes): a pass the entry limit cut must be followed at once by the next"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uncut_pass_waits_for_the_interval() {
+        let spy = Arc::new(SpyDataStore::new());
+        let (inner, _about_to_panic) = super::background_task_panic_tests::PanickingAddStore::over(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            0,
+        );
+        let mut pass_parked = inner.arm_park();
+        let store = WriteBehindDataStore::new(inner, pacing_config());
+        store
+            .add(PACING_MAP, "a", &lww("v", 1), now_millis())
+            .await
+            .expect("accepted");
+        let passes = store.test_passes_closed();
+        store.soft_flush().await.expect("soft_flush");
+        pass_parked.wait_parked().await;
+        // Due at once, and a write does not wake the loop: only a run-on
+        // would take it before the interval.
+        store
+            .add(PACING_MAP, "b", &lww("v", 1), now_millis())
+            .await
+            .expect("accepted");
+        pass_parked.release();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            (
+                spy.accepted_for("a"),
+                spy.accepted_for("b"),
+                store.pending_operation_count(),
+                store.test_passes_closed() - passes,
+            ),
+            (1, 0, 1, 1),
+            "(a stored, b stored, buffered, passes): a pass that took everything due must \
+             wait for the interval, so a write made during it stays buffered"
+        );
+    }
+
+    #[test]
+    fn oldest_entry_age_counts_a_refused_entry() {
+        const AGE: &str = "topgun_write_behind_oldest_entry_age_seconds";
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let (after_split, after_rewrite) = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                spy.refuse_key("A");
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        write_delay_ms: 0,
+                        flush_interval_ms: 60_000,
+                        capacity: 0,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                store
+                    .add(PACING_MAP, "A", &lww("a", 1), now_millis())
+                    .await
+                    .unwrap();
+                advance(4_000).await;
+                store
+                    .add(PACING_MAP, "B", &lww("b", 1), now_millis())
+                    .await
+                    .unwrap();
+                advance(1_000).await;
+                one_requested_pass(&store).await;
+                let after_split = (
+                    spy.calls_for("A") >= 2,
+                    spy.accepted_for("B"),
+                    queued_retry_count(&store, "A"),
+                    store.store_hold.load(Ordering::SeqCst),
+                    rendered_value(&handle.render(), AGE).map(|age| (5.0..6.0).contains(&age)),
+                );
+
+                // A rewrite keeps the key's first buffered instant. The walk
+                // runs at most once a second, so the second reading waits one.
+                store
+                    .add(PACING_MAP, "A", &lww("a2", 2), now_millis())
+                    .await
+                    .unwrap();
+                advance(1_100).await;
+                one_requested_pass(&store).await;
+                let after_rewrite = (
+                    queued_retry_count(&store, "A").is_some(),
+                    rendered_value(&handle.render(), AGE),
+                );
+                (after_split, after_rewrite)
+            })
+        });
+        assert_eq!(
+            after_split,
+            (true, 1, Some(1), false, Some(true)),
+            "(A refused in the commit and alone, B stored, A's retry count, hold, age in [5, 6))"
+        );
+        assert!(
+            after_rewrite.0 && after_rewrite.1.is_some_and(|age| (6.0..7.0).contains(&age)),
+            "after a rewrite of the refused key the head age must still count its first write: \
+             (A buffered, age) = {after_rewrite:?}"
+        );
+    }
+
+    #[test]
+    fn oldest_entry_age_ignores_a_store_time_ahead_of_the_clock() {
+        const AGE: &str = "topgun_write_behind_oldest_entry_age_seconds";
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let age = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                // The wall-clock delay keeps both entries queued.
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        write_delay_ms: 600_000,
+                        flush_interval_ms: 60_000,
+                        capacity: 0,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                // The older write carries a store time an hour ahead of the
+                // server clock, as a write stamped by a fast clock does.
+                store
+                    .add(PACING_MAP, "ahead", &lww("a", 1), now_millis() + 3_600_000)
+                    .await
+                    .unwrap();
+                advance(5_000).await;
+                store
+                    .add(PACING_MAP, "now", &lww("b", 1), now_millis())
+                    .await
+                    .unwrap();
+                one_requested_pass(&store).await;
+                assert_eq!(
+                    store.pending_operation_count(),
+                    2,
+                    "both entries stay queued"
+                );
+                rendered_value(&handle.render(), AGE)
+            })
+        });
+        assert!(
+            age.is_some_and(|age| (5.0..6.0).contains(&age)),
+            "the head age must count the oldest buffered write from when the server buffered \
+             it, whatever its store time: age = {age:?}"
+        );
+    }
+
+    #[test]
+    fn oldest_entry_age_moves_during_a_hold() {
+        const AGE: &str = "topgun_write_behind_oldest_entry_age_seconds";
+        const HOLD: &str = "topgun_write_behind_store_hold";
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let (held, later, healed) = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                spy.refuse_everything(true);
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        write_delay_ms: 0,
+                        flush_interval_ms: 10,
+                        capacity: 0,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                for key in ["A", "B"] {
+                    store
+                        .add(PACING_MAP, key, &lww("v", 1), now_millis())
+                        .await
+                        .unwrap();
+                }
+                one_requested_pass(&store).await;
+                advance(3_000).await;
+                let rendered = handle.render();
+                let held = (
+                    rendered_value(&rendered, HOLD),
+                    rendered_value(&rendered, AGE).map(|age| (2.0..=3.1).contains(&age)),
+                );
+                advance(3_000).await;
+                let rendered = handle.render();
+                let later = (
+                    rendered_value(&rendered, HOLD),
+                    rendered_value(&rendered, AGE).map(|age| (5.0..=6.1).contains(&age)),
+                );
+
+                spy.refuse_everything(false);
+                advance(8_000).await;
+                let healed = (
+                    store.pending_operation_count(),
+                    rendered_value(&handle.render(), AGE),
+                );
+                (held, later, healed)
+            })
+        });
+        assert_eq!(
+            (held, later, healed),
+            (
+                (Some(1.0), Some(true)),
+                (Some(1.0), Some(true)),
+                (0, Some(0.0))
+            ),
+            "((hold, age in [2, 3.1]) 3 s into the hold, (hold, age in [5, 6.1]) 6 s in, \
+             (buffered, age) once the store accepts)"
+        );
+    }
+
+    #[test]
+    fn the_report_walks_the_queues_at_most_once_a_second() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let (walks_in_the_hold, walked_when_the_hold_ended) =
+            metrics::with_local_recorder(&recorder, || {
+                paused_runtime().block_on(async {
+                    let spy = Arc::new(SpyDataStore::new());
+                    spy.refuse_everything(true);
+                    // The shortest interval a node accepts: a wake every
+                    // millisecond during the hold.
+                    let store = schedule_store(
+                        &spy,
+                        WriteBehindConfig {
+                            write_delay_ms: 0,
+                            flush_interval_ms: 1,
+                            capacity: 0,
+                            ..WriteBehindConfig::default()
+                        },
+                    );
+                    for key in ["A", "B"] {
+                        store
+                            .add(PACING_MAP, key, &lww("v", 1), now_millis())
+                            .await
+                            .unwrap();
+                    }
+                    let held = poll_until(10_000, || store.store_hold.load(Ordering::SeqCst)).await;
+                    assert!(held.is_some(), "the refused commit must start a hold");
+                    // Counted from the confirmed hold over exactly 3 s of the
+                    // paused clock, whose wakes come every millisecond: walks
+                    // at least 1 s apart and at most about 1 s apart give 2 or
+                    // 3 in any such window, wherever the hold began.
+                    let walks = store.report_walks.load(Ordering::SeqCst);
+                    advance(3_000).await;
+                    let walks_in_the_hold = store.report_walks.load(Ordering::SeqCst) - walks;
+
+                    spy.refuse_everything(false);
+                    let mut walked_when_the_hold_ended = false;
+                    for _ in 0..10_000 {
+                        let before = store.report_walks.load(Ordering::SeqCst);
+                        advance(1).await;
+                        if !store.store_hold.load(Ordering::SeqCst) {
+                            walked_when_the_hold_ended =
+                                store.report_walks.load(Ordering::SeqCst) > before;
+                            break;
+                        }
+                    }
+                    (walks_in_the_hold, walked_when_the_hold_ended)
+                })
+            });
+        assert!(
+            (2..=3).contains(&walks_in_the_hold) && walked_when_the_hold_ended,
+            "the report must walk the queues about once a second during a hold, not on every \
+             1 ms wake, and at once when the hold ends: (walks in 3 s of hold, walked at its \
+             end) = ({walks_in_the_hold}, {walked_when_the_hold_ended})"
+        );
+    }
+
+    #[test]
+    fn an_emptied_buffer_is_reported_at_once() {
+        const AGE: &str = "topgun_write_behind_oldest_entry_age_seconds";
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let readings = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                // The flush task's first pass is a minute away: the test runs
+                // the passes and the reports itself, with its own schedule.
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        write_delay_ms: 0,
+                        flush_interval_ms: 60_000,
+                        capacity: 0,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                let mut schedule = RetrySchedule::default();
+                store
+                    .add(PACING_MAP, "A", &lww("a", 1), now_millis())
+                    .await
+                    .unwrap();
+                advance(2_000).await;
+                store.report_retries(&mut schedule);
+                let while_buffered = rendered_value(&handle.render(), AGE);
+                let walks = store.report_walks.load(Ordering::SeqCst);
+                let now = tokio::time::Instant::now();
+                let (stored, _) = store
+                    .run_flush_pass(&mut schedule, store.due_deadline(), now)
+                    .await;
+                // The same instant: well inside the walk interval.
+                store.report_retries(&mut schedule);
+                (
+                    while_buffered,
+                    stored,
+                    store.pending_operation_count(),
+                    store.report_walks.load(Ordering::SeqCst) - walks,
+                    rendered_value(&handle.render(), AGE),
+                )
+            })
+        });
+        assert_eq!(
+            readings,
+            (Some(2.0), 1, 0, 1, Some(0.0)),
+            "(age while buffered, stored, buffered after the pass, walks after it, age after \
+             it): a buffer emptied inside the walk interval must be walked and read zero age \
+             at once"
+        );
+    }
+
+    #[test]
+    fn a_hold_that_ends_and_begins_again_between_reports_is_walked() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let walks = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        write_delay_ms: 0,
+                        flush_interval_ms: 60_000,
+                        capacity: 0,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                // Of never-refused entries the newest is the probe, so B is;
+                // the store refuses A alone.
+                spy.refuse_key("A");
+                for key in ["A", "B"] {
+                    store
+                        .add(PACING_MAP, key, &lww("v", 1), now_millis())
+                        .await
+                        .unwrap();
+                }
+                let example = || RefusedExample {
+                    map: PACING_MAP.to_string(),
+                    key: "A".to_string(),
+                    attempts: 1,
+                    error: "refused".to_string(),
+                };
+                let mut schedule = RetrySchedule::default();
+                let walks = || store.report_walks.load(Ordering::SeqCst);
+                let now = tokio::time::Instant::now();
+                // Every step below lies inside one walk interval.
+                store.report_retries(&mut schedule);
+                let first = walks();
+                store.start_hold(&mut schedule, now, example());
+                let at_the_hold = walks() - first;
+                // The hold ends as an accepted probe ends it, and another
+                // begins before any report: the hold flag reads as before.
+                schedule.hold_until = None;
+                schedule.hold_changes += 1;
+                let before = walks();
+                store.start_hold(&mut schedule, now, example());
+                let at_the_flip = walks() - before;
+                // The probe is due 0.5 s on, still inside the walk interval:
+                // it is accepted and ends the hold, and the refused A stays.
+                advance(600).await;
+                let before = walks();
+                store
+                    .run_flush_pass(
+                        &mut schedule,
+                        store.due_deadline(),
+                        tokio::time::Instant::now(),
+                    )
+                    .await;
+                store.report_retries(&mut schedule);
+                (
+                    at_the_hold,
+                    at_the_flip,
+                    (
+                        schedule.hold_until.is_none(),
+                        spy.accepted_for("B"),
+                        store.pending_operation_count(),
+                        walks() - before,
+                    ),
+                )
+            })
+        });
+        assert_eq!(
+            walks,
+            (1, 1, (true, 1, 1, 1)),
+            "(walks when a hold began, walks when one ended and another began between two \
+             reports, (hold ended, B stored, buffered, walks) after the probe pass): each change \
+             of the hold must be walked at once, also when something stays buffered"
+        );
+    }
+
+    #[test]
+    fn a_refused_remove_all_stops_at_the_first_new_key_past_the_capacity() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let readings = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        capacity: 3,
+                        write_delay_ms: 600_000,
+                        flush_interval_ms: 60_000,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                for key in ["a", "b"] {
+                    store
+                        .add(PACING_MAP, key, &lww("v", 1), now_millis())
+                        .await
+                        .unwrap();
+                }
+                // One place is left. A buffered key, then a hundred thousand
+                // new ones, the first named twice.
+                let keys = ["a", "n0"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .chain((0..100_000).map(|n| format!("n{n}")))
+                    .collect::<Vec<_>>();
+                let before = store.admission_probes.load(Ordering::SeqCst);
+                let refused = store.remove_all(PACING_MAP, &keys).await.is_err();
+                (
+                    refused,
+                    store.admission_probes.load(Ordering::SeqCst) - before,
+                    store.pending_operation_count(),
+                )
+            })
+        });
+        assert_eq!(
+            readings,
+            (true, 3, 2),
+            "(refused, staging lookups, buffered after it): the check must stop at the second \
+             new key, after looking up `a`, `n0` and `n1`, not walk the whole call"
+        );
+    }
+
+    #[test]
+    fn remove_all_is_admitted_or_refused_whole() {
+        const REFUSALS: &str = "topgun_write_behind_capacity_refusals_total";
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let readings = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                // The wall-clock delay keeps every accepted key buffered.
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        capacity: 3,
+                        write_delay_ms: 600_000,
+                        flush_interval_ms: 60_000,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                for key in ["a", "b"] {
+                    store
+                        .add(PACING_MAP, key, &lww("v", 1), now_millis())
+                        .await
+                        .unwrap();
+                }
+                let keys =
+                    |names: &[&str]| names.iter().map(|n| (*n).to_string()).collect::<Vec<_>>();
+                // Two new keys where one place is left: refused whole.
+                let refused = store
+                    .remove_all(PACING_MAP, &keys(&["c", "d"]))
+                    .await
+                    .is_err();
+                let after_refusal = (
+                    store.pending_operation_count(),
+                    store
+                        .staging
+                        .contains_key(&(PACING_MAP.to_string(), "c".to_string())),
+                    rendered_value(&handle.render(), REFUSALS),
+                );
+                // A buffered key and one new key, the new one named twice:
+                // one place is needed, and it is there.
+                let admitted = store
+                    .remove_all(PACING_MAP, &keys(&["a", "c", "c"]))
+                    .await
+                    .is_ok();
+                (
+                    refused,
+                    after_refusal,
+                    admitted,
+                    store.pending_operation_count(),
+                )
+            })
+        });
+        assert_eq!(
+            readings,
+            (true, (2, false, Some(1.0)), true, 3),
+            "(refused, (buffered, c staged, refusals) after it, admitted, buffered after it)"
+        );
+    }
+
+    /// A reading, not a gate: the cost of one walk of `report_retries` over a
+    /// full buffer during a store-wide hold, which it makes at most once a
+    /// second. Run with `cargo test --release -p
+    /// topgun-server report_retries_walk -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a timing reading, run on demand in release"]
+    fn report_retries_walk_over_a_full_buffer_during_a_hold() {
+        const ENTRIES: u64 = 10_000;
+        const CALLS: usize = 1_000;
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let mut calls = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                // The wall-clock delay keeps every entry queued.
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        write_delay_ms: 600_000,
+                        flush_interval_ms: 3_600_000,
+                        capacity: 0,
+                        ..WriteBehindConfig::default()
+                    },
+                );
+                for i in 0..ENTRIES {
+                    store
+                        .add(PACING_MAP, &format!("k{i}"), &lww("v", 1), now_millis())
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(store.pending_operation_count(), ENTRIES);
+                store.retrying.store(true, Ordering::Relaxed);
+                let mut schedule = RetrySchedule {
+                    hold_until: Some(
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+                    ),
+                    ..RetrySchedule::default()
+                };
+                (0..CALLS)
+                    .map(|_| {
+                        // Each call walks, as the first after a hold begins
+                        // does; the walk is what is timed.
+                        schedule.last_walk = None;
+                        let began = std::time::Instant::now();
+                        store.report_retries(&mut schedule);
+                        began.elapsed()
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
+        calls.sort_unstable();
+        let median_us = calls[CALLS / 2].as_secs_f64() * 1e6;
+        let max_us = calls.last().expect("calls").as_secs_f64() * 1e6;
+        println!(
+            "report_retries over {ENTRIES} buffered entries during a hold: median {median_us:.1} \
+             us, max {max_us:.1} us per call ({CALLS} calls)"
         );
     }
 }
@@ -13758,7 +14898,7 @@ mod background_task_panic_tests {
     /// An armed park holds the next `add` on entry, before the count is taken:
     /// the flush task then sits inside a pass, holding its batch, for as long
     /// as the test needs to act around it.
-    struct PanickingAddStore {
+    pub(super) struct PanickingAddStore {
         inner: Arc<dyn MapDataStore>,
         panic_on: u64,
         adds: AtomicU64,
@@ -13774,7 +14914,7 @@ mod background_task_panic_tests {
         }
 
         /// Over `inner`, which receives every `add` that does not panic.
-        fn over(
+        pub(super) fn over(
             inner: Arc<dyn MapDataStore>,
             panic_on: u64,
         ) -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<()>) {
@@ -13790,7 +14930,7 @@ mod background_task_panic_tests {
         }
 
         /// Parks the next `add` on entry. Dropping the handle releases it.
-        fn arm_park(&self) -> TestParkHandle {
+        pub(super) fn arm_park(&self) -> TestParkHandle {
             let (gate, handle) = TestParkHandle::arm();
             *self
                 .park
@@ -15635,10 +16775,13 @@ mod background_task_panic_tests {
             inner,
             WriteBehindConfig {
                 capacity: CAPACITY,
+                // A delay keeps `QUEUED`, an hour ahead, out of the pass; the
+                // held entries, written a second back, are due at once.
+                write_delay_ms: 1,
                 ..manual_flush_config()
             },
         );
-        let now = now_millis();
+        let now = now_millis() - 1_000;
         let held = u64::try_from(HELD.len()).expect("a small count");
 
         for key in HELD {
@@ -16024,8 +17167,8 @@ mod background_task_panic_tests {
             .await
             .expect("the first write is accepted");
 
-        // Its own time is an hour ahead: if its entry is due at once, that is
-        // only because it took over the first entry's time.
+        // Whatever the pass does with the first entry, no slot is left without
+        // an entry, and the second value is the one persisted.
         let mut park = store.test_park_between_stage_and_queue_insert(MAP, RACED_KEY);
         let write = {
             let store = Arc::clone(&store);
