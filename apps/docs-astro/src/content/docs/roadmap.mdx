@@ -35,6 +35,9 @@ use. The receipts are in the repository, not in marketing copy:
   write / flush / crash-at-any-point / recover / GC sequences against an independent reference
   model, with process-restart crossings inside each case. It re-detects every restart-boundary
   bug class we have found and fixed.
+- **Crash-safe shutdown drain and WAL recovery** — a graceful stop drains the write-behind
+  buffer, and writes still buffered at an unclean shutdown are replayed from the write-ahead log
+  at the next start.
 - **A 72-hour endurance gate** — the final exam (sustained churn + kill -9 loops with hard
   memory/disk/tombstone gates) runs once the remaining gates above are closed; we publish the
   criteria rather than the adjective "production-ready".
@@ -143,11 +146,6 @@ The features below are **not implemented** in the current Rust server. The guide
         <td className="py-3 px-4 font-medium text-foreground">Custom Conflict Resolvers</td>
         <td className="py-3 px-4 text-red-600 dark:text-red-400">Planned (v2.x)</td>
         <td className="py-3 px-4">User-defined merge functions; requires server-side WASM sandbox. SDK surface (<code>client.getConflictResolvers().register/unregister/list</code>) throws with a roadmap pointer pre-launch. Built-in CRDT merge logic + <code>MergeRejection</code> observability are unchanged.</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-medium text-foreground">Crash-safe shutdown drain + WAL recovery</td>
-        <td className="py-3 px-4 text-green-600 dark:text-green-400">Stable</td>
-        <td className="py-3 px-4">A graceful stop drains the write-behind buffer; writes still buffered at an unclean shutdown are replayed from the write-ahead log at the next start. The default <code>batched</code> fsync policy can lose the last ~10 ms fsync window on an operating-system crash or power loss; <code>per_op</code> closes it</td>
       </tr>
       <tr className="border-b border-card-border">
         <td className="py-3 px-4 font-medium text-foreground">Entry Processor</td>

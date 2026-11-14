@@ -1039,11 +1039,13 @@ weaker than a test.
 - **`hard_flush` exits already tracked elsewhere** — the abort at the shutdown timeout, the
   error and timeout exits, a dropped `hard_flush` future (TODO-768).
 - **`capacity` as a hard limit.** Decided: there is no hard limit and none is planned. The
-  one admission gate of every write path, `admit_new_keys`, keeps a soft bound; each write it
-  refuses counts in `topgun_write_behind_capacity_refusals_total`
+  one admission gate of every write path, `admit_new_keys`, keeps a soft bound; each call it
+  refuses counts once in `topgun_write_behind_capacity_refusals_total`
   (`capacity_refusals_are_counted_on_every_write_path`); a `remove_all` is admitted or refused
-  whole (`remove_all_is_admitted_or_refused_whole`). A bound on buffered bytes is not
-  there yet (TODO-963). With `C = capacity > 0` and `L = 1000`, the most entries one
+  whole (`remove_all_is_admitted_or_refused_whole`), and a refusal stops at the first new key
+  past the capacity (`a_refused_remove_all_stops_at_the_first_new_key_past_the_capacity`). A
+  bound on buffered bytes is not there yet (TODO-963).
+  With `C = capacity > 0` and `L = 1000`, the most entries one
   flush pass takes: `pending_count <= C - 1 + W + H` and `H <= min(L, C - 1 + W)`, so the count
   stays below `2 * (C + W)` and below `C + W + L`. `W` is the number of writes of
   distinct keys that are not buffered and that are, at one instant, between the capacity check
