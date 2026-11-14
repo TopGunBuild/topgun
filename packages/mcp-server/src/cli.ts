@@ -27,7 +27,7 @@ import { TopGunMCPServer } from './TopGunMCPServer';
 import { HTTPTransport, HTTPTransportConfigError, isLoopbackHost } from './transport/http';
 import { parsePort } from './port';
 import type { MCPServerConfig } from './types';
-import { createLogger } from './logger';
+import { configForLog, createLogger } from './logger';
 
 const require = createRequire(import.meta.url);
 const { version: VERSION } = require('../package.json') as { version: string };
@@ -168,6 +168,11 @@ OPTIONS:
   --allow-public-bind     Allow a non-loopback --host (only with --http)
                           Env: TOPGUN_MCP_ALLOW_PUBLIC_BIND=1
 
+                          Browser origins: the CLI allows none, on purpose
+                          (MCP clients are not browsers); a request with an
+                          Origin header gets 403. To serve a browser, use the
+                          library's HTTPTransport with its corsOrigins option.
+
   TOPGUN_MCP_HTTP_TOKEN   Required with --http (environment only): the secret
                           every HTTP request must send as
                           'Authorization: Bearer <token>'; at least 32
@@ -234,10 +239,11 @@ For more information, visit: https://github.com/topgunbuild/topgun
 }
 
 // The CLI's names for the transport settings, so a refusal names what the operator sets.
-const CLI_FIELD_NAMES: Record<HTTPTransportConfigError['field'], string> = {
+// corsOrigins has no CLI name: the CLI never sets it.
+const CLI_FIELD_NAMES: Partial<Record<HTTPTransportConfigError['field'], string>> = {
   bearerToken: 'TOPGUN_MCP_HTTP_TOKEN',
   host: '--host / TOPGUN_MCP_HOST',
-  corsOrigins: 'corsOrigins',
+  port: '--port / TOPGUN_MCP_PORT',
 };
 
 function refuseToStart(reason: string): never {
@@ -250,7 +256,7 @@ function createHTTPTransport(options: CLIOptions): { transport: HTTPTransport; p
   try {
     port = parsePort(options.port);
   } catch (error) {
-    refuseToStart((error as Error).message);
+    refuseToStart(`${CLI_FIELD_NAMES.port} ${(error as Error).message}`);
   }
 
   // A hostname is left to the transport's "must be an IP address" refusal.
@@ -273,7 +279,8 @@ function createHTTPTransport(options: CLIOptions): { transport: HTTPTransport; p
     return { transport, port };
   } catch (error) {
     if (error instanceof HTTPTransportConfigError) {
-      refuseToStart(CLI_FIELD_NAMES[error.field] + error.message.slice(error.field.length));
+      const name = CLI_FIELD_NAMES[error.field] ?? error.field;
+      refuseToStart(name + error.message.slice(error.field.length));
     }
     throw error;
   }
@@ -305,10 +312,7 @@ async function main(): Promise<void> {
   // Create logger
   const logger = createLogger({ debug: options.debug, name: 'topgun-mcp-cli' });
 
-  logger.debug(
-    { config: { ...config, authToken: config.authToken ? '[set]' : undefined } },
-    'Starting with config',
-  );
+  logger.debug({ config: configForLog(config) }, 'Starting with config');
 
   // Validated before the server is built, so a refused start never creates a TopGun client
   // holding the auth token.
