@@ -335,7 +335,12 @@ describe('HTTP Transport', () => {
     });
 
     it('T14: refuses every other IPv6 spelling of loopback, IPv4-mapped forms included', () => {
-      for (const host of ['0:0:0:0:0:0:0:1', '::ffff:7f00:1', '::ffff:127.0.0.1', '::ffff:10.0.0.1']) {
+      for (const host of [
+        '0:0:0:0:0:0:0:1',
+        '::ffff:7f00:1',
+        '::ffff:127.0.0.1',
+        '::ffff:10.0.0.1',
+      ]) {
         expect(configError({ bearerToken: TOKEN, host }).field).toBe('host');
       }
     });
