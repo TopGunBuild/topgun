@@ -386,9 +386,11 @@ of requests outstanding.
 - **Taking the turn.** `dispatch_one_message`, at its `EPHEMERAL_WRITE` intercept, awaits its ticket's turn (the
   predecessor's signal, or the predecessor's sender being dropped) before it dispatches any singleton. The ticket is
   released when the frame's task ends, by dropping it, so a task that panics releases it too. One request's singletons
-  all finish before any singleton of the next request of that connection starts. Because one key maps to one
-  partition worker whose queue is FIFO (`service/dispatch.rs:93`, `service/dispatch.rs:162-184`), even a predecessor
-  singleton answered `retry {504}` but still queued applies before the successor's op of that key.
+  all finish before any singleton of the next request of that connection starts. A singleton's verdict — `retry {504}`
+  included — exists only once the partition worker has finished with it: the caller awaits the worker's reply with no
+  timeout of its own (`service/dispatch.rs:150`), and the operation timeout runs inside the worker's pipeline
+  (`service/middleware/timeout.rs:61`). So no op of a predecessor request is still queued when the successor's ops are
+  enqueued.
 - **Envelopes.** One ticket per frame. An envelope's task already walks its inner messages in order and awaits each
   (`dispatch_envelope`, `network/handlers/websocket.rs:1631-1680`; `TG-DISP-001` (a)), so several `EPHEMERAL_WRITE`s
   in one envelope apply in envelope order, and the envelope as a whole takes its place in the lane where the read loop
@@ -855,8 +857,12 @@ sent by the node that holds the client's connection. Emitting and handling it be
 ### Reason
 
 A TODO-862 watcher over several hundred present visitors gets one delta per re-published key in every restart storm,
-which overflows a 256-message queue every time but fits a keyed stage that holds one entry per visitor. The re-check
-rules make the tick-vs-write race decided by the key writer, which every write already holds (`TG-KEY-001`).
+which overflows a 256-message queue every time (`network/config.rs:186`) but fits a keyed stage that holds one entry
+per visitor. The re-check rules make the tick-vs-write race decided by the key writer, which every write already holds
+(`TG-KEY-001`; acquired before the stamp is minted, `service/domain/crdt.rs:973-978`), the way the TTL sweep's removal
+re-checks expiry under it today (`service/domain/crdt.rs:999-1014`). Re-publishing on the transition to connected
+reuses the one place every connect path already reaches, including the NO_AUTH grace timer
+(`client/src/SyncEngine.ts:767-789`).
 
 ### Stated limits
 
@@ -895,8 +901,15 @@ rules make the tick-vs-write race decided by the key writer, which every write a
 
 ### Reason
 
-Liveness at apply closes the one remaining resurrection source: an op queued in the dispatcher before the disconnect
-and applied after the grace removal. The second opinion's "≤ TTL + grace" bound was written for a mandatory-TTL
+Liveness at apply closes resurrection by an op that reaches apply after its owner stopped being live, whatever path
+delivered it. On today's single-node WebSocket path such an op is not expected: the handler waits for every in-flight
+frame task before `registry.remove` (`network/handlers/websocket.rs:488-506`), and a frame task waits for the
+partition worker's reply with no timeout of its own (`service/dispatch.rs:150`; the operation timeout runs inside the
+worker's pipeline, `service/middleware/timeout.rs:61`), so a connection's own ops have finished before `remove()` fires
+the disconnect observers (`network/connection.rs:381-388`). The rule keeps `TG-EPH-005` from depending on that drain:
+it covers a forwarded op on a record node after the cluster lift (D9 item 6), where the owner's connection is on
+another node, and any later dispatch path that does not drain. Its cost is one set lookup under a lock the write
+already takes for the owner index. The second opinion's "≤ TTL + grace" bound was written for a mandatory-TTL
 design that D4 rejects; the bound here is `G + S`, and it does not depend on stamps.
 
 ### Stated limits
@@ -936,7 +949,11 @@ design that D4 rejects; the bound here is `G + S`, and it does not depend on sta
 ### Reason
 
 A presence value is the current state, not a history; sending the last desired value per key is both minimal and
-correct after any outage. The durable op log is the wrong store for it (D2, the op-id collision).
+correct after any outage. The durable op log is the wrong store for it: its ids are IndexedDB row ids
+(`client/src/SyncEngine.ts:994`) that every `OP_ACK` / `OP_REJECTED` is matched against
+(`client/src/sync/ClientMessageHandlers.ts:199-200`), the collision D2 rejects. A durable handle's refused write
+surfaces through the closed `WriteRejectionCause` union (`core/src/WriteRejection.ts:27-34`), which gains the new
+cause.
 
 ### Stated limits
 
