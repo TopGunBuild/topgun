@@ -143,7 +143,7 @@ function TodoItem({ id }: { id: string }) {
 <AlertBox
   variant="info"
   title="Write-behind buffer"
-  text="The server batches writes through a write-behind buffer, which stores them at its next flush pass (with no write delay; an idle buffer waits at most 10 ms). An unclean server shutdown can lose buffered writes not yet flushed to the durable backend. WAL-recovery support is tracked on the roadmap (TODO-339)."
+  text="The server batches writes through a write-behind buffer, which stores them at its next flush pass (with no write delay; an idle buffer waits at most 100 ms). An unclean server shutdown can lose buffered writes not yet flushed to the durable backend. WAL-recovery support is tracked on the roadmap (TODO-339)."
 />
 
 ---

@@ -1243,7 +1243,7 @@ weaker than a test.
   commit — what it does with an entry the store refused, the store-wide hold and its probe.
   Below, `B = backoff_base_ms`, `K = backoff_cap_ms`, `I = flush_interval_ms`, and
   `L = 1000`, the most entries one pass takes; the numbers are for the defaults (500, 5000 and
-  10 ms, and no write delay: `write_delay_ms = 0`) and for store calls that return promptly,
+  100 ms, and no write delay: `write_delay_ms = 0`) and for store calls that return promptly,
   unless a clause says otherwise.
 - **Precondition:** one writer per `(map, key)` at a time (`TG-KEY-001`).
 - **Statement:**
@@ -1319,7 +1319,7 @@ weaker than a test.
        several flaps is **not proven** by a test.
      - *When the store returns at `T`, with no write after `T`:* every entry buffered at `T` is
        in a pass that begins no later than `T + K + I + ⌈N_T / m⌉ · C_pass`, `N_T` =
-       entries buffered at `T` — `T + 5010 ms + C_pass` while they fit in one pass: the pass in
+       entries buffered at `T` — `T + 5100 ms + C_pass` while they fit in one pass: the pass in
        progress when the last of them becomes due may be followed by the interval, and every
        later pass that leaves one behind was cut and is followed at once (a cut pass that
        stores nothing, every entry refused at encoding, costs one more `I`). With writes after
@@ -1339,7 +1339,7 @@ weaker than a test.
        outside holds: within `C_pass + I + (⌈(Q_H + 1) / m⌉ − 1) · C_pass` after `t0` while
        every pass that does not take it stores something, and within
        `⌈(Q_H + 1) / m⌉ · (C_pass + I)` in any case. During a hold, within `K + I` after it is
-       due — 5010 ms.
+       due — 5100 ms.
        Refused records do not enter `Q_H`: they take the reserved slot and leftover capacity
        only. For `v_max > 4 MiB` (`m` may be 0 in a pass whose reserved entry is large) the
        bound is **not proven**.
@@ -1352,7 +1352,7 @@ weaker than a test.
        passes ends after a pass that committed nothing (for example every entry refused alone),
        and the loop then sleeps the interval. During holds one probe per hold applies: with `P`
        records refused for ever, a refused healthy key is attempted after at most `P` refused
-       probes, at most `(P + 1) · (K + I)` — 155.31 s for `P = 30`; linear in `P`, not a constant.
+       probes, at most `(P + 1) · (K + I)` — 158.1 s for `P = 30`; linear in `P`, not a constant.
   5. **What is not bounded — part of the statement, not a footnote.**
      Without classifying store errors there is no time by which every buffered key reaches the store while some records are refused for ever.
      A healthy key written before `N` refused keys that have not been tried yet, with no newer

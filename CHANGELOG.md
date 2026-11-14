@@ -46,8 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     1000 writes or 8 MiB. A pass cut by one of those limits is followed by the next one at once;
     after a pass that took every due write the flush task waits up to the flush interval, so
     writes arriving meanwhile are stored together instead of in many small passes.
-  - **`TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` defaults to `10`** (was `1000`) and is now the
-    longest a buffered write waits while the flush task is idle. `0` refuses to start (the idle
+  - **`TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` defaults to `100`** (was `1000`) and is now the
+    longest a buffered write waits while the flush task is idle, the window in which a pass
+    forms. Measured with the same harness at 2·10⁴ writes/s: a 10 ms linger formed passes of
+    about 270 writes and acknowledged 3–4 % fewer writes per second than the previous release;
+    100 ms formed passes of about 800 and matched it. `0` refuses to start (the idle
     loop would spin). A value of `500` or more, with a non-zero `TOPGUN_WRITEBEHIND_CAPACITY`,
     logs one startup `WARN`, `the write-behind flush interval is at least 500 ms: new-key
     admission is limited to about capacity / interval`. **Remove an explicit
