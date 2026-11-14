@@ -10,6 +10,7 @@
 import { TopGunMCPServer } from '../TopGunMCPServer';
 import { HTTPTransport, HTTPTransportConfigError, type HTTPServerConfig } from '../transport/http';
 import * as http from 'node:http';
+import * as net from 'node:net';
 
 // 48 characters of the b64token alphabet; every helper request sends it unless a test overrides.
 const TOKEN = 'test-token-0123456789-abcdefghijklmnopqrstuvwxyz';
@@ -281,6 +282,22 @@ describe('HTTP Transport', () => {
       expect(response.statusCode).toBe(204);
       expect(response.headers['access-control-allow-origin']).toBeUndefined();
       expect(response.headers['access-control-allow-methods']).toBeUndefined();
+    });
+
+    it('should survive a Host header that is not a valid URL authority', async () => {
+      const statusLine = await new Promise<string>((resolve, reject) => {
+        const socket = net.connect(port, '127.0.0.1', () => {
+          socket.write(
+            `GET /health HTTP/1.1\r\nHost: a b\r\nAuthorization: Bearer ${TOKEN}\r\nConnection: close\r\n\r\n`,
+          );
+        });
+        let data = '';
+        socket.on('data', (chunk) => (data += chunk));
+        socket.on('close', () => resolve(data.split('\r\n')[0]));
+        socket.on('error', reject);
+      });
+      expect(statusLine).toBe('HTTP/1.1 200 OK');
+      expect((await makeRequest({ method: 'GET', path: '/health' })).statusCode).toBe(200);
     });
 
     it('should return 404 for unknown routes', async () => {
