@@ -42,8 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   harness offering 10 000 writes of new keys per second (values of tens of bytes): about 5 200
   acknowledged per second on RocksDB, the rest refused as `Write-behind capacity exceeded`.
   - **No write delay.** A write is due for the store as soon as it is buffered; the write delay
-    (never an environment variable) defaults to 0. When writes are due, flush passes run back to
-    back, each one engine commit of up to 1000 writes or 8 MiB.
+    (never an environment variable) defaults to 0. Each flush pass is one engine commit of up to
+    1000 writes or 8 MiB. A pass cut by one of those limits is followed by the next one at once;
+    after a pass that took every due write the flush task waits up to the flush interval, so
+    writes arriving meanwhile are stored together instead of in many small passes.
   - **`TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` defaults to `10`** (was `1000`) and is now the
     longest a buffered write waits while the flush task is idle. `0` refuses to start (the idle
     loop would spin). A value of `500` or more, with a non-zero `TOPGUN_WRITEBEHIND_CAPACITY`,
@@ -458,9 +460,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1000 buffered writes or 8 MiB of encoded values, whichever comes first, and stores them,
   together with how far the write-ahead log has been stored, in one store commit instead of
   one store call per write (on RocksDB not synced at once; see "When the store is synced"
-  above). While writes are still due, the next pass starts at once instead
-  of waiting for `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`, so a full buffer is emptied in a few
-  passes. What changes for whoever runs the server:
+  above). A pass that one of those limits cut is followed by the next one
+  without waiting for `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`, so a full buffer is emptied in a
+  few passes. What changes for whoever runs the server:
   - **One refused record no longer holds up the others.** When the storage refuses a commit of
     several writes, the server splits it in two halves and commits each, again and again, until
     the refused record is alone; every other write of the pass is stored in that pass, at a

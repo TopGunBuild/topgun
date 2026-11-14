@@ -56,13 +56,15 @@ pub struct WriteBehindConfig {
     /// clock; it exists for tests and benches that keep entries buffered.
     pub write_delay_ms: u64,
     /// The longest a buffered write waits while the flush task is idle, in
-    /// milliseconds (the idle linger). While writes are due, passes run back
-    /// to back and this does not apply.
+    /// milliseconds (the idle linger). A pass that a pass limit cut is
+    /// followed by the next one at once; after any other pass the flush task
+    /// waits this long, so writes arriving meanwhile go into one pass.
     ///
     /// At least [`MIN_FLUSH_INTERVAL_MS`]: `0` would make the idle loop spin.
-    /// Admission of new keys is bounded by about `capacity / (interval + pass
-    /// time)`, so a value of [`LEGACY_FLUSH_INTERVAL_WARN_MS`] or more, with a
-    /// non-zero capacity, logs a startup warning.
+    /// Admission of new keys is bounded by about `capacity / (interval + 2 ×
+    /// pass time)` (a key holds its place until the pass that took it is
+    /// stored), so a value of [`LEGACY_FLUSH_INTERVAL_WARN_MS`] or more, with
+    /// a non-zero capacity, logs a startup warning.
     pub flush_interval_ms: u64,
     /// Accepted and parsed, and currently without effect.
     ///

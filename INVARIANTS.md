@@ -1268,8 +1268,10 @@ weaker than a test.
      first. The rest are taken in pass order — those never refused, in write order, then those
      refused, the one whose time came longest ago first — and the commit is written in that
      order, the reserved entry at its own place among the refused ones. A pass never waits on
-     behalf of an entry. While entries are due and the store is neither held nor broken, passes
-     run back to back without the interval sleep. Below the limits a pass takes every due entry.
+     behalf of an entry. A pass whose selection a limit cut (`L` entries, or the 8 MiB cap with its
+     entry put back), that stored something while the store is neither held nor broken, is
+     followed by the next pass without the interval sleep; after any other pass the loop waits
+     the interval or an explicit flush. Below the limits a pass takes every due entry.
   3. **The store-wide hold.** A pass commits its entries in one store call. A refused commit of
      one entry refuses that entry alone (statement 2). A refused commit of two or more entries
      is split into two halves, committed one after the other in the same pass: when one half is
@@ -1316,8 +1318,11 @@ weaker than a test.
        accepted probes recurring — each accepted probe adds at most `2L − 1`; a bound over
        several flaps is **not proven** by a test.
      - *When the store returns at `T`, with no write after `T`:* every entry buffered at `T` is
-       in a pass that begins no later than `T + K + I + (⌈N_T / m⌉ − 1) · C_pass`, `N_T` =
-       entries buffered at `T` — `T + 5010 ms` while they fit in one pass. With writes after
+       in a pass that begins no later than `T + K + I + ⌈N_T / m⌉ · C_pass`, `N_T` =
+       entries buffered at `T` — `T + 5010 ms + C_pass` while they fit in one pass: the pass in
+       progress when the last of them becomes due may be followed by the interval, and every
+       later pass that leaves one behind was cut and is followed at once (a cut pass that
+       stores nothing, every entry refused at encoding, costs one more `I`). With writes after
        `T` the never-refused ones among them precede refused entries; the refused-entry bound
        below applies to those. `C_max` itself is **not bounded** by this store.
      - *Order.* Entries of one partition may be stored in any order; the WAL watermark and the
@@ -1330,7 +1335,11 @@ weaker than a test.
        already ahead, which keeps that key's place). `store_time` affects only this **order**:
        production passes the wall clock, which can step back, and after a backward step a later
        write can sort ahead of `H` and count in `Q_H`; whether `H` is due does not depend on it
-       (statement 2). During a hold, within `K + I` after it is due — 5010 ms.
+       (statement 2). A pass that begins after `t0` and does not take `H` was cut. In time,
+       outside holds: within `C_pass + I + (⌈(Q_H + 1) / m⌉ − 1) · C_pass` after `t0` while
+       every pass that does not take it stores something, and within
+       `⌈(Q_H + 1) / m⌉ · (C_pass + I)` in any case. During a hold, within `K + I` after it is
+       due — 5010 ms.
        Refused records do not enter `Q_H`: they take the reserved slot and leftover capacity
        only. For `v_max > 4 MiB` (`m` may be 0 in a pass whose reserved entry is large) the
        bound is **not proven**.
@@ -1384,7 +1393,8 @@ weaker than a test.
   commit), `settle_batch`, `commit_resolving_records`, `commit_bisect` (the halving, the
   both-halves rule), `start_hold`, the `split_to_singles` state of `RetrySchedule`,
   `requeue_refused`, `put_back`, `settle_stored`, `choose_probe`, `retry_backoff`,
-  `flush_loop` (passes back to back), `report_retries`; `PartitionQueue::best_due`, `take`;
+  `flush_loop` (the next pass at once only after a cut pass), `PassSelection::cut`,
+  `report_retries`; `PartitionQueue::best_due`, `take`;
   `DelayedEntry::pass_order`, `inherit_from`; `PartitionQueue::retire_into_queued` (the retry
   state of the retired entry).
 - **Enforcing test:** `write_behind.rs::a_refused_entry_stays_buffered_and_holds_the_flushed_watermark`,
@@ -1437,6 +1447,9 @@ weaker than a test.
   `t411_default_config_stores_a_write_within_two_flush_intervals`,
   `t411_a_write_ahead_of_the_wall_clock_is_due_at_once`,
   `t411_a_pass_that_stores_nothing_ends_the_run`,
+  `t411_a_pass_cut_by_the_byte_cap_runs_on`,
+  `t411_a_pass_cut_by_the_entry_cap_runs_on`,
+  `t411_an_uncut_pass_waits_for_the_interval`,
   `t411_oldest_entry_age_counts_a_refused_entry` and
   `t411_oldest_entry_age_moves_during_a_hold`. All run in CI (`cargo test`).
   Which test holds which bound: one refused record, b04 (n = 1000, at most 21 writes); the
