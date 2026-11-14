@@ -7,8 +7,10 @@
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createServer, type Server as HTTPServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { isIP } from 'node:net';
 import { logger } from '../logger';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { TopGunMCPServer } from '../TopGunMCPServer';
 
 /**
@@ -22,14 +24,28 @@ export interface HTTPServerConfig {
   port?: number;
 
   /**
-   * Host to bind to
-   * @default '0.0.0.0'
+   * Host to bind to: an IP literal. A non-loopback address is refused unless
+   * `allowPublicBind` is true.
+   * @default '127.0.0.1'
    */
   host?: string;
 
   /**
-   * CORS allowed origins
-   * @default ['*']
+   * Allow binding a non-loopback `host`, which makes the transport reachable from the network.
+   * @default false
+   */
+  allowPublicBind?: boolean;
+
+  /**
+   * Secret every request must present as `Authorization: Bearer <token>`: at least 32
+   * characters of the RFC 6750 b64token alphabet.
+   */
+  bearerToken: string;
+
+  /**
+   * Origins allowed to call the transport from a browser, each a serialized origin such as
+   * `https://app.example.com`. A request whose `Origin` is not listed gets 403; `*` is refused.
+   * @default []
    */
   corsOrigins?: string[];
 
@@ -58,20 +74,118 @@ export interface HTTPServerConfig {
 interface ResolvedHTTPConfig {
   port: number;
   host: string;
+  // Only the digest is kept, so the secret itself is not held by the transport.
+  bearerDigest: Buffer;
   corsOrigins: string[];
   mcpPath: string;
   eventPath: string;
   debug: boolean;
 }
 
-const DEFAULT_HTTP_CONFIG: ResolvedHTTPConfig = {
+const DEFAULT_HTTP_CONFIG = {
   port: 3000,
-  host: '0.0.0.0',
-  corsOrigins: ['*'],
+  host: '127.0.0.1',
   mcpPath: '/mcp',
   eventPath: '/mcp/events',
   debug: false,
 };
+
+const BEARER_TOKEN_PATTERN = /^[A-Za-z0-9\-._~+/]+=*$/;
+const BEARER_TOKEN_MIN_LENGTH = 32;
+
+/**
+ * A setting the transport refuses to start with. The message starts with `field`, so a caller
+ * that names the setting differently (the CLI) can substitute its own name.
+ */
+export class HTTPTransportConfigError extends Error {
+  constructor(
+    readonly field: 'bearerToken' | 'host' | 'corsOrigins',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'HTTPTransportConfigError';
+  }
+}
+
+/**
+ * True only for an IPv4 literal in 127.0.0.0/8 and the literal `::1`. Every other spelling,
+ * IPv4-mapped IPv6 included, counts as non-loopback so that an unusual spelling never widens
+ * the bind silently.
+ */
+export function isLoopbackHost(host: string): boolean {
+  // net.isIP accepts no leading zeros in IPv4, so the prefix decides the first octet.
+  return host === '::1' || (isIP(host) === 4 && host.startsWith('127.'));
+}
+
+function sha256(value: string): Buffer {
+  return createHash('sha256').update(value).digest();
+}
+
+function resolveConfig(config: HTTPServerConfig): ResolvedHTTPConfig {
+  const token: unknown = config.bearerToken;
+  if (
+    typeof token !== 'string' ||
+    token.length < BEARER_TOKEN_MIN_LENGTH ||
+    !BEARER_TOKEN_PATTERN.test(token)
+  ) {
+    throw new HTTPTransportConfigError(
+      'bearerToken',
+      `bearerToken must be at least ${BEARER_TOKEN_MIN_LENGTH} characters of [A-Za-z0-9-._~+/] with optional trailing '='; generate one with: openssl rand -base64 32`,
+    );
+  }
+
+  const host = config.host ?? DEFAULT_HTTP_CONFIG.host;
+  // A name may resolve to a non-loopback address, so only a literal can be judged before the bind.
+  if (isIP(host) === 0) {
+    throw new HTTPTransportConfigError(
+      'host',
+      `host must be an IP address (e.g. 127.0.0.1 or ::1), got '${host}'`,
+    );
+  }
+  if (!isLoopbackHost(host) && config.allowPublicBind !== true) {
+    throw new HTTPTransportConfigError(
+      'host',
+      `host ${host} is not a loopback address; the MCP HTTP transport binds loopback only unless allowPublicBind is set`,
+    );
+  }
+
+  const corsOrigins = config.corsOrigins ?? [];
+  for (const entry of corsOrigins) {
+    if (entry === '*') {
+      throw new HTTPTransportConfigError(
+        'corsOrigins',
+        "corsOrigins must not contain '*': every request carries a bearer credential",
+      );
+    }
+    if (!isSerializedOrigin(entry)) {
+      throw new HTTPTransportConfigError(
+        'corsOrigins',
+        `corsOrigins entries must be serialized origins (scheme://host[:port], no path or trailing slash), got '${String(entry)}'`,
+      );
+    }
+  }
+
+  return {
+    port: config.port ?? DEFAULT_HTTP_CONFIG.port,
+    host,
+    bearerDigest: sha256(token),
+    corsOrigins: [...corsOrigins],
+    mcpPath: config.mcpPath ?? DEFAULT_HTTP_CONFIG.mcpPath,
+    eventPath: config.eventPath ?? DEFAULT_HTTP_CONFIG.eventPath,
+    debug: config.debug ?? DEFAULT_HTTP_CONFIG.debug,
+  };
+}
+
+function isSerializedOrigin(entry: unknown): boolean {
+  if (typeof entry !== 'string') return false;
+  try {
+    const origin = new URL(entry).origin;
+    // An opaque origin serializes as 'null' and never matches a browser's Origin safely.
+    return origin !== 'null' && origin === entry;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * HTTP Transport wrapper for MCP Server
@@ -82,15 +196,13 @@ export class HTTPTransport {
   private isRunning = false;
   private activeSessions = new Map<string, SSEServerTransport>();
 
-  constructor(config: HTTPServerConfig = {}) {
-    this.config = {
-      port: config.port ?? DEFAULT_HTTP_CONFIG.port,
-      host: config.host ?? DEFAULT_HTTP_CONFIG.host,
-      corsOrigins: config.corsOrigins ?? DEFAULT_HTTP_CONFIG.corsOrigins,
-      mcpPath: config.mcpPath ?? DEFAULT_HTTP_CONFIG.mcpPath,
-      eventPath: config.eventPath ?? DEFAULT_HTTP_CONFIG.eventPath,
-      debug: config.debug ?? DEFAULT_HTTP_CONFIG.debug,
-    };
+  /**
+   * @throws {HTTPTransportConfigError} on a missing or malformed `bearerToken`, a hostname or a
+   * non-loopback `host` without `allowPublicBind`, and a `corsOrigins` entry that is `*` or not
+   * a serialized origin.
+   */
+  constructor(config: HTTPServerConfig) {
+    this.config = resolveConfig(config);
   }
 
   /**
@@ -154,18 +266,37 @@ export class HTTPTransport {
     res: ServerResponse,
     mcpServer: TopGunMCPServer,
   ): Promise<void> {
-    // Set CORS headers
-    this.setCorsHeaders(req, res);
+    // The gate runs before routing, before the body is read and before an SSE session is
+    // connected, so a refused request runs nothing.
+    res.setHeader('Vary', 'Origin');
+    const origin = req.headers.origin;
+    if (origin !== undefined) {
+      if (!this.config.corsOrigins.includes(origin)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'origin not allowed' }));
+        return;
+      }
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.setHeader('Access-Control-Max-Age', '86400');
+    }
 
-    // Handle preflight
+    // Browsers send no credentials on a preflight, so it is answered without the bearer check.
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
       return;
     }
 
-    const url = new URL(req.url || '/', `http://${req.headers.host}`);
-    const pathname = url.pathname;
+    if (!this.isAuthorized(req.headers.authorization)) {
+      res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+
+    // A fixed base: only the path is used, and a malformed Host header must not make URL parsing throw.
+    const pathname = new URL(req.url || '/', 'http://localhost').pathname;
 
     this.log(`${req.method} ${pathname}`);
 
@@ -302,20 +433,13 @@ export class HTTPTransport {
   }
 
   /**
-   * Set CORS headers
+   * `Authorization: Bearer <token>` with the scheme matched case-insensitively (RFC 7235).
+   * Both sides are hashed so timingSafeEqual compares equal lengths whatever the caller sent.
    */
-  private setCorsHeaders(req: IncomingMessage, res: ServerResponse): void {
-    const origin = req.headers.origin || '*';
-    const allowedOrigin = this.config.corsOrigins.includes('*')
-      ? '*'
-      : this.config.corsOrigins.includes(origin)
-        ? origin
-        : this.config.corsOrigins[0];
-
-    res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    res.setHeader('Access-Control-Max-Age', '86400');
+  private isAuthorized(header: string | undefined): boolean {
+    const match = header === undefined ? null : /^(\S+) +(\S+)$/.exec(header);
+    if (!match || match[1].toLowerCase() !== 'bearer') return false;
+    return timingSafeEqual(sha256(match[2]), this.config.bearerDigest);
   }
 
   /**
@@ -325,6 +449,14 @@ export class HTTPTransport {
     if (this.config.debug) {
       logger.debug({ data, context: 'HTTPTransport' }, message);
     }
+  }
+
+  /**
+   * The bound address, or null before start() and after stop().
+   */
+  address(): AddressInfo | null {
+    const bound = this.httpServer?.address();
+    return bound && typeof bound === 'object' ? bound : null;
   }
 
   /**
@@ -347,7 +479,7 @@ export class HTTPTransport {
  */
 export async function createHTTPServer(
   mcpServer: TopGunMCPServer,
-  config?: HTTPServerConfig,
+  config: HTTPServerConfig,
 ): Promise<HTTPTransport> {
   const transport = new HTTPTransport(config);
   await transport.start(mcpServer);

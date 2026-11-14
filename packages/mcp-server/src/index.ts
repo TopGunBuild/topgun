@@ -27,7 +27,12 @@ export type {
 } from './types';
 
 // Transport
-export { HTTPTransport, createHTTPServer } from './transport';
+export {
+  HTTPTransport,
+  HTTPTransportConfigError,
+  createHTTPServer,
+  isLoopbackHost,
+} from './transport';
 export type { HTTPServerConfig } from './transport';
 
 // Tools (for advanced usage)
