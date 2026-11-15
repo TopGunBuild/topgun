@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Changed (breaking for an undocumented option): a live query refuses `groupBy` and
+  `aggregations`.** A live query receives per-record changes, which mixed raw records into its
+  grouped rows after the first write.
+  - `client.query()` (and so `useQuery` and `new QueryHandle(...)`) throws a `QueryError` with
+    `code: 'QUERY_LIVE_AGGREGATE_UNSUPPORTED'` for a filter with a non-empty `groupBy` or
+    `aggregations`; nothing is sent. `QueryError` and `QueryErrorCode` are exported from
+    `@topgunbuild/client`.
+  - The server answers a live `QUERY_SUB` with a non-empty `groupBy` or `aggregations` with a
+    `QUERY_RESP` carrying `code: 'QUERY_LIVE_AGGREGATE_UNSUPPORTED'` and no rows, and registers
+    nothing.
+  - Grouped results stay available from `queryOnce()` and `queryOncePaged()`. They, and the page
+    handle of `loadMore()`, now send `snapshotOnly: true` in their `QUERY_SUB`, and this server does
+    not register them as live subscriptions.
+  - Compatibility, read from source and not tested: a client older than this release that calls
+    `queryOnce` with `groupBy` against this server receives an empty result, because it ignores
+    the refusal code — upgrade the client. An older server ignores `snapshotOnly` and answers a
+    one-shot query as before.
+
 - **Security (breaking for `topgun-mcp --http` and `HTTPTransport` users): the MCP HTTP transport
   requires a bearer secret, binds loopback by default and refuses cross-origin requests.**
   - `topgun-mcp --http` now binds `127.0.0.1` (it bound `0.0.0.0`) and requires
