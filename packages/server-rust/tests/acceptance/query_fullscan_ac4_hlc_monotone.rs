@@ -118,6 +118,7 @@ async fn full_scan_accepts_all_records_with_monotone_hlc() {
             map_name: map_name.to_string(),
             query: Query::default(), // full-scan: no predicate, sort, or limit
             fields: None,
+            snapshot_only: false,
         },
     };
     let op = Operation::QuerySubscribe { ctx, payload };

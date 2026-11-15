@@ -95,6 +95,7 @@ async fn run_subscribe(
             map_name: map_name.to_string(),
             query,
             fields: None,
+            snapshot_only: false,
         },
     };
     let op = Operation::QuerySubscribe { ctx, payload };

@@ -47,6 +47,7 @@ const MESSAGE_FIXTURES: &[&str] = &[
     // Query domain
     "QUERY_SUB",
     "QUERY_SUB_GROUPBY_AGG",
+    "QUERY_SUB_SNAPSHOT_ONLY",
     "QUERY_UNSUB",
     "QUERY_RESP",
     "QUERY_RESP_AGG",
@@ -198,6 +199,24 @@ fn get_value_field<'a>(value: &'a rmpv::Value, field: &str) -> Option<&'a rmpv::
         .iter()
         .find(|(k, _)| k.as_str() == Some(field))
         .map(|(_, v)| v)
+}
+
+#[test]
+fn query_sub_snapshot_only_decodes_flag() {
+    let bytes = read_fixture("QUERY_SUB_SNAPSHOT_ONLY");
+    let msg: Message = rmp_serde::from_slice(&bytes).expect("decode QUERY_SUB_SNAPSHOT_ONLY");
+    let Message::QuerySub(sub) = msg else {
+        panic!("expected QuerySub message");
+    };
+    assert!(sub.payload.snapshot_only);
+
+    // The fixture without the key (an earlier client's one-shot) decodes as live.
+    let bytes = read_fixture("QUERY_SUB");
+    let msg: Message = rmp_serde::from_slice(&bytes).expect("decode QUERY_SUB");
+    let Message::QuerySub(sub) = msg else {
+        panic!("expected QuerySub message");
+    };
+    assert!(!sub.payload.snapshot_only);
 }
 
 #[test]

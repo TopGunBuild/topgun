@@ -37,7 +37,7 @@ pub enum CursorStatus {
 /// Payload for a query subscription request.
 ///
 /// Maps to the `payload` of `QuerySubMessageSchema` in `query-schemas.ts`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuerySubPayload {
     /// Unique identifier for this subscription.
@@ -49,6 +49,11 @@ pub struct QuerySubPayload {
     /// Optional list of field names to include in each result (projection).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub fields: Option<Vec<String>>,
+    /// `true` for a one-shot query: the server answers the snapshot and registers
+    /// no live subscription. Absent means live, which every earlier client sends,
+    /// so `false` is omitted and existing `QUERY_SUB` bytes stay unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub snapshot_only: bool,
 }
 
 /// Query subscription request message.
@@ -287,6 +292,7 @@ mod tests {
                     aggregations: None,
                 },
                 fields: None,
+                snapshot_only: false,
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -412,6 +418,7 @@ mod tests {
                     aggregations: None,
                 },
                 fields: None,
+                snapshot_only: false,
             },
         };
         let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
@@ -461,9 +468,44 @@ mod tests {
                     aggregations: None,
                 },
                 fields: Some(vec!["name".to_string(), "email".to_string()]),
+                snapshot_only: false,
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
+    }
+
+    #[test]
+    fn query_sub_snapshot_only_wire_key() {
+        // The payload's wire value of `snapshotOnly`, `None` when the key is absent.
+        fn wire_flag(payload: &QuerySubPayload) -> Option<rmpv::Value> {
+            let bytes = rmp_serde::to_vec_named(payload).expect("serialize");
+            let val: rmpv::Value = rmp_serde::from_slice(&bytes).expect("decode");
+            val.as_map()
+                .expect("map")
+                .iter()
+                .find(|(k, _)| k.as_str() == Some("snapshotOnly"))
+                .map(|(_, v)| v.clone())
+        }
+
+        // `Default` is derived, so a payload can be built from it; absent means live.
+        let live = QuerySubPayload {
+            query_id: "q-live".to_string(),
+            map_name: "users".to_string(),
+            ..QuerySubPayload::default()
+        };
+        assert_eq!(
+            wire_flag(&live),
+            None,
+            "false must be omitted from the wire"
+        );
+        assert!(!roundtrip_named(&live).snapshot_only);
+
+        let one_shot = QuerySubPayload {
+            snapshot_only: true,
+            ..live
+        };
+        assert_eq!(wire_flag(&one_shot), Some(rmpv::Value::Boolean(true)));
+        assert!(roundtrip_named(&one_shot).snapshot_only);
     }
 
     #[test]
@@ -482,6 +524,7 @@ mod tests {
                     aggregations: None,
                 },
                 fields: None,
+                snapshot_only: false,
             },
         };
         let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");

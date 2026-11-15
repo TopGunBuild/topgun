@@ -355,6 +355,10 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    *
    * When TSchema is concrete, passing a schema key narrows the QueryHandle
    * value type to TSchema[K]. The untyped overload preserves back-compat.
+   *
+   * @throws QueryError (`QUERY_LIVE_AGGREGATE_UNSUPPORTED`) when the filter has a
+   *   non-empty `groupBy` or `aggregations`; run such a query with `queryOnce` or
+   *   `queryOncePaged`.
    */
   public query<K extends keyof TSchema & string>(
     mapName: K,
@@ -412,7 +416,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     const allowLocal = opts?.allowLocal ?? false;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- handle storage is untyped internally; result type flows from the selected overload
-    const handle = new QueryHandle<any>(this.syncEngine, mapName, filter);
+    const handle = new QueryHandle<any>(this.syncEngine, mapName, filter, { snapshotOnly: true });
 
     // subscribe() both activates the server subscription (first listener triggers
     // subscribeToQuery) and feeds us the latest sorted results; we keep the most
@@ -490,7 +494,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     const allowLocal = opts?.allowLocal ?? false;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- handle storage is untyped internally; result type flows from the selected overload
-    const handle = new QueryHandle<any>(this.syncEngine, mapName, filter);
+    const handle = new QueryHandle<any>(this.syncEngine, mapName, filter, { snapshotOnly: true });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- latest sorted snapshot for the active query; element type narrowed by the selected overload
     let latest: QueryResultItem<any>[] = [];

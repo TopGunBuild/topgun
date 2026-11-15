@@ -2740,6 +2740,7 @@ mod tests {
                 map_name: map_name.to_string(),
                 query,
                 fields: None,
+                snapshot_only: false,
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
@@ -2792,6 +2793,83 @@ mod tests {
             }
         }
         live
+    }
+
+    /// A live grouped subscription is refused on the node that receives it and
+    /// registers nothing, so after a fault elsewhere in the cluster (a partition
+    /// and heal of another node pair) the node's writes reach no fan-out for it —
+    /// the `CrdtService` broadcast included.
+    ///
+    /// VACUITY GUARD: without the refusal the subscription registers and every
+    /// matching write below sends a per-record `QUERY_UPDATE` on `rx`.
+    #[tokio::test]
+    #[cfg(feature = "simulation")]
+    async fn live_grouped_subscription_is_refused_and_stays_silent_across_a_fault() {
+        use crate::service::domain::query::QUERY_LIVE_AGGREGATE_UNSUPPORTED;
+        use crate::service::operation::OperationResponse;
+
+        let mut cluster = SimCluster::new(3, 11);
+        cluster.start().expect("cluster start");
+
+        let map_name = "grouped_scores";
+        let query_id = "grouped-live";
+        set_membership(&cluster.nodes[0], &["sim-node-0"]);
+        assign_partitions(&cluster.nodes[0], &|_| "sim-node-0".to_string());
+
+        let node = &mut cluster.nodes[0];
+        let (handle, mut rx) = node
+            .connection_registry
+            .register(ConnectionKind::Client, &ConnectionConfig::default());
+        let ts = Timestamp {
+            millis: 0,
+            counter: 0,
+            node_id: node.node_id.clone(),
+        };
+        let mut ctx = OperationContext::new(0, service_names::QUERY, ts, 5000);
+        ctx.connection_id = Some(handle.id);
+        let op = Operation::QuerySubscribe {
+            ctx,
+            payload: topgun_core::messages::QuerySubMessage {
+                payload: topgun_core::messages::query::QuerySubPayload {
+                    query_id: query_id.to_string(),
+                    map_name: map_name.to_string(),
+                    query: Query {
+                        group_by: Some(vec!["score".to_string()]),
+                        ..Query::default()
+                    },
+                    ..Default::default()
+                },
+            },
+        };
+        let resp = Service::call(&mut node.operation_router, op)
+            .await
+            .expect("QuerySubscribe answers");
+        let OperationResponse::Message(msg) = resp else {
+            panic!("expected a QueryResp message");
+        };
+        let topgun_core::messages::Message::QueryResp(resp) = *msg else {
+            panic!("expected a QueryResp message");
+        };
+        assert_eq!(
+            resp.payload.code.as_deref(),
+            Some(QUERY_LIVE_AGGREGATE_UNSUPPORTED)
+        );
+        assert!(resp.payload.results.is_empty());
+
+        cluster.inject_partition(&[1], &[2]);
+        cluster.heal_partition();
+
+        for (key, score) in [("rec-a", 10), ("rec-b", 20), ("rec-c", 5)] {
+            cluster
+                .write(0, map_name, key, score_record(score))
+                .await
+                .expect("write");
+        }
+        let deltas = drain_live_updates(&mut rx, query_id);
+        assert!(
+            deltas.is_empty(),
+            "a refused query must receive no QUERY_UPDATE: {deltas:?}"
+        );
     }
 
     fn live_top_n_query() -> Query {

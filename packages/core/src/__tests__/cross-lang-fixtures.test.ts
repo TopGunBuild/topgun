@@ -230,6 +230,20 @@ describe('Cross-language fixture generation', () => {
     });
   });
 
+  test('QUERY_SUB_SNAPSHOT_ONLY', () => {
+    // A one-shot query: `snapshotOnly: true` tells the server to answer the snapshot
+    // and register no live subscription. Locks the wire key name across TS <-> Rust.
+    writeFixture('QUERY_SUB_SNAPSHOT_ONLY', {
+      type: 'QUERY_SUB',
+      payload: {
+        queryId: 'q-once-1',
+        mapName: 'orders',
+        query: { groupBy: ['category'] },
+        snapshotOnly: true,
+      },
+    });
+  });
+
   test('QUERY_RESP_AGG', () => {
     // Aggregate result row with an integer-valued SUM. Locks that a SUM over integer
     // fields round-trips as a MsgPack integer (not float64) — the Rust side asserts the

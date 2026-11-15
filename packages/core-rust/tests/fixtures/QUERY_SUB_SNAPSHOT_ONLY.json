@@ -1,0 +1,13 @@
+{
+  "type": "QUERY_SUB",
+  "payload": {
+    "queryId": "q-once-1",
+    "mapName": "orders",
+    "query": {
+      "groupBy": [
+        "category"
+      ]
+    },
+    "snapshotOnly": true
+  }
+}

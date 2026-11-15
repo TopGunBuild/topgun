@@ -2,6 +2,8 @@ import { renderHook, act } from '@testing-library/react';
 import { useQuery } from '../hooks/useQuery';
 import { TopGunProvider } from '../TopGunProvider';
 import { TopGunClient } from '@topgunbuild/client';
+// Imported by path: the client's index pulls in an ESM-only dependency this suite does not transform.
+import { QueryError } from '../../../client/src/errors/QueryError';
 import React from 'react';
 
 // Mock TopGunClient
@@ -72,6 +74,24 @@ describe('useQuery', () => {
     const { result } = renderHook(() => useQuery('testMap', {}), { wrapper });
 
     expect(result.current.error).toEqual(new Error('Subscription failed'));
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('surfaces the QueryError of a live query with groupBy', () => {
+    // client.query() throws this from the QueryHandle constructor for a live grouped filter.
+    mockQuery.mockImplementationOnce((mapName: string) => {
+      throw new QueryError(
+        'QUERY_LIVE_AGGREGATE_UNSUPPORTED: run it as a one-shot query (queryOnce / queryOncePaged)',
+        'QUERY_LIVE_AGGREGATE_UNSUPPORTED',
+        mapName,
+      );
+    });
+
+    const { result } = renderHook(() => useQuery('m', { groupBy: ['c'] }), { wrapper });
+
+    expect(result.current.error).toBeInstanceOf(QueryError);
+    expect((result.current.error as QueryError).code).toBe('QUERY_LIVE_AGGREGATE_UNSUPPORTED');
+    expect(result.current.data).toEqual([]);
     expect(result.current.loading).toBe(false);
   });
 

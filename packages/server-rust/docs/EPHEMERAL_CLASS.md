@@ -1235,7 +1235,7 @@ fifth method is needed: the `EPHEMERAL_WRITE` dispatcher maps a singleton's erro
 
 | Item | Carrier | Values | Disposition | Emitted when | Step |
 |---|---|---|---|---|---|
-| `QUERY_LIVE_AGGREGATE_UNSUPPORTED` | `QUERY_RESP.code` (a string code, like `QUERY_UNBOUNDED_SORT`; `core-rust/src/messages/query.rs:107-134`) | the string | refusal of the subscription | for every live subscription carrying `group_by` or `aggregations` (TODO-971); after 959-11 only for functions outside COUNT/SUM/AVG (MIN, MAX) | TODO-971; narrowed by 959-11 |
+| `QUERY_LIVE_AGGREGATE_UNSUPPORTED` | `QUERY_RESP.code` (a string code, like `QUERY_UNBOUNDED_SORT`; `core-rust/src/messages/query.rs:112-139`) | the string | refusal of the subscription | for every live subscription (a `QUERY_SUB` without `snapshotOnly: true`) carrying a non-empty `group_by` or non-empty `aggregations` (TODO-971); after 959-11 only for functions outside COUNT/SUM/AVG (MIN, MAX) | TODO-971; narrowed by 959-11 |
 
 MIN/MAX live aggregates are deferred (TODO-971).
 
