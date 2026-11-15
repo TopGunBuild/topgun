@@ -981,6 +981,7 @@ mod tests {
                 map_name: "users".to_string(),
                 query: topgun_core::messages::base::Query::default(),
                 fields: None,
+                snapshot_only: false,
             },
         });
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
@@ -1017,6 +1018,7 @@ mod tests {
                     ..topgun_core::messages::base::Query::default()
                 },
                 fields: None,
+                snapshot_only: false,
             },
         });
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
@@ -1041,6 +1043,7 @@ mod tests {
                     ..topgun_core::messages::base::Query::default()
                 },
                 fields: None,
+                snapshot_only: false,
             },
         });
         let op = svc.classify(msg_none, None, CallerOrigin::Client).unwrap();
@@ -1060,6 +1063,7 @@ mod tests {
                     ..topgun_core::messages::base::Query::default()
                 },
                 fields: None,
+                snapshot_only: false,
             },
         });
         let op = svc.classify(msg_empty, None, CallerOrigin::Client).unwrap();
@@ -1092,6 +1096,7 @@ mod tests {
                     ..topgun_core::messages::base::Query::default()
                 },
                 fields: None,
+                snapshot_only: false,
             },
         });
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
@@ -1115,6 +1120,7 @@ mod tests {
                     ..topgun_core::messages::base::Query::default()
                 },
                 fields: None,
+                snapshot_only: false,
             },
         });
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
@@ -1138,6 +1144,7 @@ mod tests {
                     ..topgun_core::messages::base::Query::default()
                 },
                 fields: None,
+                snapshot_only: false,
             },
         });
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();

@@ -1614,6 +1614,7 @@ mod tests {
                             map_name: map_name.clone(),
                             query: base::Query::default(),
                             fields: None,
+                            snapshot_only: false,
                         },
                     },
                 },

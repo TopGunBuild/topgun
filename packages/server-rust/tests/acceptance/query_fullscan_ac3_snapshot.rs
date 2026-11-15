@@ -76,6 +76,7 @@ async fn run_scan(
             map_name: map_name.to_string(),
             query: Query::default(),
             fields: None,
+            snapshot_only: false,
         },
     };
     let op = Operation::QuerySubscribe { ctx, payload };

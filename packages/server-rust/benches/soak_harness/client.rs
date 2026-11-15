@@ -269,6 +269,7 @@ impl SoakClient {
                 map_name: map.to_string(),
                 query: Query::default(),
                 fields: None,
+                snapshot_only: false,
             },
         });
         send_encoded(&mut self.ws, &sub).await?;

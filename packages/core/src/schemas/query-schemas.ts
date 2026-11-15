@@ -10,6 +10,9 @@ export const QuerySubMessageSchema = z.object({
     mapName: z.string(),
     query: QuerySchema,
     fields: z.array(z.string()).optional(),
+    // A one-shot query: the server answers the snapshot and registers no live
+    // subscription. Absent means live.
+    snapshotOnly: z.boolean().optional(),
   }),
 });
 export type QuerySubMessage = z.infer<typeof QuerySubMessageSchema>;
