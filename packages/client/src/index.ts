@@ -169,6 +169,8 @@ export type { QueryOnceUnsettledReason } from './errors/QueryOnceError';
 
 // Server SQL query error (carries a machine-distinguishable `code`, e.g. FEATURE_DISABLED)
 export { SqlError } from './errors/SqlError';
+export { QueryError } from './errors/QueryError';
+export type { QueryErrorCode } from './errors/QueryError';
 export type { SqlErrorCode } from './errors/SqlError';
 
 // Auth provider exports

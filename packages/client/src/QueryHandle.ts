@@ -3,6 +3,7 @@ import { ChangeTracker, ChangeEvent } from './ChangeTracker';
 import { logger } from './utils/logger';
 import type { Aggregation, PredicateNode } from '@topgunbuild/core';
 import type { RecordSyncState } from './RecordSyncState';
+import { QueryError } from './errors/QueryError';
 
 export interface QueryFilter {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- equality filters compare field values of unknown type; narrowing would require a generic on QueryFilter
@@ -14,12 +15,16 @@ export interface QueryFilter {
   cursor?: string;
   /** Optional field projection — only these fields will be returned by the server */
   fields?: string[];
-  /** GROUP BY columns. Results carry one row per group with `__count` and any requested aggregate keys. */
+  /**
+   * GROUP BY columns. Results carry one row per group with `__count` and any requested aggregate keys.
+   * Only `queryOnce` / `queryOncePaged` accept it; a live `query()` throws `QueryError`.
+   */
   groupBy?: string[];
   /**
    * Field aggregations to compute per group (alongside the implicit `__count`).
    * Each requested `{ func, field }` surfaces as a `__<func>_<field>` key on the result row
    * (e.g. `{ func: 'sum', field: 'price' }` → `__sum_price`). Unrequested functions are not emitted.
+   * Only `queryOnce` / `queryOncePaged` accept it; a live `query()` throws `QueryError`.
    */
   aggregations?: Aggregation[];
 }
@@ -110,7 +115,30 @@ export class QueryHandle<T> {
   /** Merkle root hash from last server QUERY_RESP — used for delta reconnect */
   public merkleRootHash: number = 0;
 
-  constructor(syncEngine: SyncEngine, mapName: string, filter: QueryFilter = {}) {
+  // A one-shot handle (subscribe → settle → unsubscribe): the server answers its
+  // snapshot and registers no live subscription for it.
+  private readonly snapshotOnly: boolean;
+
+  /**
+   * @param options - @internal `snapshotOnly` marks a one-shot handle; set only by
+   *   `queryOnce`, `queryOncePaged` and `loadMore`.
+   * @throws QueryError when a live handle carries a non-empty `groupBy` or
+   *   `aggregations`: per-record live updates cannot keep grouped rows correct.
+   */
+  constructor(
+    syncEngine: SyncEngine,
+    mapName: string,
+    filter: QueryFilter = {},
+    options?: { snapshotOnly?: boolean },
+  ) {
+    this.snapshotOnly = options?.snapshotOnly === true;
+    if (!this.snapshotOnly && (filter.groupBy?.length || filter.aggregations?.length)) {
+      throw new QueryError(
+        `QUERY_LIVE_AGGREGATE_UNSUPPORTED: a live query on map '${mapName}' cannot carry groupBy or aggregations; run it as a one-shot query (queryOnce / queryOncePaged)`,
+        'QUERY_LIVE_AGGREGATE_UNSUPPORTED',
+        mapName,
+      );
+    }
     this.id = crypto.randomUUID();
     this.syncEngine = syncEngine;
     this.mapName = mapName;
@@ -481,6 +509,11 @@ export class QueryHandle<T> {
     return this.filter;
   }
 
+  /** @internal Whether this is a one-shot handle the server must not register. */
+  public isSnapshotOnly(): boolean {
+    return this.snapshotOnly;
+  }
+
   public getMapName(): string {
     return this.mapName;
   }
@@ -534,10 +567,12 @@ export class QueryHandle<T> {
     try {
       // Create a temporary one-shot handle with the next cursor, exactly
       // mirroring the queryOnce pattern: subscribe → settle → unsubscribe.
-      const tempHandle = new QueryHandle<T>(this.syncEngine, this.mapName, {
-        ...this.filter,
-        cursor: nextCursor,
-      });
+      const tempHandle = new QueryHandle<T>(
+        this.syncEngine,
+        this.mapName,
+        { ...this.filter, cursor: nextCursor },
+        { snapshotOnly: true },
+      );
 
       const pageItems: { key: string; value: T }[] = [];
 

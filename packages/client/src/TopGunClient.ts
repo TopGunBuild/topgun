@@ -412,7 +412,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     const allowLocal = opts?.allowLocal ?? false;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- handle storage is untyped internally; result type flows from the selected overload
-    const handle = new QueryHandle<any>(this.syncEngine, mapName, filter);
+    const handle = new QueryHandle<any>(this.syncEngine, mapName, filter, { snapshotOnly: true });
 
     // subscribe() both activates the server subscription (first listener triggers
     // subscribeToQuery) and feeds us the latest sorted results; we keep the most
@@ -490,7 +490,7 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     const allowLocal = opts?.allowLocal ?? false;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- handle storage is untyped internally; result type flows from the selected overload
-    const handle = new QueryHandle<any>(this.syncEngine, mapName, filter);
+    const handle = new QueryHandle<any>(this.syncEngine, mapName, filter, { snapshotOnly: true });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- latest sorted snapshot for the active query; element type narrowed by the selected overload
     let latest: QueryResultItem<any>[] = [];

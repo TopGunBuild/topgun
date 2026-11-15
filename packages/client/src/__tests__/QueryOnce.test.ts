@@ -2,6 +2,8 @@ import { TopGunClient } from '../TopGunClient';
 import { QueryHandle } from '../QueryHandle';
 import { SyncState } from '../SyncState';
 import { QueryOnceUnsettledError, QueryOnceLocalError } from '../errors/QueryOnceError';
+import { QueryError } from '../errors/QueryError';
+import { QueryManager } from '../sync/QueryManager';
 import type { QueryOncePagedResult } from '../TopGunClient';
 import type { IStorageAdapter, OpLogEntry } from '../IStorageAdapter';
 
@@ -383,5 +385,114 @@ describe('TopGunClient.queryOncePaged', () => {
 
       await expect(promise).rejects.toBeInstanceOf(QueryOnceLocalError);
     });
+  });
+});
+
+/**
+ * A one-shot handle (queryOnce, queryOncePaged, loadMore's page handle) is sent
+ * with `snapshotOnly: true` so the server registers no live subscription for it;
+ * a live handle's payload is unchanged, and a live handle cannot carry
+ * groupBy / aggregations at all.
+ */
+describe('snapshot-only one-shot queries', () => {
+  /** A client whose engine double routes subscriptions through a real QueryManager. */
+  function makeWiredClient(): {
+    client: TopGunClient;
+    engine: SyncEngineDouble;
+    sent: jest.Mock;
+  } {
+    const { client, engine } = makeClient(SyncState.CONNECTED);
+    const sent = jest.fn(() => true);
+    const manager = new QueryManager({
+      storageAdapter: new MemoryStorageAdapter(),
+      sendMessage: sent,
+      isAuthenticated: () => true,
+    });
+    const capture = engine.subscribeToQuery.getMockImplementation()!;
+    engine.subscribeToQuery.mockImplementation((handle: QueryHandle<unknown>) => {
+      capture(handle);
+      manager.subscribeToQuery(handle);
+    });
+    return { client, engine, sent };
+  }
+
+  function querySubPayloads(sent: jest.Mock): Record<string, unknown>[] {
+    return sent.mock.calls
+      .map(([message]) => message as { type: string; payload: Record<string, unknown> })
+      .filter((message) => message.type === 'QUERY_SUB')
+      .map((message) => message.payload);
+  }
+
+  const grouped = {
+    groupBy: ['category'],
+    aggregations: [{ func: 'sum' as const, field: 'price' }],
+  };
+
+  test('grouped queryOnce sends snapshotOnly and resolves with the server rows', async () => {
+    const { client, engine, sent } = makeWiredClient();
+    const promise = client.queryOnce('orders', grouped);
+    await settleServer(engine, [{ key: 'a', value: { __key: 'a', __count: 2, __sum_price: 35 } }]);
+    const rows = await promise;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]._key).toBe('a');
+    const [payload] = querySubPayloads(sent);
+    expect(payload.snapshotOnly).toBe(true);
+    expect((payload.query as { groupBy: string[] }).groupBy).toEqual(['category']);
+  });
+
+  test('grouped queryOncePaged sends snapshotOnly and resolves with the server rows', async () => {
+    const { client, engine, sent } = makeWiredClient();
+    const promise = client.queryOncePaged('orders', grouped);
+    await settleServerPaged(engine, [{ key: 'b', value: { __key: 'b', __count: 1 } }], {
+      hasMore: false,
+    });
+    const result = await promise;
+    expect(result.items.map((item) => item._key)).toEqual(['b']);
+    expect(querySubPayloads(sent)[0].snapshotOnly).toBe(true);
+  });
+
+  test('plain queryOnce and queryOncePaged send snapshotOnly too', async () => {
+    const { client, engine, sent } = makeWiredClient();
+    const once = client.queryOnce('users', { where: { active: true } });
+    await settleServer(engine, []);
+    await once;
+    const paged = client.queryOncePaged('users', { limit: 5 });
+    await settleServerPaged(engine, [], { hasMore: false });
+    await paged;
+    const payloads = querySubPayloads(sent);
+    expect(payloads).toHaveLength(2);
+    expect(payloads.map((payload) => payload.snapshotOnly)).toEqual([true, true]);
+  });
+
+  test("loadMore's page handle sends snapshotOnly; the live handle does not", async () => {
+    const { client, engine, sent } = makeWiredClient();
+    const live = client.query('posts', { limit: 2, sort: { title: 'asc' } });
+    const unsubscribe = live.subscribe(() => {});
+    await Promise.resolve();
+    live.updatePaginationInfo({ nextCursor: 'cursor-1', hasMore: true, cursorStatus: 'valid' });
+
+    const more = live.loadMore();
+    await settleServer(engine, [{ key: 'p3', value: { title: 'Post 3' } }]);
+    await more;
+    unsubscribe();
+
+    const [livePayload, pagePayload] = querySubPayloads(sent);
+    expect('snapshotOnly' in livePayload).toBe(false);
+    expect(pagePayload.snapshotOnly).toBe(true);
+    expect((pagePayload.query as { cursor: string }).cursor).toBe('cursor-1');
+  });
+
+  test('client.query with groupBy throws QueryError and sends nothing', () => {
+    const { client, sent } = makeWiredClient();
+    let caught: unknown;
+    try {
+      client.query('orders', { groupBy: ['category'] });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(QueryError);
+    expect((caught as QueryError).code).toBe('QUERY_LIVE_AGGREGATE_UNSUPPORTED');
+    expect((caught as QueryError).mapName).toBe('orders');
+    expect(querySubPayloads(sent)).toHaveLength(0);
   });
 });

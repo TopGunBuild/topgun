@@ -1,5 +1,6 @@
 import { QueryHandle } from '../QueryHandle';
 import { SyncEngine } from '../SyncEngine';
+import { QueryError } from '../errors/QueryError';
 
 // Mock SyncEngine — reused across tests; some test sections override subscribeToQuery
 // per-test for precise call-count assertions.
@@ -801,5 +802,41 @@ describe('QueryHandle', () => {
         expect(changes[0].timestamp).toBeLessThanOrEqual(after);
       });
     });
+  });
+});
+
+describe('QueryHandle live aggregate refusal', () => {
+  const engine = {
+    subscribeToQuery: jest.fn(),
+    unsubscribeFromQuery: jest.fn(),
+    runLocalQuery: jest.fn().mockResolvedValue([]),
+  } as unknown as SyncEngine;
+
+  test('a live handle with aggregations throws QueryError before anything is registered', () => {
+    let caught: unknown;
+    try {
+      new QueryHandle(engine, 'm', { aggregations: [{ func: 'sum', field: 'p' }] });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(QueryError);
+    expect((caught as QueryError).code).toBe('QUERY_LIVE_AGGREGATE_UNSUPPORTED');
+    expect((caught as QueryError).message).toContain('QUERY_LIVE_AGGREGATE_UNSUPPORTED');
+    expect((caught as QueryError).message).toContain('queryOnce');
+    expect(engine.subscribeToQuery).not.toHaveBeenCalled();
+  });
+
+  test('a live handle with groupBy throws QueryError', () => {
+    expect(() => new QueryHandle(engine, 'm', { groupBy: ['c'] })).toThrow(QueryError);
+  });
+
+  test('empty groupBy / aggregations stay live', () => {
+    const handle = new QueryHandle(engine, 'm', { groupBy: [], aggregations: [] });
+    expect(handle.isSnapshotOnly()).toBe(false);
+  });
+
+  test('a snapshot-only handle may group', () => {
+    const handle = new QueryHandle(engine, 'm', { groupBy: ['c'] }, { snapshotOnly: true });
+    expect(handle.isSnapshotOnly()).toBe(true);
   });
 });

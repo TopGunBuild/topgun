@@ -113,6 +113,8 @@ export class QueryManager implements IQueryManager {
         mapName: query.getMapName(),
         query: wireQuery,
         fields: filter.fields,
+        // Only a one-shot handle carries the flag, so a live payload is unchanged.
+        ...(query.isSnapshotOnly() ? { snapshotOnly: true } : {}),
       },
     });
   }
