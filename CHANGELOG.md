@@ -109,17 +109,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     buffer was at its capacity — a temporary error, the client resends; a `remove_all` is
     admitted or refused whole and counts once) and
     `topgun_write_behind_oldest_entry_age_seconds` (the age of the oldest buffered write, refused
-    or not, counted on the server's clock from when it was buffered; it keeps rising through a
-    store outage).
+    or not, counted on the server's clock from when it was buffered; it rises through a store
+    outage).
   - **Hot keys are coalesced less.** A key rewritten while its write is still buffered is stored
     once; without the delay that window is about one pass or one flush interval instead of at
     least a second, so a key rewritten many times a second is stored up to that many times a
     second. The write-ahead log already wrote every write.
-  - **Large values (unchanged, now stated).** The buffer is bounded by keys, not bytes, and keeps
-    each buffered value twice: a buffer of large values can exhaust the process's memory before
-    the key bound refuses anything. The process is then killed and the write-ahead log replays
-    the acknowledged writes at the next start — a crash, not data loss. A byte bound is
-    TODO-963.
+  - **A byte bound on the write-behind buffer: `TOPGUN_WRITEBEHIND_CAPACITY_MB`** (default
+    `256`; `0` disables it). Beside the key bound, the buffered values' memory now has a soft
+    budget: at or above it a plain write that grows its key's buffered value is refused, and so is
+    every in-place OR write (OR add and remove, tombstone prune, the TTL sweep's OR removals, a
+    client's OR push diff) — before it changes anything. A remove, a `remove_all`, an LWW write of
+    a top-level `null` and a rewrite that does not grow are never refused by the byte bound; the
+    key bound is unchanged and still refuses a remove of a key that is not buffered at the key
+    capacity. A single value larger than the budget is admitted into a buffer below it. A refusal
+    is the transient `internal` error (500, `Write-behind byte capacity exceeded`); the client
+    keeps the write and resends it. A pushed OR diff is merged up to the refused entry and the
+    rest at the client's next connection. Values are counted by a structural estimate of their
+    stored encoding, not by heap bytes. An unparseable value warns and uses the default; a value
+    whose bytes do not fit in 64 bits ends the process with the panic message on stderr and exit
+    status 101. Before this, a buffer of large values could exhaust the process's memory before
+    the key bound refused anything.
+  - **A buffered value is held once**, shared by the queue and the read overlay, instead of twice.
+  - **Metrics.** `topgun_write_behind_capacity_refusals_total` carries `bound="keys"|"bytes"`,
+    both at 0 from the first scrape; the new gauge `topgun_write_behind_buffered_bytes` is the
+    count the byte bound uses. Both depth gauges and the head-age gauge are set at the end of a
+    flush pass, so they hold their last values while a commit is blocked inside the store engine
+    (TODO-980).
+  - **The startup line** carries `write_behind_capacity` and `write_behind_capacity_mb`.
 
 - **Breaking (server, configuration): `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=0` refuses to
   start.** Earlier releases accepted `0`; with no write delay the idle flush loop would spin, so the
