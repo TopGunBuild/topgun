@@ -5,6 +5,7 @@ import { QueryOnceUnsettledError, QueryOnceLocalError } from '../errors/QueryOnc
 import { QueryError } from '../errors/QueryError';
 import { QueryManager } from '../sync/QueryManager';
 import type { QueryOncePagedResult } from '../TopGunClient';
+import type { QueryFilter } from '../QueryHandle';
 import type { IStorageAdapter, OpLogEntry } from '../IStorageAdapter';
 
 // crypto.randomUUID is needed by the TopGunClient constructor in Node test envs.
@@ -400,6 +401,7 @@ describe('snapshot-only one-shot queries', () => {
     client: TopGunClient;
     engine: SyncEngineDouble;
     sent: jest.Mock;
+    manager: QueryManager;
   } {
     const { client, engine } = makeClient(SyncState.CONNECTED);
     const sent = jest.fn(() => true);
@@ -413,7 +415,7 @@ describe('snapshot-only one-shot queries', () => {
       capture(handle);
       manager.subscribeToQuery(handle);
     });
-    return { client, engine, sent };
+    return { client, engine, sent, manager };
   }
 
   function querySubPayloads(sent: jest.Mock): Record<string, unknown>[] {
@@ -495,4 +497,20 @@ describe('snapshot-only one-shot queries', () => {
     expect((caught as QueryError).mapName).toBe('orders');
     expect(querySubPayloads(sent)).toHaveLength(0);
   });
+
+  test('a one-shot handle re-sent after reconnect keeps snapshotOnly', async () => {
+    const { client, engine, sent, manager } = makeWiredClient();
+    const promise = client.queryOnce('orders', grouped);
+    await Promise.resolve();
+    manager.resubscribeAll();
+    await settleServer(engine, []);
+    await promise;
+    const payloads = querySubPayloads(sent);
+    expect(payloads).toHaveLength(2);
+    for (const payload of payloads) {
+      expect(payload.snapshotOnly).toBe(true);
+      expect((payload.query as QueryFilter).groupBy).toEqual(['category']);
+    }
+  });
+
 });
