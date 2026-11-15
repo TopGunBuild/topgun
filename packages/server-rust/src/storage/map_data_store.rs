@@ -644,6 +644,28 @@ pub trait MapDataStore: Send + Sync {
         false
     }
 
+    /// Whether this store admits an in-place write of `(map, key)` whose
+    /// write-through will reach it, asked BEFORE the record store mutates the
+    /// key in place.
+    ///
+    /// Contract for the caller: call it before the first engine call of the
+    /// mutation, and on `Err` do not mutate. `Err` is a temporary refusal the
+    /// caller surfaces as one — an op the client resends, a push diff cut at
+    /// that entry (re-pushed at the client's next connection), a prune ref
+    /// re-indexed for a later pass. A caller that treats it as permanent turns
+    /// a refusal into a lost op (`TG-WB-011`).
+    ///
+    /// Defaulted to `Ok(())`: only a store that bounds the memory of buffered
+    /// in-place writes overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store refuses the write for now; the caller
+    /// must then leave the key unchanged.
+    fn admit_in_place(&self, _map: &str, _key: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// The order in which a value scan of this store walks a map, or `None`.
     ///
     /// A store that answers `Some(order)` accepts this contract (`TG-WB-008`),

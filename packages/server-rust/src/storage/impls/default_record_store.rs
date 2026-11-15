@@ -88,6 +88,20 @@ impl DefaultRecordStore {
         }
     }
 
+    /// Asks the data store whether an in-place write of `key` may run, before
+    /// the first engine call: the cell is shared with the buffered write, so
+    /// its growth is buffer growth the moment the mutation runs. Only the
+    /// provenances that write through (`Client`, `CrdtMerge`) owe the check.
+    fn admit_in_place_write(&self, key: &str, provenance: CallerProvenance) -> anyhow::Result<()> {
+        if matches!(
+            provenance,
+            CallerProvenance::Client | CallerProvenance::CrdtMerge
+        ) {
+            self.data_store.admit_in_place(&self.name, key)?;
+        }
+        Ok(())
+    }
+
     /// Refuses a writer token that was acquired for another `(map, key)` than
     /// the one `mutator` was called for (TG-KEY-002). Every mutator calls this
     /// before it reads, writes or notifies anything.
@@ -389,6 +403,12 @@ impl RecordStore for DefaultRecordStore {
     /// Retries at most `MATERIALIZE_MAX_ATTEMPTS` times when a removal moves the
     /// generation during the load, then returns an error the caller surfaces as
     /// a transient failure (the client re-sends the op).
+    ///
+    /// A write that will write through (`Client`, `CrdtMerge`) is first put to
+    /// the data store's [`admit_in_place`](MapDataStore::admit_in_place): over
+    /// the write-behind byte budget it is refused before anything is loaded or
+    /// mutated, so a refused op leaves the cell, the engine and the WAL as they
+    /// were (`TG-WB-011`).
     async fn update_in_place(
         &self,
         writer: &KeyWriteToken<'_>,
@@ -400,6 +420,7 @@ impl RecordStore for DefaultRecordStore {
         use crate::storage::engine::UpdateInPlaceOutcome;
 
         self.refuse_foreign_token("update_in_place", writer, key)?;
+        self.admit_in_place_write(key, provenance)?;
         let now = now_millis();
         // Cost estimate mirrors put(): value bytes + the key string's heap
         // contribution. For the OrMap arm this is now a cheap structural

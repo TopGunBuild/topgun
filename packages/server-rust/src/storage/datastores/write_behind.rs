@@ -104,11 +104,12 @@ pub struct WriteBehindConfig {
     /// H              <=  1                      while a store-wide hold is in force
     /// ```
     ///
-    /// - `W` is the number of writes of distinct keys that are not buffered
-    ///   and that are, at one instant, between the check and their queue
-    ///   insert (the WAL append lies in between). `W >= 1` while any write is
-    ///   in progress: the writer that is inserting is itself past its check,
-    ///   so with one writer and no flush pass the count reaches `C`.
+    /// - `W` is a cohort, not an instant: the writes of distinct keys that
+    ///   were not buffered which the check admitted while `pending_count + n
+    ///   <= C`, and whose queue insert ran after the count reached `C` (the
+    ///   WAL append lies in between). `W >= 1` while any write is in
+    ///   progress: the writer that is inserting is itself past its check, so
+    ///   with one writer and no flush pass the count reaches `C`.
     /// - `H` is the number of entries the running flush pass holds whose key
     ///   was re-written while the pass holds them; each such key is counted a
     ///   second time, once. A pass holds the entries that were due when it
@@ -134,7 +135,58 @@ pub struct WriteBehindConfig {
     /// and its queue insert — a stretch with no await and no lock held, so it
     /// ends by itself. Not covered: a panic inside that stretch leaves a slot
     /// with nothing buffered.
+    ///
+    /// The buffered values' memory has its own bound, [`Self::capacity_bytes`].
     pub capacity: u64,
+    /// Soft bound on the buffered values' memory, in bytes
+    /// (`TOPGUN_WRITEBEHIND_CAPACITY_MB` × 1 MiB). `0` disables the check.
+    ///
+    /// What is counted: the charge of every buffered entry, queued or held by
+    /// a flush pass, until the entry is persisted or retired into a newer
+    /// write of its key. A value's charge is its structural size plus its key
+    /// (an estimate of its stored encoding, not a heap measurement; one copy,
+    /// shared by the queue and staging); an in-place write's charge is its
+    /// cell's cost as the engine keeps it; a remove and an LWW write of a
+    /// top-level `null` are charged 0.
+    ///
+    /// The rule, with `B = capacity_bytes > 0`: a plain write is admitted
+    /// while the counter is below `B`, or when its key's staging slot already
+    /// carries at least its charge (a rewrite that does not grow, whether the
+    /// key's entry is queued or held by a pass); otherwise it is refused with
+    /// `Write-behind byte capacity exceeded`. A write charged 0 is never
+    /// refused by this rule (the key rule still applies to it). An in-place
+    /// write is decided before its mutation, by
+    /// [`MapDataStore::admit_in_place`]: refused whenever the counter is at or
+    /// above `B`, because its growth is not known before it runs. A single
+    /// value larger than the whole budget is admitted into a buffer below it,
+    /// so no write is refused for ever while the store accepts.
+    ///
+    /// It is not a hard limit. In charge units, with `S_max` the largest
+    /// charge of any admitted entry:
+    ///
+    /// ```text
+    /// buffered_bytes  <=  B - 1 + W_b + H_b
+    /// W_b             <=  W × S_max
+    /// H_b             <=  min(L, N_held) × S_max      L = 1000 entries per pass
+    /// H_b             <=  S_max                       while a store-wide hold is in force
+    /// ```
+    ///
+    /// - `W_b` is the cohort of counter increments of writes admitted while
+    ///   the counter was below `B` whose queue insert ran after it reached
+    ///   `B`; `W` is the most such writes in flight at once (one per key,
+    ///   `TG-KEY-001`).
+    /// - `H_b` is the charges of the entries a running pass holds whose key
+    ///   was rewritten meanwhile: each such key is counted twice until the
+    ///   held entry's terminal. A rewrite of an in-place key charges the same
+    ///   cell twice, on the conservative side. The 8 MiB pass limit is in
+    ///   encoded bytes and does not bound `H_b`; the entry count `L` does.
+    ///
+    /// Not claimed: the in-place growth of a cell under a provenance that
+    /// owes no write-through (`Backup`, `Replication`, `Load`) is not counted
+    /// until its entry settles, nor that of a cell whose write-through's WAL
+    /// append failed, until the key's next write-through; the WAL frame's
+    /// transient copy and a pass's encoded bytes are outside the budget.
+    pub capacity_bytes: u64,
     /// Maximum milliseconds to wait for the write-behind buffer to drain on
     /// graceful shutdown. On timeout, still-pending ops are logged and the
     /// process exits rather than blocking termination indefinitely.
@@ -221,6 +273,9 @@ const MIN_FLUSH_INTERVAL_MS: u64 = 1;
 /// per second, the node's admission target.
 const LEGACY_FLUSH_INTERVAL_WARN_MS: u64 = 500;
 
+/// Bytes in the MiB unit of `TOPGUN_WRITEBEHIND_CAPACITY_MB`.
+const BYTES_PER_MIB: u64 = 1024 * 1024;
+
 impl Default for WriteBehindConfig {
     fn default() -> Self {
         Self {
@@ -230,6 +285,7 @@ impl Default for WriteBehindConfig {
             backoff_base_ms: 500,
             backoff_cap_ms: 5000,
             capacity: 10_000,
+            capacity_bytes: 256 * BYTES_PER_MIB,
             shutdown_timeout_ms: 30_000,
             wal_dir: PathBuf::from("./topgun-wal"),
             wal_fsync_policy: WalFsyncPolicy::Batched,
@@ -252,6 +308,7 @@ impl WriteBehindConfig {
     /// | `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | `flush_interval_ms` | 100 ms — the idle linger; `0` is fatal; 500 ms or more (with a non-zero capacity) warns |
     /// | `TOPGUN_WRITEBEHIND_BATCH_SIZE` | `batch_size` | 100 — accepted and currently without effect |
     /// | `TOPGUN_WRITEBEHIND_CAPACITY` | `capacity` | 10 000 |
+    /// | `TOPGUN_WRITEBEHIND_CAPACITY_MB` | `capacity_bytes` (× 1 MiB) | 256 MiB — `0` disables the byte bound; a value whose bytes overflow `u64` is fatal |
     /// | `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS` | `shutdown_timeout_ms` | 30 000 ms |
     /// | `TOPGUN_WAL_DIR` | `wal_dir` | `./topgun-wal` |
     /// | `TOPGUN_WAL_FSYNC_POLICY` | `wal_fsync_policy` | `batched` |
@@ -295,6 +352,12 @@ impl WriteBehindConfig {
     /// PARSES to a value below [`MIN_FLUSH_INTERVAL_MS`], that is `0`: honoured,
     /// it would make the idle flush loop spin on a zero sleep. An unparseable
     /// value warns and falls back, as for the other variables.
+    ///
+    /// Panics (refuses to start) if `TOPGUN_WRITEBEHIND_CAPACITY_MB` PARSES
+    /// but its value in bytes does not fit in a `u64`. Saturating would
+    /// silently disable a bound the operator set, and the default would
+    /// silently shrink it; the value is echoed on the boot line, so it must be
+    /// the one the operator meant.
     #[must_use]
     pub fn from_source<F: Fn(&str) -> Option<String>>(get: F) -> Self {
         let defaults = Self::default();
@@ -345,6 +408,11 @@ impl WriteBehindConfig {
                     cfg.capacity = defaults.capacity;
                 }
             }
+        }
+
+        // Parse TOPGUN_WRITEBEHIND_CAPACITY_MB → capacity_bytes (u64, × 1 MiB)
+        if let Some(raw) = get("TOPGUN_WRITEBEHIND_CAPACITY_MB") {
+            cfg.capacity_bytes = Self::parse_capacity_bytes(&raw, defaults.capacity_bytes);
         }
 
         // Parse TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS → shutdown_timeout_ms (u64)
@@ -419,6 +487,32 @@ impl WriteBehindConfig {
         }
 
         cfg
+    }
+
+    /// Parses one `TOPGUN_WRITEBEHIND_CAPACITY_MB` value into bytes: an
+    /// unparseable value warns and falls back to `default`; one whose bytes
+    /// overflow `u64` is fatal (see [`Self::from_source`]).
+    fn parse_capacity_bytes(raw: &str, default: u64) -> u64 {
+        match raw.trim().parse::<u64>() {
+            Ok(mb) => match mb.checked_mul(BYTES_PER_MIB) {
+                Some(bytes) => bytes,
+                None => panic!(
+                    "TOPGUN_WRITEBEHIND_CAPACITY_MB={raw}: {mb} MiB does not fit in a 64-bit \
+                     byte count; refusing to start"
+                ),
+            },
+            Err(err) => {
+                tracing::warn!(
+                    target: "topgun_server::storage::write_behind",
+                    var = "TOPGUN_WRITEBEHIND_CAPACITY_MB",
+                    value = %raw,
+                    error = %err,
+                    default = default / BYTES_PER_MIB,
+                    "Failed to parse env var; using default"
+                );
+                default
+            }
+        }
     }
 
     /// Parses one `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` value: an unparseable
@@ -1385,6 +1479,10 @@ struct StagingSlot {
     seq: u64,
     /// `Some(value)` = pending write, `None` = pending delete.
     value: Option<StagedValue>,
+    /// The charge of the write that set this slot (0 for a delete): a copy
+    /// the byte rule reads to tell a rewrite that does not grow the key's
+    /// buffered charge, never a second counter.
+    charge: u64,
 }
 
 /// A pending write's value in the staging overlay: an owned value (a plain
@@ -1754,6 +1852,9 @@ const FLUSH_PASS_SECONDS_HISTOGRAM: &str = "topgun_write_behind_flush_pass_secon
 /// Writes of keys that were not buffered, refused because the buffer was at
 /// its capacity.
 const CAPACITY_REFUSALS_COUNTER: &str = "topgun_write_behind_capacity_refusals_total";
+/// The buffered values' memory in charge units, the counter the byte bound
+/// reads; set at the end of every pass.
+const BUFFERED_BYTES_GAUGE: &str = "topgun_write_behind_buffered_bytes";
 /// Seconds since the oldest buffered entry was written.
 const OLDEST_ENTRY_AGE_GAUGE: &str = "topgun_write_behind_oldest_entry_age_seconds";
 
@@ -1806,28 +1907,45 @@ fn register_retry_metrics() {
     );
     metrics::describe_counter!(
         CAPACITY_REFUSALS_COUNTER,
-        "Writes of keys that were not buffered which the write-behind buffer refused because it \
-         was at its capacity (TOPGUN_WRITEBEHIND_CAPACITY); each is a temporary error, so the \
-         client keeps the write and sends it again"
+        "Write calls the write-behind buffer refused at one of its bounds, by bound: \
+         bound=\"keys\" for keys that were not buffered at TOPGUN_WRITEBEHIND_CAPACITY, \
+         bound=\"bytes\" for writes that would grow the buffered values at \
+         TOPGUN_WRITEBEHIND_CAPACITY_MB (plain writes that grow their key, every in-place OR \
+         write); each is a temporary error, so the client keeps the write and sends it again"
+    );
+    metrics::describe_gauge!(
+        BUFFERED_BYTES_GAUGE,
+        "Buffered write-behind value bytes in charge units (a structural estimate of the stored \
+         encoding), the count the byte bound uses, as of the last pass; growing writes are \
+         refused once it reaches TOPGUN_WRITEBEHIND_CAPACITY_MB"
     );
     metrics::describe_gauge!(
         OLDEST_ENTRY_AGE_GAUGE,
         "Seconds since the oldest buffered write-behind entry was written, whether or not the \
          store has refused it, 0 when nothing is buffered; set after every flush pass, also \
-         during a store-wide hold. Wall-clock based: a rewrite of a buffered key keeps the \
-         key's first buffered time. Once the store is broken no pass runs and it keeps its last \
+         during a store-wide hold. Read from the monotonic clock: a rewrite of a buffered key \
+         keeps the key's first buffered time. Once the store is broken no pass runs and it keeps its last \
          value. The refusal-specific signals are topgun_write_behind_oldest_refusal_age_seconds \
          and topgun_write_behind_store_hold"
     );
     metrics::counter!(FLUSH_REFUSALS_COUNTER).increment(0);
-    metrics::counter!(CAPACITY_REFUSALS_COUNTER).increment(0);
+    metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "keys").increment(0);
+    metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "bytes").increment(0);
     metrics::counter!(FLUSH_PASSES_COUNTER).increment(0);
     metrics::counter!(FLUSH_PASS_ENTRIES_COUNTER).increment(0);
     metrics::gauge!(RETRYING_ENTRIES_GAUGE).set(0.0);
     metrics::gauge!(BUFFERED_ENTRIES_GAUGE).set(0.0);
+    metrics::gauge!(BUFFERED_BYTES_GAUGE).set(0.0);
     metrics::gauge!(OLDEST_REFUSAL_AGE_GAUGE).set(0.0);
     metrics::gauge!(OLDEST_ENTRY_AGE_GAUGE).set(0.0);
     metrics::gauge!(STORE_HOLD_GAUGE).set(0.0);
+}
+
+/// The byte bound's refusal, counted once under `bound="bytes"`. Its text
+/// differs from the key refusal's so a reader and a test can tell them apart.
+fn refuse_bytes() -> anyhow::Error {
+    metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "bytes").increment(1);
+    anyhow::anyhow!("Write-behind byte capacity exceeded")
 }
 
 /// A count as a gauge value. A count above `u32::MAX` reads as that: every
@@ -3510,16 +3628,16 @@ impl WriteBehindDataStore {
     /// of the insert. Staged first, the slot is there for whichever terminal
     /// persists the entry; with nothing able to suspend the writer in
     /// between, a slot is never left behind without an entry.
-    fn stage(&self, map: &str, key: &str, seq: u64, value: Option<StagedValue>) {
+    fn stage(&self, map: &str, key: &str, seq: u64, value: Option<StagedValue>, charge: u64) {
         use dashmap::mapref::entry::Entry;
         match self.staging.entry((map.to_string(), key.to_string())) {
             Entry::Occupied(mut e) => {
                 if seq >= e.get().seq {
-                    e.insert(StagingSlot { seq, value });
+                    e.insert(StagingSlot { seq, value, charge });
                 }
             }
             Entry::Vacant(e) => {
-                e.insert(StagingSlot { seq, value });
+                e.insert(StagingSlot { seq, value, charge });
             }
         }
     }
@@ -5269,63 +5387,85 @@ impl WriteBehindDataStore {
         now_millis().saturating_sub(self.config.write_delay_ms as i64)
     }
 
-    /// Refuses a write call whose keys that are not buffered would take the
-    /// buffer past its capacity: the one admission gate of every write path
-    /// (`add`, `remove`, `remove_all`). A call is admitted or refused whole, so
+    /// The one admission gate of every write path (`add`, `remove`,
+    /// `remove_all`), with two soft bounds, the key rule first.
+    ///
+    /// **Keys.** Refuses a call whose keys that are not buffered would take
+    /// the buffer past its capacity. A call is admitted or refused whole, so
     /// a refused `remove_all` has buffered none of its keys and the client
-    /// resends exactly what was refused; a refusal counts once. It is admitted
-    /// while `pending_count + n <= capacity`, `n` the distinct keys of the call
-    /// that are not buffered — for one key, while `pending_count < capacity`.
-    /// A call whose keys are all buffered is always admitted.
+    /// resends exactly what was refused; a refusal counts once, under
+    /// `bound="keys"`, and never also as a byte refusal. It is admitted
+    /// while `pending_count + n <= capacity`, `n` the distinct keys of the
+    /// call that are not buffered — for one key, while `pending_count <
+    /// capacity`. A call whose keys are all buffered is always admitted by
+    /// this rule. Staging is read only when the call could reach past the
+    /// capacity were every one of its keys new; below that no key is looked
+    /// up and nothing is allocated on the write path.
     ///
-    /// Staging is read only when the call could reach past the capacity were
-    /// every one of its keys new; below that no key is looked up and nothing
-    /// is allocated on the write path.
+    /// **Bytes.** With `capacity_bytes > 0`, a call of `charge > 0` (a plain
+    /// value's write) is admitted while `buffered_bytes < capacity_bytes`, or
+    /// when its key's staging slot carries at least `charge` — a rewrite that
+    /// does not grow the key's buffered charge, whether its entry is queued
+    /// or held by a pass. Otherwise it is refused with `Write-behind byte
+    /// capacity exceeded`, under `bound="bytes"`. A call of charge 0 — a
+    /// remove, a `remove_all`, an LWW write of a top-level `null`, an
+    /// in-place write-through, whose byte decision `admit_in_place` made
+    /// before its mutation — is never refused by this rule. Staging is read
+    /// only once the counter is at the budget.
     ///
-    /// A soft bound, not a reservation. The check reads staging, and a key
-    /// whose entry is held by a flush pass counts as known: its staging slot
-    /// is cleared only once the entry is persisted. The check and the caller's
-    /// queue inserts are separate steps with nothing held across them, and
-    /// what `PartitionQueue::insert` returns is not consulted.
-    ///
-    /// The bound that holds: `pending_count` can exceed `capacity` by at most
-    /// the number of entries a flush pass holds plus the number of new keys
-    /// of the calls that are between this check and their inserts. A pass
-    /// holds at most the entries that were due when it began, up to its
-    /// limits (`batch_size` has no effect). The formula and its precondition
-    /// are on `WriteBehindConfig::capacity`.
-    fn admit_new_keys<K: AsRef<str>>(&self, map: &str, keys: &[K]) -> anyhow::Result<()> {
+    /// Both are soft bounds, not reservations: the check and the caller's
+    /// queue insert are separate steps with nothing held across them, and a
+    /// key whose entry a flush pass holds counts as buffered, its staging
+    /// slot being cleared only once the entry is persisted. The bounds that
+    /// hold are on `WriteBehindConfig::capacity` and
+    /// `WriteBehindConfig::capacity_bytes`.
+    fn admit_write<K: AsRef<str>>(&self, map: &str, keys: &[K], charge: u64) -> anyhow::Result<()> {
         let capacity = self.config.capacity;
-        if capacity == 0 {
-            return Ok(());
-        }
         let current = self.pending_count.load(Ordering::Relaxed);
         let at_most_new = u64::try_from(keys.len()).unwrap_or(u64::MAX);
-        if current.saturating_add(at_most_new) <= capacity {
+        if capacity > 0 && current.saturating_add(at_most_new) > capacity {
+            // The places left for new keys. The call is refused at the first
+            // new key past them, so a refusal looks up at most `room + 1` new
+            // keys however many the call names; one probe buffer serves every
+            // lookup.
+            let room = capacity.saturating_sub(current);
+            let mut new_keys = std::collections::HashSet::new();
+            let mut probe = (map.to_string(), String::new());
+            for key in keys.iter().map(AsRef::as_ref) {
+                if new_keys.contains(key) {
+                    continue;
+                }
+                probe.1.clear();
+                probe.1.push_str(key);
+                #[cfg(test)]
+                self.admission_probes.fetch_add(1, Ordering::SeqCst);
+                if self.staging.contains_key(&probe) {
+                    continue;
+                }
+                new_keys.insert(key);
+                if u64::try_from(new_keys.len()).unwrap_or(u64::MAX) > room {
+                    metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "keys").increment(1);
+                    anyhow::bail!("Write-behind capacity exceeded");
+                }
+            }
+        }
+        let budget = self.config.capacity_bytes;
+        if budget == 0 || charge == 0 || self.buffered_bytes.load(Ordering::Relaxed) < budget {
             return Ok(());
         }
-        // The places left for new keys. The call is refused at the first new
-        // key past them, so a refusal looks up at most `room + 1` new keys
-        // however many the call names; one probe buffer serves every lookup.
-        let room = capacity.saturating_sub(current);
-        let mut new_keys = std::collections::HashSet::new();
+        // Over the budget only a rewrite that does not grow its key's buffered
+        // charge passes: the slot carries the charge of the key's latest
+        // write, queued or held by a pass.
         let mut probe = (map.to_string(), String::new());
-        for key in keys.iter().map(AsRef::as_ref) {
-            if new_keys.contains(key) {
-                continue;
-            }
+        let grows = keys.iter().map(AsRef::as_ref).any(|key| {
             probe.1.clear();
             probe.1.push_str(key);
-            #[cfg(test)]
-            self.admission_probes.fetch_add(1, Ordering::SeqCst);
-            if self.staging.contains_key(&probe) {
-                continue;
-            }
-            new_keys.insert(key);
-            if u64::try_from(new_keys.len()).unwrap_or(u64::MAX) > room {
-                metrics::counter!(CAPACITY_REFUSALS_COUNTER).increment(1);
-                anyhow::bail!("Write-behind capacity exceeded");
-            }
+            self.staging
+                .get(&probe)
+                .is_none_or(|slot| slot.charge < charge)
+        });
+        if grows {
+            return Err(refuse_bytes());
         }
         Ok(())
     }
@@ -5348,6 +5488,9 @@ impl WriteBehindDataStore {
     fn report_retries(&self, schedule: &mut RetrySchedule) {
         let pending = self.pending_count.load(Ordering::Relaxed);
         metrics::gauge!(BUFFERED_ENTRIES_GAUGE).set(count_as_gauge(pending));
+        #[allow(clippy::cast_precision_loss)]
+        metrics::gauge!(BUFFERED_BYTES_GAUGE)
+            .set(self.buffered_bytes.load(Ordering::Relaxed) as f64);
         let now = tokio::time::Instant::now();
         if schedule.last_walk.as_ref().is_some_and(|walk| {
             walk.hold_changes == schedule.hold_changes
@@ -5632,6 +5775,25 @@ impl MapDataStore for WriteBehindDataStore {
         self.config.or_delta_wal
     }
 
+    /// The byte rule of an in-place write, decided before its mutation: the
+    /// cell is shared by the engine, the buffered entry and staging, so its
+    /// growth is buffer growth the moment the mutation runs, and a check
+    /// after it could refuse only the acknowledgement. The growth is not
+    /// known before the opaque mutation runs, so at or above the budget every
+    /// in-place write is presumed to grow and is refused with `Write-behind
+    /// byte capacity exceeded`, counted under `bound="bytes"` — also one that
+    /// would not grow (a duplicate OR remove, a tombstone prune).
+    ///
+    /// The caller must call this before mutating and must not mutate on
+    /// `Err`; the refusal is temporary (`TG-WB-011`).
+    fn admit_in_place(&self, _map: &str, _key: &str) -> anyhow::Result<()> {
+        let budget = self.config.capacity_bytes;
+        if budget == 0 || self.buffered_bytes.load(Ordering::Relaxed) < budget {
+            return Ok(());
+        }
+        Err(refuse_bytes())
+    }
+
     /// # Precondition: one writer per key at a time
     ///
     /// The entry sequence is assigned and the entry is queued in two separate
@@ -5684,8 +5846,15 @@ impl MapDataStore for WriteBehindDataStore {
 
         // The memory this write adds to the buffer, taken before the gate.
         let charge = charge_of(&src, key);
+        // An in-place write's byte decision was made before its mutation
+        // (`admit_in_place`); re-deciding it now would refuse the
+        // acknowledgement of growth that has already happened.
+        let byte_charge = match src {
+            WriteSource::Value(_) => charge,
+            WriteSource::Cell(_) => 0,
+        };
         // Check capacity before insertion to avoid partial state on rejection
-        self.admit_new_keys(map, &[key])?;
+        self.admit_write(map, &[key], byte_charge)?;
 
         let partition_id = partition_for(map, key);
         // Seed before the first sequence of this partition is handed out, so the
@@ -5778,7 +5947,7 @@ impl MapDataStore for WriteBehindDataStore {
         // the slot only if it finds it. From here to the queue insert there is
         // no await and no lock held, and it must stay that way (`TG-WB-007`).
         let (smap, skey) = staging_key;
-        self.stage(&smap, &skey, entry_seq, Some(staged));
+        self.stage(&smap, &skey, entry_seq, Some(staged), charge);
         #[cfg(test)]
         TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
         let (retired_seq, subsumed_wal_seqs) = self.enqueue(partition_id, entry, survivor_subsumes);
@@ -5837,7 +6006,7 @@ impl MapDataStore for WriteBehindDataStore {
         // As in `add_with_witness`.
         let _in_flight = self.tenant_closes.enter(map)?;
 
-        self.admit_new_keys(map, &[key])?;
+        self.admit_write(map, &[key], 0)?;
 
         let partition_id = partition_for(map, key);
         // Seed before the first sequence of this partition is handed out, so the
@@ -5878,7 +6047,7 @@ impl MapDataStore for WriteBehindDataStore {
         // queue insert there is no await and no lock held, and it must stay that
         // way (`TG-WB-007`).
         let (smap, skey) = staging_key;
-        self.stage(&smap, &skey, entry_seq, None);
+        self.stage(&smap, &skey, entry_seq, None, 0);
         #[cfg(test)]
         TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
         let (retired_seq, subsumed_wal_seqs) = self.enqueue(partition_id, entry, survivor_subsumes);
@@ -6008,7 +6177,7 @@ impl MapDataStore for WriteBehindDataStore {
         // As in `add_with_witness`, once for every key of the call.
         let _in_flight = self.tenant_closes.enter(map)?;
         // Once for the whole call: a refused call buffers none of its keys.
-        self.admit_new_keys(map, keys)?;
+        self.admit_write(map, keys, 0)?;
 
         let now = now_millis();
 
@@ -6055,7 +6224,7 @@ impl MapDataStore for WriteBehindDataStore {
             // queue insert there is no await and no lock held, and it must stay that
             // way (`TG-WB-007`).
             let (smap, skey) = staging_key;
-            self.stage(&smap, &skey, entry_seq, None);
+            self.stage(&smap, &skey, entry_seq, None, 0);
             #[cfg(test)]
             TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
             let (retired_seq, subsumed_wal_seqs) =
@@ -8635,6 +8804,7 @@ mod tests {
             "k",
             10,
             Some(StagedValue::Value(Arc::new(lww("v10", 10)))),
+            0,
         );
         // A higher seq replaces.
         store.stage(
@@ -8642,6 +8812,7 @@ mod tests {
             "k",
             11,
             Some(StagedValue::Value(Arc::new(lww("v11", 11)))),
+            0,
         );
         assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v11", 11);
         // A late, lower seq is rejected (does not clobber the newer value).
@@ -8650,10 +8821,11 @@ mod tests {
             "k",
             10,
             Some(StagedValue::Value(Arc::new(lww("v10", 10)))),
+            0,
         );
         assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v11", 11);
         // Equal seq (same write, idempotent) is allowed.
-        store.stage("m", "k", 11, None);
+        store.stage("m", "k", 11, None, 0);
         assert!(
             store.load("m", "k").await.unwrap().is_none(),
             "equal-seq restage applies (idempotent same-write update)"
@@ -13699,7 +13871,7 @@ mod tests {
 
     #[test]
     fn capacity_refusals_are_counted_on_every_write_path() {
-        const REFUSALS: &str = "topgun_write_behind_capacity_refusals_total";
+        const REFUSALS: &str = "topgun_write_behind_capacity_refusals_total{bound=\"keys\"}";
 
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -14308,7 +14480,7 @@ mod tests {
 
     #[test]
     fn remove_all_is_admitted_or_refused_whole() {
-        const REFUSALS: &str = "topgun_write_behind_capacity_refusals_total";
+        const REFUSALS: &str = "topgun_write_behind_capacity_refusals_total{bound=\"keys\"}";
 
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
