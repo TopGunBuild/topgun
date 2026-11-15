@@ -29,6 +29,23 @@ export interface QueryFilter {
   aggregations?: Aggregation[];
 }
 
+/**
+ * Deep copy of plain data: arrays and plain objects are copied, any other value is
+ * kept as it is. Not `structuredClone`, which jsdom and older runtimes lack.
+ */
+function copyPlain<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(copyPlain) as T;
+  if (value !== null && typeof value === 'object') {
+    const proto = Object.getPrototypeOf(value);
+    if (proto === Object.prototype || proto === null) {
+      return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [key, copyPlain(item)]),
+      ) as T;
+    }
+  }
+  return value;
+}
+
 /** Cursor status for debugging */
 export type CursorStatus = 'valid' | 'expired' | 'invalid' | 'none';
 
@@ -134,7 +151,7 @@ export class QueryHandle<T> {
     this.snapshotOnly = options?.snapshotOnly === true;
     // The handle owns a copy: every (re)subscription re-sends it, so a caller that
     // mutates its own filter later could otherwise turn a live handle into a grouped one.
-    this.filter = structuredClone(filter);
+    this.filter = copyPlain(filter);
     if (!this.snapshotOnly && (this.filter.groupBy?.length || this.filter.aggregations?.length)) {
       throw new QueryError(
         `QUERY_LIVE_AGGREGATE_UNSUPPORTED: a live query on map '${mapName}' cannot carry groupBy or aggregations; run it as a one-shot query (queryOnce / queryOncePaged)`,
@@ -509,7 +526,7 @@ export class QueryHandle<T> {
 
   /** Returns a copy, so mutating the result cannot change what the handle sends. */
   public getFilter(): QueryFilter {
-    return structuredClone(this.filter);
+    return copyPlain(this.filter);
   }
 
   /** @internal Whether this is a one-shot handle the server must not register. */
