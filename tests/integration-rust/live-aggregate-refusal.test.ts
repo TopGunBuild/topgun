@@ -111,15 +111,22 @@ describe('Integration: live aggregate refusal (Rust server)', () => {
     return subscriber.waitForMessage('QUERY_RESP');
   }
 
-  /** A matching write from the other connection reaches no QUERY_UPDATE for `queryId`. */
+  /**
+   * A matching write from the other connection reaches no QUERY_UPDATE for `queryId`,
+   * while a plain live query on the same map, same connection, gets one from that
+   * write in the same window — so the silence is the refusal's, not the setup's.
+   */
   async function expectNoUpdateAfterWrite(mapName: string, queryId: string): Promise<void> {
+    const controlId = `${queryId}-control`;
+    const control = await subscribe({ queryId: controlId, mapName, query: {} });
+    expect(control.payload.code).toBeUndefined();
     subscriber.messages.length = 0;
     await put(writer, mapName, 'a3', { category: 'a', price: 5 });
     await waitMs(1_000);
-    const updates = subscriber.messages.filter(
-      (m) => m.type === 'QUERY_UPDATE' && m.payload?.queryId === queryId,
-    );
-    expect(updates).toEqual([]);
+    const updatesFor = (id: string) =>
+      subscriber.messages.filter((m) => m.type === 'QUERY_UPDATE' && m.payload?.queryId === id);
+    expect(updatesFor(controlId).length).toBeGreaterThan(0);
+    expect(updatesFor(queryId)).toEqual([]);
   }
 
   test('(a) a live QUERY_SUB with groupBy is refused and stays silent', async () => {
