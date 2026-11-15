@@ -132,7 +132,10 @@ export class QueryHandle<T> {
     options?: { snapshotOnly?: boolean },
   ) {
     this.snapshotOnly = options?.snapshotOnly === true;
-    if (!this.snapshotOnly && (filter.groupBy?.length || filter.aggregations?.length)) {
+    // The handle owns a copy: every (re)subscription re-sends it, so a caller that
+    // mutates its own filter later could otherwise turn a live handle into a grouped one.
+    this.filter = structuredClone(filter);
+    if (!this.snapshotOnly && (this.filter.groupBy?.length || this.filter.aggregations?.length)) {
       throw new QueryError(
         `QUERY_LIVE_AGGREGATE_UNSUPPORTED: a live query on map '${mapName}' cannot carry groupBy or aggregations; run it as a one-shot query (queryOnce / queryOncePaged)`,
         'QUERY_LIVE_AGGREGATE_UNSUPPORTED',
@@ -142,8 +145,7 @@ export class QueryHandle<T> {
     this.id = crypto.randomUUID();
     this.syncEngine = syncEngine;
     this.mapName = mapName;
-    this.filter = filter;
-    this.fields = filter.fields;
+    this.fields = this.filter.fields;
   }
 
   public subscribe(callback: SubscribeCallback<T>): () => void {
@@ -505,8 +507,9 @@ export class QueryHandle<T> {
     return { settled: this.settled, hasEmitted: this.hasEmitted };
   }
 
+  /** Returns a copy, so mutating the result cannot change what the handle sends. */
   public getFilter(): QueryFilter {
-    return this.filter;
+    return structuredClone(this.filter);
   }
 
   /** @internal Whether this is a one-shot handle the server must not register. */

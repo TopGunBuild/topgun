@@ -513,4 +513,22 @@ describe('snapshot-only one-shot queries', () => {
     }
   });
 
+  test('mutating the filter after construction cannot make a live query group', async () => {
+    const { client, sent, manager } = makeWiredClient();
+    const filter: QueryFilter = { where: { active: true }, groupBy: [] };
+    const live = client.query('orders', filter);
+    const unsubscribe = live.subscribe(() => {});
+    await Promise.resolve();
+    filter.groupBy!.push('category');
+    live.getFilter().aggregations = [{ func: 'sum', field: 'price' }];
+    manager.resubscribeAll();
+    unsubscribe();
+    const payloads = querySubPayloads(sent);
+    expect(payloads).toHaveLength(2);
+    for (const payload of payloads) {
+      expect('snapshotOnly' in payload).toBe(false);
+      expect((payload.query as QueryFilter).groupBy).toEqual([]);
+      expect((payload.query as QueryFilter).aggregations).toBeUndefined();
+    }
+  });
 });
