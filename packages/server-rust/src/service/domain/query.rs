@@ -730,8 +730,10 @@ impl QueryService {
     ///
     /// Lifecycle (register-first → fence → snapshot → seed → `QueryResp` → drain):
     /// A live request (no `snapshot_only`) that groups or aggregates is refused
-    /// first with `QUERY_LIVE_AGGREGATE_UNSUPPORTED`; a `snapshot_only` request runs
-    /// only steps 4-6 and registers nothing.
+    /// first with `QUERY_LIVE_AGGREGATE_UNSUPPORTED`. A `snapshot_only` request runs
+    /// step 4, the clamping and projection of step 5, and step 6: it builds no
+    /// window or buffer, registers nothing, takes no fence, seeds neither the
+    /// `LiveWindow` nor the previous result keys, and drains nothing.
     ///
     /// 1. Build an empty `LiveWindow` + inactive `DeltaBuffer`.
     /// 2. Register the subscription (`DashMap` sync — no `.await` before fence).
