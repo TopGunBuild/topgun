@@ -1309,3 +1309,130 @@ mod metadata_dirtiness_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod structural_size_tests {
+    use proptest::prelude::*;
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    use super::*;
+
+    fn stamp(millis: u64, counter: u32, node_id: &str) -> Timestamp {
+        Timestamp {
+            millis,
+            counter,
+            node_id: node_id.to_string(),
+        }
+    }
+
+    fn encoded_len(value: &RecordValue) -> u64 {
+        rmp_serde::to_vec_named(value).expect("encode").len() as u64
+    }
+
+    #[test]
+    fn structural_size_of_an_or_map_is_its_estimated_cost() {
+        let entry = |tag: &str, value: Value| OrMapEntry {
+            value,
+            tag: tag.to_string(),
+            timestamp: stamp(1_700_000_000_000, 3, "node-1"),
+            ttl_ms: None,
+        };
+        let empty = RecordValue::OrMap {
+            records: Vec::new(),
+            tombstones: Vec::new(),
+        };
+        let values = [
+            empty.clone(),
+            RecordValue::OrMap {
+                records: vec![
+                    entry("t1", Value::String("abc".to_string())),
+                    entry("t2", Value::Int(7)),
+                ],
+                tombstones: Vec::new(),
+            },
+            RecordValue::OrMap {
+                records: vec![entry("t3", Value::Null)],
+                tombstones: vec!["gone-1".to_string(), "gone-22".to_string()],
+            },
+        ];
+        let pairs: Vec<(u64, u64)> = values
+            .iter()
+            .map(|v| (structural_size(v), estimated_cost(v)))
+            .collect();
+        assert!(
+            pairs.iter().all(|(s, e)| s == e),
+            "structural_size must equal estimated_cost for every OrMap: {pairs:?}"
+        );
+        // The empty map is where the `.max(1)` floor would bind if the walk
+        // could fall below the map framing; it does not.
+        assert_eq!(structural_size(&empty), OR_MAP_FRAMING_BYTES);
+    }
+
+    fn leaf() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(Value::Int),
+            any::<f64>().prop_map(Value::Float),
+            ".{0,40}".prop_map(Value::String),
+            proptest::collection::vec(any::<u8>(), 0..64).prop_map(Value::Bytes),
+        ]
+    }
+
+    fn nested() -> impl Strategy<Value = Value> {
+        leaf().prop_recursive(4, 64, 8, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..8).prop_map(Value::Array),
+                proptest::collection::btree_map(".{0,12}", inner, 0..8).prop_map(Value::Map),
+            ]
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2_000))]
+        #[test]
+        fn structural_size_is_within_the_fidelity_band(
+            value in nested(),
+            millis in any::<u64>(),
+            counter in any::<u32>(),
+            node_id in "[a-z0-9]{0,64}",
+            ttl_ms in proptest::option::of(any::<u64>()),
+        ) {
+            let record = RecordValue::Lww {
+                value,
+                timestamp: stamp(millis, counter, &node_id),
+                ttl_ms,
+            };
+            let (s, e) = (structural_size(&record), encoded_len(&record));
+            prop_assert!(
+                2 * s > e && 3 * s < 7 * e,
+                "outside the band e/2 < s < 7e/3: s = {s}, e = {e}, value {record:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fidelity_band_is_tight_at_both_ends() {
+        let ints = RecordValue::Lww {
+            value: Value::Array(vec![Value::Int(1); 100_000]),
+            timestamp: stamp(1_700_000_000_000, 0, ""),
+            ttl_ms: None,
+        };
+        let high_bytes = RecordValue::Lww {
+            value: Value::Bytes(vec![0xFF; 100_000]),
+            timestamp: stamp(1_700_000_000_000, 0, ""),
+            ttl_ms: None,
+        };
+        let (si, ei) = (structural_size(&ints), encoded_len(&ints));
+        let (sb, eb) = (structural_size(&high_bytes), encoded_len(&high_bytes));
+        assert!(
+            10 * si > 23 * ei,
+            "an array of fixints approaches the upper end 7/3: s = {si}, e = {ei}"
+        );
+        assert!(
+            100 * sb < 51 * eb,
+            "bytes of 0xFF approach the lower end 1/2: s = {sb}, e = {eb}"
+        );
+    }
+}

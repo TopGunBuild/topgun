@@ -14596,6 +14596,986 @@ mod tests {
              us, max {max_us:.1} us per call ({CALLS} calls)"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // The byte bound: one copy per value, the charge, the counter and the rule
+    // -----------------------------------------------------------------------
+
+    const BYTES_MAP: &str = "bytes";
+    const BYTE_REFUSAL: &str = "Write-behind byte capacity exceeded";
+    const KEY_REFUSAL: &str = "Write-behind capacity exceeded";
+
+    /// An LWW value of `len` string bytes. Its charge depends only on `len`,
+    /// so two values of one length are a rewrite that does not grow.
+    fn sized(len: usize, millis: u64) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String("x".repeat(len)),
+            timestamp: Timestamp {
+                millis,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
+            ttl_ms: None,
+        }
+    }
+
+    /// The charge a plain value write of `key` must carry, computed apart
+    /// from the store's own `charge_of`.
+    fn charge(key: &str, value: &RecordValue) -> u64 {
+        structural_size(value) + key.len() as u64
+    }
+
+    fn bytes_of(store: &WriteBehindDataStore) -> u64 {
+        store.buffered_bytes.load(Ordering::SeqCst)
+    }
+
+    /// The charges of every queued entry; equal to the counter whenever no
+    /// pass holds an entry.
+    fn queued_charges(store: &WriteBehindDataStore) -> u64 {
+        store
+            .queues
+            .iter()
+            .map(|queue| queue.entries.values().map(|e| e.charge).sum::<u64>())
+            .sum()
+    }
+
+    /// Nothing leaves the buffer unless a test asks for a pass.
+    fn on_request_config(capacity: u64, capacity_bytes: u64) -> WriteBehindConfig {
+        WriteBehindConfig {
+            write_delay_ms: 0,
+            flush_interval_ms: 600_000,
+            capacity,
+            capacity_bytes,
+            shutdown_timeout_ms: 5_000,
+            ..WriteBehindConfig::default()
+        }
+    }
+
+    fn byte_store(capacity_bytes: u64) -> Arc<WriteBehindDataStore> {
+        WriteBehindDataStore::new(
+            Arc::new(crate::storage::datastores::NullDataStore),
+            on_request_config(100, capacity_bytes),
+        )
+    }
+
+    /// A store whose next inner `add` parks, so a requested pass sits holding
+    /// its batch until the handle is released.
+    fn parked_pass_store(
+        capacity: u64,
+        capacity_bytes: u64,
+    ) -> (Arc<WriteBehindDataStore>, TestParkHandle) {
+        let (inner, _never_panics) = super::background_task_panic_tests::PanickingAddStore::over(
+            Arc::new(crate::storage::datastores::NullDataStore),
+            0,
+        );
+        let parked = inner.arm_park();
+        let store = WriteBehindDataStore::new(inner, on_request_config(capacity, capacity_bytes));
+        (store, parked)
+    }
+
+    /// Waits until no pass is open.
+    async fn pass_closed(store: &WriteBehindDataStore) {
+        let closed = poll_until(10_000, || {
+            store
+                .flush_pass_epoch
+                .load(Ordering::SeqCst)
+                .is_multiple_of(2)
+        })
+        .await;
+        assert!(closed.is_some(), "the pass never closed");
+    }
+
+    fn answer(result: anyhow::Result<()>) -> String {
+        match result {
+            Ok(()) => "admitted".to_string(),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_buffered_value_is_held_once() {
+        let store = byte_store(0);
+        let shared = |store: &WriteBehindDataStore| {
+            let probe = (BYTES_MAP.to_string(), "k".to_string());
+            let queued = store
+                .queues
+                .get(&partition_for(BYTES_MAP, "k"))
+                .and_then(|queue| match &queue.entries.get(&probe)?.operation {
+                    DelayedOp::Store { value } => Some(Arc::clone(value)),
+                    DelayedOp::StoreCell { .. } | DelayedOp::Remove => None,
+                })
+                .expect("a queued value");
+            let staged = match &store.staging.get(&probe).expect("a staging slot").value {
+                Some(StagedValue::Value(value)) => Arc::clone(value),
+                _ => panic!("a staged value"),
+            };
+            Arc::ptr_eq(&queued, &staged)
+        };
+        store
+            .add(BYTES_MAP, "k", &sized(10, 1), now_millis())
+            .await
+            .unwrap();
+        let first = shared(&store);
+        store
+            .add(BYTES_MAP, "k", &sized(20, 2), now_millis())
+            .await
+            .unwrap();
+        let coalesced = shared(&store);
+        assert_eq!(
+            (first, coalesced),
+            (true, true),
+            "(after an add, after a coalescing add): the queue and staging must share one value"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffered_bytes_follow_insert_coalesce_and_settle() {
+        let store = byte_store(0);
+        let (first, smaller, larger) = (sized(100, 1), sized(10, 2), sized(500, 3));
+        let mut seen = Vec::new();
+        for value in [&first, &smaller, &larger] {
+            store
+                .add(BYTES_MAP, "k", value, now_millis())
+                .await
+                .unwrap();
+            seen.push(bytes_of(&store));
+        }
+        one_requested_pass(&store).await;
+        seen.push(bytes_of(&store));
+        assert_eq!(
+            seen,
+            vec![
+                charge("k", &first),
+                charge("k", &smaller),
+                charge("k", &larger),
+                0
+            ],
+            "(insert, smaller rewrite, larger rewrite, after the settle)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rewrite_while_a_pass_holds_the_key_counts_both_until_each_settles() {
+        let (store, mut parked) = parked_pass_store(100, 0);
+        let (held, rewrite) = (sized(100, 1), sized(300, 2));
+        store
+            .add(BYTES_MAP, "k", &held, now_millis())
+            .await
+            .unwrap();
+        store.soft_flush().await.unwrap();
+        parked.wait_parked().await;
+        store
+            .add(BYTES_MAP, "k", &rewrite, now_millis())
+            .await
+            .unwrap();
+        let while_held = (bytes_of(&store), store.pending_operation_count());
+        parked.release();
+        pass_closed(&store).await;
+        let after_the_held_settles = (bytes_of(&store), store.pending_operation_count());
+        one_requested_pass(&store).await;
+        let at_rest = (bytes_of(&store), store.pending_operation_count());
+        assert_eq!(
+            (while_held, after_the_held_settles, at_rest),
+            (
+                (charge("k", &held) + charge("k", &rewrite), 2),
+                (charge("k", &rewrite), 1),
+                (0, 0)
+            ),
+            "((bytes, entries) while the pass holds the key, after it settles, at rest)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_superseded_put_back_releases_the_retired_charge() {
+        let spy = Arc::new(SpyDataStore::new());
+        spy.refuse_everything(true);
+        let (inner, _never_panics) = super::background_task_panic_tests::PanickingAddStore::over(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            0,
+        );
+        let mut parked = inner.arm_park();
+        let store = WriteBehindDataStore::new(inner, on_request_config(100, 0));
+        let (refused, newer) = (sized(100, 1), sized(300, 2));
+        store
+            .add(BYTES_MAP, "k", &refused, now_millis())
+            .await
+            .unwrap();
+        store.soft_flush().await.unwrap();
+        parked.wait_parked().await;
+        store
+            .add(BYTES_MAP, "k", &newer, now_millis())
+            .await
+            .unwrap();
+        parked.release();
+        pass_closed(&store).await;
+        let after_the_put_back = (
+            bytes_of(&store),
+            queued_charges(&store),
+            store.pending_operation_count(),
+        );
+        spy.refuse_everything(false);
+        tokio::time::timeout(std::time::Duration::from_secs(10), store.hard_flush())
+            .await
+            .expect("hard_flush returned")
+            .expect("a healthy shutdown");
+        assert_eq!(
+            (after_the_put_back, bytes_of(&store)),
+            ((charge("k", &newer), charge("k", &newer), 1), 0),
+            "((bytes, queued charges, entries) once the refused entry is retired, after the drain)"
+        );
+    }
+
+    #[derive(Debug, Clone)]
+    enum ByteStep {
+        Add(u8, u16),
+        Remove(u8),
+        RemoveAll(u8),
+        Refuse(bool),
+        Pass,
+    }
+
+    fn byte_step() -> impl proptest::strategy::Strategy<Value = ByteStep> {
+        use proptest::prelude::*;
+        prop_oneof![
+            4 => (0u8..4, 0u16..300).prop_map(|(key, len)| ByteStep::Add(key, len)),
+            1 => (0u8..4).prop_map(ByteStep::Remove),
+            1 => (1u8..16).prop_map(ByteStep::RemoveAll),
+            1 => any::<bool>().prop_map(ByteStep::Refuse),
+            2 => Just(ByteStep::Pass),
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+        #[test]
+        fn buffered_bytes_equal_the_live_charges(
+            steps in proptest::collection::vec(byte_step(), 1..30)
+        ) {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                // A refused entry is not attempted again within a case, so a
+                // pass never holds anything at a step boundary.
+                let store = schedule_store(
+                    &spy,
+                    WriteBehindConfig {
+                        backoff_base_ms: 600_000,
+                        backoff_cap_ms: 600_000,
+                        ..on_request_config(0, 0)
+                    },
+                );
+                let key = |n: u8| format!("k{n}");
+                for (i, step) in steps.iter().enumerate() {
+                    match *step {
+                        ByteStep::Add(n, len) => store
+                            .add(BYTES_MAP, &key(n), &sized(usize::from(len), u64::from(len)), now_millis())
+                            .await
+                            .unwrap(),
+                        ByteStep::Remove(n) => {
+                            store.remove(BYTES_MAP, &key(n), now_millis()).await.unwrap();
+                        }
+                        ByteStep::RemoveAll(mask) => {
+                            let keys: Vec<String> =
+                                (0..4).filter(|n| mask & (1 << n) != 0).map(key).collect();
+                            store.remove_all(BYTES_MAP, &keys).await.unwrap();
+                        }
+                        ByteStep::Refuse(refuse) => spy.refuse_everything(refuse),
+                        ByteStep::Pass => one_requested_pass(&store).await,
+                    }
+                    assert_eq!(
+                        bytes_of(&store),
+                        queued_charges(&store),
+                        "after step {i} ({step:?}): the counter is the sum of the live charges"
+                    );
+                    if store.pending_operation_count() == 0 {
+                        assert_eq!(bytes_of(&store), 0, "after step {i}: empty buffer, zero bytes");
+                    }
+                }
+                spy.refuse_everything(false);
+                store.hard_flush().await.expect("a healthy shutdown");
+                assert_eq!(
+                    (bytes_of(&store), store.pending_operation_count()),
+                    (0, 0),
+                    "at idle both counters are 0"
+                );
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn an_in_place_write_is_charged_at_the_cell_cost() {
+        let store = byte_store(0);
+        let cell = crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+            value: sized(10, 1),
+            metadata: crate::storage::record::RecordMetadata::new(0, 0),
+        });
+        let mut seen = Vec::new();
+        // The engine re-costs a cell under its lock on every in-place mutation;
+        // the test sets the cost the same way, under the same lock.
+        for cost in [700, 250] {
+            cell.lock().metadata.cost = cost;
+            store
+                .add_with_witness(BYTES_MAP, "k", WriteSource::Cell(&cell), now_millis(), None)
+                .await
+                .unwrap();
+            seen.push(bytes_of(&store));
+        }
+        one_requested_pass(&store).await;
+        seen.push(bytes_of(&store));
+        assert_eq!(
+            seen,
+            vec![700, 250, 0],
+            "(first write-through, rewrite after the cell shrank, after the settle)"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_admitted_in_place_write_is_not_byte_refused_after_its_mutation() {
+        let filler = sized(500, 1);
+        let budget = charge("other", &filler);
+        let store = byte_store(budget);
+        let now = now_millis();
+        let cell = crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+            value: sized(10, 1),
+            metadata: crate::storage::record::RecordMetadata::new(0, 0),
+        });
+        // The record store asks before it mutates, below the budget...
+        let admitted = answer(store.admit_in_place(BYTES_MAP, "k"));
+        // ...another key's write takes the counter to the budget meanwhile...
+        store.add(BYTES_MAP, "other", &filler, now).await.unwrap();
+        let at_write_through = bytes_of(&store);
+        // ...and the mutation grows the cell, which the engine re-costs.
+        cell.lock().metadata.cost = 300;
+        let acked = answer(
+            store
+                .add_with_witness(BYTES_MAP, "k", WriteSource::Cell(&cell), now, None)
+                .await,
+        );
+        assert_eq!(
+            (
+                admitted.as_str(),
+                at_write_through,
+                acked.as_str(),
+                bytes_of(&store)
+            ),
+            ("admitted", budget, "admitted", budget + 300),
+            "(the pre-check below the budget, the counter at the write-through, its answer, \
+             the counter after it, charged at the cell's cost)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_is_refused_once_the_buffered_bytes_reach_the_budget() {
+        let (a, b) = (sized(100, 1), sized(40, 1));
+        let budget = charge("a", &a) + charge("b", &b);
+        let mut answers = Vec::new();
+        for capacity_bytes in [budget, budget + 1] {
+            let store = byte_store(capacity_bytes);
+            store.add(BYTES_MAP, "a", &a, now_millis()).await.unwrap();
+            store.add(BYTES_MAP, "b", &b, now_millis()).await.unwrap();
+            assert_eq!(bytes_of(&store), budget);
+            answers.push(answer(
+                store.add(BYTES_MAP, "c", &sized(1, 1), now_millis()).await,
+            ));
+        }
+        assert_eq!(
+            answers,
+            vec![BYTE_REFUSAL.to_string(), "admitted".to_string()],
+            "(a new value at the budget, one byte below it)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_larger_than_the_whole_budget_is_admitted_into_a_buffer_below_it() {
+        let store = byte_store(1_000);
+        store
+            .add(BYTES_MAP, "small", &sized(10, 1), now_millis())
+            .await
+            .unwrap();
+        let huge = answer(
+            store
+                .add(BYTES_MAP, "huge", &sized(5_000, 1), now_millis())
+                .await,
+        );
+        let after = answer(
+            store
+                .add(BYTES_MAP, "after", &sized(1, 1), now_millis())
+                .await,
+        );
+        assert_eq!(
+            (huge.as_str(), after.as_str()),
+            ("admitted", BYTE_REFUSAL),
+            "(a value larger than the budget into a buffer below it, the next new value)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rewrite_that_does_not_grow_is_admitted_over_the_budget() {
+        let (store, mut parked) = parked_pass_store(100, 1_000);
+        let now = now_millis();
+        for key in ["held-equal", "held-smaller"] {
+            store
+                .add(BYTES_MAP, key, &sized(200, 1), now)
+                .await
+                .unwrap();
+        }
+        store.soft_flush().await.unwrap();
+        parked.wait_parked().await;
+        store
+            .add(BYTES_MAP, "queued", &sized(200, 1), now)
+            .await
+            .unwrap();
+        store
+            .add(BYTES_MAP, "fill", &sized(1_000, 1), now)
+            .await
+            .unwrap();
+        assert!(bytes_of(&store) >= 1_000, "precondition: over the budget");
+        let answers = [
+            answer(
+                store
+                    .add(BYTES_MAP, "held-equal", &sized(200, 2), now)
+                    .await,
+            ),
+            answer(
+                store
+                    .add(BYTES_MAP, "held-smaller", &sized(150, 2), now)
+                    .await,
+            ),
+            answer(store.add(BYTES_MAP, "queued", &sized(200, 2), now).await),
+            answer(store.add(BYTES_MAP, "queued", &sized(150, 3), now).await),
+        ];
+        parked.release();
+        tokio::time::timeout(std::time::Duration::from_secs(10), store.hard_flush())
+            .await
+            .expect("hard_flush returned")
+            .expect("a healthy shutdown");
+        assert_eq!(
+            answers.clone().map(|a| a == "admitted"),
+            [true; 4],
+            "(held equal, held smaller, queued equal, queued smaller): {answers:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rewrite_that_grows_is_refused_over_the_budget() {
+        let store = byte_store(1_000);
+        let now = now_millis();
+        store.add(BYTES_MAP, "k", &sized(10, 1), now).await.unwrap();
+        store
+            .add(BYTES_MAP, "fill", &sized(2_000, 1), now)
+            .await
+            .unwrap();
+        let before = bytes_of(&store);
+        let grown = answer(store.add(BYTES_MAP, "k", &sized(11, 2), now).await);
+        assert_eq!(
+            (grown.as_str(), bytes_of(&store)),
+            (BYTE_REFUSAL, before),
+            "(a growing rewrite over the budget, the counter after it)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remove_is_never_refused_by_the_byte_budget() {
+        let store = byte_store(500);
+        let now = now_millis();
+        let (buffered, fill) = (sized(50, 1), sized(1_000, 1));
+        store
+            .add(BYTES_MAP, "buffered", &buffered, now)
+            .await
+            .unwrap();
+        store.add(BYTES_MAP, "fill", &fill, now).await.unwrap();
+        assert!(bytes_of(&store) >= 500, "precondition: over the budget");
+        let mut moves = Vec::new();
+        let mut step = |store: &WriteBehindDataStore, result: anyhow::Result<()>, before: u64| {
+            moves.push((
+                answer(result),
+                i128::from(bytes_of(store)) - i128::from(before),
+            ));
+        };
+        let before = bytes_of(&store);
+        step(
+            &store,
+            store.remove(BYTES_MAP, "buffered", now).await,
+            before,
+        );
+        let before = bytes_of(&store);
+        step(&store, store.remove(BYTES_MAP, "absent", now).await, before);
+        let before = bytes_of(&store);
+        step(
+            &store,
+            store
+                .remove_all(BYTES_MAP, &["fill".to_string(), "absent-too".to_string()])
+                .await,
+            before,
+        );
+        let released = |key: &str, value: &RecordValue| -i128::from(charge(key, value));
+        assert_eq!(
+            moves,
+            vec![
+                ("admitted".to_string(), released("buffered", &buffered)),
+                ("admitted".to_string(), 0),
+                ("admitted".to_string(), released("fill", &fill)),
+            ],
+            "(a remove of a buffered key, of a key not buffered, a remove_all of both): each \
+             admitted and charged 0, releasing only what it replaced"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_null_lww_write_is_never_refused_by_the_byte_budget() {
+        fn null(ttl_ms: Option<u64>) -> RecordValue {
+            RecordValue::Lww {
+                value: Value::Null,
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+                ttl_ms,
+            }
+        }
+        let store = byte_store(1_000);
+        let now = now_millis();
+        let big = sized(300, 1);
+        for suffix in ["none", "ttl"] {
+            store
+                .add(BYTES_MAP, &format!("big-{suffix}"), &big, now)
+                .await
+                .unwrap();
+            store
+                .remove(BYTES_MAP, &format!("gone-{suffix}"), now)
+                .await
+                .unwrap();
+        }
+        store.remove(BYTES_MAP, "nested", now).await.unwrap();
+        // Over the budget on its own, so the nulls below, which release the
+        // big values, cannot bring the counter back under it.
+        store
+            .add(BYTES_MAP, "fill", &sized(1_000, 1), now)
+            .await
+            .unwrap();
+        assert!(bytes_of(&store) >= 1_000, "precondition: over the budget");
+
+        let mut moves = Vec::new();
+        let mut expected = Vec::new();
+        for (suffix, ttl) in [("none", None), ("ttl", Some(60_000))] {
+            for (key, replaced) in [
+                (format!("absent-{suffix}"), 0),
+                (format!("gone-{suffix}"), 0),
+                (
+                    format!("big-{suffix}"),
+                    charge(&format!("big-{suffix}"), &big),
+                ),
+            ] {
+                let before = bytes_of(&store);
+                let result = answer(store.add(BYTES_MAP, &key, &null(ttl), now).await);
+                moves.push((key.clone(), result, before - bytes_of(&store)));
+                expected.push((key, "admitted".to_string(), replaced));
+            }
+        }
+        // A null inside a map is data, not a delete: charged as usual, so it
+        // grows a key whose slot carries the charge 0 of a remove.
+        let nested = RecordValue::Lww {
+            value: Value::Map(std::collections::BTreeMap::from([(
+                "x".to_string(),
+                Value::Null,
+            )])),
+            timestamp: Timestamp {
+                millis: 1,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
+            ttl_ms: None,
+        };
+        let before = bytes_of(&store);
+        moves.push((
+            "nested".to_string(),
+            answer(store.add(BYTES_MAP, "nested", &nested, now).await),
+            before - bytes_of(&store),
+        ));
+        expected.push(("nested".to_string(), BYTE_REFUSAL.to_string(), 0));
+        assert_eq!(
+            moves, expected,
+            "(key, answer, bytes released) of null writes over the budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_byte_budget_refuses_nothing() {
+        let store = byte_store(0);
+        let now = now_millis();
+        let mut refused = 0;
+        for i in 0..20 {
+            for len in [10_000, 20_000] {
+                if store
+                    .add(BYTES_MAP, &format!("k{i}"), &sized(len, 1), now)
+                    .await
+                    .is_err()
+                {
+                    refused += 1;
+                }
+            }
+        }
+        assert_eq!(
+            (refused, bytes_of(&store)),
+            (0, 20 * charge("k0", &sized(20_000, 1)) + 10),
+            "(refused, bytes): a zero budget disables the byte rule"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_byte_bound_overshoot_is_the_stated_one() {
+        let held = sized(100, 1);
+        let fill = sized(200, 1);
+        let (w1, w2) = (sized(300, 1), sized(400, 1));
+        let budget = charge("held", &held) + charge("fill", &fill) + 1;
+        let (store, mut parked) = parked_pass_store(100, budget);
+        let now = now_millis();
+        store.add(BYTES_MAP, "held", &held, now).await.unwrap();
+        store.soft_flush().await.unwrap();
+        parked.wait_parked().await;
+        store.add(BYTES_MAP, "fill", &fill, now).await.unwrap();
+        assert_eq!(
+            bytes_of(&store),
+            budget - 1,
+            "precondition: one below the budget"
+        );
+
+        // Two writers pass the check one below the budget and park before
+        // their queue inserts: the cohort `W_b`.
+        let mut first = store.test_park_between_stage_and_queue_insert(BYTES_MAP, "w1");
+        let one = {
+            let (store, w1) = (Arc::clone(&store), w1.clone());
+            tokio::spawn(async move { store.add(BYTES_MAP, "w1", &w1, now).await })
+        };
+        first.wait_parked().await;
+        let mut second = store.test_park_before_queue_insert(BYTES_MAP, "w2");
+        let two = {
+            let (store, w2) = (Arc::clone(&store), w2.clone());
+            tokio::spawn(async move { store.add(BYTES_MAP, "w2", &w2, now).await })
+        };
+        second.wait_parked().await;
+        first.release();
+        second.release();
+        one.await
+            .unwrap()
+            .expect("w1 passed its check below the budget");
+        two.await
+            .unwrap()
+            .expect("w2 passed its check below the budget");
+        let late = answer(store.add(BYTES_MAP, "late", &sized(1, 1), now).await);
+        // A rewrite of the held key that does not grow is admitted over the
+        // budget and counts the key a second time: `H_b`.
+        let rewrite = answer(store.add(BYTES_MAP, "held", &held, now).await);
+        let peak = bytes_of(&store);
+        let bound = budget - 1 + (charge("w1", &w1) + charge("w2", &w2)) + charge("held", &held);
+        parked.release();
+        tokio::time::timeout(std::time::Duration::from_secs(10), store.hard_flush())
+            .await
+            .expect("hard_flush returned")
+            .expect("a healthy shutdown");
+        assert_eq!(
+            (late.as_str(), rewrite.as_str(), peak, bytes_of(&store)),
+            (BYTE_REFUSAL, "admitted", bound, 0),
+            "(a new key past the budget, the held key's rewrite, the counter, after the drain): \
+             the counter reaches but does not exceed B - 1 + W_b + H_b"
+        );
+    }
+
+    #[test]
+    fn a_key_refusal_is_not_also_a_byte_refusal() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let refused = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let store = WriteBehindDataStore::new(
+                    Arc::new(crate::storage::datastores::NullDataStore),
+                    on_request_config(1, 100),
+                );
+                store
+                    .add(BYTES_MAP, "a", &sized(500, 1), now_millis())
+                    .await
+                    .unwrap();
+                answer(store.add(BYTES_MAP, "b", &sized(10, 1), now_millis()).await)
+            })
+        });
+        let rendered = handle.render();
+        assert_eq!(
+            (
+                refused.as_str(),
+                rendered_value(
+                    &rendered,
+                    "topgun_write_behind_capacity_refusals_total{bound=\"keys\"}"
+                ),
+                rendered_value(
+                    &rendered,
+                    "topgun_write_behind_capacity_refusals_total{bound=\"bytes\"}"
+                ),
+            ),
+            (KEY_REFUSAL, Some(1.0), Some(0.0)),
+            "(answer, keys refusals, bytes refusals) at both bounds"
+        );
+    }
+
+    #[test]
+    fn capacity_mb_parses_disables_and_falls_back() {
+        const VAR: &str = "TOPGUN_WRITEBEHIND_CAPACITY_MB";
+        const MIB: u64 = 1024 * 1024;
+        #[derive(Clone)]
+        struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let parse = |raw: Option<&str>| {
+            let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let writer = Captured(Arc::clone(&captured));
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .finish();
+            let bytes = tracing::subscriber::with_default(subscriber, || {
+                WriteBehindConfig::from_source(|key| {
+                    (key == VAR).then(|| raw.map(str::to_string)).flatten()
+                })
+                .capacity_bytes
+            });
+            let log = String::from_utf8(captured.lock().unwrap().clone()).expect("utf-8 log");
+            (bytes, log.contains(VAR))
+        };
+        assert_eq!(
+            [
+                parse(None),
+                parse(Some("333")),
+                parse(Some("0")),
+                parse(Some("x")),
+                parse(Some("")),
+                parse(Some("17592186044415")),
+            ],
+            [
+                (256 * MIB, false),
+                (333 * MIB, false),
+                (0, false),
+                (256 * MIB, true),
+                (256 * MIB, true),
+                (17_592_186_044_415 * MIB, false),
+            ],
+            "(bytes, warned naming the variable) for unset, 333, 0, x, empty, the largest value"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "TOPGUN_WRITEBEHIND_CAPACITY_MB")]
+    fn capacity_mb_overflow_is_fatal() {
+        let _ = WriteBehindConfig::from_source(|key| {
+            (key == "TOPGUN_WRITEBEHIND_CAPACITY_MB").then(|| "17592186044416".to_string())
+        });
+    }
+
+    #[test]
+    fn capacity_refusals_are_counted_by_bound() {
+        const KEYS: &str = "topgun_write_behind_capacity_refusals_total{bound=\"keys\"}";
+        const BYTES: &str = "topgun_write_behind_capacity_refusals_total{bound=\"bytes\"}";
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let readings = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let store = WriteBehindDataStore::new(
+                    Arc::new(crate::storage::datastores::NullDataStore),
+                    on_request_config(1, 100),
+                );
+                let read = |rendered: String| {
+                    (
+                        rendered_value(&rendered, KEYS),
+                        rendered_value(&rendered, BYTES),
+                    )
+                };
+                let at_start = read(handle.render());
+                store
+                    .add(BYTES_MAP, "a", &sized(500, 1), now_millis())
+                    .await
+                    .unwrap();
+                // A buffered key passes the key rule; its growth meets the byte rule.
+                let grown = answer(
+                    store
+                        .add(BYTES_MAP, "a", &sized(600, 2), now_millis())
+                        .await,
+                );
+                let after_bytes = read(handle.render());
+                let new_key = answer(store.add(BYTES_MAP, "b", &sized(1, 1), now_millis()).await);
+                let after_keys = read(handle.render());
+                (at_start, grown, after_bytes, new_key, after_keys)
+            })
+        });
+        assert_eq!(
+            readings,
+            (
+                (Some(0.0), Some(0.0)),
+                BYTE_REFUSAL.to_string(),
+                (Some(0.0), Some(1.0)),
+                KEY_REFUSAL.to_string(),
+                (Some(1.0), Some(1.0)),
+            ),
+            "((keys, bytes) at start, byte refusal, after it, key refusal, after it)"
+        );
+    }
+
+    #[test]
+    fn buffered_bytes_gauge_renders_at_zero_and_follows_the_counter() {
+        const GAUGE: &str = "topgun_write_behind_buffered_bytes";
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let readings = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                // Refused, the entry stays buffered after the pass that reports it.
+                spy.refuse_everything(true);
+                let store = schedule_store(&spy, on_request_config(100, 0));
+                let at_start = rendered_value(&handle.render(), GAUGE);
+                store
+                    .add(BYTES_MAP, "k", &sized(100, 1), now_millis())
+                    .await
+                    .unwrap();
+                one_requested_pass(&store).await;
+                let after_a_pass = rendered_value(&handle.render(), GAUGE);
+                spy.refuse_everything(false);
+                store.hard_flush().await.expect("a healthy shutdown");
+                (at_start, after_a_pass, bytes_of(&store))
+            })
+        });
+        #[allow(clippy::cast_precision_loss)]
+        let charged = charge("k", &sized(100, 1)) as f64;
+        assert_eq!(
+            readings,
+            (Some(0.0), Some(charged), 0),
+            "(gauge at the first scrape, after a pass that kept the entry, counter at rest)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_commit_blocked_in_the_store_reaches_writers_as_bound_refusals() {
+        let value = sized(100, 1);
+        let one = charge("h1", &value);
+        // Four entries of equal charge fill the key bound; the budget is met
+        // only while the two the pass holds still count.
+        let (store, mut parked) = parked_pass_store(4, 3 * one + 1);
+        let now = now_millis();
+        for key in ["h1", "h2"] {
+            store.add(BYTES_MAP, key, &value, now).await.unwrap();
+        }
+        store.soft_flush().await.unwrap();
+        parked.wait_parked().await;
+        for key in ["k3", "k4"] {
+            store.add(BYTES_MAP, key, &value, now).await.unwrap();
+        }
+        let while_blocked = (store.pending_operation_count(), bytes_of(&store));
+
+        // Every call must return on its own; the paused clock jumps to the
+        // timeout the moment nothing else can run.
+        let within = std::time::Duration::from_secs(1);
+        let returns = |result: Result<anyhow::Result<()>, tokio::time::error::Elapsed>| {
+            answer(result.expect("a write call waited for the blocked commit"))
+        };
+        let answers = [
+            returns(tokio::time::timeout(within, store.add(BYTES_MAP, "k5", &value, now)).await),
+            returns(
+                tokio::time::timeout(within, store.add(BYTES_MAP, "k3", &sized(150, 2), now)).await,
+            ),
+            returns(
+                tokio::time::timeout(within, store.add(BYTES_MAP, "k3", &sized(100, 2), now)).await,
+            ),
+            returns(
+                tokio::time::timeout(within, store.add(BYTES_MAP, "h1", &sized(100, 2), now)).await,
+            ),
+            returns(tokio::time::timeout(within, store.remove(BYTES_MAP, "k4", now)).await),
+            answer(store.admit_in_place(BYTES_MAP, "k3")),
+        ];
+        parked.release();
+        pass_closed(&store).await;
+        // Left: the rewrites of k3 and h1 and the remove of k4.
+        let after_release = (
+            store.pending_operation_count(),
+            bytes_of(&store),
+            queued_charges(&store),
+        );
+        let new_key = answer(store.add(BYTES_MAP, "k6", &value, now).await);
+        tokio::time::timeout(std::time::Duration::from_secs(10), store.hard_flush())
+            .await
+            .expect("hard_flush returned")
+            .expect("a healthy shutdown");
+        assert_eq!(
+            (while_blocked, answers, after_release, new_key),
+            (
+                (4, 4 * one),
+                [
+                    KEY_REFUSAL.to_string(),
+                    BYTE_REFUSAL.to_string(),
+                    "admitted".to_string(),
+                    "admitted".to_string(),
+                    "admitted".to_string(),
+                    BYTE_REFUSAL.to_string(),
+                ],
+                (3, 2 * one, 2 * one),
+                "admitted".to_string(),
+            ),
+            "((entries, bytes) while blocked; new key, growing rewrite, equal rewrite queued, \
+             equal rewrite held, remove, in-place; after the release; a new key then)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_byte_budget_holds_through_a_store_wide_hold() {
+        let spy = Arc::new(SpyDataStore::new());
+        spy.refuse_everything(true);
+        let value = sized(100, 1);
+        // Four entries reach the budget; the fourth is admitted one below it.
+        // Passes run on their own here: a hold is probed by the passes.
+        let store = schedule_store(
+            &spy,
+            WriteBehindConfig {
+                flush_interval_ms: 100,
+                ..on_request_config(100, 3 * charge("a", &value) + 1)
+            },
+        );
+        let now = now_millis();
+        for key in ["a", "b", "c", "d"] {
+            store.add(BYTES_MAP, key, &value, now).await.unwrap();
+        }
+        store.soft_flush().await.unwrap();
+        let hold = poll_until(10_000, || store.test_store_hold_active()).await;
+        let during = [
+            answer(store.add(BYTES_MAP, "new", &value, now).await),
+            answer(store.add(BYTES_MAP, "a", &sized(200, 2), now).await),
+            answer(store.admit_in_place(BYTES_MAP, "a")),
+        ];
+        spy.refuse_everything(false);
+        let drained = poll_until(120_000, || {
+            store.pending_operation_count() == 0 && bytes_of(&store) == 0
+        })
+        .await;
+        assert_eq!(
+            (hold.is_some(), during, drained.is_some()),
+            (
+                true,
+                [
+                    BYTE_REFUSAL.to_string(),
+                    BYTE_REFUSAL.to_string(),
+                    BYTE_REFUSAL.to_string()
+                ],
+                true
+            ),
+            "(a hold began, new key / growing rewrite / in-place write during it, both \
+             counters at 0 once the store accepts)"
+        );
+    }
 }
 
 // Declared after the inline `mod tests` so that module's literal opening line

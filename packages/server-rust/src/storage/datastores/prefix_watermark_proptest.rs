@@ -3229,6 +3229,327 @@ async fn a_cancelled_append_never_lets_the_watermark_pass_its_sequence() {
     .await;
 }
 
+/// The `bound="bytes"` refusal count in a rendered scrape.
+fn byte_refusals(rendered: &str) -> Option<f64> {
+    rendered
+        .lines()
+        .find(|line| {
+            line.starts_with("topgun_write_behind_capacity_refusals_total{bound=\"bytes\"} ")
+        })
+        .and_then(|line| line.rsplit(' ').next()?.parse().ok())
+}
+
+/// A plain value of `len` string bytes, to fill the byte budget from a key
+/// other than the one under test.
+fn plain(len: usize) -> RecordValue {
+    RecordValue::Lww {
+        value: Value::String("x".repeat(len)),
+        timestamp: Timestamp {
+            millis: 1,
+            counter: 0,
+            node_id: "n".to_string(),
+        },
+        ttl_ms: None,
+    }
+}
+
+/// Entries are due at once, but only a requested flush drains them; the
+/// byte budget is exactly what `filler` charges under `filler_key`.
+fn budget_config(filler_key: &str, filler: &RecordValue) -> WriteBehindConfig {
+    WriteBehindConfig {
+        write_delay_ms: 0,
+        capacity_bytes: structural_size(filler) + filler_key.len() as u64,
+        ..never_flush_config()
+    }
+}
+
+fn current_thread() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+}
+
+#[test]
+fn an_in_place_write_over_the_byte_budget_is_refused_before_its_mutation() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        current_thread().block_on(async {
+            let filler = plain(500);
+            // The fixture's second key, which it never writes.
+            let filler_key = keys_in_partition(test_partition(), 2)[1].clone();
+            let fx = CellFixture::new(budget_config(&filler_key, &filler)).await;
+            fx.write_behind
+                .add(TEST_MAP, &filler_key, &filler, 0)
+                .await
+                .expect("the filler is admitted below the budget");
+            assert_eq!(
+                fx.write_behind.buffered_bytes.load(Ordering::SeqCst),
+                fx.write_behind.config.capacity_bytes,
+                "precondition: the counter is at the budget"
+            );
+            let resident = |fx: &CellFixture| {
+                let key = fx.key().to_string();
+                let store = Arc::clone(&fx.store);
+                async move {
+                    let record = store
+                        .get(&key, false)
+                        .await
+                        .expect("get")
+                        .expect("resident");
+                    (or_view(&record.value), record.metadata.cost)
+                }
+            };
+            let counters = |fx: &CellFixture| {
+                (
+                    fx.write_behind.pending_operation_count(),
+                    fx.write_behind.buffered_bytes.load(Ordering::SeqCst),
+                )
+            };
+            let before = (resident(&fx).await, counters(&fx), fx.max_assigned());
+            let refusals_before = byte_refusals(&handle.render());
+
+            let answers = [
+                apply_or(&fx.store, fx.key(), OrOp::Add("op1"))
+                    .await
+                    .map_err(|e| e.to_string()),
+                apply_or(&fx.store, fx.key(), OrOp::Remove("old-1"))
+                    .await
+                    .map_err(|e| e.to_string()),
+            ];
+            let after = (resident(&fx).await, counters(&fx), fx.max_assigned());
+            fx.assert_no_pending_sequence_above(before.2);
+            let refusals_after = byte_refusals(&handle.render());
+
+            fx.write_behind.soft_flush().await.expect("soft_flush");
+            wait_until("the filler to flush", || {
+                fx.write_behind.pending_operation_count() == 0
+            })
+            .await;
+            let retried = apply_or(&fx.store, fx.key(), OrOp::Add("op1"))
+                .await
+                .map_err(|e| e.to_string());
+            fx.write_behind.hard_flush().await.expect("hard_flush");
+
+            let refused = Err("Write-behind byte capacity exceeded".to_string());
+            assert_eq!(
+                (answers, after, refusals_after, retried),
+                (
+                    [refused.clone(), refused],
+                    before,
+                    refusals_before.map(|n| n + 2.0),
+                    Ok(true)
+                ),
+                "(OR add and remove over the budget; the resident value and cost, the counters \
+                 and the last WAL sequence after them; byte refusals; the add once drained)"
+            );
+        });
+    });
+}
+
+#[tokio::test]
+async fn an_in_place_write_of_backup_provenance_is_not_pre_checked() {
+    let filler = plain(500);
+    // The fixture's second key, which it never writes.
+    let filler_key = keys_in_partition(test_partition(), 2)[1].clone();
+    let fx = CellFixture::new(budget_config(&filler_key, &filler)).await;
+    fx.write_behind
+        .add(TEST_MAP, &filler_key, &filler, 0)
+        .await
+        .expect("the filler is admitted below the budget");
+    assert!(
+        fx.write_behind.admit_in_place(TEST_MAP, fx.key()).is_err(),
+        "precondition: a write-through in-place write is refused here"
+    );
+    let mut mutate = |value: &mut RecordValue| {
+        if let RecordValue::OrMap { records, .. } = value {
+            records.push(or_entry("from-backup"));
+        }
+        MutateOutcome {
+            changed: true,
+            witness: None,
+        }
+    };
+    let changed = fx
+        .store
+        .update_in_place(
+            &KeyWriteToken::for_test(fx.store.name(), fx.key()),
+            fx.key(),
+            Some(or_value(&[], &[])),
+            CallerProvenance::Backup,
+            &mut mutate,
+        )
+        .await
+        .expect("a backup in-place write owes no write-through and is not pre-checked");
+    let record = fx
+        .store
+        .get(fx.key(), false)
+        .await
+        .expect("get")
+        .expect("resident");
+    assert_eq!(
+        (changed, or_view(&record.value)),
+        (true, view(&["from-backup", "old-1", "old-2"], &[])),
+        "(changed, the resident value) after a backup in-place write over the budget"
+    );
+    fx.write_behind.hard_flush().await.expect("hard_flush");
+}
+
+#[test]
+// The push, its refusal and its re-push after the drain are one scenario; split,
+// the state each step reads would have to be rebuilt.
+#[allow(clippy::too_many_lines)]
+fn a_push_diff_over_the_byte_budget_merges_up_to_the_refused_entry() {
+    use crate::network::connection::ConnectionRegistry;
+    use crate::service::domain::query::QueryRegistry;
+    use crate::service::domain::sync::SyncService;
+    use crate::service::operation::{
+        service_names, Operation, OperationContext, OperationResponse,
+    };
+    use crate::storage::merkle_sync::MerkleSyncManager;
+    use crate::storage::{RecordStoreFactory, StorageConfig};
+    use topgun_core::messages::{ORMapEntry, ORMapPushDiff, ORMapPushDiffPayload};
+    use topgun_core::ORMapRecord;
+    use tower::ServiceExt;
+
+    let push = |keys: &[String]| {
+        let stamp = Timestamp {
+            millis: 1_700_000_000_000,
+            counter: 0,
+            node_id: "node-1".to_string(),
+        };
+        let entries = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| ORMapEntry {
+                key: key.clone(),
+                records: vec![ORMapRecord {
+                    // The first entry takes the counter, with the filler,
+                    // past the budget; without the filler all three fit.
+                    value: rmpv::Value::String(
+                        if i == 0 {
+                            "y".repeat(600)
+                        } else {
+                            "z".to_string()
+                        }
+                        .into(),
+                    ),
+                    timestamp: Timestamp {
+                        counter: u32::try_from(i).expect("small"),
+                        ..stamp.clone()
+                    },
+                    tag: format!("1700000000000:{i}:node-1"),
+                    ttl_ms: None,
+                }],
+                tombstones: Vec::new(),
+            })
+            .collect();
+        Operation::ORMapPushDiff {
+            ctx: OperationContext::new(1, service_names::SYNC, stamp, 5000),
+            payload: ORMapPushDiff {
+                payload: ORMapPushDiffPayload {
+                    map_name: TEST_MAP.to_string(),
+                    entries,
+                },
+            },
+        }
+    };
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        current_thread().block_on(async {
+            let fx = CellFixture::new(WriteBehindConfig {
+                write_delay_ms: 0,
+                capacity_bytes: 2_000,
+                ..never_flush_config()
+            })
+            .await;
+            // Three keys not yet stored, in the fixture's WAL partition, so the
+            // partition's last sequence tells which entries were framed.
+            let keys: Vec<String> = keys_in_partition(fx.partition, 5)[2..].to_vec();
+            let factory = Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::clone(&fx.write_behind) as Arc<dyn MapDataStore>,
+                Vec::new(),
+            ));
+            let svc = Arc::new(SyncService::new(
+                Arc::new(MerkleSyncManager::default()),
+                Arc::clone(&factory),
+                Arc::new(ConnectionRegistry::new()),
+                Arc::new(QueryRegistry::new()),
+            ));
+            let holds = |key: &str| {
+                let store = factory.get_or_create(TEST_MAP, topgun_core::hash_to_partition(key));
+                let key = key.to_string();
+                async move {
+                    let found = store.get(&key, false).await.expect("get").is_some();
+                    (found, store.exists_in_memory(&key))
+                }
+            };
+            fx.write_behind
+                .add(TEST_MAP, &fx.keys[1], &plain(1_500), 0)
+                .await
+                .expect("the filler is admitted below the budget");
+            assert!(
+                fx.write_behind.buffered_bytes.load(Ordering::SeqCst) < 2_000,
+                "precondition: the counter is below the budget"
+            );
+            let sequence_before = fx.max_assigned();
+            let refusals_before = byte_refusals(&handle.render());
+
+            let first_push = Arc::clone(&svc).oneshot(push(&keys)).await;
+            let after_refusal = (
+                first_push.is_err(),
+                holds(&keys[0]).await,
+                fx.write_behind
+                    .staging
+                    .contains_key(&(TEST_MAP.to_string(), keys[0].clone())),
+                holds(&keys[1]).await,
+                holds(&keys[2]).await,
+                fx.max_assigned() - sequence_before,
+                byte_refusals(&handle.render())
+                    .zip(refusals_before)
+                    .map(|(a, b)| a - b),
+            );
+
+            fx.write_behind.soft_flush().await.expect("soft_flush");
+            wait_until("the filler and the first entry to flush", || {
+                fx.write_behind.pending_operation_count() == 0
+            })
+            .await;
+            let second_push = Arc::clone(&svc).oneshot(push(&keys)).await;
+            let after_drain = (
+                matches!(second_push, Ok(OperationResponse::Empty)),
+                holds(&keys[0]).await.0,
+                holds(&keys[1]).await.0,
+                holds(&keys[2]).await.0,
+            );
+            fx.write_behind.hard_flush().await.expect("hard_flush");
+
+            assert_eq!(
+                (after_refusal, after_drain),
+                (
+                    (
+                        true,
+                        (true, true),
+                        true,
+                        (false, false),
+                        (false, false),
+                        1,
+                        Some(1.0)
+                    ),
+                    (true, true, true, true),
+                ),
+                "((push refused, first key held and resident, first key buffered, second and \
+                 third key (held, resident), WAL frames written, byte refusals); (the re-push \
+                 answered with no frame, each key holds its record))"
+            );
+        });
+    });
+}
+
 #[tokio::test]
 async fn a_capacity_rejected_mutation_is_persisted_by_the_next_write_through() {
     // Entries are due at once, but only a requested flush drains them.
