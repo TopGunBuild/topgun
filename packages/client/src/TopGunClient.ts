@@ -355,6 +355,10 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
    *
    * When TSchema is concrete, passing a schema key narrows the QueryHandle
    * value type to TSchema[K]. The untyped overload preserves back-compat.
+   *
+   * @throws QueryError (`QUERY_LIVE_AGGREGATE_UNSUPPORTED`) when the filter has a
+   *   non-empty `groupBy` or `aggregations`; run such a query with `queryOnce` or
+   *   `queryOncePaged`.
    */
   public query<K extends keyof TSchema & string>(
     mapName: K,
