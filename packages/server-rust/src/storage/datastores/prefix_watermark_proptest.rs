@@ -4322,8 +4322,9 @@ fn queued_entry(store_time: i64, sequence: u64) -> DelayedEntry {
         map: TEST_MAP.to_string(),
         key: "k".to_string(),
         operation: DelayedOp::Store {
-            value: lww(sequence),
+            value: Arc::new(lww(sequence)),
         },
+        charge: 0,
         store_time,
         buffered_at: tokio::time::Instant::now(),
         sequence,

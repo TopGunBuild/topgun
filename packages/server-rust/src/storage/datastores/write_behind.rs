@@ -22,7 +22,7 @@ use crate::storage::map_data_store::{
     MapDataStore, MerkleLeaf, PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder,
     StoreBrokenCause, StoreErrorClass, StoreWrite, WriteSource,
 };
-use crate::storage::record::RecordValue;
+use crate::storage::record::{structural_size, RecordValue};
 use crate::storage::wal::{
     describe_wal_watermark_metrics, OrDelta, Wal, WalEntry, WalFsyncPolicy, WalOp, WalStorePayload,
     WAL_WATERMARK_LAG_GAUGE,
@@ -573,8 +573,9 @@ impl WriteBehindConfig {
 /// A buffered operation waiting to be flushed to the inner store.
 #[derive(Debug, Clone)]
 pub(crate) enum DelayedOp {
-    /// Buffered add/update with the value.
-    Store { value: RecordValue },
+    /// Buffered add/update with the value, shared with the key's staging slot
+    /// so a buffered value is held once.
+    Store { value: Arc<RecordValue> },
     /// Buffered in-place write: the flush persists the cell's value as it is
     /// at flush time.
     StoreCell { cell: Arc<SlotCell> },
@@ -969,6 +970,10 @@ pub(crate) struct DelayedEntry {
     pub key: String,
     /// The buffered operation (store or remove).
     pub operation: DelayedOp,
+    /// What this entry added to the buffered-bytes counter, released at the
+    /// entry's terminal. It belongs to this entry's value, not to the key's
+    /// schedule, so a coalesce or a retirement never moves it to another entry.
+    pub charge: u64,
     /// Wall-clock millis when first enqueued. Preserved on coalesce so the
     /// key flushes on its original schedule.
     pub store_time: i64,
@@ -1012,6 +1017,7 @@ impl DelayedEntry {
         map: &str,
         key: &str,
         operation: DelayedOp,
+        charge: u64,
         store_time: i64,
         sequence: u64,
         wal_seq: u64,
@@ -1020,6 +1026,7 @@ impl DelayedEntry {
             map: map.to_string(),
             key: key.to_string(),
             operation,
+            charge,
             store_time,
             buffered_at: tokio::time::Instant::now(),
             sequence,
@@ -1034,6 +1041,9 @@ impl DelayedEntry {
     /// the flush schedule and its retry state, which belong to the key and not
     /// to one write of it. Without the retry state a key that is rewritten
     /// while the store refuses it would be attempted in every pass.
+    ///
+    /// The charge is not inherited: it is the memory of this write's value,
+    /// and the replaced entry's charge leaves the counter with it.
     fn inherit_from(&mut self, replaced: &DelayedEntry) {
         self.store_time = replaced.store_time;
         self.buffered_at = replaced.buffered_at;
@@ -1298,6 +1308,8 @@ impl PartitionQueue {
         else {
             return false;
         };
+        // The survivor keeps its own charge: the retired entry's value is gone
+        // with it, and its charge is released by the caller.
         survivor
             .wal_sequences
             .extend(retired.wal_sequences.iter().copied());
@@ -1379,7 +1391,7 @@ struct StagingSlot {
 /// `add`), or the cell of an in-place write.
 #[derive(Clone)]
 enum StagedValue {
-    Value(RecordValue),
+    Value(Arc<RecordValue>),
     Cell(Arc<SlotCell>),
 }
 
@@ -1387,30 +1399,55 @@ impl StagedValue {
     /// An owned copy of the staged value, read under the cell's lock for a cell.
     fn to_value(&self) -> RecordValue {
         match self {
-            StagedValue::Value(value) => value.clone(),
+            StagedValue::Value(value) => RecordValue::clone(value),
             StagedValue::Cell(cell) => cell.lock().value.clone(),
         }
     }
 }
 
-/// The queue operation and the staging value for one write. A value is queued
-/// and staged as two copies; an in-place write's cell is shared by the queued
-/// entry, its staging slot and the engine, so the flush persists whatever the
-/// cell holds at flush time and a re-adoption finds the same cell (TG-WB-003).
+/// The queue operation and the staging value for one write. A value is copied
+/// once and shared by the queued entry and its staging slot, so the buffer
+/// holds it once and its charge is the memory of one value; an in-place
+/// write's cell is shared by the queued entry, its staging slot and the
+/// engine, so the flush persists whatever the cell holds at flush time and a
+/// re-adoption finds the same cell (TG-WB-003).
 fn queued_and_staged(src: WriteSource<'_>) -> (DelayedOp, StagedValue) {
     match src {
-        WriteSource::Value(value) => (
-            DelayedOp::Store {
-                value: value.clone(),
-            },
-            StagedValue::Value(value.clone()),
-        ),
+        WriteSource::Value(value) => {
+            let value = Arc::new(value.clone());
+            (
+                DelayedOp::Store {
+                    value: Arc::clone(&value),
+                },
+                StagedValue::Value(value),
+            )
+        }
         WriteSource::Cell(cell) => (
             DelayedOp::StoreCell {
                 cell: Arc::clone(cell),
             },
             StagedValue::Cell(Arc::clone(cell)),
         ),
+    }
+}
+
+/// What one write adds to the buffered-bytes counter: a value's structural
+/// size plus its key, or an in-place write's cell cost, which the engine set
+/// under the same lock and which already counts the key.
+///
+/// An LWW write of a top-level `null` is a delete — a client's `set(key,
+/// null)` arrives as a put and reads as absent — so it is charged 0 like a
+/// remove and is never refused by the byte bound; its small tombstone is
+/// bounded by the key bound. A `null` nested in a map or array is ordinary
+/// data and is charged as usual.
+fn charge_of(src: &WriteSource<'_>, key: &str) -> u64 {
+    match src {
+        WriteSource::Value(RecordValue::Lww {
+            value: topgun_core::types::Value::Null,
+            ..
+        }) => 0,
+        WriteSource::Value(value) => structural_size(value) + key.len() as u64,
+        WriteSource::Cell(cell) => cell.lock().metadata.cost,
     }
 }
 
@@ -2077,6 +2114,10 @@ pub struct WriteBehindDataStore {
     sequence: AtomicU64,
     /// Node-wide count of pending entries across all partition queues.
     pending_count: AtomicU64,
+    /// Node-wide sum of the `charge` of every buffered entry, queued or held
+    /// by a pass (`TG-WB-005`). It moves only where `pending_count` moves:
+    /// `enqueue`, `settle_stored` and a superseded `put_back`.
+    buffered_bytes: AtomicU64,
     /// Signal to wake the flush loop for immediate processing.
     flush_notify: Arc<Notify>,
     /// Shutdown signal sender — wakes the background flush task and tells it to exit.
@@ -2382,6 +2423,7 @@ impl WriteBehindDataStore {
             staging: DashMap::new(),
             sequence: AtomicU64::new(0),
             pending_count: AtomicU64::new(0),
+            buffered_bytes: AtomicU64::new(0),
             flush_notify: flush_notify.clone(),
             shutdown: shutdown_tx,
             lifecycle: LifecycleState::new(),
@@ -3919,6 +3961,71 @@ impl WriteBehindDataStore {
         }
     }
 
+    /// Queues a write's entry, replacing the key's queued entry if there is
+    /// one, and moves both buffer counters: a new key adds one entry and its
+    /// charge; a coalesce adds the new charge and releases the replaced one.
+    /// Returns the replaced entry's sequence and the WAL sequences its frame
+    /// no longer needs, for the caller to resolve after the shard guard is
+    /// gone, so neither tracking lock is ever nested under it.
+    ///
+    /// The shard guard lives only inside this call and nothing in it
+    /// suspends (`TG-WB-004`).
+    fn enqueue(
+        &self,
+        partition_id: u32,
+        entry: DelayedEntry,
+        survivor_subsumes: bool,
+    ) -> (Option<u64>, Option<BTreeSet<u64>>) {
+        let charge = entry.charge;
+        let mut queue = self.queues.entry(partition_id).or_default();
+        if let Some(existing) = queue.value_mut().remove(&entry.map, &entry.key) {
+            let retired = existing.sequence;
+            let replaced = existing.charge;
+            let mut coalesced = entry;
+            // A coalesce keeps the original store_time and the retry state.
+            coalesced.inherit_from(&existing);
+            let subsumed = Self::coalesce_wal_sequences(
+                survivor_subsumes,
+                &mut coalesced,
+                existing.wal_sequences,
+            );
+            let _ = queue.value_mut().insert(coalesced);
+            // No pending_count change on coalesce; the bytes move by the
+            // difference between the two values.
+            if charge >= replaced {
+                self.buffered_bytes
+                    .fetch_add(charge - replaced, Ordering::Relaxed);
+            } else {
+                self.release_charge(replaced - charge);
+            }
+            (Some(retired), subsumed)
+        } else {
+            let _ = queue.value_mut().insert(entry);
+            self.pending_count.fetch_add(1, Ordering::Relaxed);
+            self.buffered_bytes.fetch_add(charge, Ordering::Relaxed);
+            (None, None)
+        }
+    }
+
+    /// Takes `charge` off the buffered-bytes counter. The counter is the sum
+    /// of the live entries' charges, so going below zero is a bug: asserted
+    /// in debug builds, saturated in release.
+    fn release_charge(&self, charge: u64) {
+        if charge == 0 {
+            return;
+        }
+        let before = self
+            .buffered_bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bytes| {
+                Some(bytes.saturating_sub(charge))
+            })
+            .unwrap_or_else(|bytes| bytes);
+        debug_assert!(
+            before >= charge,
+            "buffered_bytes underflow: released {charge} of {before}"
+        );
+    }
+
     /// Appends an entry to the WAL and satisfies the fsync policy before
     /// returning. Returns `Ok(())` immediately when no WAL is configured.
     ///
@@ -4305,6 +4412,7 @@ impl WriteBehindDataStore {
         // was flushed: a newer coalesced write must survive (`TG-WB-007`).
         self.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
         self.pending_count.fetch_sub(1, Ordering::Relaxed);
+        self.release_charge(entry.charge);
         // The bytes are in the inner store, so the entry sequence may let the
         // prefix-complete flushed watermark past it. This is the ONLY signal
         // that advances the tombstone durability fence.
@@ -4343,6 +4451,9 @@ impl WriteBehindDataStore {
         // One statement, so the shard guard is a temporary: held any longer
         // it would block every synchronous access to the shard — a client
         // write, the stall watchdog (TG-WB-004).
+        // Read before `reinsert_front` consumes the entry: a superseded entry
+        // leaves the buffer, and its charge with it.
+        let charge = entry.charge;
         let outcome = self
             .queues
             .entry(partition)
@@ -4354,6 +4465,7 @@ impl WriteBehindDataStore {
         // pending-set lock is never nested under it.
         if let Reinsert::Superseded { retired_sequence } = outcome {
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
+            self.release_charge(charge);
             self.resolve_pending(retired_sequence);
         }
     }
@@ -4431,7 +4543,7 @@ impl WriteBehindDataStore {
             return Err(err);
         }
         match &entry.operation {
-            DelayedOp::Store { value, .. } => Ok(Some(rmp_serde::to_vec_named(value)?)),
+            DelayedOp::Store { value, .. } => Ok(Some(rmp_serde::to_vec_named(value.as_ref())?)),
             DelayedOp::StoreCell { cell, .. } => {
                 // The guard lives only inside this arm: it is `!Send`.
                 let guard = cell.lock();
@@ -4589,7 +4701,7 @@ impl WriteBehindDataStore {
                             store_time,
                         }
                     }
-                    DelayedOp::Store { value } => Some(value),
+                    DelayedOp::Store { value } => Some(value.as_ref()),
                     DelayedOp::StoreCell { .. } => cloned.as_ref(),
                 };
                 // A cell's value is cloned above exactly when it is not
@@ -5570,6 +5682,8 @@ impl MapDataStore for WriteBehindDataStore {
         // insert is done, so a tenant drop waits for this write (`TG-TEN-002`).
         let _in_flight = self.tenant_closes.enter(map)?;
 
+        // The memory this write adds to the buffer, taken before the gate.
+        let charge = charge_of(&src, key);
         // Check capacity before insertion to avoid partial state on rejection
         self.admit_new_keys(map, &[key])?;
 
@@ -5656,7 +5770,7 @@ impl MapDataStore for WriteBehindDataStore {
             gate.pass().await;
         }
         let (operation, staged) = queued_and_staged(src);
-        let entry = DelayedEntry::fresh(map, key, operation, now, entry_seq, wal_seq);
+        let entry = DelayedEntry::fresh(map, key, operation, charge, now, entry_seq, wal_seq);
 
         let staging_key = (map.to_string(), key.to_string());
         // Staged before the entry is queued: a flush pass can take the entry the
@@ -5667,29 +5781,7 @@ impl MapDataStore for WriteBehindDataStore {
         self.stage(&smap, &skey, entry_seq, Some(staged));
         #[cfg(test)]
         TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
-        // Insert into partition queue, preserving original store_time on coalesce
-        let (retired_seq, subsumed_wal_seqs) = {
-            let mut queue = self.queues.entry(partition_id).or_default();
-            // If coalescing, preserve the original store_time
-            if let Some(existing) = queue.value_mut().remove(map, key) {
-                let retired = existing.sequence;
-                let mut coalesced = entry;
-                coalesced.inherit_from(&existing);
-                let subsumed = Self::coalesce_wal_sequences(
-                    survivor_subsumes,
-                    &mut coalesced,
-                    existing.wal_sequences,
-                );
-                let _ = queue.value_mut().insert(coalesced);
-                // No pending_count change on coalesce
-                (Some(retired), subsumed)
-            } else {
-                let _ = queue.value_mut().insert(entry);
-                // New key -- increment pending count
-                self.pending_count.fetch_add(1, Ordering::Relaxed);
-                (None, None)
-            }
-        };
+        let (retired_seq, subsumed_wal_seqs) = self.enqueue(partition_id, entry, survivor_subsumes);
 
         // The frame is on disk and the entry is queued, so an entry now owns this
         // WAL sequence. Done after releasing the partition-queue lock so neither
@@ -5776,7 +5868,8 @@ impl MapDataStore for WriteBehindDataStore {
 
         // Assign and track the durability sequence atomically before queuing.
         let entry_seq = self.assign_tracked_sequence();
-        let entry = DelayedEntry::fresh(map, key, DelayedOp::Remove, now, entry_seq, wal_seq);
+        // A remove holds no value: charged 0.
+        let entry = DelayedEntry::fresh(map, key, DelayedOp::Remove, 0, now, entry_seq, wal_seq);
 
         let staging_key = (map.to_string(), key.to_string());
         // The pending delete is staged before the entry is queued: a flush pass
@@ -5788,26 +5881,7 @@ impl MapDataStore for WriteBehindDataStore {
         self.stage(&smap, &skey, entry_seq, None);
         #[cfg(test)]
         TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
-        let (retired_seq, subsumed_wal_seqs) = {
-            let mut queue = self.queues.entry(partition_id).or_default();
-            if let Some(existing) = queue.value_mut().remove(map, key) {
-                let retired = existing.sequence;
-                let mut coalesced = entry;
-                coalesced.inherit_from(&existing);
-                let subsumed = Self::coalesce_wal_sequences(
-                    survivor_subsumes,
-                    &mut coalesced,
-                    existing.wal_sequences,
-                );
-                let _ = queue.value_mut().insert(coalesced);
-                // No pending_count change on coalesce
-                (Some(retired), subsumed)
-            } else {
-                let _ = queue.value_mut().insert(entry);
-                self.pending_count.fetch_add(1, Ordering::Relaxed);
-                (None, None)
-            }
-        };
+        let (retired_seq, subsumed_wal_seqs) = self.enqueue(partition_id, entry, survivor_subsumes);
 
         // An entry now owns this WAL sequence; sited after the queue guard drops.
         self.promote_wal_sequence(partition_id, wal_seq);
@@ -5866,7 +5940,7 @@ impl MapDataStore for WriteBehindDataStore {
             .get(&staging_key)
             .map(|entry| match &entry.value().value {
                 Some(StagedValue::Cell(cell)) => Some(Loaded::Cell(Arc::clone(cell))),
-                Some(StagedValue::Value(value)) => Some(Loaded::Value(value.clone())),
+                Some(StagedValue::Value(value)) => Some(Loaded::Value(RecordValue::clone(value))),
                 // Pending delete -- do not consult inner store
                 None => None,
             });
@@ -5971,7 +6045,8 @@ impl MapDataStore for WriteBehindDataStore {
 
             // Assign and track the durability sequence atomically before queuing.
             let entry_seq = self.assign_tracked_sequence();
-            let entry = DelayedEntry::fresh(map, key, DelayedOp::Remove, now, entry_seq, wal_seq);
+            let entry =
+                DelayedEntry::fresh(map, key, DelayedOp::Remove, 0, now, entry_seq, wal_seq);
 
             let staging_key = (map.to_string(), key.clone());
             // The pending delete is staged before the entry is queued: a flush pass
@@ -5983,25 +6058,8 @@ impl MapDataStore for WriteBehindDataStore {
             self.stage(&smap, &skey, entry_seq, None);
             #[cfg(test)]
             TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
-            let (retired_seq, subsumed_wal_seqs) = {
-                let mut queue = self.queues.entry(partition_id).or_default();
-                if let Some(existing) = queue.value_mut().remove(map, key) {
-                    let retired = existing.sequence;
-                    let mut coalesced = entry;
-                    coalesced.inherit_from(&existing);
-                    let subsumed = Self::coalesce_wal_sequences(
-                        survivor_subsumes,
-                        &mut coalesced,
-                        existing.wal_sequences,
-                    );
-                    let _ = queue.value_mut().insert(coalesced);
-                    (Some(retired), subsumed)
-                } else {
-                    let _ = queue.value_mut().insert(entry);
-                    self.pending_count.fetch_add(1, Ordering::Relaxed);
-                    (None, None)
-                }
-            };
+            let (retired_seq, subsumed_wal_seqs) =
+                self.enqueue(partition_id, entry, survivor_subsumes);
 
             // An entry now owns this WAL sequence; sited after the queue guard drops.
             self.promote_wal_sequence(partition_id, wal_seq);
@@ -8572,12 +8630,27 @@ mod tests {
     async fn stage_is_monotonic_by_seq() {
         let (store, _dir) = redb_backed_store();
 
-        store.stage("m", "k", 10, Some(StagedValue::Value(lww("v10", 10))));
+        store.stage(
+            "m",
+            "k",
+            10,
+            Some(StagedValue::Value(Arc::new(lww("v10", 10)))),
+        );
         // A higher seq replaces.
-        store.stage("m", "k", 11, Some(StagedValue::Value(lww("v11", 11))));
+        store.stage(
+            "m",
+            "k",
+            11,
+            Some(StagedValue::Value(Arc::new(lww("v11", 11)))),
+        );
         assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v11", 11);
         // A late, lower seq is rejected (does not clobber the newer value).
-        store.stage("m", "k", 10, Some(StagedValue::Value(lww("v10", 10))));
+        store.stage(
+            "m",
+            "k",
+            10,
+            Some(StagedValue::Value(Arc::new(lww("v10", 10)))),
+        );
         assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v11", 11);
         // Equal seq (same write, idempotent) is allowed.
         store.stage("m", "k", 11, None);
@@ -9788,6 +9861,7 @@ mod tests {
             operation: DelayedOp::StoreCell {
                 cell: Arc::clone(&cell),
             },
+            charge: 0,
             store_time: 0,
             buffered_at: tokio::time::Instant::now(),
             sequence: 1,

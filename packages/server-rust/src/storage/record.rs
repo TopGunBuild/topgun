@@ -567,6 +567,54 @@ fn or_map_estimated_cost(records: &[OrMapEntry], tombstones: &[String]) -> u64 {
     OR_MAP_FRAMING_BYTES + records_bytes + tombstones_bytes
 }
 
+/// Fixed `MsgPack` framing (bytes) of an `Lww` record as the store encodes it
+/// (`to_vec_named`): the outer fixmap and `"lww"`, the inner fixmap with
+/// `"value"` and `"timestamp"`, the timestamp fixmap with `"millis"` and its
+/// `uint64` (a wall-clock millis is above `2^32`), `"counter"` and a fixint,
+/// `"nodeId"` and the header of a node id under 32 bytes. The node id's own
+/// bytes vary per value and are added beside it.
+const LWW_FRAMING_BYTES: u64 = 56;
+
+/// Framing of the optional `ttlMs` field: its name and the largest `uint64`
+/// encoding, so a TTL is never under-charged.
+const LWW_TTL_FRAMING_BYTES: u64 = 15;
+
+/// Structural byte-size estimate of a whole [`RecordValue`], approximating its
+/// stored `MsgPack` encoding without serializing and without allocating.
+///
+/// For `OrMap` it is exactly [`estimated_cost`] (whose `.max(1)` floor never
+/// binds, the walk being at least the map framing). For `Lww` it is the
+/// value walk plus the record framing; it lies strictly between half and
+/// seven thirds of the encoded size (integer-heavy values over-count, binary
+/// values of high bytes under-count). It is a size signal for bounding
+/// memory, not a heap measurement.
+#[must_use]
+pub(crate) fn structural_size(value: &RecordValue) -> u64 {
+    match value {
+        RecordValue::Lww {
+            value,
+            timestamp,
+            ttl_ms,
+        } => {
+            value_byte_estimate(value)
+                + LWW_FRAMING_BYTES
+                + timestamp.node_id.len() as u64
+                + if ttl_ms.is_some() {
+                    LWW_TTL_FRAMING_BYTES
+                } else {
+                    0
+                }
+        }
+        RecordValue::OrMap {
+            records,
+            tombstones,
+        } => or_map_estimated_cost(records, tombstones),
+        RecordValue::OrTombstones { tags } => {
+            OR_MAP_FRAMING_BYTES + tags.iter().map(|t| t.len() as u64 + 2).sum::<u64>()
+        }
+    }
+}
+
 /// Returns the estimated heap cost of a [`RecordValue`] in bytes.
 ///
 /// For the [`RecordValue::OrMap`] arm this is a cheap structural size estimate
