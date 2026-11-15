@@ -509,6 +509,18 @@ pub struct QueryService {
     hlc: Option<Arc<Mutex<HLC>>>,
 }
 
+/// `QUERY_RESP.code` of a refused live subscription that carries a non-empty
+/// `group_by` or `aggregations`: the live fan-out sends per-record deltas, which
+/// would mix raw records into a grouped result.
+pub const QUERY_LIVE_AGGREGATE_UNSUPPORTED: &str = "QUERY_LIVE_AGGREGATE_UNSUPPORTED";
+
+/// Whether a query groups or aggregates. Non-empty is the DAG's own test: an empty
+/// `group_by` / `aggregations` changes nothing in the result, so it stays live.
+fn is_live_aggregate(query: &Query) -> bool {
+    query.group_by.as_ref().is_some_and(|g| !g.is_empty())
+        || query.aggregations.as_ref().is_some_and(|a| !a.is_empty())
+}
+
 /// Maps raw DAG output rows to `QueryResultEntry` values.
 ///
 /// `ScanProcessor` injects the real record key as `_key` into every row, and wraps
@@ -717,6 +729,10 @@ impl QueryService {
     /// Handles a `QuerySubscribe` operation.
     ///
     /// Lifecycle (register-first → fence → snapshot → seed → `QueryResp` → drain):
+    /// A live request (no `snapshot_only`) that groups or aggregates is refused
+    /// first with `QUERY_LIVE_AGGREGATE_UNSUPPORTED`; a `snapshot_only` request runs
+    /// only steps 4-6 and registers nothing.
+    ///
     /// 1. Build an empty `LiveWindow` + inactive `DeltaBuffer`.
     /// 2. Register the subscription (`DashMap` sync — no `.await` before fence).
     /// 3. Activate the buffer, then capture `fence = hlc.now()`.
@@ -741,6 +757,28 @@ impl QueryService {
         let map_name = payload.payload.map_name.clone();
         let query = payload.payload.query.clone();
         let fields = payload.payload.fields.clone();
+        let snapshot_only = payload.payload.snapshot_only;
+
+        // A live subscription's fan-out sends per-record deltas, which cannot keep a
+        // grouped result coherent; refuse it before anything is built or registered,
+        // so a refusal leaves no subscription (and no buffer) behind. A one-shot
+        // request (`snapshot_only`) is served: it is never registered.
+        if !snapshot_only && is_live_aggregate(&query) {
+            return Ok(OperationResponse::Message(Box::new(Message::QueryResp(
+                QueryRespMessage {
+                    payload: QueryRespPayload {
+                        query_id,
+                        error: Some(
+                            "a live query cannot carry groupBy or aggregations; run it as a \
+                             one-shot query (queryOnce / queryOncePaged)"
+                                .to_string(),
+                        ),
+                        code: Some(QUERY_LIVE_AGGREGATE_UNSUPPORTED.to_string()),
+                        ..Default::default()
+                    },
+                },
+            ))));
+        }
 
         // A value-ORDER-BY without a LIMIT is an in-memory sort over the matched set.
         // It is O(result) — the same memory profile as a no-LIMIT full scan, which is
@@ -752,50 +790,58 @@ impl QueryService {
         // SIZE/RESIDENCY-gated reject, not as a blanket reject of the sort clause. The
         // `QUERY_UNBOUNDED_SORT` code is retained for that gated reject.
 
-        // Build an empty window and an inactive buffer BEFORE registration so the
-        // observer can immediately start routing into the buffer once we activate it.
-        let live_window = Arc::new(LiveWindow::new(
-            query.sort.clone().unwrap_or_default(),
-            query.limit,
-        ));
-        // Buffer capacity: 4096 distinct concurrent writes during a scan is a generous
-        // bound; overflow falls back to the client-resubscribe signal (R5).
-        let delta_buffer = Arc::new(DeltaBuffer::new(4096));
+        // A one-shot request needs no window, buffer, registration or fence: nothing
+        // is registered for it, so no live update can follow its snapshot, and a
+        // subscription already registered under the same id is left untouched.
+        let live = if snapshot_only {
+            None
+        } else {
+            // Build an empty window and an inactive buffer BEFORE registration so the
+            // observer can immediately start routing into the buffer once we activate it.
+            let live_window = Arc::new(LiveWindow::new(
+                query.sort.clone().unwrap_or_default(),
+                query.limit,
+            ));
+            // Buffer capacity: 4096 distinct concurrent writes during a scan is a generous
+            // bound; overflow falls back to the client-resubscribe signal (R5).
+            let delta_buffer = Arc::new(DeltaBuffer::new(4096));
 
-        // --- STEP 1: register the subscription (DashMap, sync — no .await) ---
-        // The registration must happen BEFORE the fence so any write that lands after
-        // register goes through the observer and, once the buffer is active, into the buffer.
-        let subscription = QuerySubscription {
-            query_id: query_id.clone(),
-            connection_id,
-            map_name: map_name.clone(),
-            query: query.clone(),
-            previous_result_keys: DashSet::new(),
-            live_window: Arc::clone(&live_window),
-            fields: fields.clone(),
-            delta_buffer: Arc::clone(&delta_buffer),
+            // --- STEP 1: register the subscription (DashMap, sync — no .await) ---
+            // The registration must happen BEFORE the fence so any write that lands after
+            // register goes through the observer and, once the buffer is active, into the buffer.
+            let subscription = QuerySubscription {
+                query_id: query_id.clone(),
+                connection_id,
+                map_name: map_name.clone(),
+                query: query.clone(),
+                previous_result_keys: DashSet::new(),
+                live_window: Arc::clone(&live_window),
+                fields: fields.clone(),
+                delta_buffer: Arc::clone(&delta_buffer),
+            };
+            self.query_registry.register(subscription);
+
+            // --- STEP 2: activate buffer, capture fence ---
+            // Activate first; the fence timestamp is captured right after so any write
+            // that beats the activate still goes into the buffer (route is a no-op when
+            // inactive, so a write before activate is already visible in the scan).
+            delta_buffer.activate();
+            let fence = self.hlc.as_ref().map_or_else(
+                || {
+                    let wall_ms: u64 = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+                        .unwrap_or(0);
+                    topgun_core::hlc::Timestamp {
+                        millis: wall_ms,
+                        counter: 0,
+                        node_id: String::new(),
+                    }
+                },
+                |h| h.lock().now(),
+            );
+            Some((live_window, delta_buffer, fence))
         };
-        self.query_registry.register(subscription);
-
-        // --- STEP 2: activate buffer, capture fence ---
-        // Activate first; the fence timestamp is captured right after so any write
-        // that beats the activate still goes into the buffer (route is a no-op when
-        // inactive, so a write before activate is already visible in the scan).
-        delta_buffer.activate();
-        let fence = self.hlc.as_ref().map_or_else(
-            || {
-                let wall_ms: u64 = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-                    .unwrap_or(0);
-                topgun_core::hlc::Timestamp {
-                    millis: wall_ms,
-                    counter: 0,
-                    node_id: String::new(),
-                }
-            },
-            |h| h.lock().now(),
-        );
 
         // --- STEP 3: stream the snapshot (no per-query Merkle on the full-scan path) ---
         // Per-query Merkle is retired for full-scans (SPEC-322c SYNC/QUERY separation).
@@ -919,8 +965,10 @@ impl QueryService {
 
         // --- STEP 4: seed the window + prev-keys from the snapshot page ---
         // Seed before field projection so sort-field values are present for ordering.
-        for entry in &results {
-            let _ = live_window.apply_mutation(&entry.key, Some(&entry.value), true);
+        if let Some((live_window, _, _)) = &live {
+            for entry in &results {
+                let _ = live_window.apply_mutation(&entry.key, Some(&entry.value), true);
+            }
         }
 
         // Apply field projection.
@@ -931,7 +979,7 @@ impl QueryService {
         }
 
         // Sync prev-keys with the seeded window.
-        {
+        if live.is_some() {
             // Look up the registered subscription to update its prev-keys. The
             // subscription was registered above and is still live.
             if let Some(sub) =
@@ -995,6 +1043,9 @@ impl QueryService {
         // replayed through the live window + send_update path; entries ≤ fence
         // were already in the snapshot. On overflow, send a QUERY_SNAPSHOT_OVERFLOW
         // signal so the client knows to resubscribe.
+        let Some((_, delta_buffer, fence)) = live else {
+            return Ok(resp_msg);
+        };
         match delta_buffer.deactivate_and_drain(&fence) {
             Ok(post_fence_entries) => {
                 if let Some(sub) =
@@ -2236,6 +2287,7 @@ mod tests {
                 map_name: "users".to_string(),
                 query: Query::default(),
                 fields: None,
+                snapshot_only: false,
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
@@ -2269,6 +2321,7 @@ mod tests {
                 map_name: "users".to_string(),
                 query: Query::default(),
                 fields: None,
+                snapshot_only: false,
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
@@ -2375,6 +2428,7 @@ mod tests {
                     ..Query::default()
                 },
                 fields: None,
+                snapshot_only: false,
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
@@ -2474,6 +2528,7 @@ mod tests {
                 map_name: map_name.to_string(),
                 query: Query::default(), // full-scan: no predicate, sort, or limit
                 fields: None,
+                snapshot_only: false,
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
@@ -2573,6 +2628,7 @@ mod tests {
                 map_name: map_name.to_string(),
                 query,
                 fields: None,
+                snapshot_only: false,
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
@@ -2670,6 +2726,7 @@ mod tests {
                     ..Query::default()
                 },
                 fields: None,
+                snapshot_only: false,
             },
         };
         let resp = match svc
@@ -2771,6 +2828,7 @@ mod tests {
                 map_name: "users".to_string(),
                 query: Query::default(),
                 fields: None,
+                snapshot_only: false,
             },
         };
         let op = Operation::QuerySubscribe {
@@ -2810,6 +2868,7 @@ mod tests {
                     map_name: "users".to_string(),
                     query: Query::default(),
                     fields: None,
+                    snapshot_only: false,
                 },
             },
         };
@@ -3245,6 +3304,259 @@ mod tests {
                 rmpv::Value::Integer(42.into()),
             ),
         ])
+    }
+
+    // ---------------------------------------------------------------------------
+    // Live aggregate refusal and snapshot-only subscriptions
+    // ---------------------------------------------------------------------------
+
+    /// Seeds `orders` with two `a` rows (price 10, 25) and one `b` row (price 50).
+    async fn seed_orders(factory: &Arc<RecordStoreFactory>) {
+        use crate::storage::record_store::CallerProvenance;
+        for (key, category, price) in [("o1", "a", 10i64), ("o2", "a", 25), ("o3", "b", 50)] {
+            let value = make_value_map(vec![
+                ("category", Value::String(category.to_string())),
+                ("price", Value::Int(price)),
+            ]);
+            factory
+                .get_or_create("orders", topgun_core::hash_to_partition(key))
+                .put(
+                    &KeyWriteToken::for_test("orders", key),
+                    key,
+                    RecordValue::Lww {
+                        value,
+                        timestamp: make_timestamp(),
+                        ttl_ms: None,
+                    },
+                    CallerProvenance::Client,
+                )
+                .await
+                .expect("put should succeed");
+        }
+    }
+
+    fn category_is(category: &str) -> Query {
+        Query {
+            predicate: Some(PredicateNode {
+                op: PredicateOp::Eq,
+                attribute: Some("category".to_string()),
+                value: Some(rmpv::Value::String(category.into())),
+                ..Default::default()
+            }),
+            ..Query::default()
+        }
+    }
+
+    fn group_by_category() -> Query {
+        Query {
+            group_by: Some(vec!["category".to_string()]),
+            ..Query::default()
+        }
+    }
+
+    struct AggFixture {
+        registry: Arc<QueryRegistry>,
+        conn_registry: Arc<ConnectionRegistry>,
+        svc: Arc<QueryService>,
+        conn_id: ConnectionId,
+        rx: tokio::sync::mpsc::Receiver<OutboundMessage>,
+    }
+
+    async fn agg_fixture() -> AggFixture {
+        let registry = Arc::new(QueryRegistry::new());
+        let factory = make_factory();
+        seed_orders(&factory).await;
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let (handle, rx) = conn_registry.register(ConnectionKind::Client, &test_config());
+        let svc = Arc::new(QueryService::new(
+            registry.clone(),
+            factory,
+            conn_registry.clone(),
+            10_000,
+            None,
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
+        AggFixture {
+            registry,
+            conn_registry,
+            svc,
+            conn_id: handle.id,
+            rx,
+        }
+    }
+
+    async fn subscribe_orders(
+        fx: &AggFixture,
+        query_id: &str,
+        query: Query,
+        snapshot_only: bool,
+    ) -> QueryRespPayload {
+        let op = Operation::QuerySubscribe {
+            ctx: make_ctx(Some(fx.conn_id)),
+            payload: QuerySubMessage {
+                payload: QuerySubPayload {
+                    query_id: query_id.to_string(),
+                    map_name: "orders".to_string(),
+                    query,
+                    fields: None,
+                    snapshot_only,
+                },
+            },
+        };
+        match fx.svc.clone().oneshot(op).await.unwrap() {
+            OperationResponse::Message(msg) => match *msg {
+                Message::QueryResp(resp) => resp.payload,
+                other => panic!("expected QueryResp, got {other:?}"),
+            },
+            _ => panic!("expected Message response"),
+        }
+    }
+
+    fn assert_live_aggregate_refused(resp: &QueryRespPayload) {
+        assert!(resp.results.is_empty(), "a refusal carries no rows");
+        assert_eq!(resp.code.as_deref(), Some(QUERY_LIVE_AGGREGATE_UNSUPPORTED));
+        assert!(resp.error.is_some(), "a refusal names its reason");
+    }
+
+    /// Writes a matching `orders` record through the observer and asserts that
+    /// no frame reaches the connection.
+    fn assert_write_sends_nothing(fx: &mut AggFixture) {
+        let observer = QueryMutationObserver::new(
+            fx.registry.clone(),
+            fx.conn_registry.clone(),
+            "orders".to_string(),
+            0,
+        );
+        let record = make_record(make_value_map(vec![
+            ("category", Value::String("a".to_string())),
+            ("price", Value::Int(5)),
+        ]));
+        observer.on_put("o4", &record, None, false);
+        assert!(fx.rx.try_recv().is_err(), "no frame for a refused query");
+    }
+
+    /// `__count` of the group row whose `category` is `group`.
+    fn group_count(resp: &QueryRespPayload, group: &str) -> i64 {
+        let field = |pairs: &[(rmpv::Value, rmpv::Value)], name: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| k.as_str() == Some(name))
+                .map(|(_, v)| v.clone())
+        };
+        resp.results
+            .iter()
+            .find_map(|e| {
+                let rmpv::Value::Map(pairs) = &e.value else {
+                    return None;
+                };
+                (field(pairs, "category")?.as_str() == Some(group))
+                    .then(|| field(pairs, "__count")?.as_i64())
+                    .flatten()
+            })
+            .unwrap_or_else(|| panic!("group {group} missing: {:?}", resp.results))
+    }
+
+    #[tokio::test]
+    async fn live_group_by_subscription_is_refused_and_registers_nothing() {
+        let mut fx = agg_fixture().await;
+        let resp = subscribe_orders(&fx, "g-1", group_by_category(), false).await;
+        assert_live_aggregate_refused(&resp);
+        assert_eq!(fx.registry.subscription_count(), 0);
+        assert_write_sends_nothing(&mut fx);
+    }
+
+    #[tokio::test]
+    async fn live_aggregations_only_subscription_is_refused() {
+        use topgun_core::messages::base::{AggFunc, Aggregation};
+        let mut fx = agg_fixture().await;
+        let query = Query {
+            aggregations: Some(vec![Aggregation {
+                func: AggFunc::Sum,
+                field: Some("price".to_string()),
+            }]),
+            ..Query::default()
+        };
+        let resp = subscribe_orders(&fx, "g-2", query, false).await;
+        assert_live_aggregate_refused(&resp);
+        assert_eq!(fx.registry.subscription_count(), 0);
+        assert_write_sends_nothing(&mut fx);
+    }
+
+    #[tokio::test]
+    async fn empty_group_by_and_aggregations_stay_live() {
+        let fx = agg_fixture().await;
+        let query = Query {
+            group_by: Some(vec![]),
+            aggregations: Some(vec![]),
+            ..Query::default()
+        };
+        let resp = subscribe_orders(&fx, "g-3", query, false).await;
+        assert_eq!(resp.code, None);
+        assert_eq!(resp.results.len(), 3, "raw records");
+        assert_eq!(fx.registry.subscription_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn snapshot_only_serves_grouped_rows_and_registers_nothing() {
+        let fx = agg_fixture().await;
+        let resp = subscribe_orders(&fx, "g-4", group_by_category(), true).await;
+        assert_eq!(resp.code, None);
+        assert_eq!(resp.results.len(), 2, "two groups: {:?}", resp.results);
+        assert_eq!(group_count(&resp, "a"), 2);
+        assert_eq!(group_count(&resp, "b"), 1);
+        assert_eq!(fx.registry.subscription_count(), 0);
+
+        let resp = subscribe_orders(&fx, "g-5", Query::default(), true).await;
+        assert_eq!(resp.code, None);
+        assert_eq!(resp.results.len(), 3);
+        assert_eq!(fx.registry.subscription_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn refused_live_aggregate_keeps_an_existing_subscription_of_the_same_id() {
+        let fx = agg_fixture().await;
+        let resp = subscribe_orders(&fx, "q1", category_is("a"), false).await;
+        assert_eq!(resp.code, None);
+        assert_eq!(fx.registry.subscription_count(), 1);
+
+        let resp = subscribe_orders(&fx, "q1", group_by_category(), false).await;
+        assert_live_aggregate_refused(&resp);
+        assert_eq!(fx.registry.subscription_count(), 1);
+        let sub = fx
+            .registry
+            .get_subscription("orders", fx.conn_id, "q1")
+            .expect("the live subscription stays registered");
+        assert_eq!(sub.query, category_is("a"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_only_leaves_a_live_subscription_of_the_same_id_untouched() {
+        let fx = agg_fixture().await;
+        subscribe_orders(&fx, "q1", category_is("a"), false).await;
+        let keys_of = |sub: &QuerySubscription| {
+            let mut k: Vec<String> = sub.previous_result_keys.iter().map(|k| k.clone()).collect();
+            k.sort();
+            k
+        };
+        let before = fx
+            .registry
+            .get_subscription("orders", fx.conn_id, "q1")
+            .expect("registered");
+        assert_eq!(keys_of(&before), vec!["o1", "o2"]);
+
+        // Same map, and the snapshot holds `o3`, a key q1 does not hold.
+        let resp = subscribe_orders(&fx, "q1", category_is("b"), true).await;
+        let keys: Vec<&str> = resp.results.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys, vec!["o3"], "the snapshot is the new query's");
+
+        assert_eq!(fx.registry.subscription_count(), 1);
+        let after = fx
+            .registry
+            .get_subscription("orders", fx.conn_id, "q1")
+            .expect("still registered");
+        assert_eq!(after.query, category_is("a"));
+        assert_eq!(keys_of(&after), vec!["o1", "o2"]);
     }
 
     // ---------------------------------------------------------------------------
@@ -4211,6 +4523,7 @@ mod tests {
                 map_name: "users".to_string(),
                 query,
                 fields: None,
+                snapshot_only: false,
             },
         };
         let op = Operation::QuerySubscribe {
