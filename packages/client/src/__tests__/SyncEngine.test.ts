@@ -406,6 +406,7 @@ describe('SyncEngine', () => {
       const mockQuery = {
         id: 'query-1',
         getMapName: () => 'users',
+        isSnapshotOnly: () => false,
         getFilter: () => ({ where: { active: true } }),
         onResult: jest.fn(),
         onUpdate: jest.fn(),
@@ -431,6 +432,7 @@ describe('SyncEngine', () => {
       const mockQuery = {
         id: 'query-1',
         getMapName: () => 'users',
+        isSnapshotOnly: () => false,
         getFilter: () => ({}),
         onResult: jest.fn(),
         onUpdate: jest.fn(),
@@ -474,6 +476,7 @@ describe('SyncEngine', () => {
       const mockQuery = {
         id: 'query-1',
         getMapName: () => 'users',
+        isSnapshotOnly: () => false,
         getFilter: () => ({}),
         onResult: jest.fn(),
         onUpdate: jest.fn(),
@@ -503,6 +506,7 @@ describe('SyncEngine', () => {
       const mockQuery = {
         id: 'query-1',
         getMapName: () => 'users',
+        isSnapshotOnly: () => false,
         getFilter: () => ({}),
         onResult: jest.fn(),
         onUpdate: jest.fn(),
