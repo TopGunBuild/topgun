@@ -1739,6 +1739,8 @@ query<T = any>(mapName: string, filter: QueryFilter): QueryHandle<T>;
 
 Returns a live query subscription. The handle emits an initial result and delta updates. See [Search & live queries](/docs/guides/search-and-live-queries) for the canonical use-case-driven example.
 
+A live query cannot group: a filter with `groupBy` or `aggregations` makes `query()` throw a `QueryError` with `code: 'QUERY_LIVE_AGGREGATE_UNSUPPORTED'`. Grouped results are available from `queryOnce()` and `queryOncePaged()`.
+
 ```typescript
 const handle = client.query<Todo>('todos', {
   where: { completed: false },
@@ -2000,7 +2002,7 @@ SQL is **not wired into the server today** — calling `client.sql()` against an
 
 When it lands, `client.sql()` will execute a one-shot SQL query server-side via the DataFusion engine — an **opt-in, compile-time-gated** feature (`--features datafusion`; the default build is `default = ["redb"]` and does not include it). Map names are used as table names.
 
-**Niche — only for what the structured query API cannot express.** SQL is intended for queries that genuinely require it: multi-map **joins**, **window functions**, **HAVING** clauses, and **DISTINCT** aggregation. For everything else — filtering, sorting, full-text search, group-by, aggregate functions — use the structured query API (`client.query()`, `client.queryOnce()`, `client.queryOncePaged()`) backed by the canonical DAG engine, which keeps the local-first offline path.
+**Niche — only for what the structured query API cannot express.** SQL is intended for queries that genuinely require it: multi-map **joins**, **window functions**, **HAVING** clauses, and **DISTINCT** aggregation. For everything else, use the structured query API backed by the canonical DAG engine: filtering, sorting and full-text search through `client.query()`, `client.queryOnce()` and `client.queryOncePaged()`, which keep the local-first offline path; group-by and aggregate functions through `client.queryOnce()` and `client.queryOncePaged()` only, which need the server.
 
 Detect a server without SQL enabled by checking the error `code`:
 
