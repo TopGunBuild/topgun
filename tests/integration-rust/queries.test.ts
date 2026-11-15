@@ -1452,6 +1452,7 @@ describe('Integration: Queries (Rust Server)', () => {
         payload: {
           queryId: 'agg-q-1',
           mapName,
+          snapshotOnly: true,
           query: {
             groupBy: ['category'],
             aggregations: [{ func: 'count' }, { func: 'sum', field: 'price' }],
@@ -1500,6 +1501,7 @@ describe('Integration: Queries (Rust Server)', () => {
         payload: {
           queryId: 'agg-q-2',
           mapName,
+          snapshotOnly: true,
           query: { groupBy: ['category'] },
         },
       });
