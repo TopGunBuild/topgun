@@ -907,7 +907,7 @@ measured; do not read it as reported.
 | `a_refused_entry_with_a_queued_newer_write_is_retired_into_it` | the retirement with the newer write already queued when the store refuses: the refused entry is not tagged `Abandoned`, and the key becomes durable through the newer write | CI (`cargo test`) |
 | `a_retired_delta_entry_stays_replayable_until_its_survivor_is_durable` | WHY the sequences are carried for a delta frame too: the newer entry is refused ten times and stays queued with both sequences `Live`; with a second key in the same partition, a crash before the newer entry is durable must still replay the retired frame | CI (`cargo test`) |
 | `a_retired_entry_hands_its_earlier_due_time_to_the_queued_write` | the queued entry takes the earlier due time of the two, so a key rewritten during an outage keeps its flush schedule | CI (`cargo test`) |
-| `buffered_bytes_equal_the_live_charges` | the byte counter, over generated adds, in-place cell write-throughs, removes, `remove_all`s, rewrites, refusals and accepts against a refusing-then-accepting inner store, with no pass holding an entry at a step boundary: after every step the counter equals the queued charges; at idle both counters are 0. Charges held by a pass and the release of a retired entry are covered by the fixed tests in the next row and by `the_byte_bound_overshoot_is_the_stated_one` | CI (`cargo test`) |
+| `buffered_bytes_equal_the_live_charges` | the byte counter, over generated adds, in-place cell write-throughs, removes, `remove_all`s, rewrites, refusals and accepts against a refusing-then-accepting inner store, and a pass parked inside its commit that holds its batch across the following steps and then settles — accepted, put back, or retired into a newer write of its key that came meanwhile (a superseded put-back): after every step the counter equals the queued charges plus the charges of the held batch; at idle both counters are 0 | CI (`cargo test`) |
 | `buffered_bytes_follow_insert_coalesce_and_settle`, `a_rewrite_while_a_pass_holds_the_key_counts_both_until_each_settles`, `a_superseded_put_back_releases_the_retired_charge`, `an_in_place_write_is_charged_at_the_cell_cost` | each site that moves the byte counter, one fixed order each: insert, smaller and larger coalesce, settle; a rewrite of a key a parked pass holds; the release of a retired entry; an in-place write charged at its cell's cost | CI (`cargo test`) |
 | `two_writers_of_one_key_interleaved_between_sequence_and_insert_leave_nothing_unaccounted` | NOT an enforcer of the precondition. Evidence for accounting only, under one interleaving of two writers that the precondition excludes. It asserts nothing about the stored value | CI (`cargo test`) |
 | `tests/integration-rust/store-refusal-liveness.test.ts`, arm `REFUSAL-LIFTED-UNDER-LOAD` | the predicate at node level: six keys refused while they are still written; after the refusal is lifted every partition's WAL lag returns to 0 | local only (`pnpm test:integration-rust:liveness`), for the reason given under `TG-WB-004` (TODO-770) |
@@ -1830,11 +1830,19 @@ weaker than a test.
 
 **Not claimed.**
 
-- **Non-growing in-place writes over the budget.** A duplicate OR remove, a tombstone prune and
-  the TTL sweep's OR removals are refused too, because the growth of an in-place write is not
-  known before its mutation runs. A refused prune logs one `WARN` per tombstone ref per pass and
-  counts in `topgun_or_prune_restored_write_error_total`, the series a store write error also
-  uses; it is retried by a later pass.
+- **In-place writes that change nothing or do not grow, at either bound.** The pre-check runs
+  before the mutation, so it does not know the outcome: over the byte budget, and — for a key that
+  is not buffered — at the key capacity, a duplicate OR remove, an `OR_REMOVE` of an absent key, a
+  tombstone prune (also one that finds nothing to prune) and the TTL sweep's OR removals are
+  refused too, as temporary errors, where without the bound they would end unchanged. A refused
+  prune logs one `WARN` per tombstone ref per pass and counts in
+  `topgun_or_prune_restored_write_error_total`, the series a store write error also uses; it is
+  retried by a later pass, and a refused client write is retried by the client.
+- **No trace after a refusal that is not a bound refusal (TODO-992).** "A refused write leaves no
+  trace" covers the two bounds only. Inside the write-through of an admitted in-place write, the
+  write-behind store can still refuse because it has failed or is shutting down, or because the
+  write's tenant is being closed; such a refusal comes after the in-place mutation, which stays in
+  the engine.
 - **A client's push diff** is merged up to the first refused entry; the rest waits for the
   client's next connection, which runs its Merkle walk again — nothing is lost, the client keeps
   its records. A mid-connection re-push is TODO-981.
@@ -2314,12 +2322,14 @@ weaker than a test.
   `/metrics` scrape as `topgun_ormap_live_entries`, `topgun_ormap_live_tag_bytes` and
   `topgun_ormap_live_census_seeded` (internal series, like `topgun_or_prune_*`).
 - **Statement:** for every state reached through `OR_ADD`, `OR_REMOVE`, the epoch prune, SYNC OR
-  ingest, and a `REMOVE` or LWW `PUT` of a key whose slot is resident, `live_entries` is the number
-  of entries over all `OrMap` slots and `live_tag_bytes` the sum of their `tag.len()`, whether a
-  slot is resident or evicted; after a restart with `seeded = 1` the same holds for the recovered
-  state. **Known exception (TODO-874):** a `REMOVE` or LWW `PUT` of a key whose `OrMap` slot is not
-  resident, and an LWW `PUT` over an `OrMap` slot whose store write fails, drop entries the server
-  does not see, so the census stays too high by them until the next restart re-seeds it.
+  ingest, and a `REMOVE` or LWW `PUT` of a key whose slot is resident when the write reaches
+  memory, after its store write, `live_entries` is the number of entries over all `OrMap` slots and
+  `live_tag_bytes` the sum of their `tag.len()`, whether a slot is resident or evicted; after a
+  restart with `seeded = 1` the same holds for the recovered state. A `REMOVE` or LWW `PUT` whose
+  store write fails changes neither the slot nor the census. **Known exception (TODO-874):** a
+  `REMOVE` or LWW `PUT` of a key whose `OrMap` slot is not resident at that moment — never loaded,
+  or evicted while the write's store write awaited — drops entries the server does not see, so the
+  census stays too high by them until the next restart re-seeds it.
 - **Maintaining code:** `crdt.rs::apply_or_delta` reports `live_removed` and stays counter-free;
   the OR_ADD and OR_REMOVE mutate closures charge it under the key's writer, beside the
   tombstone-bytes charge; `REMOVE` and LWW `PUT` subtract the old `OrMap` value `remove` / `put`

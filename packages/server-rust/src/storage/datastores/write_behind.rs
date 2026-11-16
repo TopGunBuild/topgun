@@ -14848,6 +14848,12 @@ mod tests {
         Pass,
         /// An in-place write-through of the key's cell, re-costed first.
         Cell(u8, u16),
+        /// A pass parks inside its commit and holds its batch across the
+        /// following steps.
+        Hold,
+        /// The held pass goes on; refused entries are put back, or retired
+        /// when a newer write of their key came meanwhile.
+        Settle,
     }
 
     fn byte_step() -> impl proptest::strategy::Strategy<Value = ByteStep> {
@@ -14859,6 +14865,8 @@ mod tests {
             1 => any::<bool>().prop_map(ByteStep::Refuse),
             2 => Just(ByteStep::Pass),
             2 => (0u8..4, 0u16..300).prop_map(|(key, cost)| ByteStep::Cell(key, cost)),
+            1 => Just(ByteStep::Hold),
+            1 => Just(ByteStep::Settle),
         ]
     }
 
@@ -14874,10 +14882,15 @@ mod tests {
                 .expect("runtime");
             runtime.block_on(async {
                 let spy = Arc::new(SpyDataStore::new());
+                let (inner, _never_panics) = super::background_task_panic_tests::PanickingAddStore::over(
+                    Arc::clone(&spy) as Arc<dyn MapDataStore>,
+                    0,
+                );
                 // A refused entry is not attempted again within a case, so a
-                // pass never holds anything at a step boundary.
-                let store = schedule_store(
-                    &spy,
+                // pass holds something at a step boundary only between `Hold`
+                // and `Settle`.
+                let store = WriteBehindDataStore::new(
+                    Arc::clone(&inner) as Arc<dyn MapDataStore>,
                     WriteBehindConfig {
                         backoff_base_ms: 600_000,
                         backoff_cap_ms: 600_000,
@@ -14886,6 +14899,8 @@ mod tests {
                 );
                 let key = |n: u8| format!("k{n}");
                 let mut cells = std::collections::HashMap::new();
+                // The parked pass and the charges of the batch it holds.
+                let mut held: Option<(TestParkHandle, u64)> = None;
                 for (i, step) in steps.iter().enumerate() {
                     match *step {
                         ByteStep::Add(n, len) => store
@@ -14901,7 +14916,33 @@ mod tests {
                             store.remove_all(BYTES_MAP, &keys).await.unwrap();
                         }
                         ByteStep::Refuse(refuse) => spy.refuse_everything(refuse),
+                        ByteStep::Pass | ByteStep::Hold if held.is_some() => {}
                         ByteStep::Pass => one_requested_pass(&store).await,
+                        ByteStep::Hold => {
+                            let before = queued_charges(&store);
+                            let mut park = inner.arm_park();
+                            let opened_at = store.flush_pass_epoch.load(Ordering::SeqCst);
+                            store.soft_flush().await.expect("soft_flush");
+                            let mut parked = false;
+                            let settled = poll_until(10_000, || {
+                                parked = parked
+                                    || park.parked.as_mut().is_some_and(|rx| rx.try_recv().is_ok());
+                                let epoch = store.flush_pass_epoch.load(Ordering::SeqCst);
+                                parked || (epoch >= opened_at + 2 && epoch.is_multiple_of(2))
+                            })
+                            .await;
+                            assert!(settled.is_some(), "the pass neither parked nor closed");
+                            // A batch with no value to store never reaches the park.
+                            if parked {
+                                held = Some((park, before - queued_charges(&store)));
+                            }
+                        }
+                        ByteStep::Settle => {
+                            if let Some((mut park, _)) = held.take() {
+                                park.release();
+                                pass_closed(&store).await;
+                            }
+                        }
                         ByteStep::Cell(n, cost) => {
                             let cell = cells.entry(n).or_insert_with(|| {
                                 crate::storage::engine::new_slot_cell(crate::storage::record::Record {
@@ -14916,14 +14957,20 @@ mod tests {
                                 .unwrap();
                         }
                     }
+                    let held_charges = held.as_ref().map_or(0, |(_, charges)| *charges);
                     assert_eq!(
                         bytes_of(&store),
-                        queued_charges(&store),
-                        "after step {i} ({step:?}): the counter is the sum of the live charges"
+                        queued_charges(&store) + held_charges,
+                        "after step {i} ({step:?}): the counter is the sum of the live charges, \
+                         queued and held"
                     );
                     if store.pending_operation_count() == 0 {
                         assert_eq!(bytes_of(&store), 0, "after step {i}: empty buffer, zero bytes");
                     }
+                }
+                if let Some((mut park, _)) = held.take() {
+                    park.release();
+                    pass_closed(&store).await;
                 }
                 spy.refuse_everything(false);
                 store.hard_flush().await.expect("a healthy shutdown");

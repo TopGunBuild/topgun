@@ -382,7 +382,6 @@ impl RecordStore for DefaultRecordStore {
             );
         }
 
-        // Step 7: Return old value
         Ok(old_record.map(|r| r.value))
     }
 
