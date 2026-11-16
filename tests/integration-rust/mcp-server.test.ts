@@ -559,6 +559,109 @@ describe('Integration: MCP tools against a real Rust server (cold cache)', () =>
     }
   }, 60_000);
 
+  // The feed's `filter` is field equality, as in topgun_query: a write of a
+  // record that does not match is not a change for the agent, a new matching
+  // record is an ADD, and a record that stops matching is a REMOVE. Before the
+  // filter was sent as the query's `where`, the server matched every record, so
+  // the non-matching writes below surfaced as changes.
+  test('subscribe with a filter reports only changes to matching records', async () => {
+    const server = await spawnRustServer();
+    const seeder = await createRustTestClient(server.port, {
+      userId: 'mcp-seeder',
+      roles: ['ADMIN'],
+    });
+    const mcpClient = makeClient(server.port, 'mcp-filter-watcher');
+    const mcp = new TopGunMCPServer({ client: mcpClient });
+
+    const put = async (mapName: string, key: string, value: Record<string, unknown>) => {
+      seeder.messages.length = 0;
+      seeder.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: `op-${key}-${Date.now()}`,
+          mapName,
+          opType: 'PUT',
+          key,
+          record: createLWWRecord(value),
+        },
+      });
+      await seeder.waitForMessage('OP_ACK', 10_000);
+    };
+
+    try {
+      await seeder.waitForMessage('AUTH_ACK', 10_000);
+      await mcpClient.start();
+      await waitForState(mcpClient, SyncState.CONNECTED);
+
+      const mapName = `mcp_sub_filter_${Date.now()}`;
+      for (let i = 0; i < 5; i++) {
+        await put(mapName, `o${i}`, { id: `o${i}`, status: 'open', title: `open ${i}` });
+        await put(mapName, `d${i}`, { id: `d${i}`, status: 'done', title: `done ${i}` });
+      }
+
+      const startRes = await callStable(mcp, 'topgun_subscribe', {
+        action: 'start',
+        map: mapName,
+        filter: { status: 'open' },
+      });
+      expect(startRes.isError).toBeFalsy();
+      const idMatch = text(startRes).match(/subscriptionId:\s*([0-9a-f-]+)\)/i);
+      expect(idMatch).toBeTruthy();
+      const subscriptionId = idMatch![1];
+
+      const emptyPoll = await mcp.callTool('topgun_subscribe', {
+        action: 'poll',
+        subscriptionId,
+      });
+      expect(emptyPoll.isError).toBeFalsy();
+      expect(text(emptyPoll)).toMatch(/no changes/i);
+
+      // (a) a non-matching record changes but still does not match: no change
+      await put(mapName, 'd0', { id: 'd0', status: 'done', title: 'done 0, edited' });
+      // (b) a new non-matching record: no change
+      await put(mapName, 'x-done', { id: 'x-done', status: 'done', title: 'new done' });
+      // (c) a new matching record: ADD
+      await put(mapName, 'x-open', { id: 'x-open', status: 'open', title: 'new open' });
+      // (d) a matching record stops matching: REMOVE
+      await put(mapName, 'o0', { id: 'o0', status: 'done', title: 'open 0, closed' });
+
+      const collected: Array<{ kind: string; key: string }> = [];
+      const deadline = Date.now() + 15_000;
+      let extraPollsAfterComplete = 0;
+      while (Date.now() < deadline) {
+        const poll = await mcp.callTool('topgun_subscribe', { action: 'poll', subscriptionId });
+        expect(poll.isError).toBeFalsy();
+        collected.push(...parseDeltas(text(poll)));
+        if (collected.length >= 2) {
+          if (++extraPollsAfterComplete >= 3) break;
+        }
+        await waitMs(400);
+      }
+
+      expect([...collected].sort((a, b) => a.key.localeCompare(b.key))).toEqual([
+        { kind: 'REMOVE', key: 'o0' },
+        { kind: 'ADD', key: 'x-open' },
+      ]);
+      const quiet = ['d0', 'd1', 'd2', 'd3', 'd4', 'x-done', 'o1', 'o2', 'o3', 'o4'];
+      for (const key of quiet) {
+        expect(collected.some((c) => c.key === key)).toBe(false);
+      }
+
+      const listRes = await mcp.callTool('topgun_subscribe', { action: 'list' });
+      expect(listRes.isError).toBeFalsy();
+      expect(text(listRes)).toContain('filter: {"status":"open"}');
+
+      const stopRes = await mcp.callTool('topgun_subscribe', { action: 'stop', subscriptionId });
+      expect(stopRes.isError).toBeFalsy();
+      expect(text(stopRes)).toMatch(/stopped/i);
+    } finally {
+      await mcp.stop().catch(() => {});
+      await mcpClient.close().catch(() => {});
+      seeder.close();
+      await server.cleanup().catch(() => {});
+    }
+  }, 60_000);
+
   // F4 — topgun_list_maps must reflect the REAL server catalog, never fabricated
   // "common patterns". A separate seeder creates two distinctly-named maps over
   // the wire; list_maps (server-authoritative, via the admin map-enumeration
