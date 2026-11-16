@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed: `topgun_subscribe` applies its `filter`.** The MCP change feed applied no field
+  condition from `filter` and reported changes to every record of the map; it now applies `filter`
+  as field equality, as `topgun_query` does: a write of a record that does not match is not
+  reported, a new matching record is an add, and a record that stops matching is a remove. Keys
+  such as `where`, `limit`, `sort` or `groupBy` in `filter` are field names, so a feed can no longer
+  be windowed, sorted or grouped through `filter`.
+
 - **Changed (breaking for an undocumented option): a live query refuses `groupBy` and
   `aggregations`.** A live query receives per-record changes, which mixed raw records into its
   grouped rows after the first write.

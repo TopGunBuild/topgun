@@ -18,7 +18,7 @@
 
 import { randomUUID } from 'node:crypto';
 
-import type { ChangeEvent, QueryHandle, TopGunClient } from '@topgunbuild/client';
+import type { ChangeEvent, QueryFilter, QueryHandle, TopGunClient } from '@topgunbuild/client';
 
 /** Upper bound on buffered deltas per subscription; oldest are dropped first. */
 export const MAX_BUFFERED_DELTAS = 1000;
@@ -119,7 +119,12 @@ export class SubscriptionRegistry {
     }
 
     const id = randomUUID();
-    const handle = this.client.query<Record<string, unknown>>(map, filter);
+    // The tool's `filter` is a field-equality map, as in `topgun_query`; at the
+    // top level of a QueryFilter its keys would be read as query options (and
+    // field conditions dropped), so the filter goes under `where`. An empty
+    // filter sends no `where`, because `where: {}` rejects non-map values.
+    const query: QueryFilter = Object.keys(filter).length > 0 ? { where: filter } : {};
+    const handle = this.client.query<Record<string, unknown>>(map, query);
 
     const sub: InternalSubscription = {
       id,

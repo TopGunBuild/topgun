@@ -186,7 +186,7 @@ Read records from a map with filters and sorting. Returns **authoritative server
 
 ```text
 > Show me unfinished tasks created this week
-[runs topgun_query with where: { done: false, createdAt: { gt: ... } }]
+[runs topgun_query with filter: { done: false }]
 ```
 
 A settled result with no matching records renders as `No results found in map '<map>'...` — that means the server genuinely has no such rows, not that the query failed.
@@ -237,8 +237,10 @@ re-reported as "changes".
 - **Usage:**
   - `action: 'start'` `{ map, filter? }` — opens a server-backed live query and returns a
     `subscriptionId` as soon as the server confirms the watch (it does **not** hold the call open
-    for the watch window). Errors if the server cannot deliver an initial baseline (offline /
-    unreachable).
+    for the watch window). `filter` is field equality, as in `topgun_query`: with
+    `filter: { status: 'open' }` the feed reports only changes to records whose `status` equals
+    `'open'`, and a record that stops matching is reported as a remove. Errors if the server
+    cannot deliver an initial baseline (offline / unreachable).
   - `action: 'poll'` `{ subscriptionId }` — returns the changes observed since the last poll
     as `{ type, key, value? }`. Refreshes the subscription's idle timer. Reports if the buffer
     overflowed (changes dropped).
