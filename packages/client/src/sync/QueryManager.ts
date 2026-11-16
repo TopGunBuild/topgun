@@ -184,17 +184,18 @@ export class QueryManager implements IQueryManager {
       return;
     }
 
-    const { results, nextCursor, hasMore, cursorStatus, merkleRootHash } = payload;
-    query.onResult(results, 'server', merkleRootHash);
-    query.updatePaginationInfo({ nextCursor, hasMore, cursorStatus });
-
     // A refusal carries no snapshot, so a clean answer in a later chain than the
-    // refused one means the server now serves the query.
+    // refused one means the server now serves the query. Cleared before the
+    // rows apply, so this answer settles the handle for new awaiters.
     const state = this.errorStates.get(query);
     if (state && state.errorKind === 'terminal' && state.errorChain < state.chain) {
       state.errorKind = null;
       query.clearServerError();
     }
+
+    const { results, nextCursor, hasMore, cursorStatus, merkleRootHash } = payload;
+    query.onResult(results, 'server', merkleRootHash);
+    query.updatePaginationInfo({ nextCursor, hasMore, cursorStatus });
   }
 
   /** Cancel every pending resubscribe timer. */
@@ -253,8 +254,8 @@ export class QueryManager implements IQueryManager {
 
   /**
    * Start a subscription chain: the overflow bound resets and an overflow
-   * error clears. A terminal error stays until a clean response in this or a
-   * later chain clears it.
+   * error clears. A terminal error stays until a clean response in a later
+   * chain than the one that raised it clears it.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased at the routing layer
   private startChain(query: QueryHandle<any>): void {

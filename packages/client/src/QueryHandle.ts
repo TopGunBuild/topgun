@@ -252,7 +252,8 @@ export class QueryHandle<T> {
    * Resolves when the first server QUERY_RESP arrives (settlement). If already
    * settled, resolves immediately. One-shot — subsequent settlements re-use the
    * already-resolved promise. Rejects with the QueryError when a server error
-   * arrives before settlement; that rejection is final for this promise.
+   * arrives before settlement; once that error clears, later calls get a new
+   * promise that the next settlement resolves.
    * Consumed by queryOnce, queryOncePaged, loadMore and the { settled }
    * subscribe option.
    *
@@ -314,6 +315,9 @@ export class QueryHandle<T> {
   public clearServerError(): void {
     if (this.serverError === null) return;
     this.serverError = null;
+    // An error before settlement rejected the settled promise for good; the
+    // chain that cleared it may still settle, so later awaiters wait for it.
+    if (!this.settled) this.settledPromise = this.createSettledPromise();
     this.notifyErrorListeners();
   }
 

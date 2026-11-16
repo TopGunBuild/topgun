@@ -673,5 +673,53 @@ describe('QueryManager error QUERY_RESP routing', () => {
       manager.close();
       expect(jest.getTimerCount()).toBe(0);
     });
+
+    test('resubscribeAll with a pending timer: only the new chain sends a QUERY_SUB', () => {
+      const handle = liveHandleWithRows();
+      overflow(handle);
+      const before = querySubs(handle);
+      manager.resubscribeAll();
+      jest.advanceTimersByTime(60_000);
+      expect(querySubs(handle)).toBe(before + 1);
+    });
+
+    test('unsubscribe then subscribeToQuery with a pending timer: only the new chain sends a QUERY_SUB', () => {
+      const handle = liveHandleWithRows();
+      overflow(handle);
+      manager.unsubscribeFromQuery(handle.id);
+      const before = querySubs(handle);
+      manager.subscribeToQuery(handle);
+      jest.advanceTimersByTime(60_000);
+      expect(querySubs(handle)).toBe(before + 1);
+    });
+  });
+
+  describe('whenSettled after an error clears before settlement', () => {
+    function unsettledHandle(): QueryHandle<any> {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'm', {});
+      manager.subscribeToQuery(handle);
+      return handle;
+    }
+
+    test('overflow error: the next chain gives new awaiters a promise its snapshot resolves', async () => {
+      const handle = unsettledHandle();
+      exhaust(handle);
+      await expect(handle.whenSettled()).rejects.toMatchObject({ code: OVERFLOW });
+      manager.resubscribeAll();
+      const settled = handle.whenSettled();
+      clean(handle);
+      await expect(settled).resolves.toBeUndefined();
+      expect(handle.isSettled).toBe(true);
+    });
+
+    test('terminal error: the clean answer of a later chain resolves whenSettled', async () => {
+      const handle = unsettledHandle();
+      refuse(handle);
+      await expect(handle.whenSettled()).rejects.toMatchObject({ code: REFUSAL });
+      manager.resubscribeAll();
+      clean(handle);
+      expect(handle.getError()).toBeNull();
+      await expect(handle.whenSettled()).resolves.toBeUndefined();
+    });
   });
 });
