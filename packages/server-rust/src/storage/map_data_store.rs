@@ -567,7 +567,8 @@ impl std::error::Error for StoreSyncFailed {
 /// Used as `Arc<dyn MapDataStore>`.
 #[async_trait]
 pub trait MapDataStore: Send + Sync {
-    /// Persist a record (or queue it for async persistence).
+    /// Persist a record (or queue it for async persistence). A store that
+    /// bounds its buffer admits the write here, before it queues it.
     async fn add(&self, map: &str, key: &str, value: &RecordValue, now: i64) -> anyhow::Result<()>;
 
     /// Persist a record together with the delta that produced it.
@@ -582,6 +583,11 @@ pub trait MapDataStore: Send + Sync {
     ///
     /// `src` is the record: a borrowed value, or the engine's cell for the key
     /// (see [`WriteSource`]).
+    ///
+    /// It decides no bound: a store that bounds its buffer decides them in
+    /// [`admit_value()`](MapDataStore::admit_value) or
+    /// [`admit_in_place()`](MapDataStore::admit_in_place), which the caller
+    /// calls before its mutation.
     ///
     /// The default body delegates to [`add()`](MapDataStore::add) and IGNORES
     /// the witness, so a backend that consumes no deltas persists exactly what
@@ -642,6 +648,26 @@ pub trait MapDataStore: Send + Sync {
     /// records deltas overrides it.
     fn wants_or_witness(&self) -> bool {
         false
+    }
+
+    /// Whether this store admits a write of `value` to `(map, key)` through
+    /// [`add_with_witness()`](MapDataStore::add_with_witness), asked BEFORE
+    /// the record store changes the key in memory or notifies anyone.
+    ///
+    /// Same contract as [`admit_in_place()`](MapDataStore::admit_in_place):
+    /// call it before the mutation, do not mutate on `Err`, surface `Err` as a
+    /// temporary refusal. [`add()`](MapDataStore::add) admits its own write;
+    /// `add_with_witness` admits none, so its caller calls this or
+    /// `admit_in_place` first.
+    ///
+    /// Defaulted to `Ok(())`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store refuses the write for now; the caller
+    /// must then leave the key unchanged.
+    fn admit_value(&self, _map: &str, _key: &str, _value: &RecordValue) -> anyhow::Result<()> {
+        Ok(())
     }
 
     /// Whether this store admits an in-place write of `(map, key)` whose

@@ -3120,10 +3120,14 @@ async fn an_unframed_mutation_after_a_pre_frame_append_error_is_unacked_and_idem
     .await;
 }
 
+/// Once the store is shutting down, a put and an in-place write are refused
+/// at their admission, before the engine is called: the shutdown flag is
+/// decided there, not only by the write-through after the mutation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_unframed_mutation_rejected_by_the_shutdown_gate_is_unacked_and_idempotent() {
+async fn a_write_after_the_shutdown_flag_is_refused_before_its_mutation() {
     let fx = CellFixture::new(never_flush_config()).await;
     fx.ack_op1().await;
+    let fresh = keys_in_partition(test_partition(), 3)[2].clone();
 
     let mut park = fx.write_behind.test_park_after_shutdown_flag();
     let drain = {
@@ -3132,22 +3136,42 @@ async fn an_unframed_mutation_rejected_by_the_shutdown_gate_is_unacked_and_idemp
     };
     park.wait_parked().await;
 
-    let before = fx.max_assigned();
-    assert!(
+    let before = (
+        engine_view(&fx.store, fx.key()),
+        engine_view(&fx.store, &fresh),
+        fx.max_assigned(),
+    );
+    let refused = (
         apply_or(&fx.store, fx.key(), OrOp::Add("op2"))
             .await
-            .is_err(),
-        "the shutdown gate rejects op2 after its in-place mutation"
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        put_client(&fx.store, &fresh, plain(10)).await.map(|_| ()),
     );
-    fx.assert_no_pending_sequence_above(before);
+    let after = (
+        engine_view(&fx.store, fx.key()),
+        engine_view(&fx.store, &fresh),
+        fx.max_assigned(),
+    );
+    let shutting_down = |key: &str| -> Result<(), String> {
+        Err(format!(
+            "write-behind store is shutting down; write rejected for map={TEST_MAP} key={key}"
+        ))
+    };
+    assert_eq!(
+        (refused, after),
+        ((shutting_down(fx.key()), shutting_down(&fresh)), before),
+        "((the in-place write's answer, the put's answer), (the engine's record of both keys, \
+         the last WAL sequence) after them)"
+    );
 
     park.release();
     drain.await.expect("drain task").expect("hard_flush");
-    fx.crash_recover_and_retry(
-        view(&["old-1", "old-2", "op1", "op2"], &[]),
-        OrOp::Add("op2"),
-    )
-    .await;
+    assert_eq!(
+        inner_view(&fx.inner, fx.key()).await,
+        view(&["old-1", "old-2", "op1"], &[]),
+        "the drain persists the acked op1 and nothing of the refused op2"
+    );
 }
 
 #[tokio::test]
@@ -5099,53 +5123,101 @@ fn a_write_refused_at_the_key_bound_leaves_no_trace() {
     });
 }
 
-/// While a put's write-through awaits, a reader of the key, which is not
-/// resident, loads the staged value into the engine. The put then replaces
-/// that record with its own and reports an update of it, not a fresh insert.
+/// Raises the write-behind store's key count and buffered bytes to their
+/// bounds the first time the record store notifies it, which a put does
+/// between its admission and its write-through.
+struct BoundCrossingObserver {
+    write_behind: Arc<WriteBehindDataStore>,
+    crossed: std::sync::atomic::AtomicBool,
+}
+
+impl BoundCrossingObserver {
+    fn cross(&self) {
+        if !self.crossed.swap(true, Ordering::SeqCst) {
+            let config = &self.write_behind.config;
+            self.write_behind
+                .pending_count
+                .fetch_add(config.capacity, Ordering::SeqCst);
+            self.write_behind
+                .buffered_bytes
+                .fetch_add(config.capacity_bytes, Ordering::SeqCst);
+        }
+    }
+}
+
+impl crate::storage::mutation_observer::MutationObserver for BoundCrossingObserver {
+    fn on_put(&self, _: &str, _: &Record, _: Option<&RecordValue>, _: bool) {
+        self.cross();
+    }
+    fn on_update(&self, _: &str, _: &Record, _: &RecordValue, _: &RecordValue, _: bool) {
+        self.cross();
+    }
+    fn on_remove(&self, _: &str, _: &Record, _: bool) {}
+    fn on_remove_key(&self, _: &str, _: bool) {}
+    fn on_evict(&self, _: &str, _: &Record, _: bool) {}
+    fn on_load(&self, _: &str, _: &Record, _: bool) {}
+    fn on_replication_put(&self, _: &str, _: &Record, _: bool) {}
+    fn on_clear(&self) {}
+    fn on_reset(&self) {}
+    fn on_destroy(&self, _: bool) {}
+}
+
+/// A put admitted below both bounds is acknowledged although both were
+/// reached after its admission, before its write-through: the write-through
+/// decides no bound again, so a write that is already in memory and shown to
+/// the observers is not refused for a bound.
 #[tokio::test]
-async fn a_reader_that_loads_the_staged_value_during_a_put_is_replaced_by_the_put() {
-    let fx = CellFixture::new(never_flush_config()).await;
-    let (store, observer) =
-        observed_store_over(Arc::clone(&fx.write_behind) as Arc<dyn MapDataStore>);
+async fn an_admitted_put_is_not_refused_at_a_bound_by_its_write_through() {
+    let fx = CellFixture::new(WriteBehindConfig {
+        write_delay_ms: 0,
+        capacity: 2,
+        capacity_bytes: 1_000,
+        ..never_flush_config()
+    })
+    .await;
+    let observer = Arc::new(BoundCrossingObserver {
+        write_behind: Arc::clone(&fx.write_behind),
+        crossed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let store = DefaultRecordStore::new(
+        TEST_MAP.to_string(),
+        0,
+        Box::new(HashMapStorage::new()),
+        Arc::clone(&fx.write_behind) as Arc<dyn MapDataStore>,
+        Arc::new(CompositeMutationObserver::new(vec![
+            Arc::clone(&observer) as Arc<dyn crate::storage::mutation_observer::MutationObserver>
+        ])),
+        StorageConfig::default(),
+    );
     let key = keys_in_partition(test_partition(), 3)[2].clone();
-    let value = plain(10);
-
-    let mut park = fx
-        .write_behind
-        .test_park_between_stage_and_queue_insert(TEST_MAP, &key);
-    let write = {
-        let (store, key, value) = (Arc::clone(&store), key.clone(), value.clone());
-        tokio::spawn(async move { put_client(&store, &key, value).await })
+    let counters = |fx: &CellFixture| {
+        (
+            fx.write_behind.pending_count.load(Ordering::SeqCst),
+            fx.write_behind.buffered_bytes.load(Ordering::SeqCst),
+        )
     };
-    park.wait_parked().await;
-    let read = store
-        .get(&key, false)
-        .await
-        .expect("get")
-        .map(|record| record.value);
-    let (_, _, loaded) = engine_view(&store, &key).expect("the read loaded the key");
-    park.release();
-    let answer = write.await.expect("put task");
+    let before = counters(&fx);
+    let last_sequence = fx.max_assigned();
 
-    let (resident, dirty, token) = engine_view(&store, &key).expect("resident");
+    let answer = put_client(&store, &key, plain(10)).await.map(|_| ());
+    let (keys, bytes) = counters(&fx);
+    let config = &fx.write_behind.config;
     assert_eq!(
         (
-            read,
             answer,
-            resident,
-            dirty,
-            token != loaded,
-            observer.calls()
+            observer.crossed.load(Ordering::SeqCst),
+            keys - config.capacity - before.0,
+            bytes - config.capacity_bytes > before.1,
+            fx.max_assigned() > last_sequence,
         ),
-        (
-            Some(value.clone()),
-            Ok(Some(value.clone())),
-            value.clone(),
-            false,
-            true,
-            vec![("load", None), ("update", Some(value))]
-        ),
-        "(the read during the put, the put's answer, the resident value, dirty, carries another \
-         token than the loaded record, the observer calls)"
+        (Ok(()), true, 1, true, true),
+        "(the put's answer, both bounds reached between its admission and its write-through, \
+         keys it added, it added bytes, it was framed in the WAL)"
     );
+    fx.write_behind
+        .pending_count
+        .fetch_sub(config.capacity, Ordering::SeqCst);
+    fx.write_behind
+        .buffered_bytes
+        .fetch_sub(config.capacity_bytes, Ordering::SeqCst);
 }

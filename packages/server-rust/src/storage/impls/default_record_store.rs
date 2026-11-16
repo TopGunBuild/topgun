@@ -299,12 +299,14 @@ impl RecordStore for DefaultRecordStore {
     /// one key that are not serialised by the writer can leave memory on one
     /// value and the durable store on the other.
     ///
-    /// A write that writes through (`Client`, `CrdtMerge`) reaches the data
-    /// store first, and only once it is accepted is it put into the engine and
-    /// shown to the observers: a write the data store refuses (a write-behind
-    /// bound, `TG-WB-011`) leaves the engine, the observers and the store's
-    /// counters as they were, so no read or subscriber sees a write that was
-    /// never acknowledged. Other provenances write memory only.
+    /// A write that writes through (`Client`, `CrdtMerge`) is first put to the
+    /// data store's [`admit_value`](MapDataStore::admit_value): at a
+    /// write-behind bound (keys or bytes) it is refused before the engine or
+    /// any observer has seen it (`TG-WB-011`). The write-through after the
+    /// mutation decides no bound again; a refusal there because the store
+    /// failed or is shutting down, the map's tenant is being closed or the WAL
+    /// append failed comes after the mutation, which stays in the engine
+    /// (TODO-992). Other provenances write memory only.
     async fn put(
         &self,
         writer: &KeyWriteToken<'_>,
@@ -338,21 +340,16 @@ impl RecordStore for DefaultRecordStore {
             "live write must carry a minted token (>= 1)"
         );
 
-        // Durable first: a refusal returns here, before memory or any observer
-        // has seen the write.
+        // Admitted before memory or any observer sees the write, with no await
+        // between the decision and the mutation.
         let writes_through = matches!(
             provenance,
             CallerProvenance::Client | CallerProvenance::CrdtMerge
         );
         if writes_through {
             self.data_store
-                .add(&self.name, key, &record.value, now)
-                .await?;
+                .admit_value(&self.name, key, &record.value)?;
         }
-
-        // Read the resident only now: while `add` awaited, a reader of a key
-        // that was not resident may have loaded this write's staged value into
-        // the engine, and that record is what this put replaces.
         let old_record = self.engine.get(key);
         self.engine.put(key, record.clone());
         if let Some(ref old) = old_record {
@@ -361,19 +358,29 @@ impl RecordStore for DefaultRecordStore {
         } else {
             self.observer.on_put(key, &record, None, false);
         }
+        if writes_through {
+            self.data_store
+                .add_with_witness(
+                    &self.name,
+                    key,
+                    WriteSource::Value(&record.value),
+                    now,
+                    None,
+                )
+                .await?;
+        }
 
         // Mark the record clean only if the value was written to a real
         // persistent store (not a no-op null store) AND the resident record
         // still carries the token of this write: only the exact write just
         // persisted is marked clean, under the engine's per-key lock, without
-        // re-putting the value. A flush that stored the entry before the engine
-        // put changes nothing here: the mark keys on the token, not on the
-        // buffer.
+        // re-putting the value.
         if writes_through
             && !self.data_store.is_null()
             && !self.engine.mark_stored(key, now, write_token)
         {
-            // Another record now occupies the slot. Harmless: the value is
+            // Record was evicted between the engine put and this mark, or
+            // another record now occupies the slot. Harmless: the value is
             // durable via add(), and a write that owns the slot marks itself
             // clean when its own persist completes.
             tracing::trace!(

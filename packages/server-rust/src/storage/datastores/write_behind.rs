@@ -2139,6 +2139,13 @@ impl TenantCloses {
             }
             count.fetch_sub(1, Ordering::SeqCst);
         };
+        self.refuse_closed(map)?;
+        Ok(write)
+    }
+
+    /// Refuses a write of `map`, as a temporary error, when a closed tenant
+    /// owns `map`.
+    fn refuse_closed(&self, map: &str) -> anyhow::Result<()> {
         if self.any.load(Ordering::SeqCst)
             && self
                 .closed
@@ -2151,7 +2158,7 @@ impl TenantCloses {
                  write rejected"
             );
         }
-        Ok(write)
+        Ok(())
     }
 
     /// The drop slot, or `None` while another drop holds it.
@@ -5483,6 +5490,25 @@ impl WriteBehindDataStore {
         Ok(())
     }
 
+    /// Refuses a write once graceful drain is in progress, so any
+    /// out-of-order arrival is visible as an error rather than silently lost,
+    /// and once the store has failed, because the write would be acked and
+    /// then queued behind a flush task that is gone. In the normal shutdown
+    /// sequence the HTTP server is already draining before the shutdown state
+    /// is set, making that arm effectively unreachable under orderly shutdown.
+    fn refuse_unless_running(&self, map: &str, key: &str) -> anyhow::Result<()> {
+        match self.lifecycle.load(Ordering::Acquire) {
+            Lifecycle::Running => Ok(()),
+            Lifecycle::Failed => anyhow::bail!(
+                "write-behind store has failed ({}); write rejected for map={map} key={key}",
+                self.failed_reason()
+            ),
+            Lifecycle::ShuttingDown => anyhow::bail!(
+                "write-behind store is shutting down; write rejected for map={map} key={key}"
+            ),
+        }
+    }
+
     /// Reports the buffer and its refused entries at the end of a pass: the
     /// gauges, one rate-limited warning while any entry is refused, and one
     /// line when none is left after a warning.
@@ -5768,12 +5794,26 @@ impl WriteBehindDataStore {
 #[async_trait]
 impl MapDataStore for WriteBehindDataStore {
     async fn add(&self, map: &str, key: &str, value: &RecordValue, now: i64) -> anyhow::Result<()> {
-        // One write path, not two. Every caller without a per-op delta — every
-        // LWW write, bulk and SYNC ingestion, cross-node merge, rehydration —
-        // arrives here, and it is the same code the witness-bearing callers run
-        // with the witness set. A second body would let the two drift.
+        // One write path, not two: the same code the witness-bearing callers
+        // run with the witness set. A second body would let the two drift. The
+        // write is admitted here, before its only mutation, the queue insert;
+        // `add_with_witness` decides no bound.
+        self.admit_value(map, key, value)?;
         self.add_with_witness(map, key, WriteSource::Value(value), now, None)
             .await
+    }
+
+    /// Every refusal of a plain write that can be decided before it changes
+    /// anything: the store failed or shutting down, its tenant closed, and
+    /// both bounds by `admit_write` at the value's charge. The write-through
+    /// that follows decides no bound again, so a write admitted here is not
+    /// refused at a bound after its mutation; the store's state and a tenant
+    /// close are checked again there, because either can change in between.
+    fn admit_value(&self, map: &str, key: &str, value: &RecordValue) -> anyhow::Result<()> {
+        self.refuse_unless_running(map, key)?;
+        self.tenant_closes.refuse_closed(map)?;
+        let charge = charge_of(&WriteSource::Value(value), key);
+        self.admit_write(map, &[key], charge)
     }
 
     /// Whether the mutation point should build an OR witness for this store.
@@ -5797,11 +5837,14 @@ impl MapDataStore for WriteBehindDataStore {
     /// in-place write is presumed to grow and is refused with `Write-behind
     /// byte capacity exceeded`, counted under `bound="bytes"` — also one that
     /// would not grow (a duplicate OR remove, a tombstone prune). The
-    /// write-through that follows is not checked again.
+    /// store's state and a tenant close are decided here too, and checked
+    /// again by the write-through, which decides no bound.
     ///
     /// The caller must call this before mutating and must not mutate on
     /// `Err`; the refusal is temporary (`TG-WB-011`).
     fn admit_in_place(&self, map: &str, key: &str) -> anyhow::Result<()> {
+        self.refuse_unless_running(map, key)?;
+        self.tenant_closes.refuse_closed(map)?;
         self.admit_write(map, &[key], 0)?;
         let budget = self.config.capacity_bytes;
         if budget == 0 || self.buffered_bytes.load(Ordering::Relaxed) < budget {
@@ -5840,35 +5883,16 @@ impl MapDataStore for WriteBehindDataStore {
         now: i64,
         witness: Option<&OrDelta>,
     ) -> anyhow::Result<()> {
-        // Reject new writes once graceful drain is in progress so any out-of-order
-        // arrival is visible as an error rather than silently lost. In the normal
-        // shutdown sequence the HTTP server is already draining before the shutdown
-        // state is set, making that arm effectively unreachable under orderly
-        // shutdown. A failed store refuses for the opposite reason: the write
-        // would be acked and then queued behind a flush task that is gone.
-        match self.lifecycle.load(Ordering::Acquire) {
-            Lifecycle::Running => {}
-            Lifecycle::Failed => anyhow::bail!(
-                "write-behind store has failed ({}); write rejected for map={map} key={key}",
-                self.failed_reason()
-            ),
-            Lifecycle::ShuttingDown => anyhow::bail!(
-                "write-behind store is shutting down; write rejected for map={map} key={key}"
-            ),
-        }
+        self.refuse_unless_running(map, key)?;
         // Before the WAL sequence is assigned, and held until the queue
         // insert is done, so a tenant drop waits for this write (`TG-TEN-002`).
         let _in_flight = self.tenant_closes.enter(map)?;
 
-        // The memory this write adds to the buffer, taken before the gate.
-        let charge = charge_of(&src, key);
-        // Check capacity before insertion to avoid partial state on rejection.
-        // An in-place write was admitted before its mutation
-        // (`admit_in_place`); deciding it again now would refuse only the
+        // The memory this write adds to the buffer. No bound is decided here:
+        // the caller admitted the write before its mutation (`admit_value`,
+        // `admit_in_place`), and deciding it again now would refuse only the
         // acknowledgement of a change that has already happened.
-        if let WriteSource::Value(_) = src {
-            self.admit_write(map, &[key], charge)?;
-        }
+        let charge = charge_of(&src, key);
 
         let partition_id = partition_for(map, key);
         // Seed before the first sequence of this partition is handed out, so the
