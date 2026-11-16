@@ -655,8 +655,9 @@ pub trait MapDataStore: Send + Sync {
     /// re-indexed for a later pass. A caller that treats it as permanent turns
     /// a refusal into a lost op (`TG-WB-011`).
     ///
-    /// Defaulted to `Ok(())`: only a store that bounds the memory of buffered
-    /// in-place writes overrides it.
+    /// Defaulted to `Ok(())`: only a store that bounds its buffered in-place
+    /// writes overrides it, and such a store decides its bounds here, not again
+    /// at the write-through, which comes after the mutation.
     ///
     /// # Errors
     ///

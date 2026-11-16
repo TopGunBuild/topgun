@@ -298,6 +298,13 @@ impl RecordStore for DefaultRecordStore {
     /// separate steps with no lock of this store across both, so two puts of
     /// one key that are not serialised by the writer can leave memory on one
     /// value and the durable store on the other.
+    ///
+    /// A write that writes through (`Client`, `CrdtMerge`) reaches the data
+    /// store first, and only once it is accepted is it put into the engine and
+    /// shown to the observers: a write the data store refuses (a write-behind
+    /// bound, `TG-WB-011`) leaves the engine, the observers and the store's
+    /// counters as they were, so no read or subscriber sees a write that was
+    /// never acknowledged. Other provenances write memory only.
     async fn put(
         &self,
         writer: &KeyWriteToken<'_>,
@@ -308,38 +315,46 @@ impl RecordStore for DefaultRecordStore {
         self.refuse_foreign_token("put", writer, key)?;
         let now = now_millis();
 
-        // Step 1: Check if key already exists
-        let old_record = self.engine.get(key);
-
-        // Step 2: Create metadata — measure before value is moved into the record
+        // Measure before the value is moved into the record.
         let cost = crate::storage::record::estimated_cost(&value) + key.len() as u64;
         let metadata = RecordMetadata::new(now, cost);
 
-        // Step 3: Create record. Capture the token from this record's metadata
-        // before it is moved — this is the exact token that identifies this write.
-        // Never re-allocate or re-read the token off the resident after put():
-        // the slot's occupant can change without the key's writer. Eviction
-        // and expiry remove a record, and a read of a key that is no longer
-        // resident loads one back.
+        // Capture the token from this record's metadata before it is moved —
+        // this is the exact token that identifies this write. Never re-allocate
+        // or re-read the token off the resident after put(): the slot's
+        // occupant can change without the key's writer. Eviction and expiry
+        // remove a record, and a read of a key that is no longer resident
+        // loads one back.
         let write_token = metadata.write_token;
         let record = Record { value, metadata };
 
-        // Sanity check: a live write must carry a minted token (>= 1). Token 0 is
-        // reserved for Default-constructed/hydrated metadata, which must never
-        // enter the engine dirty on this path. We assert our OWN captured token,
-        // not the resident's: the resident can be a different record by the
-        // time it is read (see step 3), and tokens are minted at new() time
-        // rather than put() time, so the resident's token has no ordering
-        // relationship to ours — comparing against it would panic spuriously.
+        // A live write must carry a minted token (>= 1). Token 0 is reserved
+        // for Default-constructed/hydrated metadata, which must never enter the
+        // engine dirty on this path. We assert our OWN captured token, not the
+        // resident's: tokens are minted at new() time rather than put() time,
+        // so the resident's token has no ordering relationship to ours.
         debug_assert_ne!(
             write_token, 0,
             "live write must carry a minted token (>= 1)"
         );
 
-        // Step 4: Put into engine
-        self.engine.put(key, record.clone());
+        // Durable first: a refusal returns here, before memory or any observer
+        // has seen the write.
+        let writes_through = matches!(
+            provenance,
+            CallerProvenance::Client | CallerProvenance::CrdtMerge
+        );
+        if writes_through {
+            self.data_store
+                .add(&self.name, key, &record.value, now)
+                .await?;
+        }
 
-        // Step 5: Fire observer notifications
+        // Read the resident only now: while `add` awaited, a reader of a key
+        // that was not resident may have loaded this write's staged value into
+        // the engine, and that record is what this put replaces.
+        let old_record = self.engine.get(key);
+        self.engine.put(key, record.clone());
         if let Some(ref old) = old_record {
             self.observer
                 .on_update(key, &record, &old.value, &record.value, false);
@@ -347,37 +362,24 @@ impl RecordStore for DefaultRecordStore {
             self.observer.on_put(key, &record, None, false);
         }
 
-        // Step 6: Write-through for Client or CrdtMerge provenance
-        if matches!(
-            provenance,
-            CallerProvenance::Client | CallerProvenance::CrdtMerge
-        ) {
-            self.data_store
-                .add(&self.name, key, &record.value, now)
-                .await?;
-
-            // Mark the record clean only if the value was written to a real
-            // persistent store (not a no-op null store) AND the token of the
-            // resident record still matches the one we persisted. The WAL append
-            // + fsync inside add() completes before returning Ok on real backends,
-            // so the value is durable when we reach here. The per-write token
-            // ensures that only the exact write just persisted is marked clean:
-            // any other record in the slot — one loaded back after an eviction,
-            // or the write of a caller that did not hold the key's writer —
-            // carries a different token and is left as it is.
-            // Mark in place under the engine's per-key lock (mark_stored) — the
-            // in-place mark never re-puts the value, so it cannot overwrite
-            // whatever occupies the slot.
-            if !self.data_store.is_null() && !self.engine.mark_stored(key, now, write_token) {
-                // Record was evicted between the engine put and this mark, or
-                // another record now occupies the slot. Harmless: the value is
-                // durable via add(), and a write that owns the slot marks itself
-                // clean when its own persist completes.
-                tracing::trace!(
-                    key,
-                    "mark_stored found no eligible record after persist (evicted or superseded)"
-                );
-            }
+        // Mark the record clean only if the value was written to a real
+        // persistent store (not a no-op null store) AND the resident record
+        // still carries the token of this write: only the exact write just
+        // persisted is marked clean, under the engine's per-key lock, without
+        // re-putting the value. A flush that stored the entry before the engine
+        // put changes nothing here: the mark keys on the token, not on the
+        // buffer.
+        if writes_through
+            && !self.data_store.is_null()
+            && !self.engine.mark_stored(key, now, write_token)
+        {
+            // Another record now occupies the slot. Harmless: the value is
+            // durable via add(), and a write that owns the slot marks itself
+            // clean when its own persist completes.
+            tracing::trace!(
+                key,
+                "mark_stored found no eligible record after persist (evicted or superseded)"
+            );
         }
 
         // Step 7: Return old value
@@ -405,10 +407,10 @@ impl RecordStore for DefaultRecordStore {
     /// a transient failure (the client re-sends the op).
     ///
     /// A write that will write through (`Client`, `CrdtMerge`) is first put to
-    /// the data store's [`admit_in_place`](MapDataStore::admit_in_place): over
-    /// the write-behind byte budget it is refused before anything is loaded or
-    /// mutated, so a refused op leaves the cell, the engine and the WAL as they
-    /// were (`TG-WB-011`).
+    /// the data store's [`admit_in_place`](MapDataStore::admit_in_place): at a
+    /// write-behind bound (keys or bytes) it is refused before anything is
+    /// loaded or mutated, so a refused op leaves the cell, the engine and the
+    /// WAL as they were (`TG-WB-011`).
     async fn update_in_place(
         &self,
         writer: &KeyWriteToken<'_>,
@@ -634,23 +636,19 @@ impl RecordStore for DefaultRecordStore {
         provenance: CallerProvenance,
     ) -> anyhow::Result<()> {
         self.refuse_foreign_token("put_backup", writer, key)?;
-        // Step 1: Put into engine
-        let old = self.engine.put(key, record.clone());
-
-        // Step 2: Fire observer
-        self.observer
-            .on_put(key, &record, old.as_ref().map(|r| &r.value), true);
-
-        // Step 3: Write-through for Client or CrdtMerge provenance
+        // Durable first, as in `put`: a refusal leaves memory and observers
+        // as they were.
         if matches!(
             provenance,
             CallerProvenance::Client | CallerProvenance::CrdtMerge
         ) {
-            let now = now_millis();
             self.data_store
-                .add_backup(&self.name, key, &record.value, now)
+                .add_backup(&self.name, key, &record.value, now_millis())
                 .await?;
         }
+        let old = self.engine.put(key, record.clone());
+        self.observer
+            .on_put(key, &record, old.as_ref().map(|r| &r.value), true);
 
         Ok(())
     }
@@ -662,18 +660,15 @@ impl RecordStore for DefaultRecordStore {
         provenance: CallerProvenance,
     ) -> anyhow::Result<()> {
         self.refuse_foreign_token("remove_backup", writer, key)?;
-        // Step 1: Remove from engine
-        let old = self.engine.remove(key);
-
-        // Step 2: Fire observer if removed
-        if let Some(ref record) = old {
+        // Durable first, as in `remove`: a refusal leaves memory and observers
+        // as they were.
+        let _ = provenance;
+        self.data_store
+            .remove_backup(&self.name, key, now_millis())
+            .await?;
+        if let Some(ref record) = self.engine.remove(key) {
             self.observer.on_remove(key, record, true);
         }
-
-        // Step 3: Remove from data store backup
-        let now = now_millis();
-        let _ = provenance;
-        self.data_store.remove_backup(&self.name, key, now).await?;
 
         Ok(())
     }
@@ -1918,6 +1913,8 @@ mod tests {
             inner: Arc<dyn MapDataStore>,
             after_load: Mutex<Option<Gate>>,
             before_remove: Mutex<Option<Gate>>,
+            /// When set, every backup write is refused.
+            refuse_backup: std::sync::atomic::AtomicBool,
         }
 
         impl ParkingStore {
@@ -1926,6 +1923,7 @@ mod tests {
                     inner,
                     after_load: Mutex::new(None),
                     before_remove: Mutex::new(None),
+                    refuse_backup: std::sync::atomic::AtomicBool::new(false),
                 }
             }
 
@@ -1945,6 +1943,13 @@ mod tests {
 
             fn take(slot: &Mutex<Option<Gate>>) -> Option<Gate> {
                 slot.lock().unwrap().take()
+            }
+
+            fn refused_backup(&self) -> anyhow::Result<()> {
+                if self.refuse_backup.load(Ordering::SeqCst) {
+                    anyhow::bail!("the test store refuses backup writes");
+                }
+                Ok(())
             }
         }
 
@@ -1967,6 +1972,7 @@ mod tests {
                 value: &RecordValue,
                 now: i64,
             ) -> anyhow::Result<()> {
+                self.refused_backup()?;
                 self.inner.add_backup(map, key, value, now).await
             }
 
@@ -1978,6 +1984,7 @@ mod tests {
             }
 
             async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+                self.refused_backup()?;
                 self.inner.remove_backup(map, key, now).await
             }
 
@@ -2316,6 +2323,58 @@ mod tests {
                     .1,
                 expected_leaf,
                 "durable leaf must equal the in-memory leaf"
+            );
+        }
+
+        /// A backup write that writes through and is refused by the data
+        /// store leaves the engine and the observers as they were.
+        #[tokio::test]
+        async fn a_refused_backup_write_leaves_the_engine_and_the_observers_unchanged() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let parking = Arc::new(ParkingStore::new(redb(&dir)));
+            let observer = Arc::new(CountingObserver::new());
+            let store = store_over(
+                parking.clone(),
+                Box::new(HashMapStorage::new()),
+                vec![Arc::clone(&observer) as Arc<dyn MutationObserver>],
+            );
+            let writer = KeyWriteToken::for_test(MAP, KEY);
+            store
+                .put(
+                    &writer,
+                    KEY,
+                    or_value(&["a"], &[]),
+                    CallerProvenance::Client,
+                )
+                .await
+                .expect("seed");
+            let snapshot = || {
+                (
+                    store.storage().get(KEY).map(|record| record.value),
+                    observer.put_count.load(Ordering::Relaxed),
+                    observer.remove_count.load(Ordering::Relaxed),
+                )
+            };
+            let before = snapshot();
+            parking.refuse_backup.store(true, Ordering::SeqCst);
+            let record = Record {
+                value: or_value(&["b"], &[]),
+                metadata: RecordMetadata::new(1, 1),
+            };
+            let answers = (
+                store
+                    .put_backup(&writer, KEY, record, CallerProvenance::Client)
+                    .await
+                    .is_err(),
+                store
+                    .remove_backup(&writer, KEY, CallerProvenance::Client)
+                    .await
+                    .is_err(),
+            );
+            assert_eq!(
+                (answers, snapshot()),
+                ((true, true), before),
+                "((put_backup refused, remove_backup refused), (resident value, puts, removes))"
             );
         }
 

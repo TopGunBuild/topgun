@@ -4127,8 +4127,11 @@ impl WriteBehindDataStore {
 
     /// Takes `charge` off the buffered-bytes counter. The counter is the sum
     /// of the live entries' charges, so going below zero is a bug: asserted
-    /// in debug builds, saturated in release.
+    /// in debug builds; in release saturated, and logged once at `ERROR`,
+    /// because from then on the counter, and the byte bound that reads it,
+    /// are wrong for the rest of the process.
     fn release_charge(&self, charge: u64) {
+        static UNDERFLOW_LOGGED: std::sync::Once = std::sync::Once::new();
         if charge == 0 {
             return;
         }
@@ -4142,6 +4145,16 @@ impl WriteBehindDataStore {
             before >= charge,
             "buffered_bytes underflow: released {charge} of {before}"
         );
+        if before < charge {
+            UNDERFLOW_LOGGED.call_once(|| {
+                tracing::error!(
+                    released = charge,
+                    counted = before,
+                    "write-behind buffered-bytes counter underflow: it was clamped at 0 and is \
+                     wrong from now on, so the byte bound refuses later or less than it should"
+                );
+            });
+        }
     }
 
     /// Appends an entry to the WAL and satisfies the fsync policy before
@@ -5408,9 +5421,9 @@ impl WriteBehindDataStore {
     /// does not grow the key's buffered charge, whether its entry is queued
     /// or held by a pass. Otherwise it is refused with `Write-behind byte
     /// capacity exceeded`, under `bound="bytes"`. A call of charge 0 — a
-    /// remove, a `remove_all`, an LWW write of a top-level `null`, an
-    /// in-place write-through, whose byte decision `admit_in_place` made
-    /// before its mutation — is never refused by this rule. Staging is read
+    /// remove, a `remove_all`, an LWW write of a top-level `null`, and the
+    /// key check `admit_in_place` makes for an in-place write before its
+    /// mutation — is never refused by this rule. Staging is read
     /// only once the counter is at the budget.
     ///
     /// Both are soft bounds, not reservations: the check and the caller's
@@ -5775,18 +5788,21 @@ impl MapDataStore for WriteBehindDataStore {
         self.config.or_delta_wal
     }
 
-    /// The byte rule of an in-place write, decided before its mutation: the
+    /// Both bounds of an in-place write, decided before its mutation: the
     /// cell is shared by the engine, the buffered entry and staging, so its
     /// growth is buffer growth the moment the mutation runs, and a check
-    /// after it could refuse only the acknowledgement. The growth is not
-    /// known before the opaque mutation runs, so at or above the budget every
+    /// after it could refuse only the acknowledgement. The key rule is
+    /// `admit_write`'s, counted under `bound="keys"`. The growth is not known
+    /// before the opaque mutation runs, so at or above the byte budget every
     /// in-place write is presumed to grow and is refused with `Write-behind
     /// byte capacity exceeded`, counted under `bound="bytes"` — also one that
-    /// would not grow (a duplicate OR remove, a tombstone prune).
+    /// would not grow (a duplicate OR remove, a tombstone prune). The
+    /// write-through that follows is not checked again.
     ///
     /// The caller must call this before mutating and must not mutate on
     /// `Err`; the refusal is temporary (`TG-WB-011`).
-    fn admit_in_place(&self, _map: &str, _key: &str) -> anyhow::Result<()> {
+    fn admit_in_place(&self, map: &str, key: &str) -> anyhow::Result<()> {
+        self.admit_write(map, &[key], 0)?;
         let budget = self.config.capacity_bytes;
         if budget == 0 || self.buffered_bytes.load(Ordering::Relaxed) < budget {
             return Ok(());
@@ -5846,15 +5862,13 @@ impl MapDataStore for WriteBehindDataStore {
 
         // The memory this write adds to the buffer, taken before the gate.
         let charge = charge_of(&src, key);
-        // An in-place write's byte decision was made before its mutation
-        // (`admit_in_place`); re-deciding it now would refuse the
-        // acknowledgement of growth that has already happened.
-        let byte_charge = match src {
-            WriteSource::Value(_) => charge,
-            WriteSource::Cell(_) => 0,
-        };
-        // Check capacity before insertion to avoid partial state on rejection
-        self.admit_write(map, &[key], byte_charge)?;
+        // Check capacity before insertion to avoid partial state on rejection.
+        // An in-place write was admitted before its mutation
+        // (`admit_in_place`); deciding it again now would refuse only the
+        // acknowledgement of a change that has already happened.
+        if let WriteSource::Value(_) = src {
+            self.admit_write(map, &[key], charge)?;
+        }
 
         let partition_id = partition_for(map, key);
         // Seed before the first sequence of this partition is handed out, so the
@@ -14832,6 +14846,8 @@ mod tests {
         RemoveAll(u8),
         Refuse(bool),
         Pass,
+        /// An in-place write-through of the key's cell, re-costed first.
+        Cell(u8, u16),
     }
 
     fn byte_step() -> impl proptest::strategy::Strategy<Value = ByteStep> {
@@ -14842,6 +14858,7 @@ mod tests {
             1 => (1u8..16).prop_map(ByteStep::RemoveAll),
             1 => any::<bool>().prop_map(ByteStep::Refuse),
             2 => Just(ByteStep::Pass),
+            2 => (0u8..4, 0u16..300).prop_map(|(key, cost)| ByteStep::Cell(key, cost)),
         ]
     }
 
@@ -14868,6 +14885,7 @@ mod tests {
                     },
                 );
                 let key = |n: u8| format!("k{n}");
+                let mut cells = std::collections::HashMap::new();
                 for (i, step) in steps.iter().enumerate() {
                     match *step {
                         ByteStep::Add(n, len) => store
@@ -14884,6 +14902,19 @@ mod tests {
                         }
                         ByteStep::Refuse(refuse) => spy.refuse_everything(refuse),
                         ByteStep::Pass => one_requested_pass(&store).await,
+                        ByteStep::Cell(n, cost) => {
+                            let cell = cells.entry(n).or_insert_with(|| {
+                                crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+                                    value: sized(10, 1),
+                                    metadata: crate::storage::record::RecordMetadata::new(0, 0),
+                                })
+                            });
+                            cell.lock().metadata.cost = u64::from(cost);
+                            store
+                                .add_with_witness(BYTES_MAP, &key(n), WriteSource::Cell(cell), now_millis(), None)
+                                .await
+                                .unwrap();
+                        }
                     }
                     assert_eq!(
                         bytes_of(&store),
@@ -14964,6 +14995,44 @@ mod tests {
             ("admitted", budget, "admitted", budget + 300),
             "(the pre-check below the budget, the counter at the write-through, its answer, \
              the counter after it, charged at the cell's cost)"
+        );
+    }
+
+    /// The key rule of an in-place write is decided by the same pre-check and
+    /// not again at its write-through: a key that filled the buffer between
+    /// the two must not turn an applied mutation into a refusal.
+    #[tokio::test]
+    async fn an_admitted_in_place_write_is_not_key_refused_after_its_mutation() {
+        let store = WriteBehindDataStore::new(
+            Arc::new(crate::storage::datastores::NullDataStore),
+            on_request_config(1, 0),
+        );
+        let now = now_millis();
+        let cell = crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+            value: sized(10, 1),
+            metadata: crate::storage::record::RecordMetadata::new(0, 0),
+        });
+        let admitted = answer(store.admit_in_place(BYTES_MAP, "k"));
+        store
+            .add(BYTES_MAP, "other", &sized(10, 1), now)
+            .await
+            .unwrap();
+        let at_capacity = answer(store.admit_in_place(BYTES_MAP, "k2"));
+        let acked = answer(
+            store
+                .add_with_witness(BYTES_MAP, "k", WriteSource::Cell(&cell), now, None)
+                .await,
+        );
+        assert_eq!(
+            (
+                admitted.as_str(),
+                at_capacity.as_str(),
+                acked.as_str(),
+                store.pending_operation_count()
+            ),
+            ("admitted", KEY_REFUSAL, "admitted", 2),
+            "(the pre-check below capacity, a second pre-check at it, the write-through of \
+             the first, the buffered keys after it)"
         );
     }
 

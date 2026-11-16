@@ -3551,7 +3551,7 @@ fn a_push_diff_over_the_byte_budget_merges_up_to_the_refused_entry() {
 }
 
 #[tokio::test]
-async fn a_capacity_rejected_mutation_is_persisted_by_the_next_write_through() {
+async fn a_capacity_refused_in_place_op_is_not_applied_and_the_next_write_through_persists() {
     // Entries are due at once, but only a requested flush drains them.
     let fx = CellFixture::new(WriteBehindConfig {
         capacity: 1,
@@ -3569,7 +3569,7 @@ async fn a_capacity_rejected_mutation_is_persisted_by_the_next_write_through() {
         apply_or(&fx.store, fx.key(), OrOp::Add("op2"))
             .await
             .is_err(),
-        "a non-staged key is rejected at capacity, after its in-place mutation"
+        "a non-staged key is refused at capacity, before its in-place mutation"
     );
     fx.assert_no_pending_sequence_above(before);
 
@@ -3608,8 +3608,8 @@ async fn a_capacity_rejected_mutation_is_persisted_by_the_next_write_through() {
     );
     assert_eq!(
         inner_view(&inner, &key).await,
-        view(&["old-1", "old-2", "op2", "op3"], &[]),
-        "op3's write-through persists the resident value, the rejected op2 included"
+        view(&["old-1", "old-2", "op3"], &[]),
+        "op3's write-through persists the resident value, which the refused op2 never changed"
     );
 }
 
@@ -4856,4 +4856,296 @@ async fn the_shutdown_drain_registers_its_batch_in_flight() {
         .expect("drain task")
         .expect("a healthy drain");
     assert!(inner.contains(&key).await);
+}
+
+// ---------------------------------------------------------------------------
+// A write refused at a write-behind bound leaves no trace in the record store
+// ---------------------------------------------------------------------------
+
+/// The observer calls a record store made, in order, with the old value an
+/// update named.
+#[derive(Default)]
+struct RecordingObserver {
+    calls: std::sync::Mutex<Vec<(&'static str, Option<RecordValue>)>>,
+}
+
+impl RecordingObserver {
+    fn calls(&self) -> Vec<(&'static str, Option<RecordValue>)> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn push(&self, call: &'static str, old: Option<&RecordValue>) {
+        self.calls.lock().unwrap().push((call, old.cloned()));
+    }
+}
+
+impl crate::storage::mutation_observer::MutationObserver for RecordingObserver {
+    fn on_put(&self, _: &str, _: &Record, old: Option<&RecordValue>, _: bool) {
+        self.push("put", old);
+    }
+    fn on_update(&self, _: &str, _: &Record, old: &RecordValue, _: &RecordValue, _: bool) {
+        self.push("update", Some(old));
+    }
+    fn on_remove(&self, _: &str, _: &Record, _: bool) {
+        self.push("remove", None);
+    }
+    fn on_remove_key(&self, _: &str, _: bool) {
+        self.push("remove_key", None);
+    }
+    fn on_evict(&self, _: &str, _: &Record, _: bool) {
+        self.push("evict", None);
+    }
+    fn on_load(&self, _: &str, _: &Record, _: bool) {
+        self.push("load", None);
+    }
+    fn on_replication_put(&self, _: &str, _: &Record, _: bool) {}
+    fn on_clear(&self) {}
+    fn on_reset(&self) {}
+    fn on_destroy(&self, _: bool) {}
+}
+
+fn observed_store_over(
+    data_store: Arc<dyn MapDataStore>,
+) -> (Arc<DefaultRecordStore>, Arc<RecordingObserver>) {
+    let observer = Arc::new(RecordingObserver::default());
+    let store = Arc::new(DefaultRecordStore::new(
+        TEST_MAP.to_string(),
+        0,
+        Box::new(HashMapStorage::new()),
+        data_store,
+        Arc::new(CompositeMutationObserver::new(vec![
+            Arc::clone(&observer) as Arc<dyn crate::storage::mutation_observer::MutationObserver>
+        ])),
+        StorageConfig::default(),
+    ));
+    (store, observer)
+}
+
+/// What the engine holds for `key`, without loading: (value, dirty, token).
+fn engine_view(store: &DefaultRecordStore, key: &str) -> Option<(RecordValue, bool, u64)> {
+    store.storage().get(key).map(|record| {
+        (
+            record.value,
+            record.metadata.is_dirty(),
+            record.metadata.write_token,
+        )
+    })
+}
+
+fn key_refusals(rendered: &str) -> Option<f64> {
+    rendered
+        .lines()
+        .find(|line| {
+            line.starts_with("topgun_write_behind_capacity_refusals_total{bound=\"keys\"} ")
+        })
+        .and_then(|line| line.rsplit(' ').next()?.parse().ok())
+}
+
+async fn put_client(
+    store: &DefaultRecordStore,
+    key: &str,
+    value: RecordValue,
+) -> Result<Option<RecordValue>, String> {
+    store
+        .put(
+            &KeyWriteToken::for_test(store.name(), key),
+            key,
+            value,
+            CallerProvenance::Client,
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn remove_client(store: &DefaultRecordStore, key: &str) -> Result<(), String> {
+    store
+        .remove(
+            &KeyWriteToken::for_test(store.name(), key),
+            key,
+            CallerProvenance::Client,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[test]
+fn a_put_refused_at_the_byte_bound_leaves_no_trace() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        current_thread().block_on(async {
+            let filler = plain(500);
+            let keys = keys_in_partition(test_partition(), 4);
+            let (filler_key, held, fresh) = (&keys[1], &keys[2], &keys[3]);
+            let fx = CellFixture::new(budget_config(filler_key, &filler)).await;
+            let (store, observer) =
+                observed_store_over(Arc::clone(&fx.write_behind) as Arc<dyn MapDataStore>);
+            put_client(&store, held, plain(10))
+                .await
+                .expect("a small value is admitted below the budget");
+            fx.write_behind
+                .add(TEST_MAP, filler_key, &filler, 0)
+                .await
+                .expect("the filler is admitted below the budget");
+            assert!(
+                fx.write_behind.buffered_bytes.load(Ordering::SeqCst)
+                    >= fx.write_behind.config.capacity_bytes,
+                "precondition: the counter is at the budget"
+            );
+            let snapshot = |fx: &CellFixture| {
+                (
+                    engine_view(&store, held),
+                    engine_view(&store, fresh),
+                    observer.calls(),
+                    fx.max_assigned(),
+                    fx.write_behind.pending_operation_count(),
+                    fx.write_behind.buffered_bytes.load(Ordering::SeqCst),
+                    key_refusals(&handle.render()),
+                )
+            };
+            let before = snapshot(&fx);
+            let refusals_before = byte_refusals(&handle.render());
+
+            let answers = [
+                put_client(&store, held, plain(400)).await,
+                put_client(&store, fresh, plain(10)).await,
+            ];
+            let after = snapshot(&fx);
+            fx.assert_no_pending_sequence_above(before.3);
+
+            let refused = Err("Write-behind byte capacity exceeded".to_string());
+            assert_eq!(
+                (answers, after, byte_refusals(&handle.render())),
+                (
+                    [refused.clone(), refused],
+                    before,
+                    refusals_before.map(|n| n + 2.0)
+                ),
+                "(a growing rewrite and a new key over the budget; the engine's record of \
+                 both keys, the observer calls, the last WAL sequence, the counters and key \
+                 refusals after them; byte refusals)"
+            );
+        });
+    });
+}
+
+#[test]
+fn a_write_refused_at_the_key_bound_leaves_no_trace() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        current_thread().block_on(async {
+            let keys = keys_in_partition(test_partition(), 3);
+            let fresh = &keys[2];
+            let fx = CellFixture::new(WriteBehindConfig {
+                write_delay_ms: 0,
+                capacity: 1,
+                capacity_bytes: 0,
+                ..never_flush_config()
+            })
+            .await;
+            let (store, observer) =
+                observed_store_over(Arc::clone(&fx.write_behind) as Arc<dyn MapDataStore>);
+            // The fixture's key is durable and not buffered; resident here too.
+            store
+                .get(fx.key(), false)
+                .await
+                .expect("hydrate")
+                .expect("seeded");
+            fx.write_behind
+                .add(TEST_MAP, &keys[1], &plain(10), 0)
+                .await
+                .expect("the filler takes the one place");
+            let snapshot = |fx: &CellFixture| {
+                (
+                    engine_view(&store, fx.key()),
+                    engine_view(&store, fresh),
+                    observer.calls(),
+                    fx.max_assigned(),
+                    fx.write_behind.pending_operation_count(),
+                    fx.write_behind.buffered_bytes.load(Ordering::SeqCst),
+                    byte_refusals(&handle.render()),
+                )
+            };
+            let before = snapshot(&fx);
+            let refusals_before = key_refusals(&handle.render());
+
+            let answers = [
+                put_client(&store, fx.key(), plain(10)).await.map(|_| ()),
+                put_client(&store, fresh, plain(10)).await.map(|_| ()),
+                remove_client(&store, fx.key()).await,
+                apply_or(&store, fx.key(), OrOp::Add("op1"))
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+            ];
+            let after = snapshot(&fx);
+            fx.assert_no_pending_sequence_above(before.3);
+
+            let refused = Err("Write-behind capacity exceeded".to_string());
+            assert_eq!(
+                (answers, after, key_refusals(&handle.render())),
+                (
+                    [refused.clone(), refused.clone(), refused.clone(), refused],
+                    before,
+                    refusals_before.map(|n| n + 4.0)
+                ),
+                "(a put of a resident key, a put of a new key, a remove and an in-place write at \
+                 the key bound; the engine's record of both keys, the observer calls, the last \
+                 WAL sequence, the counters and byte refusals after them; key refusals)"
+            );
+        });
+    });
+}
+
+/// While a put's write-through awaits, a reader of the key, which is not
+/// resident, loads the staged value into the engine. The put then replaces
+/// that record with its own and reports an update of it, not a fresh insert.
+#[tokio::test]
+async fn a_reader_that_loads_the_staged_value_during_a_put_is_replaced_by_the_put() {
+    let fx = CellFixture::new(never_flush_config()).await;
+    let (store, observer) =
+        observed_store_over(Arc::clone(&fx.write_behind) as Arc<dyn MapDataStore>);
+    let key = keys_in_partition(test_partition(), 3)[2].clone();
+    let value = plain(10);
+
+    let mut park = fx
+        .write_behind
+        .test_park_between_stage_and_queue_insert(TEST_MAP, &key);
+    let write = {
+        let (store, key, value) = (Arc::clone(&store), key.clone(), value.clone());
+        tokio::spawn(async move { put_client(&store, &key, value).await })
+    };
+    park.wait_parked().await;
+    let read = store
+        .get(&key, false)
+        .await
+        .expect("get")
+        .map(|record| record.value);
+    let (_, _, loaded) = engine_view(&store, &key).expect("the read loaded the key");
+    park.release();
+    let answer = write.await.expect("put task");
+
+    let (resident, dirty, token) = engine_view(&store, &key).expect("resident");
+    assert_eq!(
+        (
+            read,
+            answer,
+            resident,
+            dirty,
+            token != loaded,
+            observer.calls()
+        ),
+        (
+            Some(value.clone()),
+            Ok(Some(value.clone())),
+            value.clone(),
+            false,
+            true,
+            vec![("load", None), ("update", Some(value))]
+        ),
+        "(the read during the put, the put's answer, the resident value, dirty, carries another \
+         token than the loaded record, the observer calls)"
+    );
 }
