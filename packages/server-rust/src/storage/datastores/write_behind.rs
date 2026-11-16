@@ -22,7 +22,7 @@ use crate::storage::map_data_store::{
     MapDataStore, MerkleLeaf, PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder,
     StoreBrokenCause, StoreErrorClass, StoreWrite, WriteSource,
 };
-use crate::storage::record::RecordValue;
+use crate::storage::record::{structural_size, RecordValue};
 use crate::storage::wal::{
     describe_wal_watermark_metrics, OrDelta, Wal, WalEntry, WalFsyncPolicy, WalOp, WalStorePayload,
     WAL_WATERMARK_LAG_GAUGE,
@@ -104,11 +104,12 @@ pub struct WriteBehindConfig {
     /// H              <=  1                      while a store-wide hold is in force
     /// ```
     ///
-    /// - `W` is the number of writes of distinct keys that are not buffered
-    ///   and that are, at one instant, between the check and their queue
-    ///   insert (the WAL append lies in between). `W >= 1` while any write is
-    ///   in progress: the writer that is inserting is itself past its check,
-    ///   so with one writer and no flush pass the count reaches `C`.
+    /// - `W` is a cohort, not an instant: the writes of distinct keys that
+    ///   were not buffered which the check admitted while `pending_count + n
+    ///   <= C`, and whose queue insert ran after the count reached `C` (the
+    ///   WAL append lies in between). `W >= 1` while any write is in
+    ///   progress: the writer that is inserting is itself past its check, so
+    ///   with one writer and no flush pass the count reaches `C`.
     /// - `H` is the number of entries the running flush pass holds whose key
     ///   was re-written while the pass holds them; each such key is counted a
     ///   second time, once. A pass holds the entries that were due when it
@@ -134,7 +135,58 @@ pub struct WriteBehindConfig {
     /// and its queue insert — a stretch with no await and no lock held, so it
     /// ends by itself. Not covered: a panic inside that stretch leaves a slot
     /// with nothing buffered.
+    ///
+    /// The buffered values' memory has its own bound, [`Self::capacity_bytes`].
     pub capacity: u64,
+    /// Soft bound on the buffered values' memory, in bytes
+    /// (`TOPGUN_WRITEBEHIND_CAPACITY_MB` × 1 MiB). `0` disables the check.
+    ///
+    /// What is counted: the charge of every buffered entry, queued or held by
+    /// a flush pass, until the entry is persisted or retired into a newer
+    /// write of its key. A value's charge is its structural size plus its key
+    /// (an estimate of its stored encoding, not a heap measurement; one copy,
+    /// shared by the queue and staging); an in-place write's charge is its
+    /// cell's cost as the engine keeps it; a remove and an LWW write of a
+    /// top-level `null` are charged 0.
+    ///
+    /// The rule, with `B = capacity_bytes > 0`: a plain write is admitted
+    /// while the counter is below `B`, or when its key's staging slot already
+    /// carries at least its charge (a rewrite that does not grow, whether the
+    /// key's entry is queued or held by a pass); otherwise it is refused with
+    /// `Write-behind byte capacity exceeded`. A write charged 0 is never
+    /// refused by this rule (the key rule still applies to it). An in-place
+    /// write is decided before its mutation, by
+    /// [`MapDataStore::admit_in_place`]: refused whenever the counter is at or
+    /// above `B`, because its growth is not known before it runs. A single
+    /// value larger than the whole budget is admitted into a buffer below it,
+    /// so no write is refused for ever while the store accepts.
+    ///
+    /// It is not a hard limit. In charge units, with `S_max` the largest
+    /// charge of any admitted entry:
+    ///
+    /// ```text
+    /// buffered_bytes  <=  B - 1 + W_b + H_b
+    /// W_b             <=  W × S_max
+    /// H_b             <=  min(L, N_held) × S_max      L = 1000 entries per pass
+    /// H_b             <=  S_max                       while a store-wide hold is in force
+    /// ```
+    ///
+    /// - `W_b` is the cohort of counter increments of writes admitted while
+    ///   the counter was below `B` whose queue insert ran after it reached
+    ///   `B`; `W` is the most such writes in flight at once (one per key,
+    ///   `TG-KEY-001`).
+    /// - `H_b` is the charges of the entries a running pass holds whose key
+    ///   was rewritten meanwhile: each such key is counted twice until the
+    ///   held entry's terminal. A rewrite of an in-place key charges the same
+    ///   cell twice, on the conservative side. The 8 MiB pass limit is in
+    ///   encoded bytes and does not bound `H_b`; the entry count `L` does.
+    ///
+    /// Not claimed: the in-place growth of a cell under a provenance that
+    /// owes no write-through (`Backup`, `Replication`, `Load`) is not counted
+    /// until its entry settles, nor that of a cell whose write-through's WAL
+    /// append failed, until the key's next write-through; the WAL frame's
+    /// transient copy and a pass's encoded bytes are outside the budget.
+    pub capacity_bytes: u64,
     /// Maximum milliseconds to wait for the write-behind buffer to drain on
     /// graceful shutdown. On timeout, still-pending ops are logged and the
     /// process exits rather than blocking termination indefinitely.
@@ -221,6 +273,9 @@ const MIN_FLUSH_INTERVAL_MS: u64 = 1;
 /// per second, the node's admission target.
 const LEGACY_FLUSH_INTERVAL_WARN_MS: u64 = 500;
 
+/// Bytes in the MiB unit of `TOPGUN_WRITEBEHIND_CAPACITY_MB`.
+const BYTES_PER_MIB: u64 = 1024 * 1024;
+
 impl Default for WriteBehindConfig {
     fn default() -> Self {
         Self {
@@ -230,6 +285,7 @@ impl Default for WriteBehindConfig {
             backoff_base_ms: 500,
             backoff_cap_ms: 5000,
             capacity: 10_000,
+            capacity_bytes: 256 * BYTES_PER_MIB,
             shutdown_timeout_ms: 30_000,
             wal_dir: PathBuf::from("./topgun-wal"),
             wal_fsync_policy: WalFsyncPolicy::Batched,
@@ -252,6 +308,7 @@ impl WriteBehindConfig {
     /// | `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` | `flush_interval_ms` | 100 ms — the idle linger; `0` is fatal; 500 ms or more (with a non-zero capacity) warns |
     /// | `TOPGUN_WRITEBEHIND_BATCH_SIZE` | `batch_size` | 100 — accepted and currently without effect |
     /// | `TOPGUN_WRITEBEHIND_CAPACITY` | `capacity` | 10 000 |
+    /// | `TOPGUN_WRITEBEHIND_CAPACITY_MB` | `capacity_bytes` (× 1 MiB) | 256 MiB — `0` disables the byte bound; a value whose bytes overflow `u64` is fatal |
     /// | `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS` | `shutdown_timeout_ms` | 30 000 ms |
     /// | `TOPGUN_WAL_DIR` | `wal_dir` | `./topgun-wal` |
     /// | `TOPGUN_WAL_FSYNC_POLICY` | `wal_fsync_policy` | `batched` |
@@ -295,6 +352,12 @@ impl WriteBehindConfig {
     /// PARSES to a value below [`MIN_FLUSH_INTERVAL_MS`], that is `0`: honoured,
     /// it would make the idle flush loop spin on a zero sleep. An unparseable
     /// value warns and falls back, as for the other variables.
+    ///
+    /// Panics (refuses to start) if `TOPGUN_WRITEBEHIND_CAPACITY_MB` PARSES
+    /// but its value in bytes does not fit in a `u64`. Saturating would
+    /// silently disable a bound the operator set, and the default would
+    /// silently shrink it; the value is echoed on the boot line, so it must be
+    /// the one the operator meant.
     #[must_use]
     pub fn from_source<F: Fn(&str) -> Option<String>>(get: F) -> Self {
         let defaults = Self::default();
@@ -345,6 +408,11 @@ impl WriteBehindConfig {
                     cfg.capacity = defaults.capacity;
                 }
             }
+        }
+
+        // Parse TOPGUN_WRITEBEHIND_CAPACITY_MB → capacity_bytes (u64, × 1 MiB)
+        if let Some(raw) = get("TOPGUN_WRITEBEHIND_CAPACITY_MB") {
+            cfg.capacity_bytes = Self::parse_capacity_bytes(&raw, defaults.capacity_bytes);
         }
 
         // Parse TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS → shutdown_timeout_ms (u64)
@@ -419,6 +487,32 @@ impl WriteBehindConfig {
         }
 
         cfg
+    }
+
+    /// Parses one `TOPGUN_WRITEBEHIND_CAPACITY_MB` value into bytes: an
+    /// unparseable value warns and falls back to `default`; one whose bytes
+    /// overflow `u64` is fatal (see [`Self::from_source`]).
+    fn parse_capacity_bytes(raw: &str, default: u64) -> u64 {
+        match raw.trim().parse::<u64>() {
+            Ok(mb) => match mb.checked_mul(BYTES_PER_MIB) {
+                Some(bytes) => bytes,
+                None => panic!(
+                    "TOPGUN_WRITEBEHIND_CAPACITY_MB={raw}: {mb} MiB does not fit in a 64-bit \
+                     byte count; refusing to start"
+                ),
+            },
+            Err(err) => {
+                tracing::warn!(
+                    target: "topgun_server::storage::write_behind",
+                    var = "TOPGUN_WRITEBEHIND_CAPACITY_MB",
+                    value = %raw,
+                    error = %err,
+                    default = default / BYTES_PER_MIB,
+                    "Failed to parse env var; using default"
+                );
+                default
+            }
+        }
     }
 
     /// Parses one `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS` value: an unparseable
@@ -573,8 +667,9 @@ impl WriteBehindConfig {
 /// A buffered operation waiting to be flushed to the inner store.
 #[derive(Debug, Clone)]
 pub(crate) enum DelayedOp {
-    /// Buffered add/update with the value.
-    Store { value: RecordValue },
+    /// Buffered add/update with the value, shared with the key's staging slot
+    /// so a buffered value is held once.
+    Store { value: Arc<RecordValue> },
     /// Buffered in-place write: the flush persists the cell's value as it is
     /// at flush time.
     StoreCell { cell: Arc<SlotCell> },
@@ -969,6 +1064,10 @@ pub(crate) struct DelayedEntry {
     pub key: String,
     /// The buffered operation (store or remove).
     pub operation: DelayedOp,
+    /// What this entry added to the buffered-bytes counter, released at the
+    /// entry's terminal. It belongs to this entry's value, not to the key's
+    /// schedule, so a coalesce or a retirement never moves it to another entry.
+    pub charge: u64,
     /// Wall-clock millis when first enqueued. Preserved on coalesce so the
     /// key flushes on its original schedule.
     pub store_time: i64,
@@ -1012,6 +1111,7 @@ impl DelayedEntry {
         map: &str,
         key: &str,
         operation: DelayedOp,
+        charge: u64,
         store_time: i64,
         sequence: u64,
         wal_seq: u64,
@@ -1020,6 +1120,7 @@ impl DelayedEntry {
             map: map.to_string(),
             key: key.to_string(),
             operation,
+            charge,
             store_time,
             buffered_at: tokio::time::Instant::now(),
             sequence,
@@ -1034,6 +1135,9 @@ impl DelayedEntry {
     /// the flush schedule and its retry state, which belong to the key and not
     /// to one write of it. Without the retry state a key that is rewritten
     /// while the store refuses it would be attempted in every pass.
+    ///
+    /// The charge is not inherited: it is the memory of this write's value,
+    /// and the replaced entry's charge leaves the counter with it.
     fn inherit_from(&mut self, replaced: &DelayedEntry) {
         self.store_time = replaced.store_time;
         self.buffered_at = replaced.buffered_at;
@@ -1298,6 +1402,8 @@ impl PartitionQueue {
         else {
             return false;
         };
+        // The survivor keeps its own charge: the retired entry's value is gone
+        // with it, and its charge is released by the caller.
         survivor
             .wal_sequences
             .extend(retired.wal_sequences.iter().copied());
@@ -1373,13 +1479,17 @@ struct StagingSlot {
     seq: u64,
     /// `Some(value)` = pending write, `None` = pending delete.
     value: Option<StagedValue>,
+    /// The charge of the write that set this slot (0 for a delete): a copy
+    /// the byte rule reads to tell a rewrite that does not grow the key's
+    /// buffered charge, never a second counter.
+    charge: u64,
 }
 
 /// A pending write's value in the staging overlay: an owned value (a plain
 /// `add`), or the cell of an in-place write.
 #[derive(Clone)]
 enum StagedValue {
-    Value(RecordValue),
+    Value(Arc<RecordValue>),
     Cell(Arc<SlotCell>),
 }
 
@@ -1387,30 +1497,55 @@ impl StagedValue {
     /// An owned copy of the staged value, read under the cell's lock for a cell.
     fn to_value(&self) -> RecordValue {
         match self {
-            StagedValue::Value(value) => value.clone(),
+            StagedValue::Value(value) => RecordValue::clone(value),
             StagedValue::Cell(cell) => cell.lock().value.clone(),
         }
     }
 }
 
-/// The queue operation and the staging value for one write. A value is queued
-/// and staged as two copies; an in-place write's cell is shared by the queued
-/// entry, its staging slot and the engine, so the flush persists whatever the
-/// cell holds at flush time and a re-adoption finds the same cell (TG-WB-003).
+/// The queue operation and the staging value for one write. A value is copied
+/// once and shared by the queued entry and its staging slot, so the buffer
+/// holds it once and its charge is the memory of one value; an in-place
+/// write's cell is shared by the queued entry, its staging slot and the
+/// engine, so the flush persists whatever the cell holds at flush time and a
+/// re-adoption finds the same cell (TG-WB-003).
 fn queued_and_staged(src: WriteSource<'_>) -> (DelayedOp, StagedValue) {
     match src {
-        WriteSource::Value(value) => (
-            DelayedOp::Store {
-                value: value.clone(),
-            },
-            StagedValue::Value(value.clone()),
-        ),
+        WriteSource::Value(value) => {
+            let value = Arc::new(value.clone());
+            (
+                DelayedOp::Store {
+                    value: Arc::clone(&value),
+                },
+                StagedValue::Value(value),
+            )
+        }
         WriteSource::Cell(cell) => (
             DelayedOp::StoreCell {
                 cell: Arc::clone(cell),
             },
             StagedValue::Cell(Arc::clone(cell)),
         ),
+    }
+}
+
+/// What one write adds to the buffered-bytes counter: a value's structural
+/// size plus its key, or an in-place write's cell cost, which the engine set
+/// under the same lock and which already counts the key.
+///
+/// An LWW write of a top-level `null` is a delete — a client's `set(key,
+/// null)` arrives as a put and reads as absent — so it is charged 0 like a
+/// remove and is never refused by the byte bound; its small tombstone is
+/// bounded by the key bound. A `null` nested in a map or array is ordinary
+/// data and is charged as usual.
+fn charge_of(src: &WriteSource<'_>, key: &str) -> u64 {
+    match src {
+        WriteSource::Value(RecordValue::Lww {
+            value: topgun_core::types::Value::Null,
+            ..
+        }) => 0,
+        WriteSource::Value(value) => structural_size(value) + key.len() as u64,
+        WriteSource::Cell(cell) => cell.lock().metadata.cost,
     }
 }
 
@@ -1717,6 +1852,9 @@ const FLUSH_PASS_SECONDS_HISTOGRAM: &str = "topgun_write_behind_flush_pass_secon
 /// Writes of keys that were not buffered, refused because the buffer was at
 /// its capacity.
 const CAPACITY_REFUSALS_COUNTER: &str = "topgun_write_behind_capacity_refusals_total";
+/// The buffered values' memory in charge units, the counter the byte bound
+/// reads; set at the end of every pass.
+const BUFFERED_BYTES_GAUGE: &str = "topgun_write_behind_buffered_bytes";
 /// Seconds since the oldest buffered entry was written.
 const OLDEST_ENTRY_AGE_GAUGE: &str = "topgun_write_behind_oldest_entry_age_seconds";
 
@@ -1769,28 +1907,45 @@ fn register_retry_metrics() {
     );
     metrics::describe_counter!(
         CAPACITY_REFUSALS_COUNTER,
-        "Writes of keys that were not buffered which the write-behind buffer refused because it \
-         was at its capacity (TOPGUN_WRITEBEHIND_CAPACITY); each is a temporary error, so the \
-         client keeps the write and sends it again"
+        "Write calls the write-behind buffer refused at one of its bounds, by bound: \
+         bound=\"keys\" for keys that were not buffered at TOPGUN_WRITEBEHIND_CAPACITY, \
+         bound=\"bytes\" for writes that would grow the buffered values at \
+         TOPGUN_WRITEBEHIND_CAPACITY_MB (plain writes that grow their key, every in-place OR \
+         write); each is a temporary error, so the client keeps the write and sends it again"
+    );
+    metrics::describe_gauge!(
+        BUFFERED_BYTES_GAUGE,
+        "Buffered write-behind value bytes in charge units (a structural estimate of the stored \
+         encoding), the count the byte bound uses, as of the last pass; growing writes are \
+         refused once it reaches TOPGUN_WRITEBEHIND_CAPACITY_MB"
     );
     metrics::describe_gauge!(
         OLDEST_ENTRY_AGE_GAUGE,
         "Seconds since the oldest buffered write-behind entry was written, whether or not the \
          store has refused it, 0 when nothing is buffered; set after every flush pass, also \
-         during a store-wide hold. Wall-clock based: a rewrite of a buffered key keeps the \
-         key's first buffered time. Once the store is broken no pass runs and it keeps its last \
+         during a store-wide hold. Read from the monotonic clock: a rewrite of a buffered key \
+         keeps the key's first buffered time. Once the store is broken no pass runs and it keeps its last \
          value. The refusal-specific signals are topgun_write_behind_oldest_refusal_age_seconds \
          and topgun_write_behind_store_hold"
     );
     metrics::counter!(FLUSH_REFUSALS_COUNTER).increment(0);
-    metrics::counter!(CAPACITY_REFUSALS_COUNTER).increment(0);
+    metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "keys").increment(0);
+    metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "bytes").increment(0);
     metrics::counter!(FLUSH_PASSES_COUNTER).increment(0);
     metrics::counter!(FLUSH_PASS_ENTRIES_COUNTER).increment(0);
     metrics::gauge!(RETRYING_ENTRIES_GAUGE).set(0.0);
     metrics::gauge!(BUFFERED_ENTRIES_GAUGE).set(0.0);
+    metrics::gauge!(BUFFERED_BYTES_GAUGE).set(0.0);
     metrics::gauge!(OLDEST_REFUSAL_AGE_GAUGE).set(0.0);
     metrics::gauge!(OLDEST_ENTRY_AGE_GAUGE).set(0.0);
     metrics::gauge!(STORE_HOLD_GAUGE).set(0.0);
+}
+
+/// The byte bound's refusal, counted once under `bound="bytes"`. Its text
+/// differs from the key refusal's so a reader and a test can tell them apart.
+fn refuse_bytes() -> anyhow::Error {
+    metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "bytes").increment(1);
+    anyhow::anyhow!("Write-behind byte capacity exceeded")
 }
 
 /// A count as a gauge value. A count above `u32::MAX` reads as that: every
@@ -1984,6 +2139,13 @@ impl TenantCloses {
             }
             count.fetch_sub(1, Ordering::SeqCst);
         };
+        self.refuse_closed(map)?;
+        Ok(write)
+    }
+
+    /// Refuses a write of `map`, as a temporary error, when a closed tenant
+    /// owns `map`.
+    fn refuse_closed(&self, map: &str) -> anyhow::Result<()> {
         if self.any.load(Ordering::SeqCst)
             && self
                 .closed
@@ -1996,7 +2158,7 @@ impl TenantCloses {
                  write rejected"
             );
         }
-        Ok(write)
+        Ok(())
     }
 
     /// The drop slot, or `None` while another drop holds it.
@@ -2077,6 +2239,10 @@ pub struct WriteBehindDataStore {
     sequence: AtomicU64,
     /// Node-wide count of pending entries across all partition queues.
     pending_count: AtomicU64,
+    /// Node-wide sum of the `charge` of every buffered entry, queued or held
+    /// by a pass (`TG-WB-005`). It moves only where `pending_count` moves:
+    /// `enqueue`, `settle_stored` and a superseded `put_back`.
+    buffered_bytes: AtomicU64,
     /// Signal to wake the flush loop for immediate processing.
     flush_notify: Arc<Notify>,
     /// Shutdown signal sender — wakes the background flush task and tells it to exit.
@@ -2382,6 +2548,7 @@ impl WriteBehindDataStore {
             staging: DashMap::new(),
             sequence: AtomicU64::new(0),
             pending_count: AtomicU64::new(0),
+            buffered_bytes: AtomicU64::new(0),
             flush_notify: flush_notify.clone(),
             shutdown: shutdown_tx,
             lifecycle: LifecycleState::new(),
@@ -3468,16 +3635,16 @@ impl WriteBehindDataStore {
     /// of the insert. Staged first, the slot is there for whichever terminal
     /// persists the entry; with nothing able to suspend the writer in
     /// between, a slot is never left behind without an entry.
-    fn stage(&self, map: &str, key: &str, seq: u64, value: Option<StagedValue>) {
+    fn stage(&self, map: &str, key: &str, seq: u64, value: Option<StagedValue>, charge: u64) {
         use dashmap::mapref::entry::Entry;
         match self.staging.entry((map.to_string(), key.to_string())) {
             Entry::Occupied(mut e) => {
                 if seq >= e.get().seq {
-                    e.insert(StagingSlot { seq, value });
+                    e.insert(StagingSlot { seq, value, charge });
                 }
             }
             Entry::Vacant(e) => {
-                e.insert(StagingSlot { seq, value });
+                e.insert(StagingSlot { seq, value, charge });
             }
         }
     }
@@ -3919,6 +4086,84 @@ impl WriteBehindDataStore {
         }
     }
 
+    /// Queues a write's entry, replacing the key's queued entry if there is
+    /// one, and moves both buffer counters: a new key adds one entry and its
+    /// charge; a coalesce adds the new charge and releases the replaced one.
+    /// Returns the replaced entry's sequence and the WAL sequences its frame
+    /// no longer needs, for the caller to resolve after the shard guard is
+    /// gone, so neither tracking lock is ever nested under it.
+    ///
+    /// The shard guard lives only inside this call and nothing in it
+    /// suspends (`TG-WB-004`).
+    fn enqueue(
+        &self,
+        partition_id: u32,
+        entry: DelayedEntry,
+        survivor_subsumes: bool,
+    ) -> (Option<u64>, Option<BTreeSet<u64>>) {
+        let charge = entry.charge;
+        let mut queue = self.queues.entry(partition_id).or_default();
+        if let Some(existing) = queue.value_mut().remove(&entry.map, &entry.key) {
+            let retired = existing.sequence;
+            let replaced = existing.charge;
+            let mut coalesced = entry;
+            // A coalesce keeps the original store_time and the retry state.
+            coalesced.inherit_from(&existing);
+            let subsumed = Self::coalesce_wal_sequences(
+                survivor_subsumes,
+                &mut coalesced,
+                existing.wal_sequences,
+            );
+            let _ = queue.value_mut().insert(coalesced);
+            // No pending_count change on coalesce; the bytes move by the
+            // difference between the two values.
+            if charge >= replaced {
+                self.buffered_bytes
+                    .fetch_add(charge - replaced, Ordering::Relaxed);
+            } else {
+                self.release_charge(replaced - charge);
+            }
+            (Some(retired), subsumed)
+        } else {
+            let _ = queue.value_mut().insert(entry);
+            self.pending_count.fetch_add(1, Ordering::Relaxed);
+            self.buffered_bytes.fetch_add(charge, Ordering::Relaxed);
+            (None, None)
+        }
+    }
+
+    /// Takes `charge` off the buffered-bytes counter. The counter is the sum
+    /// of the live entries' charges, so going below zero is a bug: asserted
+    /// in debug builds; in release saturated, and logged once at `ERROR`,
+    /// because from then on the counter, and the byte bound that reads it,
+    /// are wrong for the rest of the process.
+    fn release_charge(&self, charge: u64) {
+        static UNDERFLOW_LOGGED: std::sync::Once = std::sync::Once::new();
+        if charge == 0 {
+            return;
+        }
+        let before = self
+            .buffered_bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bytes| {
+                Some(bytes.saturating_sub(charge))
+            })
+            .unwrap_or_else(|bytes| bytes);
+        debug_assert!(
+            before >= charge,
+            "buffered_bytes underflow: released {charge} of {before}"
+        );
+        if before < charge {
+            UNDERFLOW_LOGGED.call_once(|| {
+                tracing::error!(
+                    released = charge,
+                    counted = before,
+                    "write-behind buffered-bytes counter underflow: it was clamped at 0 and is \
+                     wrong from now on, so the byte bound refuses later or less than it should"
+                );
+            });
+        }
+    }
+
     /// Appends an entry to the WAL and satisfies the fsync policy before
     /// returning. Returns `Ok(())` immediately when no WAL is configured.
     ///
@@ -4305,6 +4550,7 @@ impl WriteBehindDataStore {
         // was flushed: a newer coalesced write must survive (`TG-WB-007`).
         self.clear_staging_if_current(&entry.map, &entry.key, entry.sequence);
         self.pending_count.fetch_sub(1, Ordering::Relaxed);
+        self.release_charge(entry.charge);
         // The bytes are in the inner store, so the entry sequence may let the
         // prefix-complete flushed watermark past it. This is the ONLY signal
         // that advances the tombstone durability fence.
@@ -4343,6 +4589,9 @@ impl WriteBehindDataStore {
         // One statement, so the shard guard is a temporary: held any longer
         // it would block every synchronous access to the shard — a client
         // write, the stall watchdog (TG-WB-004).
+        // Read before `reinsert_front` consumes the entry: a superseded entry
+        // leaves the buffer, and its charge with it.
+        let charge = entry.charge;
         let outcome = self
             .queues
             .entry(partition)
@@ -4354,6 +4603,7 @@ impl WriteBehindDataStore {
         // pending-set lock is never nested under it.
         if let Reinsert::Superseded { retired_sequence } = outcome {
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
+            self.release_charge(charge);
             self.resolve_pending(retired_sequence);
         }
     }
@@ -4431,7 +4681,7 @@ impl WriteBehindDataStore {
             return Err(err);
         }
         match &entry.operation {
-            DelayedOp::Store { value, .. } => Ok(Some(rmp_serde::to_vec_named(value)?)),
+            DelayedOp::Store { value, .. } => Ok(Some(rmp_serde::to_vec_named(value.as_ref())?)),
             DelayedOp::StoreCell { cell, .. } => {
                 // The guard lives only inside this arm: it is `!Send`.
                 let guard = cell.lock();
@@ -4589,7 +4839,7 @@ impl WriteBehindDataStore {
                             store_time,
                         }
                     }
-                    DelayedOp::Store { value } => Some(value),
+                    DelayedOp::Store { value } => Some(value.as_ref()),
                     DelayedOp::StoreCell { .. } => cloned.as_ref(),
                 };
                 // A cell's value is cloned above exactly when it is not
@@ -5157,65 +5407,106 @@ impl WriteBehindDataStore {
         now_millis().saturating_sub(self.config.write_delay_ms as i64)
     }
 
-    /// Refuses a write call whose keys that are not buffered would take the
-    /// buffer past its capacity: the one admission gate of every write path
-    /// (`add`, `remove`, `remove_all`). A call is admitted or refused whole, so
+    /// The one admission gate of every write path (`add`, `remove`,
+    /// `remove_all`), with two soft bounds, the key rule first.
+    ///
+    /// **Keys.** Refuses a call whose keys that are not buffered would take
+    /// the buffer past its capacity. A call is admitted or refused whole, so
     /// a refused `remove_all` has buffered none of its keys and the client
-    /// resends exactly what was refused; a refusal counts once. It is admitted
-    /// while `pending_count + n <= capacity`, `n` the distinct keys of the call
-    /// that are not buffered — for one key, while `pending_count < capacity`.
-    /// A call whose keys are all buffered is always admitted.
+    /// resends exactly what was refused; a refusal counts once, under
+    /// `bound="keys"`, and never also as a byte refusal. It is admitted
+    /// while `pending_count + n <= capacity`, `n` the distinct keys of the
+    /// call that are not buffered — for one key, while `pending_count <
+    /// capacity`. A call whose keys are all buffered is always admitted by
+    /// this rule. Staging is read only when the call could reach past the
+    /// capacity were every one of its keys new; below that no key is looked
+    /// up and nothing is allocated on the write path.
     ///
-    /// Staging is read only when the call could reach past the capacity were
-    /// every one of its keys new; below that no key is looked up and nothing
-    /// is allocated on the write path.
+    /// **Bytes.** With `capacity_bytes > 0`, a call of `charge > 0` (a plain
+    /// value's write) is admitted while `buffered_bytes < capacity_bytes`, or
+    /// when its key's staging slot carries at least `charge` — a rewrite that
+    /// does not grow the key's buffered charge, whether its entry is queued
+    /// or held by a pass. Otherwise it is refused with `Write-behind byte
+    /// capacity exceeded`, under `bound="bytes"`. A call of charge 0 — a
+    /// remove, a `remove_all`, an LWW write of a top-level `null`, and the
+    /// key check `admit_in_place` makes for an in-place write before its
+    /// mutation — is never refused by this rule. Staging is read
+    /// only once the counter is at the budget.
     ///
-    /// A soft bound, not a reservation. The check reads staging, and a key
-    /// whose entry is held by a flush pass counts as known: its staging slot
-    /// is cleared only once the entry is persisted. The check and the caller's
-    /// queue inserts are separate steps with nothing held across them, and
-    /// what `PartitionQueue::insert` returns is not consulted.
-    ///
-    /// The bound that holds: `pending_count` can exceed `capacity` by at most
-    /// the number of entries a flush pass holds plus the number of new keys
-    /// of the calls that are between this check and their inserts. A pass
-    /// holds at most the entries that were due when it began, up to its
-    /// limits (`batch_size` has no effect). The formula and its precondition
-    /// are on `WriteBehindConfig::capacity`.
-    fn admit_new_keys<K: AsRef<str>>(&self, map: &str, keys: &[K]) -> anyhow::Result<()> {
+    /// Both are soft bounds, not reservations: the check and the caller's
+    /// queue insert are separate steps with nothing held across them, and a
+    /// key whose entry a flush pass holds counts as buffered, its staging
+    /// slot being cleared only once the entry is persisted. The bounds that
+    /// hold are on `WriteBehindConfig::capacity` and
+    /// `WriteBehindConfig::capacity_bytes`.
+    fn admit_write<K: AsRef<str>>(&self, map: &str, keys: &[K], charge: u64) -> anyhow::Result<()> {
         let capacity = self.config.capacity;
-        if capacity == 0 {
-            return Ok(());
-        }
         let current = self.pending_count.load(Ordering::Relaxed);
         let at_most_new = u64::try_from(keys.len()).unwrap_or(u64::MAX);
-        if current.saturating_add(at_most_new) <= capacity {
+        if capacity > 0 && current.saturating_add(at_most_new) > capacity {
+            // The places left for new keys. The call is refused at the first
+            // new key past them, so a refusal looks up at most `room + 1` new
+            // keys however many the call names; one probe buffer serves every
+            // lookup.
+            let room = capacity.saturating_sub(current);
+            let mut new_keys = std::collections::HashSet::new();
+            let mut probe = (map.to_string(), String::new());
+            for key in keys.iter().map(AsRef::as_ref) {
+                if new_keys.contains(key) {
+                    continue;
+                }
+                probe.1.clear();
+                probe.1.push_str(key);
+                #[cfg(test)]
+                self.admission_probes.fetch_add(1, Ordering::SeqCst);
+                if self.staging.contains_key(&probe) {
+                    continue;
+                }
+                new_keys.insert(key);
+                if u64::try_from(new_keys.len()).unwrap_or(u64::MAX) > room {
+                    metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "keys").increment(1);
+                    anyhow::bail!("Write-behind capacity exceeded");
+                }
+            }
+        }
+        let budget = self.config.capacity_bytes;
+        if budget == 0 || charge == 0 || self.buffered_bytes.load(Ordering::Relaxed) < budget {
             return Ok(());
         }
-        // The places left for new keys. The call is refused at the first new
-        // key past them, so a refusal looks up at most `room + 1` new keys
-        // however many the call names; one probe buffer serves every lookup.
-        let room = capacity.saturating_sub(current);
-        let mut new_keys = std::collections::HashSet::new();
+        // Over the budget only a rewrite that does not grow its key's buffered
+        // charge passes: the slot carries the charge of the key's latest
+        // write, queued or held by a pass.
         let mut probe = (map.to_string(), String::new());
-        for key in keys.iter().map(AsRef::as_ref) {
-            if new_keys.contains(key) {
-                continue;
-            }
+        let grows = keys.iter().map(AsRef::as_ref).any(|key| {
             probe.1.clear();
             probe.1.push_str(key);
-            #[cfg(test)]
-            self.admission_probes.fetch_add(1, Ordering::SeqCst);
-            if self.staging.contains_key(&probe) {
-                continue;
-            }
-            new_keys.insert(key);
-            if u64::try_from(new_keys.len()).unwrap_or(u64::MAX) > room {
-                metrics::counter!(CAPACITY_REFUSALS_COUNTER).increment(1);
-                anyhow::bail!("Write-behind capacity exceeded");
-            }
+            self.staging
+                .get(&probe)
+                .is_none_or(|slot| slot.charge < charge)
+        });
+        if grows {
+            return Err(refuse_bytes());
         }
         Ok(())
+    }
+
+    /// Refuses a write once graceful drain is in progress, so any
+    /// out-of-order arrival is visible as an error rather than silently lost,
+    /// and once the store has failed, because the write would be acked and
+    /// then queued behind a flush task that is gone. In the normal shutdown
+    /// sequence the HTTP server is already draining before the shutdown state
+    /// is set, making that arm effectively unreachable under orderly shutdown.
+    fn refuse_unless_running(&self, map: &str, key: &str) -> anyhow::Result<()> {
+        match self.lifecycle.load(Ordering::Acquire) {
+            Lifecycle::Running => Ok(()),
+            Lifecycle::Failed => anyhow::bail!(
+                "write-behind store has failed ({}); write rejected for map={map} key={key}",
+                self.failed_reason()
+            ),
+            Lifecycle::ShuttingDown => anyhow::bail!(
+                "write-behind store is shutting down; write rejected for map={map} key={key}"
+            ),
+        }
     }
 
     /// Reports the buffer and its refused entries at the end of a pass: the
@@ -5236,6 +5527,9 @@ impl WriteBehindDataStore {
     fn report_retries(&self, schedule: &mut RetrySchedule) {
         let pending = self.pending_count.load(Ordering::Relaxed);
         metrics::gauge!(BUFFERED_ENTRIES_GAUGE).set(count_as_gauge(pending));
+        #[allow(clippy::cast_precision_loss)]
+        metrics::gauge!(BUFFERED_BYTES_GAUGE)
+            .set(self.buffered_bytes.load(Ordering::Relaxed) as f64);
         let now = tokio::time::Instant::now();
         if schedule.last_walk.as_ref().is_some_and(|walk| {
             walk.hold_changes == schedule.hold_changes
@@ -5500,12 +5794,29 @@ impl WriteBehindDataStore {
 #[async_trait]
 impl MapDataStore for WriteBehindDataStore {
     async fn add(&self, map: &str, key: &str, value: &RecordValue, now: i64) -> anyhow::Result<()> {
-        // One write path, not two. Every caller without a per-op delta — every
-        // LWW write, bulk and SYNC ingestion, cross-node merge, rehydration —
-        // arrives here, and it is the same code the witness-bearing callers run
-        // with the witness set. A second body would let the two drift.
+        // One write path, not two: the same code the witness-bearing callers
+        // run with the witness set. A second body would let the two drift. The
+        // write is admitted here, before its only mutation, the queue insert;
+        // `add_with_witness` decides no bound.
+        self.admit_value(map, key, value)?;
         self.add_with_witness(map, key, WriteSource::Value(value), now, None)
             .await
+    }
+
+    /// Every refusal of a plain write that can be decided before it changes
+    /// anything: the store failed or shutting down, its tenant closed, and
+    /// both bounds by `admit_write` at the value's charge. The write-through
+    /// that follows decides no bound again, so a write admitted here is not
+    /// refused at a bound after its mutation; the store's state and a tenant
+    /// close are checked again there, because either can change in between.
+    fn admit_value(&self, map: &str, key: &str, value: &RecordValue) -> anyhow::Result<()> {
+        self.refuse_unless_running(map, key)?;
+        // A fast refusal only: a tenant drop that begins after this check is
+        // caught by `tenant_closes.enter` in the write-through, which re-checks
+        // under the in-flight guard and is the check `TG-TEN-002` rests on.
+        self.tenant_closes.refuse_closed(map)?;
+        let charge = charge_of(&WriteSource::Value(value), key);
+        self.admit_write(map, &[key], charge)
     }
 
     /// Whether the mutation point should build an OR witness for this store.
@@ -5518,6 +5829,31 @@ impl MapDataStore for WriteBehindDataStore {
     /// a witness it then discards.
     fn wants_or_witness(&self) -> bool {
         self.config.or_delta_wal
+    }
+
+    /// Both bounds of an in-place write, decided before its mutation: the
+    /// cell is shared by the engine, the buffered entry and staging, so its
+    /// growth is buffer growth the moment the mutation runs, and a check
+    /// after it could refuse only the acknowledgement. The key rule is
+    /// `admit_write`'s, counted under `bound="keys"`. The growth is not known
+    /// before the opaque mutation runs, so at or above the byte budget every
+    /// in-place write is presumed to grow and is refused with `Write-behind
+    /// byte capacity exceeded`, counted under `bound="bytes"` — also one that
+    /// would not grow (a duplicate OR remove, a tombstone prune). The
+    /// store's state and a tenant close are decided here too, and checked
+    /// again by the write-through, which decides no bound.
+    ///
+    /// The caller must call this before mutating and must not mutate on
+    /// `Err`; the refusal is temporary (`TG-WB-011`).
+    fn admit_in_place(&self, map: &str, key: &str) -> anyhow::Result<()> {
+        self.refuse_unless_running(map, key)?;
+        self.tenant_closes.refuse_closed(map)?;
+        self.admit_write(map, &[key], 0)?;
+        let budget = self.config.capacity_bytes;
+        if budget == 0 || self.buffered_bytes.load(Ordering::Relaxed) < budget {
+            return Ok(());
+        }
+        Err(refuse_bytes())
     }
 
     /// # Precondition: one writer per key at a time
@@ -5550,28 +5886,18 @@ impl MapDataStore for WriteBehindDataStore {
         now: i64,
         witness: Option<&OrDelta>,
     ) -> anyhow::Result<()> {
-        // Reject new writes once graceful drain is in progress so any out-of-order
-        // arrival is visible as an error rather than silently lost. In the normal
-        // shutdown sequence the HTTP server is already draining before the shutdown
-        // state is set, making that arm effectively unreachable under orderly
-        // shutdown. A failed store refuses for the opposite reason: the write
-        // would be acked and then queued behind a flush task that is gone.
-        match self.lifecycle.load(Ordering::Acquire) {
-            Lifecycle::Running => {}
-            Lifecycle::Failed => anyhow::bail!(
-                "write-behind store has failed ({}); write rejected for map={map} key={key}",
-                self.failed_reason()
-            ),
-            Lifecycle::ShuttingDown => anyhow::bail!(
-                "write-behind store is shutting down; write rejected for map={map} key={key}"
-            ),
-        }
+        self.refuse_unless_running(map, key)?;
         // Before the WAL sequence is assigned, and held until the queue
         // insert is done, so a tenant drop waits for this write (`TG-TEN-002`).
         let _in_flight = self.tenant_closes.enter(map)?;
 
-        // Check capacity before insertion to avoid partial state on rejection
-        self.admit_new_keys(map, &[key])?;
+        // The memory this write adds to the buffer. No bound is decided here:
+        // the caller admitted the write before its mutation (`admit_value`,
+        // `admit_in_place`), and deciding it again now would refuse only the
+        // acknowledgement of a change that has already happened. For a value
+        // this computes the same charge `admit_value` computed from the same
+        // arguments, a second walk of the value.
+        let charge = charge_of(&src, key);
 
         let partition_id = partition_for(map, key);
         // Seed before the first sequence of this partition is handed out, so the
@@ -5656,7 +5982,7 @@ impl MapDataStore for WriteBehindDataStore {
             gate.pass().await;
         }
         let (operation, staged) = queued_and_staged(src);
-        let entry = DelayedEntry::fresh(map, key, operation, now, entry_seq, wal_seq);
+        let entry = DelayedEntry::fresh(map, key, operation, charge, now, entry_seq, wal_seq);
 
         let staging_key = (map.to_string(), key.to_string());
         // Staged before the entry is queued: a flush pass can take the entry the
@@ -5664,32 +5990,10 @@ impl MapDataStore for WriteBehindDataStore {
         // the slot only if it finds it. From here to the queue insert there is
         // no await and no lock held, and it must stay that way (`TG-WB-007`).
         let (smap, skey) = staging_key;
-        self.stage(&smap, &skey, entry_seq, Some(staged));
+        self.stage(&smap, &skey, entry_seq, Some(staged), charge);
         #[cfg(test)]
         TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
-        // Insert into partition queue, preserving original store_time on coalesce
-        let (retired_seq, subsumed_wal_seqs) = {
-            let mut queue = self.queues.entry(partition_id).or_default();
-            // If coalescing, preserve the original store_time
-            if let Some(existing) = queue.value_mut().remove(map, key) {
-                let retired = existing.sequence;
-                let mut coalesced = entry;
-                coalesced.inherit_from(&existing);
-                let subsumed = Self::coalesce_wal_sequences(
-                    survivor_subsumes,
-                    &mut coalesced,
-                    existing.wal_sequences,
-                );
-                let _ = queue.value_mut().insert(coalesced);
-                // No pending_count change on coalesce
-                (Some(retired), subsumed)
-            } else {
-                let _ = queue.value_mut().insert(entry);
-                // New key -- increment pending count
-                self.pending_count.fetch_add(1, Ordering::Relaxed);
-                (None, None)
-            }
-        };
+        let (retired_seq, subsumed_wal_seqs) = self.enqueue(partition_id, entry, survivor_subsumes);
 
         // The frame is on disk and the entry is queued, so an entry now owns this
         // WAL sequence. Done after releasing the partition-queue lock so neither
@@ -5745,7 +6049,7 @@ impl MapDataStore for WriteBehindDataStore {
         // As in `add_with_witness`.
         let _in_flight = self.tenant_closes.enter(map)?;
 
-        self.admit_new_keys(map, &[key])?;
+        self.admit_write(map, &[key], 0)?;
 
         let partition_id = partition_for(map, key);
         // Seed before the first sequence of this partition is handed out, so the
@@ -5776,7 +6080,8 @@ impl MapDataStore for WriteBehindDataStore {
 
         // Assign and track the durability sequence atomically before queuing.
         let entry_seq = self.assign_tracked_sequence();
-        let entry = DelayedEntry::fresh(map, key, DelayedOp::Remove, now, entry_seq, wal_seq);
+        // A remove holds no value: charged 0.
+        let entry = DelayedEntry::fresh(map, key, DelayedOp::Remove, 0, now, entry_seq, wal_seq);
 
         let staging_key = (map.to_string(), key.to_string());
         // The pending delete is staged before the entry is queued: a flush pass
@@ -5785,29 +6090,10 @@ impl MapDataStore for WriteBehindDataStore {
         // queue insert there is no await and no lock held, and it must stay that
         // way (`TG-WB-007`).
         let (smap, skey) = staging_key;
-        self.stage(&smap, &skey, entry_seq, None);
+        self.stage(&smap, &skey, entry_seq, None, 0);
         #[cfg(test)]
         TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
-        let (retired_seq, subsumed_wal_seqs) = {
-            let mut queue = self.queues.entry(partition_id).or_default();
-            if let Some(existing) = queue.value_mut().remove(map, key) {
-                let retired = existing.sequence;
-                let mut coalesced = entry;
-                coalesced.inherit_from(&existing);
-                let subsumed = Self::coalesce_wal_sequences(
-                    survivor_subsumes,
-                    &mut coalesced,
-                    existing.wal_sequences,
-                );
-                let _ = queue.value_mut().insert(coalesced);
-                // No pending_count change on coalesce
-                (Some(retired), subsumed)
-            } else {
-                let _ = queue.value_mut().insert(entry);
-                self.pending_count.fetch_add(1, Ordering::Relaxed);
-                (None, None)
-            }
-        };
+        let (retired_seq, subsumed_wal_seqs) = self.enqueue(partition_id, entry, survivor_subsumes);
 
         // An entry now owns this WAL sequence; sited after the queue guard drops.
         self.promote_wal_sequence(partition_id, wal_seq);
@@ -5866,7 +6152,7 @@ impl MapDataStore for WriteBehindDataStore {
             .get(&staging_key)
             .map(|entry| match &entry.value().value {
                 Some(StagedValue::Cell(cell)) => Some(Loaded::Cell(Arc::clone(cell))),
-                Some(StagedValue::Value(value)) => Some(Loaded::Value(value.clone())),
+                Some(StagedValue::Value(value)) => Some(Loaded::Value(RecordValue::clone(value))),
                 // Pending delete -- do not consult inner store
                 None => None,
             });
@@ -5934,7 +6220,7 @@ impl MapDataStore for WriteBehindDataStore {
         // As in `add_with_witness`, once for every key of the call.
         let _in_flight = self.tenant_closes.enter(map)?;
         // Once for the whole call: a refused call buffers none of its keys.
-        self.admit_new_keys(map, keys)?;
+        self.admit_write(map, keys, 0)?;
 
         let now = now_millis();
 
@@ -5971,7 +6257,8 @@ impl MapDataStore for WriteBehindDataStore {
 
             // Assign and track the durability sequence atomically before queuing.
             let entry_seq = self.assign_tracked_sequence();
-            let entry = DelayedEntry::fresh(map, key, DelayedOp::Remove, now, entry_seq, wal_seq);
+            let entry =
+                DelayedEntry::fresh(map, key, DelayedOp::Remove, 0, now, entry_seq, wal_seq);
 
             let staging_key = (map.to_string(), key.clone());
             // The pending delete is staged before the entry is queued: a flush pass
@@ -5980,28 +6267,11 @@ impl MapDataStore for WriteBehindDataStore {
             // queue insert there is no await and no lock held, and it must stay that
             // way (`TG-WB-007`).
             let (smap, skey) = staging_key;
-            self.stage(&smap, &skey, entry_seq, None);
+            self.stage(&smap, &skey, entry_seq, None, 0);
             #[cfg(test)]
             TestParks::pass_keyed(&self.test_parks.between_stage_and_queue_insert, map, key).await;
-            let (retired_seq, subsumed_wal_seqs) = {
-                let mut queue = self.queues.entry(partition_id).or_default();
-                if let Some(existing) = queue.value_mut().remove(map, key) {
-                    let retired = existing.sequence;
-                    let mut coalesced = entry;
-                    coalesced.inherit_from(&existing);
-                    let subsumed = Self::coalesce_wal_sequences(
-                        survivor_subsumes,
-                        &mut coalesced,
-                        existing.wal_sequences,
-                    );
-                    let _ = queue.value_mut().insert(coalesced);
-                    (Some(retired), subsumed)
-                } else {
-                    let _ = queue.value_mut().insert(entry);
-                    self.pending_count.fetch_add(1, Ordering::Relaxed);
-                    (None, None)
-                }
-            };
+            let (retired_seq, subsumed_wal_seqs) =
+                self.enqueue(partition_id, entry, survivor_subsumes);
 
             // An entry now owns this WAL sequence; sited after the queue guard drops.
             self.promote_wal_sequence(partition_id, wal_seq);
@@ -8572,15 +8842,33 @@ mod tests {
     async fn stage_is_monotonic_by_seq() {
         let (store, _dir) = redb_backed_store();
 
-        store.stage("m", "k", 10, Some(StagedValue::Value(lww("v10", 10))));
+        store.stage(
+            "m",
+            "k",
+            10,
+            Some(StagedValue::Value(Arc::new(lww("v10", 10)))),
+            0,
+        );
         // A higher seq replaces.
-        store.stage("m", "k", 11, Some(StagedValue::Value(lww("v11", 11))));
+        store.stage(
+            "m",
+            "k",
+            11,
+            Some(StagedValue::Value(Arc::new(lww("v11", 11)))),
+            0,
+        );
         assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v11", 11);
         // A late, lower seq is rejected (does not clobber the newer value).
-        store.stage("m", "k", 10, Some(StagedValue::Value(lww("v10", 10))));
+        store.stage(
+            "m",
+            "k",
+            10,
+            Some(StagedValue::Value(Arc::new(lww("v10", 10)))),
+            0,
+        );
         assert_lww(&store.load("m", "k").await.unwrap().unwrap(), "v11", 11);
         // Equal seq (same write, idempotent) is allowed.
-        store.stage("m", "k", 11, None);
+        store.stage("m", "k", 11, None, 0);
         assert!(
             store.load("m", "k").await.unwrap().is_none(),
             "equal-seq restage applies (idempotent same-write update)"
@@ -9788,6 +10076,7 @@ mod tests {
             operation: DelayedOp::StoreCell {
                 cell: Arc::clone(&cell),
             },
+            charge: 0,
             store_time: 0,
             buffered_at: tokio::time::Instant::now(),
             sequence: 1,
@@ -13625,7 +13914,7 @@ mod tests {
 
     #[test]
     fn capacity_refusals_are_counted_on_every_write_path() {
-        const REFUSALS: &str = "topgun_write_behind_capacity_refusals_total";
+        const REFUSALS: &str = "topgun_write_behind_capacity_refusals_total{bound=\"keys\"}";
 
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -14234,7 +14523,7 @@ mod tests {
 
     #[test]
     fn remove_all_is_admitted_or_refused_whole() {
-        const REFUSALS: &str = "topgun_write_behind_capacity_refusals_total";
+        const REFUSALS: &str = "topgun_write_behind_capacity_refusals_total{bound=\"keys\"}";
 
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -14348,6 +14637,1088 @@ mod tests {
         println!(
             "report_retries over {ENTRIES} buffered entries during a hold: median {median_us:.1} \
              us, max {max_us:.1} us per call ({CALLS} calls)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The byte bound: one copy per value, the charge, the counter and the rule
+    // -----------------------------------------------------------------------
+
+    const BYTES_MAP: &str = "bytes";
+    const BYTE_REFUSAL: &str = "Write-behind byte capacity exceeded";
+    const KEY_REFUSAL: &str = "Write-behind capacity exceeded";
+
+    /// An LWW value of `len` string bytes. Its charge depends only on `len`,
+    /// so two values of one length are a rewrite that does not grow.
+    fn sized(len: usize, millis: u64) -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String("x".repeat(len)),
+            timestamp: Timestamp {
+                millis,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
+            ttl_ms: None,
+        }
+    }
+
+    /// The charge a plain value write of `key` must carry, computed apart
+    /// from the store's own `charge_of`.
+    fn charge(key: &str, value: &RecordValue) -> u64 {
+        structural_size(value) + key.len() as u64
+    }
+
+    fn bytes_of(store: &WriteBehindDataStore) -> u64 {
+        store.buffered_bytes.load(Ordering::SeqCst)
+    }
+
+    /// The charges of every queued entry; equal to the counter whenever no
+    /// pass holds an entry.
+    fn queued_charges(store: &WriteBehindDataStore) -> u64 {
+        store
+            .queues
+            .iter()
+            .map(|queue| queue.entries.values().map(|e| e.charge).sum::<u64>())
+            .sum()
+    }
+
+    /// Nothing leaves the buffer unless a test asks for a pass.
+    fn on_request_config(capacity: u64, capacity_bytes: u64) -> WriteBehindConfig {
+        WriteBehindConfig {
+            write_delay_ms: 0,
+            flush_interval_ms: 600_000,
+            capacity,
+            capacity_bytes,
+            shutdown_timeout_ms: 5_000,
+            ..WriteBehindConfig::default()
+        }
+    }
+
+    fn byte_store(capacity_bytes: u64) -> Arc<WriteBehindDataStore> {
+        WriteBehindDataStore::new(
+            Arc::new(crate::storage::datastores::NullDataStore),
+            on_request_config(100, capacity_bytes),
+        )
+    }
+
+    /// A store whose next inner `add` parks, so a requested pass sits holding
+    /// its batch until the handle is released.
+    fn parked_pass_store(
+        capacity: u64,
+        capacity_bytes: u64,
+    ) -> (Arc<WriteBehindDataStore>, TestParkHandle) {
+        let (inner, _never_panics) = super::background_task_panic_tests::PanickingAddStore::over(
+            Arc::new(crate::storage::datastores::NullDataStore),
+            0,
+        );
+        let parked = inner.arm_park();
+        let store = WriteBehindDataStore::new(inner, on_request_config(capacity, capacity_bytes));
+        (store, parked)
+    }
+
+    /// Waits until no pass is open.
+    async fn pass_closed(store: &WriteBehindDataStore) {
+        let closed = poll_until(10_000, || {
+            store
+                .flush_pass_epoch
+                .load(Ordering::SeqCst)
+                .is_multiple_of(2)
+        })
+        .await;
+        assert!(closed.is_some(), "the pass never closed");
+    }
+
+    fn answer(result: anyhow::Result<()>) -> String {
+        match result {
+            Ok(()) => "admitted".to_string(),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_buffered_value_is_held_once() {
+        let store = byte_store(0);
+        let shared = |store: &WriteBehindDataStore| {
+            let probe = (BYTES_MAP.to_string(), "k".to_string());
+            let queued = store
+                .queues
+                .get(&partition_for(BYTES_MAP, "k"))
+                .and_then(|queue| match &queue.entries.get(&probe)?.operation {
+                    DelayedOp::Store { value } => Some(Arc::clone(value)),
+                    DelayedOp::StoreCell { .. } | DelayedOp::Remove => None,
+                })
+                .expect("a queued value");
+            let staged = match &store.staging.get(&probe).expect("a staging slot").value {
+                Some(StagedValue::Value(value)) => Arc::clone(value),
+                _ => panic!("a staged value"),
+            };
+            Arc::ptr_eq(&queued, &staged)
+        };
+        store
+            .add(BYTES_MAP, "k", &sized(10, 1), now_millis())
+            .await
+            .unwrap();
+        let first = shared(&store);
+        store
+            .add(BYTES_MAP, "k", &sized(20, 2), now_millis())
+            .await
+            .unwrap();
+        let coalesced = shared(&store);
+        assert_eq!(
+            (first, coalesced),
+            (true, true),
+            "(after an add, after a coalescing add): the queue and staging must share one value"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffered_bytes_follow_insert_coalesce_and_settle() {
+        let store = byte_store(0);
+        let (first, smaller, larger) = (sized(100, 1), sized(10, 2), sized(500, 3));
+        let mut seen = Vec::new();
+        for value in [&first, &smaller, &larger] {
+            store
+                .add(BYTES_MAP, "k", value, now_millis())
+                .await
+                .unwrap();
+            seen.push(bytes_of(&store));
+        }
+        one_requested_pass(&store).await;
+        seen.push(bytes_of(&store));
+        assert_eq!(
+            seen,
+            vec![
+                charge("k", &first),
+                charge("k", &smaller),
+                charge("k", &larger),
+                0
+            ],
+            "(insert, smaller rewrite, larger rewrite, after the settle)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rewrite_while_a_pass_holds_the_key_counts_both_until_each_settles() {
+        let (store, mut parked) = parked_pass_store(100, 0);
+        let (held, rewrite) = (sized(100, 1), sized(300, 2));
+        store
+            .add(BYTES_MAP, "k", &held, now_millis())
+            .await
+            .unwrap();
+        store.soft_flush().await.unwrap();
+        parked.wait_parked().await;
+        store
+            .add(BYTES_MAP, "k", &rewrite, now_millis())
+            .await
+            .unwrap();
+        let while_held = (bytes_of(&store), store.pending_operation_count());
+        parked.release();
+        pass_closed(&store).await;
+        let after_the_held_settles = (bytes_of(&store), store.pending_operation_count());
+        one_requested_pass(&store).await;
+        let at_rest = (bytes_of(&store), store.pending_operation_count());
+        assert_eq!(
+            (while_held, after_the_held_settles, at_rest),
+            (
+                (charge("k", &held) + charge("k", &rewrite), 2),
+                (charge("k", &rewrite), 1),
+                (0, 0)
+            ),
+            "((bytes, entries) while the pass holds the key, after it settles, at rest)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_superseded_put_back_releases_the_retired_charge() {
+        let spy = Arc::new(SpyDataStore::new());
+        spy.refuse_everything(true);
+        let (inner, _never_panics) = super::background_task_panic_tests::PanickingAddStore::over(
+            Arc::clone(&spy) as Arc<dyn MapDataStore>,
+            0,
+        );
+        let mut parked = inner.arm_park();
+        let store = WriteBehindDataStore::new(inner, on_request_config(100, 0));
+        let (refused, newer) = (sized(100, 1), sized(300, 2));
+        store
+            .add(BYTES_MAP, "k", &refused, now_millis())
+            .await
+            .unwrap();
+        store.soft_flush().await.unwrap();
+        parked.wait_parked().await;
+        store
+            .add(BYTES_MAP, "k", &newer, now_millis())
+            .await
+            .unwrap();
+        parked.release();
+        pass_closed(&store).await;
+        let after_the_put_back = (
+            bytes_of(&store),
+            queued_charges(&store),
+            store.pending_operation_count(),
+        );
+        spy.refuse_everything(false);
+        tokio::time::timeout(std::time::Duration::from_secs(10), store.hard_flush())
+            .await
+            .expect("hard_flush returned")
+            .expect("a healthy shutdown");
+        assert_eq!(
+            (after_the_put_back, bytes_of(&store)),
+            ((charge("k", &newer), charge("k", &newer), 1), 0),
+            "((bytes, queued charges, entries) once the refused entry is retired, after the drain)"
+        );
+    }
+
+    #[derive(Debug, Clone)]
+    enum ByteStep {
+        Add(u8, u16),
+        Remove(u8),
+        RemoveAll(u8),
+        Refuse(bool),
+        Pass,
+        /// An in-place write-through of the key's cell, re-costed first.
+        Cell(u8, u16),
+        /// A pass parks inside its commit and holds its batch across the
+        /// following steps.
+        Hold,
+        /// The held pass goes on; refused entries are put back, or retired
+        /// when a newer write of their key came meanwhile.
+        Settle,
+    }
+
+    fn byte_step() -> impl proptest::strategy::Strategy<Value = ByteStep> {
+        use proptest::prelude::*;
+        prop_oneof![
+            4 => (0u8..4, 0u16..300).prop_map(|(key, len)| ByteStep::Add(key, len)),
+            1 => (0u8..4).prop_map(ByteStep::Remove),
+            1 => (1u8..16).prop_map(ByteStep::RemoveAll),
+            1 => any::<bool>().prop_map(ByteStep::Refuse),
+            2 => Just(ByteStep::Pass),
+            2 => (0u8..4, 0u16..300).prop_map(|(key, cost)| ByteStep::Cell(key, cost)),
+            1 => Just(ByteStep::Hold),
+            1 => Just(ByteStep::Settle),
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+        #[test]
+        fn buffered_bytes_equal_the_live_charges(
+            steps in proptest::collection::vec(byte_step(), 1..30)
+        ) {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                let (inner, _never_panics) = super::background_task_panic_tests::PanickingAddStore::over(
+                    Arc::clone(&spy) as Arc<dyn MapDataStore>,
+                    0,
+                );
+                // A refused entry is not attempted again within a case, so a
+                // pass holds something at a step boundary only between `Hold`
+                // and `Settle`.
+                let store = WriteBehindDataStore::new(
+                    Arc::clone(&inner) as Arc<dyn MapDataStore>,
+                    WriteBehindConfig {
+                        backoff_base_ms: 600_000,
+                        backoff_cap_ms: 600_000,
+                        ..on_request_config(0, 0)
+                    },
+                );
+                let key = |n: u8| format!("k{n}");
+                let mut cells = std::collections::HashMap::new();
+                // The parked pass and the charges of the batch it holds.
+                let mut held: Option<(TestParkHandle, u64)> = None;
+                for (i, step) in steps.iter().enumerate() {
+                    match *step {
+                        ByteStep::Add(n, len) => store
+                            .add(BYTES_MAP, &key(n), &sized(usize::from(len), u64::from(len)), now_millis())
+                            .await
+                            .unwrap(),
+                        ByteStep::Remove(n) => {
+                            store.remove(BYTES_MAP, &key(n), now_millis()).await.unwrap();
+                        }
+                        ByteStep::RemoveAll(mask) => {
+                            let keys: Vec<String> =
+                                (0..4).filter(|n| mask & (1 << n) != 0).map(key).collect();
+                            store.remove_all(BYTES_MAP, &keys).await.unwrap();
+                        }
+                        ByteStep::Refuse(refuse) => spy.refuse_everything(refuse),
+                        ByteStep::Pass | ByteStep::Hold if held.is_some() => {}
+                        ByteStep::Pass => one_requested_pass(&store).await,
+                        ByteStep::Hold => {
+                            let before = queued_charges(&store);
+                            let mut park = inner.arm_park();
+                            let opened_at = store.flush_pass_epoch.load(Ordering::SeqCst);
+                            store.soft_flush().await.expect("soft_flush");
+                            let mut parked = false;
+                            let settled = poll_until(10_000, || {
+                                parked = parked
+                                    || park.parked.as_mut().is_some_and(|rx| rx.try_recv().is_ok());
+                                let epoch = store.flush_pass_epoch.load(Ordering::SeqCst);
+                                parked || (epoch >= opened_at + 2 && epoch.is_multiple_of(2))
+                            })
+                            .await;
+                            assert!(settled.is_some(), "the pass neither parked nor closed");
+                            // A batch with no value to store never reaches the park.
+                            if parked {
+                                held = Some((park, before - queued_charges(&store)));
+                            }
+                        }
+                        ByteStep::Settle => {
+                            if let Some((mut park, _)) = held.take() {
+                                park.release();
+                                pass_closed(&store).await;
+                            }
+                        }
+                        ByteStep::Cell(n, cost) => {
+                            let cell = cells.entry(n).or_insert_with(|| {
+                                crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+                                    value: sized(10, 1),
+                                    metadata: crate::storage::record::RecordMetadata::new(0, 0),
+                                })
+                            });
+                            cell.lock().metadata.cost = u64::from(cost);
+                            store
+                                .add_with_witness(BYTES_MAP, &key(n), WriteSource::Cell(cell), now_millis(), None)
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    let held_charges = held.as_ref().map_or(0, |(_, charges)| *charges);
+                    assert_eq!(
+                        bytes_of(&store),
+                        queued_charges(&store) + held_charges,
+                        "after step {i} ({step:?}): the counter is the sum of the live charges, \
+                         queued and held"
+                    );
+                    if store.pending_operation_count() == 0 {
+                        assert_eq!(bytes_of(&store), 0, "after step {i}: empty buffer, zero bytes");
+                    }
+                }
+                if let Some((mut park, _)) = held.take() {
+                    park.release();
+                    pass_closed(&store).await;
+                }
+                spy.refuse_everything(false);
+                store.hard_flush().await.expect("a healthy shutdown");
+                assert_eq!(
+                    (bytes_of(&store), store.pending_operation_count()),
+                    (0, 0),
+                    "at idle both counters are 0"
+                );
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn an_in_place_write_is_charged_at_the_cell_cost() {
+        let store = byte_store(0);
+        let cell = crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+            value: sized(10, 1),
+            metadata: crate::storage::record::RecordMetadata::new(0, 0),
+        });
+        let mut seen = Vec::new();
+        // The engine re-costs a cell under its lock on every in-place mutation;
+        // the test sets the cost the same way, under the same lock.
+        for cost in [700, 250] {
+            cell.lock().metadata.cost = cost;
+            store
+                .add_with_witness(BYTES_MAP, "k", WriteSource::Cell(&cell), now_millis(), None)
+                .await
+                .unwrap();
+            seen.push(bytes_of(&store));
+        }
+        one_requested_pass(&store).await;
+        seen.push(bytes_of(&store));
+        assert_eq!(
+            seen,
+            vec![700, 250, 0],
+            "(first write-through, rewrite after the cell shrank, after the settle)"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_admitted_in_place_write_is_not_byte_refused_after_its_mutation() {
+        let filler = sized(500, 1);
+        let budget = charge("other", &filler);
+        let store = byte_store(budget);
+        let now = now_millis();
+        let cell = crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+            value: sized(10, 1),
+            metadata: crate::storage::record::RecordMetadata::new(0, 0),
+        });
+        // The record store asks before it mutates, below the budget...
+        let admitted = answer(store.admit_in_place(BYTES_MAP, "k"));
+        // ...another key's write takes the counter to the budget meanwhile...
+        store.add(BYTES_MAP, "other", &filler, now).await.unwrap();
+        let at_write_through = bytes_of(&store);
+        // ...and the mutation grows the cell, which the engine re-costs.
+        cell.lock().metadata.cost = 300;
+        let acked = answer(
+            store
+                .add_with_witness(BYTES_MAP, "k", WriteSource::Cell(&cell), now, None)
+                .await,
+        );
+        assert_eq!(
+            (
+                admitted.as_str(),
+                at_write_through,
+                acked.as_str(),
+                bytes_of(&store)
+            ),
+            ("admitted", budget, "admitted", budget + 300),
+            "(the pre-check below the budget, the counter at the write-through, its answer, \
+             the counter after it, charged at the cell's cost)"
+        );
+    }
+
+    /// The key rule of an in-place write is decided by the same pre-check and
+    /// not again at its write-through: a key that filled the buffer between
+    /// the two must not turn an applied mutation into a refusal.
+    #[tokio::test]
+    async fn an_admitted_in_place_write_is_not_key_refused_after_its_mutation() {
+        let store = WriteBehindDataStore::new(
+            Arc::new(crate::storage::datastores::NullDataStore),
+            on_request_config(1, 0),
+        );
+        let now = now_millis();
+        let cell = crate::storage::engine::new_slot_cell(crate::storage::record::Record {
+            value: sized(10, 1),
+            metadata: crate::storage::record::RecordMetadata::new(0, 0),
+        });
+        let admitted = answer(store.admit_in_place(BYTES_MAP, "k"));
+        store
+            .add(BYTES_MAP, "other", &sized(10, 1), now)
+            .await
+            .unwrap();
+        let at_capacity = answer(store.admit_in_place(BYTES_MAP, "k2"));
+        let acked = answer(
+            store
+                .add_with_witness(BYTES_MAP, "k", WriteSource::Cell(&cell), now, None)
+                .await,
+        );
+        assert_eq!(
+            (
+                admitted.as_str(),
+                at_capacity.as_str(),
+                acked.as_str(),
+                store.pending_operation_count()
+            ),
+            ("admitted", KEY_REFUSAL, "admitted", 2),
+            "(the pre-check below capacity, a second pre-check at it, the write-through of \
+             the first, the buffered keys after it)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_is_refused_once_the_buffered_bytes_reach_the_budget() {
+        let (a, b) = (sized(100, 1), sized(40, 1));
+        let budget = charge("a", &a) + charge("b", &b);
+        let mut answers = Vec::new();
+        for capacity_bytes in [budget, budget + 1] {
+            let store = byte_store(capacity_bytes);
+            store.add(BYTES_MAP, "a", &a, now_millis()).await.unwrap();
+            store.add(BYTES_MAP, "b", &b, now_millis()).await.unwrap();
+            assert_eq!(bytes_of(&store), budget);
+            answers.push(answer(
+                store.add(BYTES_MAP, "c", &sized(1, 1), now_millis()).await,
+            ));
+        }
+        assert_eq!(
+            answers,
+            vec![BYTE_REFUSAL.to_string(), "admitted".to_string()],
+            "(a new value at the budget, one byte below it)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_larger_than_the_whole_budget_is_admitted_into_a_buffer_below_it() {
+        let store = byte_store(1_000);
+        store
+            .add(BYTES_MAP, "small", &sized(10, 1), now_millis())
+            .await
+            .unwrap();
+        let huge = answer(
+            store
+                .add(BYTES_MAP, "huge", &sized(5_000, 1), now_millis())
+                .await,
+        );
+        let after = answer(
+            store
+                .add(BYTES_MAP, "after", &sized(1, 1), now_millis())
+                .await,
+        );
+        assert_eq!(
+            (huge.as_str(), after.as_str()),
+            ("admitted", BYTE_REFUSAL),
+            "(a value larger than the budget into a buffer below it, the next new value)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rewrite_that_does_not_grow_is_admitted_over_the_budget() {
+        let (store, mut parked) = parked_pass_store(100, 1_000);
+        let now = now_millis();
+        for key in ["held-equal", "held-smaller"] {
+            store
+                .add(BYTES_MAP, key, &sized(200, 1), now)
+                .await
+                .unwrap();
+        }
+        store.soft_flush().await.unwrap();
+        parked.wait_parked().await;
+        store
+            .add(BYTES_MAP, "queued", &sized(200, 1), now)
+            .await
+            .unwrap();
+        store
+            .add(BYTES_MAP, "fill", &sized(1_000, 1), now)
+            .await
+            .unwrap();
+        assert!(bytes_of(&store) >= 1_000, "precondition: over the budget");
+        let answers = [
+            answer(
+                store
+                    .add(BYTES_MAP, "held-equal", &sized(200, 2), now)
+                    .await,
+            ),
+            answer(
+                store
+                    .add(BYTES_MAP, "held-smaller", &sized(150, 2), now)
+                    .await,
+            ),
+            answer(store.add(BYTES_MAP, "queued", &sized(200, 2), now).await),
+            answer(store.add(BYTES_MAP, "queued", &sized(150, 3), now).await),
+        ];
+        parked.release();
+        tokio::time::timeout(std::time::Duration::from_secs(10), store.hard_flush())
+            .await
+            .expect("hard_flush returned")
+            .expect("a healthy shutdown");
+        assert_eq!(
+            answers.clone().map(|a| a == "admitted"),
+            [true; 4],
+            "(held equal, held smaller, queued equal, queued smaller): {answers:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rewrite_that_grows_is_refused_over_the_budget() {
+        let store = byte_store(1_000);
+        let now = now_millis();
+        store.add(BYTES_MAP, "k", &sized(10, 1), now).await.unwrap();
+        store
+            .add(BYTES_MAP, "fill", &sized(2_000, 1), now)
+            .await
+            .unwrap();
+        let before = bytes_of(&store);
+        let grown = answer(store.add(BYTES_MAP, "k", &sized(11, 2), now).await);
+        assert_eq!(
+            (grown.as_str(), bytes_of(&store)),
+            (BYTE_REFUSAL, before),
+            "(a growing rewrite over the budget, the counter after it)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remove_is_never_refused_by_the_byte_budget() {
+        let store = byte_store(500);
+        let now = now_millis();
+        let (buffered, fill) = (sized(50, 1), sized(1_000, 1));
+        store
+            .add(BYTES_MAP, "buffered", &buffered, now)
+            .await
+            .unwrap();
+        store.add(BYTES_MAP, "fill", &fill, now).await.unwrap();
+        assert!(bytes_of(&store) >= 500, "precondition: over the budget");
+        let mut moves = Vec::new();
+        let mut step = |store: &WriteBehindDataStore, result: anyhow::Result<()>, before: u64| {
+            moves.push((
+                answer(result),
+                i128::from(bytes_of(store)) - i128::from(before),
+            ));
+        };
+        let before = bytes_of(&store);
+        step(
+            &store,
+            store.remove(BYTES_MAP, "buffered", now).await,
+            before,
+        );
+        let before = bytes_of(&store);
+        step(&store, store.remove(BYTES_MAP, "absent", now).await, before);
+        let before = bytes_of(&store);
+        step(
+            &store,
+            store
+                .remove_all(BYTES_MAP, &["fill".to_string(), "absent-too".to_string()])
+                .await,
+            before,
+        );
+        let released = |key: &str, value: &RecordValue| -i128::from(charge(key, value));
+        assert_eq!(
+            moves,
+            vec![
+                ("admitted".to_string(), released("buffered", &buffered)),
+                ("admitted".to_string(), 0),
+                ("admitted".to_string(), released("fill", &fill)),
+            ],
+            "(a remove of a buffered key, of a key not buffered, a remove_all of both): each \
+             admitted and charged 0, releasing only what it replaced"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_null_lww_write_is_never_refused_by_the_byte_budget() {
+        fn null(ttl_ms: Option<u64>) -> RecordValue {
+            RecordValue::Lww {
+                value: Value::Null,
+                timestamp: Timestamp {
+                    millis: 1,
+                    counter: 0,
+                    node_id: "n".to_string(),
+                },
+                ttl_ms,
+            }
+        }
+        let store = byte_store(1_000);
+        let now = now_millis();
+        let big = sized(300, 1);
+        for suffix in ["none", "ttl"] {
+            store
+                .add(BYTES_MAP, &format!("big-{suffix}"), &big, now)
+                .await
+                .unwrap();
+            store
+                .remove(BYTES_MAP, &format!("gone-{suffix}"), now)
+                .await
+                .unwrap();
+        }
+        store.remove(BYTES_MAP, "nested", now).await.unwrap();
+        // Over the budget on its own, so the nulls below, which release the
+        // big values, cannot bring the counter back under it.
+        store
+            .add(BYTES_MAP, "fill", &sized(1_000, 1), now)
+            .await
+            .unwrap();
+        assert!(bytes_of(&store) >= 1_000, "precondition: over the budget");
+
+        let mut moves = Vec::new();
+        let mut expected = Vec::new();
+        for (suffix, ttl) in [("none", None), ("ttl", Some(60_000))] {
+            for (key, replaced) in [
+                (format!("absent-{suffix}"), 0),
+                (format!("gone-{suffix}"), 0),
+                (
+                    format!("big-{suffix}"),
+                    charge(&format!("big-{suffix}"), &big),
+                ),
+            ] {
+                let before = bytes_of(&store);
+                let result = answer(store.add(BYTES_MAP, &key, &null(ttl), now).await);
+                moves.push((key.clone(), result, before - bytes_of(&store)));
+                expected.push((key, "admitted".to_string(), replaced));
+            }
+        }
+        // A null inside a map is data, not a delete: charged as usual, so it
+        // grows a key whose slot carries the charge 0 of a remove.
+        let nested = RecordValue::Lww {
+            value: Value::Map(std::collections::BTreeMap::from([(
+                "x".to_string(),
+                Value::Null,
+            )])),
+            timestamp: Timestamp {
+                millis: 1,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
+            ttl_ms: None,
+        };
+        let before = bytes_of(&store);
+        moves.push((
+            "nested".to_string(),
+            answer(store.add(BYTES_MAP, "nested", &nested, now).await),
+            before - bytes_of(&store),
+        ));
+        expected.push(("nested".to_string(), BYTE_REFUSAL.to_string(), 0));
+        assert_eq!(
+            moves, expected,
+            "(key, answer, bytes released) of null writes over the budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_byte_budget_refuses_nothing() {
+        let store = byte_store(0);
+        let now = now_millis();
+        let mut refused = 0;
+        for i in 0..20 {
+            for len in [10_000, 20_000] {
+                if store
+                    .add(BYTES_MAP, &format!("k{i}"), &sized(len, 1), now)
+                    .await
+                    .is_err()
+                {
+                    refused += 1;
+                }
+            }
+        }
+        assert_eq!(
+            (refused, bytes_of(&store)),
+            (0, 20 * charge("k0", &sized(20_000, 1)) + 10),
+            "(refused, bytes): a zero budget disables the byte rule"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_byte_bound_overshoot_is_the_stated_one() {
+        let held = sized(100, 1);
+        let fill = sized(200, 1);
+        let (w1, w2) = (sized(300, 1), sized(400, 1));
+        let budget = charge("held", &held) + charge("fill", &fill) + 1;
+        let (store, mut parked) = parked_pass_store(100, budget);
+        let now = now_millis();
+        store.add(BYTES_MAP, "held", &held, now).await.unwrap();
+        store.soft_flush().await.unwrap();
+        parked.wait_parked().await;
+        store.add(BYTES_MAP, "fill", &fill, now).await.unwrap();
+        assert_eq!(
+            bytes_of(&store),
+            budget - 1,
+            "precondition: one below the budget"
+        );
+
+        // Two writers pass the check one below the budget and park before
+        // their queue inserts: the cohort `W_b`.
+        let mut first = store.test_park_between_stage_and_queue_insert(BYTES_MAP, "w1");
+        let one = {
+            let (store, w1) = (Arc::clone(&store), w1.clone());
+            tokio::spawn(async move { store.add(BYTES_MAP, "w1", &w1, now).await })
+        };
+        first.wait_parked().await;
+        let mut second = store.test_park_before_queue_insert(BYTES_MAP, "w2");
+        let two = {
+            let (store, w2) = (Arc::clone(&store), w2.clone());
+            tokio::spawn(async move { store.add(BYTES_MAP, "w2", &w2, now).await })
+        };
+        second.wait_parked().await;
+        first.release();
+        second.release();
+        one.await
+            .unwrap()
+            .expect("w1 passed its check below the budget");
+        two.await
+            .unwrap()
+            .expect("w2 passed its check below the budget");
+        let late = answer(store.add(BYTES_MAP, "late", &sized(1, 1), now).await);
+        // A rewrite of the held key that does not grow is admitted over the
+        // budget and counts the key a second time: `H_b`.
+        let rewrite = answer(store.add(BYTES_MAP, "held", &held, now).await);
+        let peak = bytes_of(&store);
+        let bound = budget - 1 + (charge("w1", &w1) + charge("w2", &w2)) + charge("held", &held);
+        parked.release();
+        tokio::time::timeout(std::time::Duration::from_secs(10), store.hard_flush())
+            .await
+            .expect("hard_flush returned")
+            .expect("a healthy shutdown");
+        assert_eq!(
+            (late.as_str(), rewrite.as_str(), peak, bytes_of(&store)),
+            (BYTE_REFUSAL, "admitted", bound, 0),
+            "(a new key past the budget, the held key's rewrite, the counter, after the drain): \
+             the counter reaches but does not exceed B - 1 + W_b + H_b"
+        );
+    }
+
+    #[test]
+    fn a_key_refusal_is_not_also_a_byte_refusal() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let refused = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let store = WriteBehindDataStore::new(
+                    Arc::new(crate::storage::datastores::NullDataStore),
+                    on_request_config(1, 100),
+                );
+                store
+                    .add(BYTES_MAP, "a", &sized(500, 1), now_millis())
+                    .await
+                    .unwrap();
+                answer(store.add(BYTES_MAP, "b", &sized(10, 1), now_millis()).await)
+            })
+        });
+        let rendered = handle.render();
+        assert_eq!(
+            (
+                refused.as_str(),
+                rendered_value(
+                    &rendered,
+                    "topgun_write_behind_capacity_refusals_total{bound=\"keys\"}"
+                ),
+                rendered_value(
+                    &rendered,
+                    "topgun_write_behind_capacity_refusals_total{bound=\"bytes\"}"
+                ),
+            ),
+            (KEY_REFUSAL, Some(1.0), Some(0.0)),
+            "(answer, keys refusals, bytes refusals) at both bounds"
+        );
+    }
+
+    #[test]
+    fn capacity_mb_parses_disables_and_falls_back() {
+        const VAR: &str = "TOPGUN_WRITEBEHIND_CAPACITY_MB";
+        const MIB: u64 = 1024 * 1024;
+        #[derive(Clone)]
+        struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let parse = |raw: Option<&str>| {
+            let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let writer = Captured(Arc::clone(&captured));
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .finish();
+            let bytes = tracing::subscriber::with_default(subscriber, || {
+                WriteBehindConfig::from_source(|key| {
+                    (key == VAR).then(|| raw.map(str::to_string)).flatten()
+                })
+                .capacity_bytes
+            });
+            let log = String::from_utf8(captured.lock().unwrap().clone()).expect("utf-8 log");
+            (bytes, log.contains(VAR))
+        };
+        assert_eq!(
+            [
+                parse(None),
+                parse(Some("333")),
+                parse(Some("0")),
+                parse(Some("x")),
+                parse(Some("")),
+                parse(Some("17592186044415")),
+            ],
+            [
+                (256 * MIB, false),
+                (333 * MIB, false),
+                (0, false),
+                (256 * MIB, true),
+                (256 * MIB, true),
+                (17_592_186_044_415 * MIB, false),
+            ],
+            "(bytes, warned naming the variable) for unset, 333, 0, x, empty, the largest value"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "TOPGUN_WRITEBEHIND_CAPACITY_MB")]
+    fn capacity_mb_overflow_is_fatal() {
+        let _ = WriteBehindConfig::from_source(|key| {
+            (key == "TOPGUN_WRITEBEHIND_CAPACITY_MB").then(|| "17592186044416".to_string())
+        });
+    }
+
+    #[test]
+    fn capacity_refusals_are_counted_by_bound() {
+        const KEYS: &str = "topgun_write_behind_capacity_refusals_total{bound=\"keys\"}";
+        const BYTES: &str = "topgun_write_behind_capacity_refusals_total{bound=\"bytes\"}";
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let readings = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let store = WriteBehindDataStore::new(
+                    Arc::new(crate::storage::datastores::NullDataStore),
+                    on_request_config(1, 100),
+                );
+                let read = |rendered: String| {
+                    (
+                        rendered_value(&rendered, KEYS),
+                        rendered_value(&rendered, BYTES),
+                    )
+                };
+                let at_start = read(handle.render());
+                store
+                    .add(BYTES_MAP, "a", &sized(500, 1), now_millis())
+                    .await
+                    .unwrap();
+                // A buffered key passes the key rule; its growth meets the byte rule.
+                let grown = answer(
+                    store
+                        .add(BYTES_MAP, "a", &sized(600, 2), now_millis())
+                        .await,
+                );
+                let after_bytes = read(handle.render());
+                let new_key = answer(store.add(BYTES_MAP, "b", &sized(1, 1), now_millis()).await);
+                let after_keys = read(handle.render());
+                (at_start, grown, after_bytes, new_key, after_keys)
+            })
+        });
+        assert_eq!(
+            readings,
+            (
+                (Some(0.0), Some(0.0)),
+                BYTE_REFUSAL.to_string(),
+                (Some(0.0), Some(1.0)),
+                KEY_REFUSAL.to_string(),
+                (Some(1.0), Some(1.0)),
+            ),
+            "((keys, bytes) at start, byte refusal, after it, key refusal, after it)"
+        );
+    }
+
+    #[test]
+    fn buffered_bytes_gauge_renders_at_zero_and_follows_the_counter() {
+        const GAUGE: &str = "topgun_write_behind_buffered_bytes";
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let readings = metrics::with_local_recorder(&recorder, || {
+            paused_runtime().block_on(async {
+                let spy = Arc::new(SpyDataStore::new());
+                // Refused, the entry stays buffered after the pass that reports it.
+                spy.refuse_everything(true);
+                let store = schedule_store(&spy, on_request_config(100, 0));
+                let at_start = rendered_value(&handle.render(), GAUGE);
+                store
+                    .add(BYTES_MAP, "k", &sized(100, 1), now_millis())
+                    .await
+                    .unwrap();
+                one_requested_pass(&store).await;
+                let after_a_pass = rendered_value(&handle.render(), GAUGE);
+                spy.refuse_everything(false);
+                store.hard_flush().await.expect("a healthy shutdown");
+                (at_start, after_a_pass, bytes_of(&store))
+            })
+        });
+        #[allow(clippy::cast_precision_loss)]
+        let charged = charge("k", &sized(100, 1)) as f64;
+        assert_eq!(
+            readings,
+            (Some(0.0), Some(charged), 0),
+            "(gauge at the first scrape, after a pass that kept the entry, counter at rest)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_commit_blocked_in_the_store_reaches_writers_as_bound_refusals() {
+        let value = sized(100, 1);
+        let one = charge("h1", &value);
+        // Four entries of equal charge fill the key bound; the budget is met
+        // only while the two the pass holds still count.
+        let (store, mut parked) = parked_pass_store(4, 3 * one + 1);
+        let now = now_millis();
+        for key in ["h1", "h2"] {
+            store.add(BYTES_MAP, key, &value, now).await.unwrap();
+        }
+        store.soft_flush().await.unwrap();
+        parked.wait_parked().await;
+        for key in ["k3", "k4"] {
+            store.add(BYTES_MAP, key, &value, now).await.unwrap();
+        }
+        let while_blocked = (store.pending_operation_count(), bytes_of(&store));
+
+        // Every call must return on its own; the paused clock jumps to the
+        // timeout the moment nothing else can run.
+        let within = std::time::Duration::from_secs(1);
+        let returns = |result: Result<anyhow::Result<()>, tokio::time::error::Elapsed>| {
+            answer(result.expect("a write call waited for the blocked commit"))
+        };
+        let answers = [
+            returns(tokio::time::timeout(within, store.add(BYTES_MAP, "k5", &value, now)).await),
+            returns(
+                tokio::time::timeout(within, store.add(BYTES_MAP, "k3", &sized(150, 2), now)).await,
+            ),
+            returns(
+                tokio::time::timeout(within, store.add(BYTES_MAP, "k3", &sized(100, 2), now)).await,
+            ),
+            returns(
+                tokio::time::timeout(within, store.add(BYTES_MAP, "h1", &sized(100, 2), now)).await,
+            ),
+            returns(tokio::time::timeout(within, store.remove(BYTES_MAP, "k4", now)).await),
+            answer(store.admit_in_place(BYTES_MAP, "k3")),
+        ];
+        parked.release();
+        pass_closed(&store).await;
+        // Left: the rewrites of k3 and h1 and the remove of k4.
+        let after_release = (
+            store.pending_operation_count(),
+            bytes_of(&store),
+            queued_charges(&store),
+        );
+        let new_key = answer(store.add(BYTES_MAP, "k6", &value, now).await);
+        tokio::time::timeout(std::time::Duration::from_secs(10), store.hard_flush())
+            .await
+            .expect("hard_flush returned")
+            .expect("a healthy shutdown");
+        assert_eq!(
+            (while_blocked, answers, after_release, new_key),
+            (
+                (4, 4 * one),
+                [
+                    KEY_REFUSAL.to_string(),
+                    BYTE_REFUSAL.to_string(),
+                    "admitted".to_string(),
+                    "admitted".to_string(),
+                    "admitted".to_string(),
+                    BYTE_REFUSAL.to_string(),
+                ],
+                (3, 2 * one, 2 * one),
+                "admitted".to_string(),
+            ),
+            "((entries, bytes) while blocked; new key, growing rewrite, equal rewrite queued, \
+             equal rewrite held, remove, in-place; after the release; a new key then)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_byte_budget_holds_through_a_store_wide_hold() {
+        let spy = Arc::new(SpyDataStore::new());
+        spy.refuse_everything(true);
+        let value = sized(100, 1);
+        // Four entries reach the budget; the fourth is admitted one below it.
+        // Passes run on their own here: a hold is probed by the passes.
+        let store = schedule_store(
+            &spy,
+            WriteBehindConfig {
+                flush_interval_ms: 100,
+                ..on_request_config(100, 3 * charge("a", &value) + 1)
+            },
+        );
+        let now = now_millis();
+        for key in ["a", "b", "c", "d"] {
+            store.add(BYTES_MAP, key, &value, now).await.unwrap();
+        }
+        store.soft_flush().await.unwrap();
+        let hold = poll_until(10_000, || store.test_store_hold_active()).await;
+        let during = [
+            answer(store.add(BYTES_MAP, "new", &value, now).await),
+            answer(store.add(BYTES_MAP, "a", &sized(200, 2), now).await),
+            answer(store.admit_in_place(BYTES_MAP, "a")),
+        ];
+        spy.refuse_everything(false);
+        let drained = poll_until(120_000, || {
+            store.pending_operation_count() == 0 && bytes_of(&store) == 0
+        })
+        .await;
+        assert_eq!(
+            (hold.is_some(), during, drained.is_some()),
+            (
+                true,
+                [
+                    BYTE_REFUSAL.to_string(),
+                    BYTE_REFUSAL.to_string(),
+                    BYTE_REFUSAL.to_string()
+                ],
+                true
+            ),
+            "(a hold began, new key / growing rewrite / in-place write during it, both \
+             counters at 0 once the store accepts)"
         );
     }
 }

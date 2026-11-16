@@ -898,9 +898,10 @@ impl CrdtService {
                     .put(writer, &op.key, record_value, CallerProvenance::CrdtMerge)
                     .await
                     .map_err(OperationError::Internal)?;
-                // An OR slot this put replaced leaves the live OR census. A
-                // non-resident slot, or a put whose store write failed, is the
-                // known gap of TG-OR-008 (TODO-874).
+                // An OR slot this put replaced leaves the live OR census. A slot
+                // that is not resident when the put reaches memory (TODO-874),
+                // and a put whose write-through is refused after it reached
+                // memory (TODO-992), are the known gaps of TG-OR-008.
                 if let Some(old) = &old {
                     crate::storage::record::sub_live_census_of(old);
                 }

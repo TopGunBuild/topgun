@@ -109,17 +109,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     buffer was at its capacity — a temporary error, the client resends; a `remove_all` is
     admitted or refused whole and counts once) and
     `topgun_write_behind_oldest_entry_age_seconds` (the age of the oldest buffered write, refused
-    or not, counted on the server's clock from when it was buffered; it keeps rising through a
-    store outage).
+    or not, counted on the server's clock from when it was buffered; it rises through a store
+    outage).
   - **Hot keys are coalesced less.** A key rewritten while its write is still buffered is stored
     once; without the delay that window is about one pass or one flush interval instead of at
     least a second, so a key rewritten many times a second is stored up to that many times a
     second. The write-ahead log already wrote every write.
-  - **Large values (unchanged, now stated).** The buffer is bounded by keys, not bytes, and keeps
-    each buffered value twice: a buffer of large values can exhaust the process's memory before
-    the key bound refuses anything. The process is then killed and the write-ahead log replays
-    the acknowledged writes at the next start — a crash, not data loss. A byte bound is
-    TODO-963.
+  - **A byte bound on the write-behind buffer: `TOPGUN_WRITEBEHIND_CAPACITY_MB`** (default
+    `256`; `0` disables it). Beside the key bound, the buffered values' memory now has a soft
+    budget: at or above it a plain write that grows its key's buffered value is refused, and so is
+    every in-place OR write (OR add and remove, tombstone prune, the TTL sweep's OR removals, a
+    client's OR push diff) — before it changes anything. A remove, a `remove_all`, an LWW write of
+    a top-level `null` and a rewrite that does not grow are never refused by the byte bound; the
+    key bound is unchanged and still refuses a remove of a key that is not buffered at the key
+    capacity. A single value larger than the budget is admitted into a buffer below it. A refusal
+    is the transient `internal` error (500, `Write-behind byte capacity exceeded`); the client
+    keeps the write and resends it. A pushed OR diff is merged up to the refused entry and the
+    rest at the client's next connection. Values are counted by a structural estimate of their
+    stored encoding, not by heap bytes. An unparseable value warns and uses the default; a value
+    whose bytes do not fit in 64 bits ends the process with the panic message on stderr and exit
+    status 101. Before this, a buffer of large values could exhaust the process's memory before
+    the key bound refused anything.
+  - **A buffered value is held once**, shared by the queue and the read overlay, instead of twice.
+  - **A write refused at either bound is no longer visible to reads or subscribers.** Both bounds
+    are now decided before a write changes anything, so a write refused at a bound leaves memory,
+    subscribers, the write-ahead log and the counters as they were, and a write admitted by them is
+    not refused at a bound afterwards. Before this, a write refused at the key bound had already
+    replaced the record in memory, where reads saw it and eviction could not drop it, and
+    subscribers had been sent it. Not covered: a write refused after that decision — because the
+    store failed or began shutting down, its tenant was being closed, or its write-ahead-log append
+    failed — still leaves its change in memory, visible to reads and subscribers (TODO-992).
+  - **Measured.** Measured on Linux (Hetzner ccx33, 8 vCPU AMD EPYC-Milan) with the in-process
+    open-loop load harness on RocksDB, at the default bounds, values of 0 bytes, three runs of this
+    release against six of the release before it: at 2·10⁴ and at 4·10⁴ new keys/s both acknowledged
+    the offered rate with no refusal in every run, and at 4·10⁴/s the service latency of this
+    release was p50 1.12–1.15 ms and p99 9.37–11.06 ms, against 1.13–1.16 ms and 9.93–11.12 ms. No
+    throughput or latency difference between the releases is claimed: in an earlier series on the
+    same host class the release before it reached its 10 000-key bound at 4·10⁴/s and refused writes
+    in 4 of 6 runs, in this one in none, and the latencies of both releases were about 0.5 ms lower
+    in this series. With 4 KiB values at 10⁴/s (key bound off) the buffered charge (the structural
+    estimate, not heap bytes) peaked at 4.7–49.1 MB in three runs, with 64 KiB values at 10³/s at
+    7.8–9.6 MB; the byte bound refused nothing at the default budget. Throughput smoke (median of
+    three, 50 connections, 10 s): fire-and-wait 9 542 ops/s against 9 553, fire-and-forget 534 080
+    against 540 334. Not shown: that the key bound is never reached at 4·10⁴/s (peak 4 456 of 10 000
+    keys in three runs), any figure at 8·10⁴/s (the load generator was the limit), a throughput
+    gain, or a latency difference between the releases.
+  - **Metrics.** `topgun_write_behind_capacity_refusals_total` carries `bound="keys"|"bytes"`,
+    both at 0 from the first scrape; the new gauge `topgun_write_behind_buffered_bytes` is the
+    count the byte bound uses. Both depth gauges and the head-age gauge are set at the end of a
+    flush pass, so they hold their last values while a commit is blocked inside the store engine
+    (TODO-980).
+  - **The startup line** carries `write_behind_capacity` and `write_behind_capacity_mb`.
 
 - **Breaking (server, configuration): `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS=0` refuses to
   start.** Earlier releases accepted `0`; with no write delay the idle flush loop would spin, so the

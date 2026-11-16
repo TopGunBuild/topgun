@@ -682,10 +682,14 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   (AC-2a: `get` adopts, the flush releases the queue and staging references, the cell is freed
   after a further eviction). (b), un-framed mutations (AC-2e):
   `storage::datastores::write_behind::prefix_watermark_proptest::an_unframed_mutation_after_a_pre_frame_append_error_is_unacked_and_idempotent`,
-  `::an_unframed_mutation_rejected_by_the_shutdown_gate_is_unacked_and_idempotent`,
+  `::a_write_after_the_shutdown_flag_is_refused_before_its_mutation` (the shutdown flag is
+  decided at the admission now, so such a write leaves no un-framed mutation; one the flag
+  overtakes after the admission is the case of the pre-frame append error above, TODO-992),
   `::an_unframed_or_remove_is_unacked_and_idempotent`,
   `::a_cancelled_append_never_lets_the_watermark_pass_its_sequence`,
-  `::a_capacity_rejected_mutation_is_persisted_by_the_next_write_through`.
+  `::a_capacity_refused_in_place_op_is_not_applied_and_the_next_write_through_persists` (a
+  refusal at the key bound now comes before the mutation, `TG-WB-011`, so it leaves no un-framed
+  mutation: the refused op is absent after the next write-through and a crash).
   (a), lead-not-lag (AC-3):
   `storage::impls::default_record_store::tests::materialize::two_in_place_writes_with_a_flush_between_persist_both`,
   `storage::datastores::write_behind::prefix_watermark_proptest::a_flush_racing_an_in_flight_op_persists_every_resolved_frame`
@@ -820,8 +824,9 @@ measured; do not read it as reported.
 
 ### TG-WB-005: Every write-behind entry that leaves a queue or a flush batch is accounted
 
-- **Scope:** `WriteBehindDataStore` — the pending counter (`pending_count`), the entry-sequence
-  set (`pending_seqs`) and the per-partition WAL-sequence tracker, on a node that is not shutting
+- **Scope:** `WriteBehindDataStore` — the pending counter (`pending_count`), the buffered-bytes
+  counter (`buffered_bytes`), the entry-sequence set (`pending_seqs`) and the per-partition
+  WAL-sequence tracker, on a node that is not shutting
   down and whose flush task is alive.
 - **Precondition — upheld by `TG-KEY-001`:** the predicate below is proven for one writer per
   `(map, key)` at a time. For record keys that is what `TG-KEY-001` states: every write of a
@@ -845,7 +850,13 @@ measured; do not read it as reported.
   `TG-KEY-001`, so a record writer can no longer produce the case in which the queued entry
   holds the older value.
 - **Statement:** an entry leaves a partition queue or a flush batch only through a site that
-  disposes of all three: its count, its entry sequence, and its WAL sequences. The exits are
+  disposes of all three: its count (and with it its byte charge), its entry sequence, and its
+  WAL sequences. The byte counter is the sum of the `charge` of every queued entry and every
+  entry a pass holds; it moves only where the count moves — the one insert site `enqueue` (a
+  new key adds its charge; a coalesce adds the new charge and releases the replaced one),
+  `settle_stored` and a superseded `put_back` — and returns to 0 whenever the count does. A
+  charge belongs to its entry's value: a retirement or a coalesce never moves it to another
+  entry. The exits are
   the success terminal (the store accepted the entry: all three resolved), the retirement into a
   queued newer write of the same key, and the shutdown drain. "Abandoned with the `Abandoned`
   tag" is true only of the shutdown drain, which is outside the scope above; on a running node
@@ -866,12 +877,13 @@ measured; do not read it as reported.
 - **Mechanical predicate:** once the store accepts writes again and the write-behind store is
   idle — no entry is queued AND the flush loop is between passes, holding no drained batch
   ("every queue empty" alone is not idle: the loop may hold a batch it has just drained) —
-  `pending_operation_count() == 0`, `flushed_watermark() == assigned_write_sequence()`, no
+  `pending_operation_count() == 0`, the buffered bytes are 0, `flushed_watermark() == assigned_write_sequence()`, no
   WAL sequence is `Live`, no WAL sequence is `Abandoned`, and the inner store holds the last
   acknowledged operation of every key.
 - **Maintaining code:** `write_behind.rs` — `PartitionQueue::retire_into_queued`, called from
   `reinsert_front`, which `put_back` calls for an entry the store refused and for every entry a
-  pass did not attempt when a hold began; `settle_stored`, the one success terminal.
+  pass did not attempt when a hold began; `settle_stored`, the one success terminal; `enqueue`,
+  the one insert site of `add`, `remove` and `remove_all`.
 - **Enforcing test:** `prefix_watermark_proptest.rs::interleaved_refusals_and_writes_to_one_key_leave_nothing_unaccounted`
   (property: refusals, accepts, writes and removes of one key in generated order, 64 cases) and
   `write_behind.rs::a_refused_entry_superseded_by_a_newer_write_is_retired_into_it`. Both run in CI
@@ -897,6 +909,8 @@ measured; do not read it as reported.
 | `a_refused_entry_with_a_queued_newer_write_is_retired_into_it` | the retirement with the newer write already queued when the store refuses: the refused entry is not tagged `Abandoned`, and the key becomes durable through the newer write | CI (`cargo test`) |
 | `a_retired_delta_entry_stays_replayable_until_its_survivor_is_durable` | WHY the sequences are carried for a delta frame too: the newer entry is refused ten times and stays queued with both sequences `Live`; with a second key in the same partition, a crash before the newer entry is durable must still replay the retired frame | CI (`cargo test`) |
 | `a_retired_entry_hands_its_earlier_due_time_to_the_queued_write` | the queued entry takes the earlier due time of the two, so a key rewritten during an outage keeps its flush schedule | CI (`cargo test`) |
+| `buffered_bytes_equal_the_live_charges` | the byte counter, over generated adds, in-place cell write-throughs, removes, `remove_all`s, rewrites, refusals and accepts against a refusing-then-accepting inner store, and a pass parked inside its commit that holds its batch across the following steps and then settles — accepted, put back, or retired into a newer write of its key that came meanwhile (a superseded put-back): after every step the counter equals the queued charges plus the charges of the held batch; at idle both counters are 0 | CI (`cargo test`) |
+| `buffered_bytes_follow_insert_coalesce_and_settle`, `a_rewrite_while_a_pass_holds_the_key_counts_both_until_each_settles`, `a_superseded_put_back_releases_the_retired_charge`, `an_in_place_write_is_charged_at_the_cell_cost` | each site that moves the byte counter, one fixed order each: insert, smaller and larger coalesce, settle; a rewrite of a key a parked pass holds; the release of a retired entry; an in-place write charged at its cell's cost | CI (`cargo test`) |
 | `two_writers_of_one_key_interleaved_between_sequence_and_insert_leave_nothing_unaccounted` | NOT an enforcer of the precondition. Evidence for accounting only, under one interleaving of two writers that the precondition excludes. It asserts nothing about the stored value | CI (`cargo test`) |
 | `tests/integration-rust/store-refusal-liveness.test.ts`, arm `REFUSAL-LIFTED-UNDER-LOAD` | the predicate at node level: six keys refused while they are still written; after the refusal is lifted every partition's WAL lag returns to 0 | local only (`pnpm test:integration-rust:liveness`), for the reason given under `TG-WB-004` (TODO-770) |
 
@@ -1038,19 +1052,21 @@ weaker than a test.
   is pinned by reading the code, not by a test or a mutant.
 - **`hard_flush` exits already tracked elsewhere** — the abort at the shutdown timeout, the
   error and timeout exits, a dropped `hard_flush` future (TODO-768).
-- **`capacity` as a hard limit.** Decided: there is no hard limit and none is planned. The
-  one admission gate of every write path, `admit_new_keys`, keeps a soft bound; each call it
-  refuses counts once in `topgun_write_behind_capacity_refusals_total`
-  (`capacity_refusals_are_counted_on_every_write_path`); a `remove_all` is admitted or refused
-  whole (`remove_all_is_admitted_or_refused_whole`), and a refusal stops at the first new key
-  past the capacity (`a_refused_remove_all_stops_at_the_first_new_key_past_the_capacity`). A
-  bound on buffered bytes is not there yet (TODO-963).
+- **`capacity` and `capacity_bytes` as hard limits.** Decided: there is no hard limit and none
+  is planned. The one admission gate of every write path, `admit_write`, keeps two soft bounds,
+  the key bound first; each call it refuses counts once in
+  `topgun_write_behind_capacity_refusals_total`, under `bound="keys"` or `bound="bytes"`
+  (`capacity_refusals_are_counted_on_every_write_path`, `capacity_refusals_are_counted_by_bound`);
+  a `remove_all` is admitted or refused whole (`remove_all_is_admitted_or_refused_whole`), and a
+  refusal stops at the first new key past the capacity
+  (`a_refused_remove_all_stops_at_the_first_new_key_past_the_capacity`). The byte bound is
+  `TG-WB-011`.
   With `C = capacity > 0` and `L = 1000`, the most entries one
   flush pass takes: `pending_count <= C - 1 + W + H` and `H <= min(L, C - 1 + W)`, so the count
-  stays below `2 * (C + W)` and below `C + W + L`. `W` is the number of writes of
-  distinct keys that are not buffered and that are, at one instant, between the capacity check
-  and their queue insert; `W >= 1` while any write is in progress, because the inserting writer
-  is itself past its check. `H` is the number of entries the running flush pass holds whose key
+  stays below `2 * (C + W)` and below `C + W + L`. `W` is a cohort, not an instant: the
+  writes of distinct keys that were not buffered which the check admitted while
+  `pending_count + n <= C`, and whose queue insert ran after the count reached `C`; `W >= 1`
+  while any write is in progress, because the inserting writer is itself past its check. `H` is the number of entries the running flush pass holds whose key
   was re-written while the pass holds them; a pass holds the entries that were due when it
   began, at most `L` of them and 8 MiB of encoded values, and `batch_size` does not limit it. A third line holds while a store-wide hold is in force
   (`TG-WB-009`): `H <= 1`, because a hold puts back every entry the pass did not attempt and a
@@ -1064,6 +1080,18 @@ weaker than a test.
   enforcers are the five capacity rows of the table above. Not covered: a panic between a
   write's staging and its queue insert leaves a key staged with nothing buffered, whose next
   write passes the check at any count (`TG-WB-007`, "Not claimed"; TODO-817).
+  The byte bound, in charge units (a structural estimate of the stored encoding), with `B =
+  capacity_bytes > 0` and `S_max` the largest charge of an admitted entry:
+  `buffered_bytes <= B - 1 + W_b + H_b`, `W_b <= W × S_max` (the cohort of counter increments of
+  writes admitted below `B` whose insert ran after the counter reached `B`, in-place writes
+  admitted by `admit_in_place` included), `H_b <= min(L, N_held) × S_max` (the charges of held
+  entries whose key was rewritten while the pass holds them; the 8 MiB pass limit is in encoded
+  bytes and does not bound it), and `H_b <= S_max` during a store-wide hold. The counter
+  under-counts the in-place growth of a cell under a provenance that owes no write-through
+  (`Backup`, `Replication`, `Load`) until its entry settles, and a cell whose write-through's WAL
+  append failed until the key's next write-through; it over-counts, on the safe side, a rewrite
+  of an in-place key a pass holds, which charges the same cell twice until the held entry's
+  terminal.
 - **Which statements of the flush loop or of an inner store can panic.** Not enumerated; the
   tests inject one.
 - **A stop started by a signal has no deadline of its own**, before this entry or after it. When
@@ -1739,6 +1767,110 @@ weaker than a test.
 - **The order of two failures in one process** (the first record wins) is pinned by reading;
   no test drives a broken store and a panic in the same process.
 
+### TG-WB-011: A write that adds a key or value bytes to the write-behind buffer is refused, temporarily, while the buffer is at its key or byte bound, decided before the write changes anything; acknowledgement never waits for the store engine
+
+- **Scope:** `WriteBehindDataStore` — `admit_write` (the one bound decision of `admit_value`,
+  `admit_in_place`, `remove` and `remove_all`; `add` calls `admit_value`, `add_with_witness` decides
+  no bound) — and `DefaultRecordStore`: `put`, which calls `MapDataStore::admit_value`, and
+  `update_in_place`, which calls `MapDataStore::admit_in_place`, both for `Client` and `CrdtMerge`
+  provenance before the first engine call, and `remove`, which reaches the data store before the
+  engine.
+- **Statement:** with `B = capacity_bytes > 0` (`TOPGUN_WRITEBEHIND_CAPACITY_MB`), while the
+  buffered bytes are at or above `B`:
+  - a plain write (`WriteSource::Value`) whose charge is above 0 is refused with `Write-behind byte
+    capacity exceeded` unless its key's staging slot already carries at least that charge — a
+    rewrite that does not grow, whether the key's entry is queued or held by a pass;
+  - every in-place write of `Client` or `CrdtMerge` provenance is refused before the engine is
+    called, so the cell, its cost, the engine slot, the WAL (no sequence assigned) and both
+    counters are as before; this pre-check applies the key rule too;
+  - each write is bounded exactly once, before its own mutation: a `put` of `Client` or
+    `CrdtMerge` provenance by `admit_value` before the engine and the observers, an in-place write
+    by `admit_in_place`, a direct `add` (cursor and credential rows) by `admit_value` before its
+    queue insert, a remove and a `remove_all` by `admit_write` before theirs; the write-through of
+    an admitted `put` or in-place write (`add_with_witness`) decides no bound, so it is not refused
+    at a bound after its mutation;
+  - a remove, a `remove_all` and an LWW write of a top-level `null` (charge 0) are never refused
+    by the byte bound; the key bound is unchanged and can still refuse a remove of a key that is
+    not buffered once the buffer is at its key capacity, as a write of any new key;
+  - every refusal is a temporary error (the transient `internal`, 500), counted once under
+    `bound="keys"` or `bound="bytes"`, the key bound checked first;
+  - **a write refused at a bound leaves no trace** at the record store: a `put`, `remove` or
+    in-place write of `Client` or `CrdtMerge` provenance refused at either bound leaves the engine
+    (the key's value, residency, dirty flag and write token), the mutation observers (no call), the
+    WAL and both counters as they were, so no read and no subscriber sees a write that was not
+    acknowledged. This covers bound refusals only (see "Not claimed").
+  No write call waits for the store engine: a flush commit blocked inside the store reaches
+  writers only as refusals at these bounds, and once it returns both counters fall.
+- **Mechanical predicate:** under a paused clock with a flush pass parked inside its commit,
+  every `add` and `remove` returns without the park being released; at the bounds a new key is
+  refused under `bound="keys"`, a growing plain value under `bound="bytes"`, a non-growing
+  rewrite of a queued or held key and a remove of a buffered key are admitted; after the release
+  both counters fall and a new key is admitted.
+- **Maintaining code:** `write_behind.rs` — `admit_write`, `admit_value`, `admit_in_place`,
+  `add` (admits, then `add_with_witness`, which decides no bound), `charge_of`, `stage` (the slot
+  carries its write's charge); `default_record_store.rs` — `put` (`admit_value` before the engine
+  and the observers, the write-through after them), `remove` (its delete staged first), and
+  `admit_in_place_write`, called from `update_in_place` after `refuse_foreign_token`.
+- **Enforcing test:** `write_behind.rs::a_commit_blocked_in_the_store_reaches_writers_as_bound_refusals`
+  and `prefix_watermark_proptest.rs::an_in_place_write_over_the_byte_budget_is_refused_before_its_mutation`.
+  Both run in CI (`cargo test`). The table below lists the others.
+- **Violation consequence:** a buffer of large values, or OR slots that keep growing during a
+  store outage, exhaust the process's memory before any write is refused; the process is killed
+  and restarts by replaying the WAL — a crash loop, not data loss. Or, the other way: a delete or
+  a non-growing rewrite refused at the budget jams a client on an op that would relieve the
+  pressure.
+- **Status:** decided, **enforced** — within "Not claimed" below.
+
+| Enforcer | What it covers | Where it runs |
+|----------|----------------|---------------|
+| `a_commit_blocked_in_the_store_reaches_writers_as_bound_refusals` | the statement end to end with a pass parked in its commit: both bounds, both kinds of admitted writes, no write waits, counters fall after the release | CI (`cargo test`) |
+| `the_byte_budget_holds_through_a_store_wide_hold` | growth refused at the budget during a store-wide hold; counters at 0 once the store accepts | CI (`cargo test`) |
+| `a_value_is_refused_once_the_buffered_bytes_reach_the_budget`, `a_value_larger_than_the_whole_budget_is_admitted_into_a_buffer_below_it`, `a_rewrite_that_does_not_grow_is_admitted_over_the_budget`, `a_rewrite_that_grows_is_refused_over_the_budget` | the plain-write rule: refused at exactly `B`, admitted at `B − 1`; a value above `B` admitted below it; equal and smaller rewrites of a queued and of a held key admitted; a growing rewrite refused | CI (`cargo test`) |
+| `a_remove_is_never_refused_by_the_byte_budget`, `a_null_lww_write_is_never_refused_by_the_byte_budget`, `a_zero_byte_budget_refuses_nothing` | charge-0 writes over the budget, with the key count below capacity; a top-level `null` with and without TTL charged 0, a nested `Null` charged and refused; `B = 0` | CI (`cargo test`) |
+| `a_key_refusal_is_not_also_a_byte_refusal`, `capacity_refusals_are_counted_by_bound` | the key rule first, one refusal counted once, each under its own bound | CI (`cargo test`) |
+| `the_byte_bound_overshoot_is_the_stated_one` | the counter reaches but does not exceed `B − 1 + W_b + H_b` with parked writers and a parked pass | CI (`cargo test`) |
+| `an_in_place_write_over_the_byte_budget_is_refused_before_its_mutation`, `an_in_place_write_of_backup_provenance_is_not_pre_checked` (`prefix_watermark_proptest.rs`) | the in-place rule on a record store over the write-behind store: OR add and remove refused with the cell, cost, WAL and counters unchanged; `Backup` not pre-checked | CI (`cargo test`) |
+| `an_admitted_in_place_write_is_not_byte_refused_after_its_mutation`, `an_admitted_in_place_write_is_not_key_refused_after_its_mutation` (`write_behind.rs`) | an in-place write admitted by the pre-check is acked although the budget, or the key capacity, was reached before its write-through | CI (`cargo test`) |
+| `a_put_refused_at_the_byte_bound_leaves_no_trace`, `a_write_refused_at_the_key_bound_leaves_no_trace` (`prefix_watermark_proptest.rs`) | a refused write leaves no trace, with a recording observer: a growing rewrite and a new key at the byte bound; a put of a resident and of a new key, a remove and an in-place write at the key bound — engine value, residency, dirty flag and token, observer calls, last WAL sequence and both counters unchanged | CI (`cargo test`) |
+| `a_write_after_the_shutdown_flag_is_refused_before_its_mutation` (`prefix_watermark_proptest.rs`) | not a bound: a put and an in-place write of a store already shutting down are refused at their admission, the engine and the last WAL sequence unchanged, and the drain persists nothing of them | CI (`cargo test`) |
+| `an_admitted_put_is_not_refused_at_a_bound_by_its_write_through` (`prefix_watermark_proptest.rs`) | a put admitted below both bounds is acked, queued and framed although an observer raised both counters to their bounds between its admission and its write-through | CI (`cargo test`) |
+| `a_push_diff_over_the_byte_budget_merges_up_to_the_refused_entry` (`prefix_watermark_proptest.rs`) | a client's OR push diff over the budget: the entry whose write-through reaches the budget is merged and buffered, the next is refused and it and the rest are not merged; the same push after the drain merges all | CI (`cargo test`) |
+
+**Not claimed.**
+
+- **In-place writes that change nothing or do not grow, at either bound.** The pre-check runs
+  before the mutation, so it does not know the outcome: over the byte budget, and — for a key that
+  is not buffered — at the key capacity, a duplicate OR remove, an `OR_REMOVE` of an absent key, a
+  tombstone prune (also one that finds nothing to prune) and the TTL sweep's OR removals are
+  refused too, as temporary errors, where without the bound they would end unchanged. A refused
+  prune logs one `WARN` per tombstone ref per pass and counts in
+  `topgun_or_prune_restored_write_error_total`, the series a store write error also uses; it is
+  retried by a later pass, and a refused client write is retried by the client.
+- **No trace after a refusal that is not a bound refusal (TODO-992).** "A write refused at a bound
+  leaves no trace" covers the two bounds only. The admission of a `put` and of an in-place write
+  also refuses a store that has failed or is shutting down and a map whose tenant is closed, before
+  the mutation. Three refusals can still come from the write-through, after the mutation: the
+  store failing or starting its shutdown, or the map's tenant being closed, between the admission
+  and the write-through — another task changes either, and only a lock held across the mutation,
+  which a shutdown or a tenant drop would then wait on, could exclude it — and a WAL append that
+  fails (a stopped writer, a frame that cannot be written), which is known only once it is tried.
+  Such a write is not acknowledged and the client resends it, but its mutation stays: the engine
+  holds the new value, dirty, reads return it and subscribers, the Merkle tree and the indexes were
+  given it; it has no WAL frame, so a restart before a later write of the key stores it loses
+  it.
+- **A client's push diff** is merged up to the first refused entry; the rest waits for the
+  client's next connection, which runs its Merkle walk again — nothing is lost, the client keeps
+  its records. A mid-connection re-push is TODO-981.
+- **Live gauges during a blocked commit.** `topgun_write_behind_buffered_entries`,
+  `topgun_write_behind_buffered_bytes` and `topgun_write_behind_oldest_entry_age_seconds` are set
+  at the end of a pass, so they hold their last values while a commit is blocked inside the
+  engine; only the refusal counter moves (TODO-980).
+- **An engine-debt gate.** None: RocksDB's slowdown and stop reach the flush pass, and the bounds
+  turn them into refusals at the drain rate. During a RocksDB slowdown the drain is capped at its
+  delayed write rate; not measured.
+- **Exactness of the charge.** It is a structural estimate of the stored encoding (for an LWW
+  value between half and seven thirds of it), not a heap measurement.
+
 ### TG-EVI-001: An acknowledged write the store has not taken is readable on a running node
 
 - **Scope:** `RecordStore::get` and `MapDataStore::load` / `load_slot` over a write-behind store
@@ -2205,12 +2337,17 @@ weaker than a test.
   `/metrics` scrape as `topgun_ormap_live_entries`, `topgun_ormap_live_tag_bytes` and
   `topgun_ormap_live_census_seeded` (internal series, like `topgun_or_prune_*`).
 - **Statement:** for every state reached through `OR_ADD`, `OR_REMOVE`, the epoch prune, SYNC OR
-  ingest, and a `REMOVE` or LWW `PUT` of a key whose slot is resident, `live_entries` is the number
-  of entries over all `OrMap` slots and `live_tag_bytes` the sum of their `tag.len()`, whether a
-  slot is resident or evicted; after a restart with `seeded = 1` the same holds for the recovered
-  state. **Known exception (TODO-874):** a `REMOVE` or LWW `PUT` of a key whose `OrMap` slot is not
-  resident, and an LWW `PUT` over an `OrMap` slot whose store write fails, drop entries the server
-  does not see, so the census stays too high by them until the next restart re-seeds it.
+  ingest, and a `REMOVE` or LWW `PUT` of a key whose slot is resident when the write reaches
+  memory (a `REMOVE` after its store write, a `PUT` after its admission and before its store
+  write), `live_entries` is the number of entries over all `OrMap` slots and `live_tag_bytes` the
+  sum of their `tag.len()`, whether a slot is resident or evicted; after a restart with
+  `seeded = 1` the same holds for the recovered state. A `REMOVE` whose store write fails and a
+  `PUT` refused at its admission change neither the slot nor the census. **Known exceptions:** a
+  `REMOVE` or LWW `PUT` of a key whose `OrMap` slot is not resident at that moment — never loaded,
+  or, for a `REMOVE`, evicted while its store write awaited — drops entries the server does not
+  see (TODO-874); a `PUT` whose write-through is refused after it reached memory (the refusals
+  `TG-WB-011` does not claim) has replaced the slot without subtracting it (TODO-992). Either way
+  the census stays too high by those entries until the next restart re-seeds it.
 - **Maintaining code:** `crdt.rs::apply_or_delta` reports `live_removed` and stays counter-free;
   the OR_ADD and OR_REMOVE mutate closures charge it under the key's writer, beside the
   tombstone-bytes charge; `REMOVE` and LWW `PUT` subtract the old `OrMap` value `remove` / `put`

@@ -1964,11 +1964,12 @@ fn tg_or_003_ac7b_an_or_delta_survivor_carries_the_retired_sequences_forward() {
         map: "wm".to_string(),
         key: "k".to_string(),
         operation: DelayedOp::Store {
-            value: RecordValue::OrMap {
+            value: std::sync::Arc::new(RecordValue::OrMap {
                 records: Vec::new(),
                 tombstones: Vec::new(),
-            },
+            }),
         },
+        charge: 0,
         store_time: 0,
         buffered_at: tokio::time::Instant::now(),
         sequence: 1,

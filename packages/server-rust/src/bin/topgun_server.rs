@@ -615,6 +615,8 @@ fn log_boot_summary(
         interval_ms = eviction_config.interval_ms,
         write_behind_enabled = durable_backend,
         write_behind_shutdown_timeout_ms = write_behind_config.shutdown_timeout_ms,
+        write_behind_capacity = write_behind_config.capacity,
+        write_behind_capacity_mb = write_behind_config.capacity_bytes / (1024 * 1024),
         wal_enabled = durable_backend,
         wal_dir = %write_behind_config.wal_dir.display(),
         wal_fsync_policy = ?write_behind_config.wal_fsync_policy,
@@ -2164,6 +2166,9 @@ mod tests {
     }
 
     #[test]
+    // One test per boot line, so every field's assertion stays beside the
+    // others and none can be dropped without the rest noticing.
+    #[allow(clippy::too_many_lines)]
     fn the_boot_summary_carries_the_effective_stall_bound_and_delta_framing_switch() {
         let captured = CapturedLog::default();
         let writer = captured.clone();
@@ -2176,6 +2181,8 @@ mod tests {
         let write_behind_config = WriteBehindConfig {
             wal_watermark_stall_bound_ms: 42_123,
             or_delta_wal: false,
+            capacity: 7_777,
+            capacity_bytes: 333 * 1024 * 1024,
             ..WriteBehindConfig::default()
         };
 
@@ -2271,6 +2278,12 @@ mod tests {
                 )),
             "the operator-facing boot line must carry the descriptor limit and the engine's \
              max_open_files; captured: {rendered}"
+        );
+        assert!(
+            rendered.contains("write_behind_capacity=7777")
+                && rendered.contains("write_behind_capacity_mb=333"),
+            "the operator-facing boot line must carry the EFFECTIVE key and byte bounds of the \
+             write-behind buffer; captured: {rendered}"
         );
         assert!(
             rendered.contains("or_delta_wal=false"),

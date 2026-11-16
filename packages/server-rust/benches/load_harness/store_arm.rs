@@ -266,6 +266,8 @@ pub struct EffectiveStoreConfig {
     pub write_delay_ms: u64,
     pub flush_interval_ms: u64,
     pub capacity: u64,
+    /// The write-behind byte budget the run used.
+    pub capacity_bytes: u64,
     pub backoff_base_ms: u64,
     pub backoff_cap_ms: u64,
     pub shutdown_timeout_ms: u64,
@@ -295,6 +297,7 @@ impl EffectiveStoreConfig {
             write_delay_ms: wb.write_delay_ms,
             flush_interval_ms: wb.flush_interval_ms,
             capacity: wb.capacity,
+            capacity_bytes: wb.capacity_bytes,
             backoff_base_ms: wb.backoff_base_ms,
             backoff_cap_ms: wb.backoff_cap_ms,
             shutdown_timeout_ms: wb.shutdown_timeout_ms,
