@@ -559,9 +559,9 @@ pub fn build_services(
     let search_observer_factory_dyn: Arc<dyn ObserverFactory> =
         Arc::clone(&search_observer_factory) as Arc<dyn ObserverFactory>;
 
-    // QueryRegistry shared between CrdtService (broadcast_query_updates) and QueryService.
-    // QueryMutationObserver is no longer in the observer chain -- CrdtService handles
-    // QUERY_UPDATE broadcast directly with writer exclusion and field projection.
+    // QueryRegistry shared between CrdtService and QueryService. Live-query delivery has
+    // one path, QueryRegistry::deliver_mutation, which CrdtService calls under the key's
+    // writer for every applied write; no mutation observer delivers QUERY_UPDATEs.
     let query_registry = Arc::new(QueryRegistry::new());
 
     // MerkleSyncManager must be created before RecordStoreFactory so the
@@ -885,8 +885,7 @@ pub fn build_services(
         Some(Arc::clone(&index_observer_factory)),
         #[cfg(feature = "datafusion")]
         None,
-    )
-    .with_hlc(Arc::clone(&hlc));
+    );
     // In cluster mode, construct a ClusterQueryCoordinator using the real
     // connection_registry and record_store_factory available here, and wire it
     // into QueryService.  Single-node startup passes None and leaves query_svc

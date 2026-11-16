@@ -20,7 +20,7 @@ use topgun_core::types::Value;
 use tower::ServiceExt;
 
 use topgun_server::network::config::ConnectionConfig;
-use topgun_server::network::connection::{ConnectionKind, ConnectionRegistry};
+use topgun_server::network::connection::{ConnectionKind, ConnectionRegistry, OutboundMessage};
 use topgun_server::service::domain::query::QueryRegistry;
 use topgun_server::service::domain::QueryService;
 use topgun_server::service::operation::{
@@ -98,7 +98,7 @@ async fn full_scan_accepts_all_records_with_monotone_hlc() {
 
     let conn_registry = Arc::new(ConnectionRegistry::new());
     let config = ConnectionConfig::default();
-    let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+    let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
     let conn_id = handle.id;
 
     let svc = Arc::new(QueryService::new(
@@ -122,12 +122,21 @@ async fn full_scan_accepts_all_records_with_monotone_hlc() {
         },
     };
     let op = Operation::QuerySubscribe { ctx, payload };
-    let resp = match svc.oneshot(op).await.unwrap() {
-        OperationResponse::Message(msg) => match *msg {
-            Message::QueryResp(resp) => resp,
-            other => panic!("expected QueryResp, got {other:?}"),
-        },
-        other => panic!("expected Message response, got {other:?}"),
+    let resp = {
+        let returned = svc.oneshot(op).await.unwrap();
+        assert!(
+            matches!(returned, OperationResponse::Empty),
+            "a live subscribe enqueues its snapshot itself"
+        );
+        match rx.try_recv() {
+            Ok(OutboundMessage::Binary(bytes)) => {
+                match rmp_serde::from_slice::<Message>(&bytes).expect("decodes") {
+                    Message::QueryResp(resp) => resp,
+                    other => panic!("expected QueryResp, got {other:?}"),
+                }
+            }
+            other => panic!("expected the enqueued snapshot, got {other:?}"),
+        }
     };
 
     // (1) COMPLETENESS — all N records with monotone HLC must be returned.

@@ -4,7 +4,7 @@
 ///
 /// AC6: Registration-gap race — a write that arrives between subscription
 /// registration and the snapshot response is NOT lost; the `DeltaBuffer` captures
-/// it and `deactivate_and_drain` replays it to the subscriber.  The public API
+/// it and `close` folds it into the snapshot (TG-LIVE-001).  The public API
 /// contract (`activate`/`route`/`is_active`) is verified at the acceptance level.
 ///
 /// AC7: Unbounded-sort + overflow rejects — `QuerySubscribe` with a sort spec but
@@ -29,7 +29,9 @@ use topgun_core::types::Value;
 use tower::ServiceExt;
 
 use topgun_server::network::config::ConnectionConfig;
-use topgun_server::network::connection::{ConnectionId, ConnectionKind, ConnectionRegistry};
+use topgun_server::network::connection::{
+    ConnectionId, ConnectionKind, ConnectionRegistry, OutboundMessage,
+};
 use topgun_server::service::domain::query::QueryRegistry;
 use topgun_server::service::domain::QueryService;
 use topgun_server::service::operation::{
@@ -84,6 +86,7 @@ fn make_svc(
 async fn run_subscribe(
     svc: Arc<QueryService>,
     conn_id: ConnectionId,
+    rx: &mut tokio::sync::mpsc::Receiver<OutboundMessage>,
     query_id: &str,
     map_name: &str,
     query: Query,
@@ -99,12 +102,21 @@ async fn run_subscribe(
         },
     };
     let op = Operation::QuerySubscribe { ctx, payload };
-    match svc.oneshot(op).await.unwrap() {
-        OperationResponse::Message(msg) => match *msg {
-            Message::QueryResp(resp) => resp,
-            other => panic!("expected QueryResp, got {other:?}"),
-        },
-        other => panic!("expected Message response, got {other:?}"),
+    {
+        let returned = svc.oneshot(op).await.unwrap();
+        assert!(
+            matches!(returned, OperationResponse::Empty),
+            "a live subscribe enqueues its snapshot itself"
+        );
+        match rx.try_recv() {
+            Ok(OutboundMessage::Binary(bytes)) => {
+                match rmp_serde::from_slice::<Message>(&bytes).expect("decodes") {
+                    Message::QueryResp(resp) => resp,
+                    other => panic!("expected QueryResp, got {other:?}"),
+                }
+            }
+            other => panic!("expected the enqueued snapshot, got {other:?}"),
+        }
     }
 }
 
@@ -152,7 +164,7 @@ async fn tiebreak_equal_sort_field_produces_deterministic_key_order() {
 
     let conn_registry = Arc::new(ConnectionRegistry::new());
     let config = ConnectionConfig::default();
-    let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+    let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
     let conn_id = handle.id;
 
     let svc = make_svc(factory, conn_registry);
@@ -171,12 +183,21 @@ async fn tiebreak_equal_sort_field_produces_deterministic_key_order() {
     let resp1 = run_subscribe(
         Arc::clone(&svc),
         conn_id,
+        &mut rx,
         "ac5-tie-1",
         map_name,
         query.clone(),
     )
     .await;
-    let resp2 = run_subscribe(Arc::clone(&svc), conn_id, "ac5-tie-2", map_name, query).await;
+    let resp2 = run_subscribe(
+        Arc::clone(&svc),
+        conn_id,
+        &mut rx,
+        "ac5-tie-2",
+        map_name,
+        query,
+    )
+    .await;
 
     // Both runs must return all N records.
     assert_eq!(
@@ -262,7 +283,7 @@ async fn tiebreak_equal_sort_field_key_ascending_regardless_of_desc_sort() {
     }
 
     let conn_registry = Arc::new(ConnectionRegistry::new());
-    let (handle, _rx) =
+    let (handle, mut rx) =
         conn_registry.register(ConnectionKind::Client, &ConnectionConfig::default());
     let conn_id = handle.id;
 
@@ -271,6 +292,7 @@ async fn tiebreak_equal_sort_field_key_ascending_regardless_of_desc_sort() {
     let resp = run_subscribe(
         svc,
         conn_id,
+        &mut rx,
         "ac5b-desc-tie",
         map_name,
         Query {
@@ -309,10 +331,10 @@ async fn tiebreak_equal_sort_field_key_ascending_regardless_of_desc_sort() {
 /// - A second `activate()` on an already-active buffer is idempotent.
 ///
 /// These observable state transitions are what the registration-gap protocol
-/// relies on: the subscription is registered first, then `activate()` opens the
-/// capture window, then the snapshot scan runs, then `deactivate_and_drain`
-/// closes the window.  Any write that arrives after `activate()` and before
-/// drain is captured and replayed.
+/// relies on: `activate()` opens the capture window, then the subscription is
+/// registered, then the snapshot scan runs, then `close` closes the window.
+/// Any write that arrives after `activate()` and before `close` is captured
+/// and folded into the snapshot.
 #[test]
 fn delta_buffer_activation_lifecycle_contract() {
     use topgun_server::query::delta_buffer::DeltaBuffer;
@@ -342,26 +364,24 @@ fn delta_buffer_activation_lifecycle_contract() {
 
 /// `route()` while INACTIVE must be silently ignored.
 ///
-/// This is critical for the registration-gap protocol: a write that arrives
-/// BEFORE `activate()` is already visible in the scan snapshot and must NOT be
-/// double-counted when the drain path replays buffered entries.  The buffer
-/// enforces this by ignoring routes outside the active window.
+/// An inactive buffer owns nothing: `route` returns `false` and the caller
+/// sends the write through the live path.
 #[test]
 fn delta_buffer_route_while_inactive_does_not_change_active_state() {
     use topgun_server::query::delta_buffer::DeltaBuffer;
 
     let buf = DeltaBuffer::new(64);
     // Route while inactive — must be a no-op that does not change is_active.
-    buf.route(
-        "silent-key",
-        rmpv::Value::String("value".into()),
-        Timestamp {
+    let record = topgun_core::LWWRecord {
+        value: Some(rmpv::Value::String("value".into())),
+        timestamp: Timestamp {
             millis: BASE_MILLIS,
             counter: 0,
             node_id: "n".to_string(),
         },
-        true,
-    );
+        ttl_ms: None,
+    };
+    assert!(!buf.route("silent-key", Some(&record), true));
 
     // The buffer must remain inactive; no side-effects from the route call.
     assert!(
@@ -375,11 +395,9 @@ fn delta_buffer_route_while_inactive_does_not_change_active_state() {
 }
 
 /// Overflow guard: once more than `capacity` distinct keys have been routed, the
-/// buffer enters a poisoned state.  The service path that calls
-/// `deactivate_and_drain` will receive `Err(())` and must send a
-/// `QUERY_SNAPSHOT_OVERFLOW` response.  We verify the externally-observable
-/// signal: the buffer remains active until the drain call (the service logic
-/// decides whether to signal overflow based on the drain result).
+/// buffer overflows.  The service path that calls `close` then answers with the
+/// snapshot and `QUERY_SNAPSHOT_OVERFLOW`.  We verify the externally-observable
+/// signal: the buffer still owns every write until it is closed.
 #[test]
 fn delta_buffer_remains_active_after_overflow_until_drain() {
     use topgun_server::query::delta_buffer::DeltaBuffer;
@@ -388,23 +406,19 @@ fn delta_buffer_remains_active_after_overflow_until_drain() {
     let buf = DeltaBuffer::new(2);
     buf.activate();
 
-    let ts_val = |ms: u64| Timestamp {
-        millis: ms,
-        counter: 0,
-        node_id: "n".to_string(),
-    };
-
-    buf.route("k1", rmpv::Value::Nil, ts_val(1), true);
-    buf.route("k2", rmpv::Value::Nil, ts_val(2), true);
+    assert!(buf.route("k1", None, false));
+    assert!(buf.route("k2", None, false));
     // Third distinct key would exceed capacity — the buffer enters overflow state.
-    buf.route("k3", rmpv::Value::Nil, ts_val(3), true);
+    assert!(
+        buf.route("k3", None, false),
+        "an overflowed buffer still owns the write"
+    );
 
-    // The buffer is still active until drain is called.  The service invokes
-    // deactivate_and_drain (pub(crate)) and receives Err(()) which triggers the
-    // QUERY_SNAPSHOT_OVERFLOW response to the subscriber.
+    // The buffer is still active until the service closes it (`close` is
+    // pub(crate)) and answers with the snapshot and QUERY_SNAPSHOT_OVERFLOW.
     assert!(
         buf.is_active(),
-        "overflowed buffer must remain active until deactivate_and_drain is called by the service"
+        "overflowed buffer must remain active until the service closes it"
     );
 }
 
@@ -434,7 +448,7 @@ async fn unbounded_sort_query_is_accepted_not_rejected() {
     ));
 
     let conn_registry = Arc::new(ConnectionRegistry::new());
-    let (handle, _rx) =
+    let (handle, mut rx) =
         conn_registry.register(ConnectionKind::Client, &ConnectionConfig::default());
     let conn_id = handle.id;
 
@@ -444,6 +458,7 @@ async fn unbounded_sort_query_is_accepted_not_rejected() {
     let resp = run_subscribe(
         svc,
         conn_id,
+        &mut rx,
         "ac7-unbounded",
         "any_map",
         Query {
@@ -480,7 +495,7 @@ async fn sort_with_limit_is_accepted() {
     ));
 
     let conn_registry = Arc::new(ConnectionRegistry::new());
-    let (handle, _rx) =
+    let (handle, mut rx) =
         conn_registry.register(ConnectionKind::Client, &ConnectionConfig::default());
     let conn_id = handle.id;
 
@@ -489,6 +504,7 @@ async fn sort_with_limit_is_accepted() {
     let resp = run_subscribe(
         svc,
         conn_id,
+        &mut rx,
         "ac7-accepted",
         "any_map",
         Query {

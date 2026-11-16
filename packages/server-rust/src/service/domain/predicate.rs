@@ -2,7 +2,8 @@
 //!
 //! Evaluates `PredicateNode` trees and legacy `where` clause filters against
 //! `rmpv::Value` record data. Used by `QueryService` for initial query evaluation
-//! and by `QueryMutationObserver` for standing query re-evaluation.
+//! and by live-query delivery (`QueryRegistry::deliver_mutation`) for standing
+//! query re-evaluation.
 
 use std::collections::HashMap;
 use std::hash::BuildHasher;

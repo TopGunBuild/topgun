@@ -24,9 +24,6 @@ use tracing::Instrument;
 use crate::network::connection::{ConnectionId, ConnectionMetadata, ConnectionRegistry};
 use crate::service::domain::journal::JournalStore;
 use crate::service::domain::key_writer::{KeyWriteToken, KeyWriterRegistry};
-use crate::service::domain::predicate::{
-    evaluate_predicate, evaluate_where, value_to_rmpv, EvalContext,
-};
 use crate::service::domain::query::QueryRegistry;
 use crate::service::operation::{
     service_names, CallerOrigin, Operation, OperationContext, OperationError, OperationResponse,
@@ -40,25 +37,6 @@ use crate::storage::{CallerProvenance, MutateOutcome, RecordStore, RecordStoreFa
 use crate::tombstone_frontier::{Epoch, PruneEpochRecord, PruneExit, PrunePassRecord};
 use crate::tombstone_frontier_impl::{TombstoneFrontier, TombstoneRef};
 use crate::traits::SchemaProvider;
-
-// ---------------------------------------------------------------------------
-// Query predicate matching
-// ---------------------------------------------------------------------------
-
-/// Evaluates whether an `rmpv::Value` matches a query's predicate or where clause.
-///
-/// Used by `broadcast_query_updates` to determine ENTER/UPDATE/LEAVE events
-/// without depending on `QueryMutationObserver`.
-fn matches_query_predicate(query: &topgun_core::messages::base::Query, data: &rmpv::Value) -> bool {
-    if let Some(pred) = &query.predicate {
-        evaluate_predicate(pred, &EvalContext::data_only(data))
-    } else if let Some(wh) = &query.r#where {
-        evaluate_where(wh, data)
-    } else {
-        // No filter: match all
-        true
-    }
-}
 
 /// Serializes a `ServerEventPayload` as `MsgPack` and sends it only to connections
 /// with active query subscriptions for the affected map, never to the writer.
@@ -963,12 +941,6 @@ impl CrdtService {
         stamp: StampPolicy,
         exclude_connection_id: Option<ConnectionId>,
     ) -> Result<(), OperationError> {
-        // Issued before the writer is taken: this can be a disk load, and its
-        // result orders nothing, so it must not extend the critical section.
-        let old_rmpv_value = self
-            .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
-            .await;
-
         #[cfg(test)]
         self.before_acquire_park.pass(&op.map_name, &op.key).await;
         let key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
@@ -986,9 +958,13 @@ impl CrdtService {
             &event_payload,
             exclude_connection_id,
         )?;
-        self.broadcast_query_updates(
-            &event_payload,
-            old_rmpv_value.as_ref(),
+        // Live-query delivery (TG-LIVE-001), under the writer so one key's
+        // writes reach every live query in the order the store applied them.
+        self.query_registry.deliver_mutation(
+            &self.connection_registry,
+            &event_payload.map_name,
+            &event_payload.key,
+            event_payload.record.as_ref(),
             exclude_connection_id,
         );
         self.record_journal(&event_payload, sanitized_ts.as_ref(), None);
@@ -1019,8 +995,9 @@ impl CrdtService {
         expected: &ExpiryExpectation,
     ) -> Result<OperationResponse, OperationError> {
         let partition_id = hash_to_partition(key);
-        // Taken before the pre-read, which may create the map's store object
-        // for itself; the re-check below must not count that object as the map.
+        // Taken before the store read under the writer below, which creates the
+        // map's store object for itself; the re-check must not count that object
+        // as the map.
         let resident = !self
             .record_store_factory
             .get_all_for_map(map_name)
@@ -1028,10 +1005,6 @@ impl CrdtService {
         if !resident && !self.map_is_stored(map_name).await? {
             return Ok(expiry_skipped("absent"));
         }
-
-        let old_rmpv_value = self
-            .read_old_value_for_queries(map_name, key, partition_id)
-            .await;
 
         #[cfg(test)]
         self.before_acquire_park.pass(map_name, key).await;
@@ -1104,7 +1077,13 @@ impl CrdtService {
                 &event_payload,
                 None,
             )?;
-            self.broadcast_query_updates(&event_payload, old_rmpv_value.as_ref(), None);
+            self.query_registry.deliver_mutation(
+                &self.connection_registry,
+                &event_payload.map_name,
+                &event_payload.key,
+                event_payload.record.as_ref(),
+                None,
+            );
             // One stamp per event, as a client remove gets, so no expiry
             // DELETE falls back to the zero stamp.
             let stamp = self.write_validator.sanitize_hlc();
@@ -1218,154 +1197,6 @@ impl CrdtService {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to serialize JOURNAL_EVENT");
-            }
-        }
-    }
-
-    /// Reads the old record value for a key before mutation, for query broadcast filtering.
-    ///
-    /// Returns `None` if no queries are active for this map, if no record exists,
-    /// or if the record is not an LWW record (OR-Map records are skipped).
-    async fn read_old_value_for_queries(
-        &self,
-        map_name: &str,
-        key: &str,
-        partition_id: u32,
-    ) -> Option<rmpv::Value> {
-        let has_queries = !self
-            .query_registry
-            .get_subscriptions_for_map(map_name)
-            .is_empty();
-        if !has_queries {
-            return None;
-        }
-
-        let store = self
-            .record_store_factory
-            .get_or_create(map_name, partition_id);
-        let old_record = store.get(key, false).await.ok().flatten()?;
-        if let RecordValue::Lww { ref value, .. } = old_record.value {
-            Some(value_to_rmpv(value))
-        } else {
-            None
-        }
-    }
-
-    /// Broadcasts `QUERY_UPDATE` messages to subscribers of queries targeting the mutated map.
-    ///
-    /// This method:
-    /// - Routes each standing subscription's mutation through its `LiveWindow`, which is the
-    ///   single authoritative top-N algorithm and returns the complete delta set (ENTER,
-    ///   displacement LEAVE, promotion ENTER, in-window UPDATE, delete LEAVE)
-    /// - Suppresses deltas for rows outside the subscription's active cursor page
-    /// - Applies field projection if the subscription has `fields`
-    /// - Skips the writing connection (writer exclusion)
-    /// - Mirrors window membership into `previous_result_keys` for `on_remove`/`on_clear`/Merkle
-    ///
-    /// The old value is no longer needed for event derivation (the window tracks prior
-    /// membership), so `_old_rmpv_value` is retained only for call-site signature stability.
-    fn broadcast_query_updates(
-        &self,
-        event_payload: &ServerEventPayload,
-        _old_rmpv_value: Option<&rmpv::Value>,
-        exclude_connection_id: Option<ConnectionId>,
-    ) {
-        let subs = self
-            .query_registry
-            .get_subscriptions_for_map(&event_payload.map_name);
-        if subs.is_empty() {
-            return;
-        }
-
-        // Extract the new value from the event payload.
-        let new_rmpv_value: Option<rmpv::Value> =
-            event_payload.record.as_ref().and_then(|r| r.value.clone());
-
-        for sub in &subs {
-            // Skip the writing connection so it does not receive its own updates.
-            if let Some(exclude_id) = exclude_connection_id {
-                if sub.connection_id == exclude_id {
-                    continue;
-                }
-            }
-
-            // The predicate result the window needs for this mutation. A delete
-            // (`new_rmpv_value == None`) is a non-match, modelled by passing `None` through.
-            let new_matches = new_rmpv_value
-                .as_ref()
-                .is_some_and(|v| matches_query_predicate(&sub.query, v));
-
-            // Single shared top-N algorithm: the window returns the COMPLETE delta set for
-            // this mutation — the new ENTER, any displacement LEAVE, any promotion ENTER, an
-            // in-window UPDATE, or a LEAVE for deletes/predicate-false rows. An empty result
-            // naturally sends nothing, so no `(false,false)` short-circuit is needed.
-            let deltas = sub.live_window.apply_mutation(
-                &event_payload.key,
-                new_rmpv_value.as_ref(),
-                new_matches,
-            );
-
-            // Decode this subscription's active page bound once (if any) so out-of-page
-            // deltas can be suppressed. `sub.query.cursor` is the only cursor state reachable
-            // from the subscription here; a row strictly before the cursor is on an earlier
-            // page the subscriber is not currently observing.
-            let page_cursor = sub
-                .query
-                .cursor
-                .as_deref()
-                .and_then(crate::query::cursor::decode_cursor);
-
-            for delta in deltas {
-                // Cursor out-of-window filter: drop deltas whose row falls outside this
-                // subscription's active page. LEAVE carries Nil (no row value to test), so it
-                // is always delivered — the subscriber must drop a row it may currently hold.
-                if let Some(ref cursor) = page_cursor {
-                    if !matches!(
-                        delta.event,
-                        topgun_core::messages::base::ChangeEventType::LEAVE
-                    ) && !crate::query::cursor::is_after_cursor(&delta.key, &delta.value, cursor)
-                    {
-                        continue;
-                    }
-                }
-
-                // Mirror window membership into `previous_result_keys`, which is still the
-                // source of truth for on_remove/on_clear/on_reset and Merkle init.
-                match delta.event {
-                    topgun_core::messages::base::ChangeEventType::ENTER => {
-                        sub.previous_result_keys.insert(delta.key.clone());
-                    }
-                    topgun_core::messages::base::ChangeEventType::LEAVE => {
-                        sub.previous_result_keys.remove(&delta.key);
-                    }
-                    topgun_core::messages::base::ChangeEventType::UPDATE => {}
-                }
-
-                // Apply field projection to ENTER/UPDATE values; LEAVE carries Nil.
-                let value = if matches!(
-                    delta.event,
-                    topgun_core::messages::base::ChangeEventType::LEAVE
-                ) {
-                    rmpv::Value::Nil
-                } else if let Some(ref fields) = sub.fields {
-                    super::query::project_fields(fields, &delta.value)
-                } else {
-                    delta.value.clone()
-                };
-
-                let payload = topgun_core::messages::client_events::QueryUpdatePayload {
-                    query_id: sub.query_id.clone(),
-                    key: delta.key.clone(),
-                    value,
-                    change_type: delta.event,
-                };
-                let msg = topgun_core::messages::Message::QueryUpdate { payload };
-                if let Ok(bytes) = rmp_serde::to_vec_named(&msg) {
-                    use crate::network::connection::OutboundMessage;
-                    if let Some(handle) = self.connection_registry.get(sub.connection_id) {
-                        let _ = handle.try_send_broadcast(OutboundMessage::Binary(bytes));
-                    }
-                }
             }
         }
     }
@@ -2714,6 +2545,8 @@ impl CrdtService {
 mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Weak};
+
+    use crate::service::domain::predicate::value_to_rmpv;
 
     use metrics_exporter_prometheus::PrometheusBuilder;
     use parking_lot::Mutex;
@@ -5181,7 +5014,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // broadcast_query_updates writer exclusion test
+    // Live-query delivery: writer exclusion and projection
     // ---------------------------------------------------------------------------
 
     /// Helper: drain all QUERY_UPDATE messages from a connection receiver.
@@ -5208,9 +5041,9 @@ mod tests {
     }
 
     /// AC3: QUERY_UPDATE is NOT sent to the connection that originated the write.
-    /// This tests broadcast_query_updates() writer exclusion + field projection.
+    /// This tests `QueryRegistry::deliver_mutation`'s writer exclusion + field projection.
     #[tokio::test]
-    async fn broadcast_query_updates_writer_exclusion_and_projection() {
+    async fn deliver_mutation_excludes_the_writer_and_projects() {
         let (svc, conn_registry, query_registry) = make_broadcast_test_setup();
         let config = crate::network::config::ConnectionConfig::default();
 
