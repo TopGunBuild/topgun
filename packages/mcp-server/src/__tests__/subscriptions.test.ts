@@ -51,10 +51,12 @@ describe('SubscriptionRegistry.start filter mapping', () => {
   });
 
   it('treats QueryFilter option names in the filter as field names', async () => {
-    const result = await registry.start('tasks', { limit: 5, groupBy: ['x'] }, 60_000);
+    const filter = { where: { a: 1 }, limit: 5, sort: { a: 'asc' }, groupBy: ['x'] };
+    const result = await registry.start('tasks', filter, 60_000);
 
     expect(result.ok).toBe(true);
-    expect(recorded).toEqual([{ where: { limit: 5, groupBy: ['x'] } }]);
+    expect(recorded).toEqual([{ where: filter }]);
+    expect(Object.keys(recorded[0] as object)).toEqual(['where']);
   });
 });
 
