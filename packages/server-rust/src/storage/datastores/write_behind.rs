@@ -5891,7 +5891,9 @@ impl MapDataStore for WriteBehindDataStore {
         // The memory this write adds to the buffer. No bound is decided here:
         // the caller admitted the write before its mutation (`admit_value`,
         // `admit_in_place`), and deciding it again now would refuse only the
-        // acknowledgement of a change that has already happened.
+        // acknowledgement of a change that has already happened. For a value
+        // this computes the same charge `admit_value` computed from the same
+        // arguments, a second walk of the value.
         let charge = charge_of(&src, key);
 
         let partition_id = partition_for(map, key);

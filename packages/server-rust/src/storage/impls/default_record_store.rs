@@ -642,8 +642,7 @@ impl RecordStore for DefaultRecordStore {
         provenance: CallerProvenance,
     ) -> anyhow::Result<()> {
         self.refuse_foreign_token("put_backup", writer, key)?;
-        // Durable first, as in `put`: a refusal leaves memory and observers
-        // as they were.
+        // Durable first: a refusal leaves memory and observers as they were.
         if matches!(
             provenance,
             CallerProvenance::Client | CallerProvenance::CrdtMerge

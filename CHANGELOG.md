@@ -140,17 +140,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     store failed or began shutting down, its tenant was being closed, or its write-ahead-log append
     failed — still leaves its change in memory, visible to reads and subscribers (TODO-992).
   - **Measured.** Measured on Linux (Hetzner ccx33, 8 vCPU AMD EPYC-Milan) with the in-process
-    open-loop load harness on RocksDB, at the default bounds, values of 0 bytes, three runs per arm
-    against the release before it: at 2·10⁴ and at 4·10⁴ new keys/s this release acknowledged the
-    offered rate with no refusal in 3 of 3 runs each, while at 4·10⁴/s the release before it reached
-    its 10 000-key bound and refused writes in 4 of 6 runs. At 4·10⁴/s its service latency was p50
-    1.63–1.71 ms and p99 12.98–13.92 ms, against 1.72–1.92 ms and 13.69–14.50 ms in the two runs of
-    the release before it that refused nothing. With 4 KiB values at 10⁴/s (key bound off) the
-    buffered charge (the structural estimate, not heap bytes) peaked at 18.1 MB, with 64 KiB values at 10³/s at 9.6 MB; the byte bound refused
-    nothing at the default budget. Throughput smoke (median of three, 50 connections, 10 s):
-    fire-and-wait 9 536 ops/s against 9 526, fire-and-forget 503 076 against 511 550. Not shown:
-    that the key bound is never reached at 4·10⁴/s (peak 5 916 of 10 000 keys in three runs), any
-    figure at 8·10⁴/s (the load generator was the limit), or a general throughput gain.
+    open-loop load harness on RocksDB, at the default bounds, values of 0 bytes, three runs of this
+    release against six of the release before it: at 2·10⁴ and at 4·10⁴ new keys/s both acknowledged
+    the offered rate with no refusal in every run, and at 4·10⁴/s the service latency of this
+    release was p50 1.12–1.15 ms and p99 9.37–11.06 ms, against 1.13–1.16 ms and 9.93–11.12 ms. No
+    throughput or latency difference between the releases is claimed: in an earlier series on the
+    same host class the release before it reached its 10 000-key bound at 4·10⁴/s and refused writes
+    in 4 of 6 runs, in this one in none, and the latencies of both releases were about 0.5 ms lower
+    in this series. With 4 KiB values at 10⁴/s (key bound off) the buffered charge (the structural
+    estimate, not heap bytes) peaked at 4.7–49.1 MB in three runs, with 64 KiB values at 10³/s at
+    7.8–9.6 MB; the byte bound refused nothing at the default budget. Throughput smoke (median of
+    three, 50 connections, 10 s): fire-and-wait 9 542 ops/s against 9 553, fire-and-forget 534 080
+    against 540 334. Not shown: that the key bound is never reached at 4·10⁴/s (peak 4 456 of 10 000
+    keys in three runs), any figure at 8·10⁴/s (the load generator was the limit), a throughput
+    gain, or a latency difference between the releases.
   - **Metrics.** `topgun_write_behind_capacity_refusals_total` carries `bound="keys"|"bytes"`,
     both at 0 from the first scrape; the new gauge `topgun_write_behind_buffered_bytes` is the
     count the byte bound uses. Both depth gauges and the head-age gauge are set at the end of a
