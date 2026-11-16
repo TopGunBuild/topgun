@@ -8,10 +8,47 @@
  */
 
 import { evaluatePredicate } from '@topgunbuild/core';
+import type { QueryRespPayload } from '@topgunbuild/core';
 import { logger } from '../utils/logger';
+import { QueryError } from '../errors/QueryError';
+import type { QueryErrorCode } from '../errors/QueryError';
 import type { QueryHandle, QueryFilter } from '../QueryHandle';
 import type { HybridQueryHandle, HybridQueryFilter } from '../HybridQueryHandle';
 import type { IQueryManager, QueryManagerConfig } from './types';
+
+const SNAPSHOT_OVERFLOW = 'QUERY_SNAPSHOT_OVERFLOW';
+
+/** Resubscribes a live handle may send after snapshot overflows, per subscription chain. */
+const MAX_OVERFLOW_RESUBSCRIBES = 3;
+
+/** Delay before the first resubscribe; each later one waits four times longer. */
+const OVERFLOW_RESUBSCRIBE_BASE_MS = 250;
+
+const KNOWN_QUERY_ERROR_CODES: ReadonlySet<string> = new Set<QueryErrorCode>([
+  'QUERY_LIVE_AGGREGATE_UNSUPPORTED',
+  'QUERY_SNAPSHOT_OVERFLOW',
+  'QUERY_FAILED',
+]);
+
+/**
+ * Per-handle error bookkeeping. A subscription chain starts with a handle's
+ * first QUERY_SUB on a connection or with the one resubscribeAll sends; the
+ * overflow resubscribes below belong to the chain they were sent in.
+ */
+interface QueryErrorState {
+  /** Incremented at every chain start; never reset, so "a later chain" stays comparable. */
+  chain: number;
+  /** Snapshot overflows seen in the current chain. */
+  overflows: number;
+  timer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * How the handle's current error was raised: `overflow` when the resubscribe
+   * bound ran out (cleared at the next chain start), `terminal` for any other
+   * error response (cleared by a clean response in a later chain).
+   */
+  errorKind: 'overflow' | 'terminal' | null;
+  errorChain: number;
+}
 
 /**
  * QueryManager handles all query-related operations for SyncEngine.
@@ -27,6 +64,11 @@ export class QueryManager implements IQueryManager {
   /** Hybrid queries with FTS support (single source of truth) */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased in the manager registry
   private hybridQueries: Map<string, HybridQueryHandle<any>> = new Map();
+
+  // Keyed by the handle so the chain number and the error kind live as long as
+  // the handle does, across unsubscribe/subscribe cycles.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased in the manager registry
+  private errorStates: WeakMap<QueryHandle<any>, QueryErrorState> = new WeakMap();
 
   constructor(config: QueryManagerConfig) {
     this.config = config;
@@ -72,6 +114,7 @@ export class QueryManager implements IQueryManager {
   public subscribeToQuery(query: QueryHandle<any>): void {
     this.queries.set(query.id, query);
     if (this.config.isAuthenticated()) {
+      this.startChain(query);
       this.sendQuerySubscription(query);
     }
   }
@@ -81,6 +124,14 @@ export class QueryManager implements IQueryManager {
    * Removes from Map and sends unsubscription to server if authenticated.
    */
   public unsubscribeFromQuery(queryId: string): void {
+    const query = this.queries.get(queryId);
+    if (query) {
+      const state = this.errorStates.get(query);
+      if (state) {
+        this.cancelTimer(state);
+        state.overflows = 0;
+      }
+    }
     this.queries.delete(queryId);
     if (this.config.isAuthenticated()) {
       this.config.sendMessage({
@@ -117,6 +168,121 @@ export class QueryManager implements IQueryManager {
         ...(query.isSnapshotOnly() ? { snapshotOnly: true } : {}),
       },
     });
+  }
+
+  /**
+   * Route a QUERY_RESP to its handle. An error response never reaches the
+   * rows: a snapshot overflow on a live handle resubscribes (at most three
+   * times per chain, with backoff), anything else raises a QueryError.
+   */
+  public handleQueryResp(payload: QueryRespPayload): void {
+    const query = this.queries.get(payload.queryId);
+    if (!query) return;
+
+    if (payload.error !== undefined || payload.code !== undefined) {
+      this.handleQueryError(query, payload.error, payload.code);
+      return;
+    }
+
+    const { results, nextCursor, hasMore, cursorStatus, merkleRootHash } = payload;
+    query.onResult(results, 'server', merkleRootHash);
+    query.updatePaginationInfo({ nextCursor, hasMore, cursorStatus });
+
+    // A refusal carries no snapshot, so a clean answer in a later chain than the
+    // refused one means the server now serves the query.
+    const state = this.errorStates.get(query);
+    if (state && state.errorKind === 'terminal' && state.errorChain < state.chain) {
+      state.errorKind = null;
+      query.clearServerError();
+    }
+  }
+
+  /** Cancel every pending resubscribe timer. */
+  public close(): void {
+    for (const query of this.queries.values()) {
+      const state = this.errorStates.get(query);
+      if (state) this.cancelTimer(state);
+    }
+  }
+
+  private handleQueryError(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased at the routing layer
+    query: QueryHandle<any>,
+    error: string | undefined,
+    code: string | undefined,
+  ): void {
+    const state = this.errorState(query);
+    const queryError = new QueryError(
+      `${code ?? 'QUERY_FAILED'}: ${error ?? ''}`,
+      code !== undefined && KNOWN_QUERY_ERROR_CODES.has(code)
+        ? (code as QueryErrorCode)
+        : 'QUERY_FAILED',
+      query.getMapName(),
+    );
+
+    // A one-shot handle builds no delta buffer, so an overflow there is not
+    // recoverable by resubscribing; it is terminal like any other code.
+    if (code !== SNAPSHOT_OVERFLOW || query.isSnapshotOnly()) {
+      this.cancelTimer(state);
+      state.errorKind = 'terminal';
+      state.errorChain = state.chain;
+      query.setServerError(queryError);
+      return;
+    }
+
+    if (state.overflows >= MAX_OVERFLOW_RESUBSCRIBES) {
+      this.cancelTimer(state);
+      state.errorKind = 'overflow';
+      query.setServerError(queryError);
+      return;
+    }
+
+    state.overflows += 1;
+    if (state.timer !== undefined) return;
+    // Full jitter spreads the retries of many clients after a reconnect storm.
+    const delay =
+      OVERFLOW_RESUBSCRIBE_BASE_MS * 4 ** (state.overflows - 1) * (0.5 + 0.5 * Math.random());
+    state.timer = setTimeout(() => {
+      state.timer = undefined;
+      // Offline: the next resubscribeAll starts a new chain instead.
+      if (this.config.isAuthenticated()) {
+        this.sendQuerySubscription(query);
+      }
+    }, delay);
+  }
+
+  /**
+   * Start a subscription chain: the overflow bound resets and an overflow
+   * error clears. A terminal error stays until a clean response in this or a
+   * later chain clears it.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased at the routing layer
+  private startChain(query: QueryHandle<any>): void {
+    const state = this.errorState(query);
+    this.cancelTimer(state);
+    state.overflows = 0;
+    state.chain += 1;
+    if (state.errorKind === 'overflow') {
+      state.errorKind = null;
+      query.clearServerError();
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased at the routing layer
+  private errorState(query: QueryHandle<any>): QueryErrorState {
+    let state = this.errorStates.get(query);
+    if (!state) {
+      state = { chain: 0, overflows: 0, timer: undefined, errorKind: null, errorChain: 0 };
+      this.errorStates.set(query, state);
+    }
+    return state;
+  }
+
+  private cancelTimer(state: QueryErrorState): void {
+    if (state.timer !== undefined) {
+      clearTimeout(state.timer);
+      state.timer = undefined;
+    }
   }
 
   // ============================================
@@ -392,6 +558,7 @@ export class QueryManager implements IQueryManager {
 
     // Re-subscribe standard queries
     for (const query of this.queries.values()) {
+      this.startChain(query);
       this.sendQuerySubscription(query);
 
       // Delta reconnect for field-projected queries: send QUERY_SYNC_INIT when we have
