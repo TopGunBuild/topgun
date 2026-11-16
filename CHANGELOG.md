@@ -20,9 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `QUERY_RESP` that carries `error` / `code` as an empty result set: a live query's rows
   disappeared and every `onDelta` listener saw a `remove` per row.
   - The rows are kept. On `QUERY_SNAPSHOT_OVERFLOW` a live query resubscribes on its own, at most
-    three times per subscription, after about 250 ms, 1 s and 4 s with random jitter; a fourth
-    overflow, or any other error code, is raised as a `QueryError` on the handle:
-    `QueryHandle.getError()` and `QueryHandle.onError(listener)`. `QueryErrorCode` gains
+    three times per subscription, after at most 250 ms, 1 s and 4 s (each scaled by a random
+    factor between 0.5 and 1); a fourth overflow, or any other error code, is raised as a
+    `QueryError` on the handle: `QueryHandle.getError()` and `QueryHandle.onError(listener)`.
+    `QueryErrorCode` gains
     `QUERY_SNAPSHOT_OVERFLOW` and `QUERY_FAILED` (a code this client does not know).
   - `queryOnce()`, `queryOncePaged()` and `loadMore()` reject with the `QueryError` instead of
     resolving to an empty result; `loadMore()` also unsubscribes its page query on that rejection.
