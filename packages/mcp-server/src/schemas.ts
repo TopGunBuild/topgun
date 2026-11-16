@@ -7,18 +7,23 @@
 
 import { z } from 'zod';
 
+/** The meaning of a tool's `filter`, shared so `topgun_query` and `topgun_subscribe` say the same thing. */
+export const FILTER_DESCRIPTION =
+  'Field equality filter as key-value pairs: a record matches when every listed field equals the given value. ' +
+  'Example: { "status": "active", "priority": "high" }. A value is compared as a whole; an object such as ' +
+  '{ "gt": 5 } is not read as an operator.';
+
+const SUBSCRIBE_FILTER_DESCRIPTION =
+  FILTER_DESCRIPTION +
+  ' Only changes to matching records are reported; a record that stops matching is reported as a remove.';
+
 // ============================================
 // Query Tool Schema
 // ============================================
 
 export const QueryArgsSchema = z.object({
   map: z.string().describe("Name of the map to query (e.g., 'tasks', 'users', 'products')"),
-  filter: z
-    .record(z.string(), z.unknown())
-    .optional()
-    .describe(
-      'Filter criteria as key-value pairs. Example: { "status": "active", "priority": "high" }',
-    ),
+  filter: z.record(z.string(), z.unknown()).optional().describe(FILTER_DESCRIPTION),
   sort: z
     .object({
       field: z.string().describe('Field name to sort by'),
@@ -101,10 +106,7 @@ export const SubscribeArgsSchema = z.object({
         "subscription; 'list' shows active subscriptions.",
     ),
   map: z.string().optional().describe("Name of the map to watch (required for action 'start')"),
-  filter: z
-    .record(z.string(), z.unknown())
-    .optional()
-    .describe('Filter criteria - only report changes to records matching these conditions'),
+  filter: z.record(z.string(), z.unknown()).optional().describe(SUBSCRIBE_FILTER_DESCRIPTION),
   subscriptionId: z
     .string()
     .optional()
@@ -183,8 +185,7 @@ export const toolSchemas = {
       },
       filter: {
         type: 'object',
-        description:
-          'Filter criteria as key-value pairs. Example: { "status": "active", "priority": "high" }',
+        description: FILTER_DESCRIPTION,
         additionalProperties: true,
       },
       sort: {
@@ -284,7 +285,7 @@ export const toolSchemas = {
       },
       filter: {
         type: 'object',
-        description: 'Filter criteria - only report changes to records matching these conditions',
+        description: SUBSCRIBE_FILTER_DESCRIPTION,
         additionalProperties: true,
       },
       subscriptionId: {
