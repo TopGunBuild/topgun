@@ -23,8 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     three times per subscription, after at most 250 ms, 1 s and 4 s (each scaled by a random
     factor between 0.5 and 1); a fourth overflow, or any other error code, is raised as a
     `QueryError` on the handle: `QueryHandle.getError()` and `QueryHandle.onError(listener)`.
-    `QueryErrorCode` gains
-    `QUERY_SNAPSHOT_OVERFLOW` and `QUERY_FAILED` (a code this client does not know).
+    `QueryErrorCode` gains `QUERY_SNAPSHOT_OVERFLOW` and `QUERY_FAILED` (a code this client does not know).
   - `queryOnce()`, `queryOncePaged()` and `loadMore()` reject with the `QueryError` instead of
     resolving to an empty result; `loadMore()` also unsubscribes its page query on that rejection.
   - `useQuery` returns the error in `error`, keeps `data`, and reports `loading: false` while the

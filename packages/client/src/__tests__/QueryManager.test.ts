@@ -692,6 +692,58 @@ describe('QueryManager error QUERY_RESP routing', () => {
       jest.advanceTimersByTime(60_000);
       expect(querySubs(handle)).toBe(before + 1);
     });
+
+    test('a second subscribeToQuery without unsubscribe (StrictMode) with a pending timer: one new QUERY_SUB', () => {
+      const handle = liveHandleWithRows();
+      overflow(handle);
+      const before = querySubs(handle);
+      manager.subscribeToQuery(handle);
+      jest.advanceTimersByTime(60_000);
+      expect(querySubs(handle)).toBe(before + 1);
+    });
+  });
+
+  /** How a promise stands once pending microtasks have run: a bounded check, never a hang. */
+  async function outcome(promise: Promise<unknown>): Promise<'resolved' | 'rejected' | 'pending'> {
+    let state: 'resolved' | 'rejected' | 'pending' = 'pending';
+    promise.then(
+      () => (state = 'resolved'),
+      () => (state = 'rejected'),
+    );
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    return state;
+  }
+
+  describe('whenSettled on a settled handle whose error clears', () => {
+    test('overflow error cleared by resubscribeAll: whenSettled resolves', async () => {
+      const handle = liveHandleWithRows();
+      exhaust(handle);
+      manager.resubscribeAll();
+      expect(handle.getError()).toBeNull();
+      expect(await outcome(handle.whenSettled())).toBe('resolved');
+    });
+
+    test("refusal cleared by a later chain's clean answer: whenSettled resolves", async () => {
+      const handle = liveHandleWithRows();
+      refuse(handle);
+      manager.resubscribeAll();
+      clean(handle);
+      expect(handle.getError()).toBeNull();
+      expect(await outcome(handle.whenSettled())).toBe('resolved');
+    });
+
+    test('an error before settlement, settled in the same chain, then cleared: whenSettled resolves', async () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'm', {});
+      manager.subscribeToQuery(handle);
+      refuse(handle);
+      clean(handle);
+      expect(handle.isSettled).toBe(true);
+      expect(await outcome(handle.whenSettled())).toBe('rejected');
+      manager.resubscribeAll();
+      clean(handle);
+      expect(handle.getError()).toBeNull();
+      expect(await outcome(handle.whenSettled())).toBe('resolved');
+    });
   });
 
   describe('whenSettled after an error clears before settlement', () => {
