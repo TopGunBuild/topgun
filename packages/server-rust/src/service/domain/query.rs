@@ -4744,8 +4744,6 @@ mod tests {
     /// (i)/(ii) here and state that cost for old clients.
     #[tokio::test(flavor = "multi_thread")]
     async fn overflow_frame_precedes_the_snapshot_and_the_subscription_stays() {
-        use crate::storage::record_store::CallerProvenance;
-
         const QUERY_ID: &str = "pin-overflow";
         let map_name = "pin-map";
         let registry = Arc::new(QueryRegistry::new());
@@ -4762,7 +4760,7 @@ mod tests {
                         timestamp: make_timestamp(),
                         ttl_ms: None,
                     },
-                    CallerProvenance::Client,
+                    crate::storage::record_store::CallerProvenance::Client,
                 )
                 .await
                 .expect("seed put");
@@ -4817,12 +4815,10 @@ mod tests {
         let returned = snapshot_of(task.await.expect("join").expect("subscribe"));
 
         // (i) the overflow frame was already on the connection when the handler returned.
-        let frame = match rx.try_recv().expect("the overflow frame is enqueued") {
-            OutboundMessage::Binary(bytes) => {
-                rmp_serde::from_slice::<Message>(&bytes).expect("decode")
-            }
-            OutboundMessage::Close(_) => panic!("expected a Binary frame"),
+        let Ok(OutboundMessage::Binary(bytes)) = rx.try_recv() else {
+            panic!("expected the overflow frame, enqueued as a Binary frame");
         };
+        let frame = rmp_serde::from_slice::<Message>(&bytes).expect("decode");
         let Message::QueryResp(overflow) = frame else {
             panic!("expected a QueryResp overflow frame, got {frame:?}");
         };

@@ -260,7 +260,10 @@ fn query_resp_error_decodes_error_and_code() {
     let Message::QueryResp(resp) = msg else {
         panic!("expected QueryResp message");
     };
-    assert_eq!(resp.payload.code.as_deref(), Some("QUERY_SNAPSHOT_OVERFLOW"));
+    assert_eq!(
+        resp.payload.code.as_deref(),
+        Some("QUERY_SNAPSHOT_OVERFLOW")
+    );
     assert!(resp.payload.error.is_some());
     assert!(resp.payload.results.is_empty());
 }
