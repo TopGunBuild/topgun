@@ -682,7 +682,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   (AC-2a: `get` adopts, the flush releases the queue and staging references, the cell is freed
   after a further eviction). (b), un-framed mutations (AC-2e):
   `storage::datastores::write_behind::prefix_watermark_proptest::an_unframed_mutation_after_a_pre_frame_append_error_is_unacked_and_idempotent`,
-  `::an_unframed_mutation_rejected_by_the_shutdown_gate_is_unacked_and_idempotent`,
+  `::a_write_after_the_shutdown_flag_is_refused_before_its_mutation` (the shutdown flag is
+  decided at the admission now, so such a write leaves no un-framed mutation; one the flag
+  overtakes after the admission is the case of the pre-frame append error above, TODO-992),
   `::an_unframed_or_remove_is_unacked_and_idempotent`,
   `::a_cancelled_append_never_lets_the_watermark_pass_its_sequence`,
   `::a_capacity_refused_in_place_op_is_not_applied_and_the_next_write_through_persists` (a
@@ -1765,13 +1767,14 @@ weaker than a test.
 - **The order of two failures in one process** (the first record wins) is pinned by reading;
   no test drives a broken store and a panic in the same process.
 
-### TG-WB-011: A write that adds a key or value bytes to the write-behind buffer is refused, temporarily, while the buffer is at its key or byte bound; an in-place write is refused before its mutation; acknowledgement never waits for the store engine
+### TG-WB-011: A write that adds a key or value bytes to the write-behind buffer is refused, temporarily, while the buffer is at its key or byte bound, decided before the write changes anything; acknowledgement never waits for the store engine
 
-- **Scope:** `WriteBehindDataStore` — `admit_write` (the one gate of `add`, `remove` and
-  `remove_all`) and `admit_in_place` — and `DefaultRecordStore`: `put` and `remove`, which reach
-  the data store before the engine, and `update_in_place`, which calls
-  `MapDataStore::admit_in_place` for `Client` and `CrdtMerge` provenance before its first engine
-  call.
+- **Scope:** `WriteBehindDataStore` — `admit_write` (the one bound decision of `admit_value`,
+  `admit_in_place`, `remove` and `remove_all`; `add` calls `admit_value`, `add_with_witness` decides
+  no bound) — and `DefaultRecordStore`: `put`, which calls `MapDataStore::admit_value`, and
+  `update_in_place`, which calls `MapDataStore::admit_in_place`, both for `Client` and `CrdtMerge`
+  provenance before the first engine call, and `remove`, which reaches the data store before the
+  engine.
 - **Statement:** with `B = capacity_bytes > 0` (`TOPGUN_WRITEBEHIND_CAPACITY_MB`), while the
   buffered bytes are at or above `B`:
   - a plain write (`WriteSource::Value`) whose charge is above 0 is refused with `Write-behind byte
@@ -1779,20 +1782,23 @@ weaker than a test.
     rewrite that does not grow, whether the key's entry is queued or held by a pass;
   - every in-place write of `Client` or `CrdtMerge` provenance is refused before the engine is
     called, so the cell, its cost, the engine slot, the WAL (no sequence assigned) and both
-    counters are as before; this pre-check applies the key rule too, and the write-through after
-    an admitted mutation is refused by neither bound;
+    counters are as before; this pre-check applies the key rule too;
+  - each write is bounded exactly once, before its own mutation: a `put` of `Client` or
+    `CrdtMerge` provenance by `admit_value` before the engine and the observers, an in-place write
+    by `admit_in_place`, a direct `add` (cursor and credential rows) by `admit_value` before its
+    queue insert, a remove and a `remove_all` by `admit_write` before theirs; the write-through of
+    an admitted `put` or in-place write (`add_with_witness`) decides no bound, so it is not refused
+    at a bound after its mutation;
   - a remove, a `remove_all` and an LWW write of a top-level `null` (charge 0) are never refused
     by the byte bound; the key bound is unchanged and can still refuse a remove of a key that is
     not buffered once the buffer is at its key capacity, as a write of any new key;
   - every refusal is a temporary error (the transient `internal`, 500), counted once under
     `bound="keys"` or `bound="bytes"`, the key bound checked first;
-  - **a refused write leaves no trace** at the record store: a `put`, `remove` or in-place write
-    of `Client` or `CrdtMerge` provenance refused at either bound leaves the engine (the key's
-    value, residency, dirty flag and write token), the mutation observers (no call), the WAL and
-    both counters as they were, so no read and no subscriber sees a write that was not
-    acknowledged. `put` reads the record it replaces only after the data store accepted the
-    write, so a reader that loaded the staged value meanwhile is replaced and reported as an
-    update.
+  - **a write refused at a bound leaves no trace** at the record store: a `put`, `remove` or
+    in-place write of `Client` or `CrdtMerge` provenance refused at either bound leaves the engine
+    (the key's value, residency, dirty flag and write token), the mutation observers (no call), the
+    WAL and both counters as they were, so no read and no subscriber sees a write that was not
+    acknowledged. This covers bound refusals only (see "Not claimed").
   No write call waits for the store engine: a flush commit blocked inside the store reaches
   writers only as refusals at these bounds, and once it returns both counters fall.
 - **Mechanical predicate:** under a paused clock with a flush pass parked inside its commit,
@@ -1800,9 +1806,10 @@ weaker than a test.
   refused under `bound="keys"`, a growing plain value under `bound="bytes"`, a non-growing
   rewrite of a queued or held key and a remove of a buffered key are admitted; after the release
   both counters fall and a new key is admitted.
-- **Maintaining code:** `write_behind.rs` — `admit_write`, `admit_in_place`, `charge_of`,
-  `stage` (the slot carries its write's charge); `default_record_store.rs` — `put` (the data
-  store's `add` before the engine and the observers), `remove` (its delete staged first), and
+- **Maintaining code:** `write_behind.rs` — `admit_write`, `admit_value`, `admit_in_place`,
+  `add` (admits, then `add_with_witness`, which decides no bound), `charge_of`, `stage` (the slot
+  carries its write's charge); `default_record_store.rs` — `put` (`admit_value` before the engine
+  and the observers, the write-through after them), `remove` (its delete staged first), and
   `admit_in_place_write`, called from `update_in_place` after `refuse_foreign_token`.
 - **Enforcing test:** `write_behind.rs::a_commit_blocked_in_the_store_reaches_writers_as_bound_refusals`
   and `prefix_watermark_proptest.rs::an_in_place_write_over_the_byte_budget_is_refused_before_its_mutation`.
@@ -1825,7 +1832,8 @@ weaker than a test.
 | `an_in_place_write_over_the_byte_budget_is_refused_before_its_mutation`, `an_in_place_write_of_backup_provenance_is_not_pre_checked` (`prefix_watermark_proptest.rs`) | the in-place rule on a record store over the write-behind store: OR add and remove refused with the cell, cost, WAL and counters unchanged; `Backup` not pre-checked | CI (`cargo test`) |
 | `an_admitted_in_place_write_is_not_byte_refused_after_its_mutation`, `an_admitted_in_place_write_is_not_key_refused_after_its_mutation` (`write_behind.rs`) | an in-place write admitted by the pre-check is acked although the budget, or the key capacity, was reached before its write-through | CI (`cargo test`) |
 | `a_put_refused_at_the_byte_bound_leaves_no_trace`, `a_write_refused_at_the_key_bound_leaves_no_trace` (`prefix_watermark_proptest.rs`) | a refused write leaves no trace, with a recording observer: a growing rewrite and a new key at the byte bound; a put of a resident and of a new key, a remove and an in-place write at the key bound — engine value, residency, dirty flag and token, observer calls, last WAL sequence and both counters unchanged | CI (`cargo test`) |
-| `a_reader_that_loads_the_staged_value_during_a_put_is_replaced_by_the_put` (`prefix_watermark_proptest.rs`) | a reader loads the staged value while `put` awaits the data store; the put replaces it with its own record (clean, its token) and reports an update | CI (`cargo test`) |
+| `a_write_after_the_shutdown_flag_is_refused_before_its_mutation` (`prefix_watermark_proptest.rs`) | not a bound: a put and an in-place write of a store already shutting down are refused at their admission, the engine and the last WAL sequence unchanged, and the drain persists nothing of them | CI (`cargo test`) |
+| `an_admitted_put_is_not_refused_at_a_bound_by_its_write_through` (`prefix_watermark_proptest.rs`) | a put admitted below both bounds is acked, queued and framed although an observer raised both counters to their bounds between its admission and its write-through | CI (`cargo test`) |
 | `a_push_diff_over_the_byte_budget_merges_up_to_the_refused_entry` (`prefix_watermark_proptest.rs`) | a client's OR push diff over the budget: the entry whose write-through reaches the budget is merged and buffered, the next is refused and it and the rest are not merged; the same push after the drain merges all | CI (`cargo test`) |
 
 **Not claimed.**
@@ -1838,11 +1846,18 @@ weaker than a test.
   prune logs one `WARN` per tombstone ref per pass and counts in
   `topgun_or_prune_restored_write_error_total`, the series a store write error also uses; it is
   retried by a later pass, and a refused client write is retried by the client.
-- **No trace after a refusal that is not a bound refusal (TODO-992).** "A refused write leaves no
-  trace" covers the two bounds only. Inside the write-through of an admitted in-place write, the
-  write-behind store can still refuse because it has failed or is shutting down, or because the
-  write's tenant is being closed; such a refusal comes after the in-place mutation, which stays in
-  the engine.
+- **No trace after a refusal that is not a bound refusal (TODO-992).** "A write refused at a bound
+  leaves no trace" covers the two bounds only. The admission of a `put` and of an in-place write
+  also refuses a store that has failed or is shutting down and a map whose tenant is closed, before
+  the mutation. Three refusals can still come from the write-through, after the mutation: the
+  store failing or starting its shutdown, or the map's tenant being closed, between the admission
+  and the write-through — another task changes either, and only a lock held across the mutation,
+  which a shutdown or a tenant drop would then wait on, could exclude it — and a WAL append that
+  fails (a stopped writer, a frame that cannot be written), which is known only once it is tried.
+  Such a write is not acknowledged and the client resends it, but its mutation stays: the engine
+  holds the new value, dirty, reads return it and subscribers, the Merkle tree and the indexes were
+  given it; it has no WAL frame, so a restart before a later write of the key stores it loses
+  it.
 - **A client's push diff** is merged up to the first refused entry; the rest waits for the
   client's next connection, which runs its Merkle walk again — nothing is lost, the client keeps
   its records. A mid-connection re-push is TODO-981.
@@ -2323,13 +2338,16 @@ weaker than a test.
   `topgun_ormap_live_census_seeded` (internal series, like `topgun_or_prune_*`).
 - **Statement:** for every state reached through `OR_ADD`, `OR_REMOVE`, the epoch prune, SYNC OR
   ingest, and a `REMOVE` or LWW `PUT` of a key whose slot is resident when the write reaches
-  memory, after its store write, `live_entries` is the number of entries over all `OrMap` slots and
-  `live_tag_bytes` the sum of their `tag.len()`, whether a slot is resident or evicted; after a
-  restart with `seeded = 1` the same holds for the recovered state. A `REMOVE` or LWW `PUT` whose
-  store write fails changes neither the slot nor the census. **Known exception (TODO-874):** a
+  memory (a `REMOVE` after its store write, a `PUT` after its admission and before its store
+  write), `live_entries` is the number of entries over all `OrMap` slots and `live_tag_bytes` the
+  sum of their `tag.len()`, whether a slot is resident or evicted; after a restart with
+  `seeded = 1` the same holds for the recovered state. A `REMOVE` whose store write fails and a
+  `PUT` refused at its admission change neither the slot nor the census. **Known exceptions:** a
   `REMOVE` or LWW `PUT` of a key whose `OrMap` slot is not resident at that moment — never loaded,
-  or evicted while the write's store write awaited — drops entries the server does not see, so the
-  census stays too high by them until the next restart re-seeds it.
+  or, for a `REMOVE`, evicted while its store write awaited — drops entries the server does not
+  see (TODO-874); a `PUT` whose write-through is refused after it reached memory (the refusals
+  `TG-WB-011` does not claim) has replaced the slot without subtracting it (TODO-992). Either way
+  the census stays too high by those entries until the next restart re-seeds it.
 - **Maintaining code:** `crdt.rs::apply_or_delta` reports `live_removed` and stays counter-free;
   the OR_ADD and OR_REMOVE mutate closures charge it under the key's writer, beside the
   tombstone-bytes charge; `REMOVE` and LWW `PUT` subtract the old `OrMap` value `remove` / `put`

@@ -131,11 +131,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     status 101. Before this, a buffer of large values could exhaust the process's memory before
     the key bound refused anything.
   - **A buffered value is held once**, shared by the queue and the read overlay, instead of twice.
-  - **A write refused at either bound is no longer visible to reads or subscribers.** A write now
-    reaches the write-behind buffer before the in-memory record and the change feed, so a refused
-    write leaves memory, subscribers, the write-ahead log and the counters as they were. Before
-    this, a write refused at the key bound had already replaced the record in memory, where reads
-    saw it and eviction could not drop it, and subscribers had been sent it.
+  - **A write refused at either bound is no longer visible to reads or subscribers.** Both bounds
+    are now decided before a write changes anything, so a write refused at a bound leaves memory,
+    subscribers, the write-ahead log and the counters as they were, and a write admitted by them is
+    not refused at a bound afterwards. Before this, a write refused at the key bound had already
+    replaced the record in memory, where reads saw it and eviction could not drop it, and
+    subscribers had been sent it. Not covered: a write refused after that decision — because the
+    store failed or began shutting down, its tenant was being closed, or its write-ahead-log append
+    failed — still leaves its change in memory, visible to reads and subscribers (TODO-992).
   - **Measured.** Measured on Linux (Hetzner ccx33, 8 vCPU AMD EPYC-Milan) with the in-process
     open-loop load harness on RocksDB, at the default bounds, values of 0 bytes, three runs per arm
     against the release before it: at 2·10⁴ and at 4·10⁴ new keys/s this release acknowledged the
