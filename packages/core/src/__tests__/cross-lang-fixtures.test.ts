@@ -11,6 +11,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { pack } from 'msgpackr';
+import { QueryRespMessageSchema } from '../schemas';
 
 // Fixture output directory (relative to repo root)
 const FIXTURES_DIR = path.resolve(__dirname, '../../../../packages/core-rust/tests/fixtures');
@@ -284,6 +285,24 @@ describe('Cross-language fixture generation', () => {
         nextCursor: 'cursor-abc',
       },
     });
+  });
+
+  test('QUERY_RESP_ERROR', () => {
+    // Built through the schema, not written as a bare literal: parse strips any key
+    // the schema does not name, so if the TS field names drifted from the Rust wire
+    // names `error`/`code`, the fixture would lose them and the Rust decode test fails.
+    writeFixture(
+      'QUERY_RESP_ERROR',
+      QueryRespMessageSchema.parse({
+        type: 'QUERY_RESP',
+        payload: {
+          queryId: 'q-overflow-1',
+          results: [],
+          error: 'Too many concurrent writes during snapshot; please resubscribe.',
+          code: 'QUERY_SNAPSHOT_OVERFLOW',
+        },
+      }),
+    );
   });
 
   test('QUERY_UPDATE', () => {

@@ -28,7 +28,7 @@ fn read_fixture(name: &str) -> Vec<u8> {
     fs::read(&path).unwrap_or_else(|e| panic!("Failed to read fixture {name}: {e}"))
 }
 
-/// All Message enum fixture names (59 fixtures -- excludes `HTTP_SYNC_REQUEST` and `HTTP_SYNC_RESPONSE` standalone types).
+/// All Message enum fixture names (63 fixtures -- excludes `HTTP_SYNC_REQUEST` and `HTTP_SYNC_RESPONSE` standalone types).
 const MESSAGE_FIXTURES: &[&str] = &[
     // Base domain
     "AUTH",
@@ -51,6 +51,7 @@ const MESSAGE_FIXTURES: &[&str] = &[
     "QUERY_UNSUB",
     "QUERY_RESP",
     "QUERY_RESP_AGG",
+    "QUERY_RESP_ERROR",
     "QUERY_UPDATE",
     // Search domain
     "SEARCH",
@@ -250,6 +251,18 @@ fn query_sub_groupby_agg_decodes_typed_aggregations() {
             },
         ]
     );
+}
+
+#[test]
+fn query_resp_error_decodes_error_and_code() {
+    let bytes = read_fixture("QUERY_RESP_ERROR");
+    let msg: Message = rmp_serde::from_slice(&bytes).expect("decode QUERY_RESP_ERROR");
+    let Message::QueryResp(resp) = msg else {
+        panic!("expected QueryResp message");
+    };
+    assert_eq!(resp.payload.code.as_deref(), Some("QUERY_SNAPSHOT_OVERFLOW"));
+    assert!(resp.payload.error.is_some());
+    assert!(resp.payload.results.is_empty());
 }
 
 #[test]

@@ -507,6 +507,25 @@ pub struct QueryService {
     ///
     /// `None` in test call sites that do not exercise the fence/drain lifecycle.
     hlc: Option<Arc<Mutex<HLC>>>,
+    #[cfg(test)]
+    /// The one hold a test may arm between a live subscribe's snapshot and its drain.
+    drain_hold: DrainHold,
+}
+
+/// Environment variable naming the sentinel file of the live-query drain hold:
+/// while a file exists at that path, a live subscribe waits between its
+/// snapshot and its drain (see `QueryService::hold_before_drain`). Read only by
+/// `fault-injection` builds.
+#[cfg(feature = "fault-injection")]
+const FAULT_QUERY_DRAIN_HOLD_FILE_ENV: &str = "TOPGUN_FAULT_QUERY_DRAIN_HOLD_FILE";
+
+/// The sentinel path of the drain hold, read from the environment once per
+/// process, as the store seams read theirs.
+#[cfg(feature = "fault-injection")]
+fn fault_query_drain_hold_path() -> Option<&'static std::path::Path> {
+    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| std::env::var_os(FAULT_QUERY_DRAIN_HOLD_FILE_ENV).map(Into::into))
+        .as_deref()
 }
 
 /// `QUERY_RESP.code` of a refused live subscription that carries a non-empty
@@ -597,6 +616,8 @@ impl QueryService {
             coordinator: None,
             linear_engine_for_tests: false,
             hlc: None,
+            #[cfg(test)]
+            drain_hold: DrainHold::default(),
         }
     }
 
@@ -1048,6 +1069,8 @@ impl QueryService {
         let Some((_, delta_buffer, fence)) = live else {
             return Ok(resp_msg);
         };
+        #[cfg(any(test, feature = "fault-injection"))]
+        self.hold_before_drain(&query_id, &map_name).await;
         match delta_buffer.deactivate_and_drain(&fence) {
             Ok(post_fence_entries) => {
                 if let Some(sub) =
@@ -1098,6 +1121,32 @@ impl QueryService {
         }
 
         Ok(resp_msg)
+    }
+
+    /// Holds a live subscribe after its snapshot is built and before its delta
+    /// buffer is drained, while a test asks for it. Writes made meanwhile are in
+    /// no snapshot and are captured by the still-active buffer, so a test can
+    /// overflow it deterministically.
+    ///
+    /// Compiled only into test and `fault-injection` builds. While it holds, it
+    /// stalls the global worker that runs the subscribe, and with it every
+    /// connection's `PING` and `SYNC_INIT`. It also runs inside the pipeline's
+    /// operation timeout (30 s by default): a hold longer than that cancels the
+    /// handler with the buffer still active and the subscription registered, so
+    /// a test keeps its hold far below it.
+    #[cfg(any(test, feature = "fault-injection"))]
+    async fn hold_before_drain(&self, query_id: &str, map_name: &str) {
+        #[cfg(test)]
+        self.drain_hold.pass(query_id).await;
+        #[cfg(feature = "fault-injection")]
+        if let Some(path) = fault_query_drain_hold_path().filter(|path| path.exists()) {
+            tracing::warn!(query_id, map_name, "fault injection: live query drain held");
+            while path.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        #[cfg(not(feature = "fault-injection"))]
+        let _ = map_name;
     }
 
     /// Sends a `QUERY_UPDATE` to a subscriber's connection.
@@ -1622,6 +1671,93 @@ pub(crate) fn project_fields(fields: &[String], record: &rmpv::Value) -> rmpv::V
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+/// The held subscribe's ends of the two signals of a hold: it sends "reached"
+/// and awaits "release".
+type DrainHoldGate = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+#[cfg(test)]
+/// At most one armed hold, for one `query_id`, between a live subscribe's
+/// snapshot and its drain. It belongs to one service, so tests running side by
+/// side in one process cannot consume each other's hold.
+#[derive(Default)]
+struct DrainHold(std::sync::Mutex<Option<(String, DrainHoldGate)>>);
+
+#[cfg(test)]
+impl DrainHold {
+    /// Holds the caller iff the hold is armed for this query id: reports
+    /// "reached", then waits until the test releases it or drops its end. The
+    /// gate is taken out of the slot, which is what makes the hold fire once.
+    async fn pass(&self, query_id: &str) {
+        let gate = {
+            let mut slot = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slot.as_ref().is_some_and(|(id, _)| id.as_str() == query_id) {
+                slot.take().map(|(_, gate)| gate)
+            } else {
+                None
+            }
+        };
+        if let Some((reached, release)) = gate {
+            let _ = reached.send(());
+            let _ = release.await;
+        }
+    }
+}
+
+#[cfg(test)]
+/// The test's side of the drain hold. Dropping it releases the held subscribe,
+/// so a failing test never leaves a task held.
+struct DrainHoldHandle {
+    reached: Option<tokio::sync::oneshot::Receiver<()>>,
+    release: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+#[cfg(test)]
+impl DrainHoldHandle {
+    /// Waits until the subscribe is held; panics after two seconds, which means
+    /// the setup never reached the hold point.
+    async fn wait_reached(&mut self) {
+        let reached = self.reached.take().expect("wait_reached called once");
+        tokio::time::timeout(std::time::Duration::from_secs(2), reached)
+            .await
+            .expect("the subscribe never reached the drain hold")
+            .expect("hold dropped before it was reached");
+    }
+
+    fn release(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+#[cfg(test)]
+impl QueryService {
+    /// Arms the hold for the next live subscribe of `query_id` on this service:
+    /// it stops after its snapshot response is built and before its delta
+    /// buffer is drained, with the buffer active.
+    fn test_hold_before_drain(&self, query_id: &str) -> DrainHoldHandle {
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self
+            .drain_hold
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((query_id.to_string(), (reached_tx, release_rx)));
+        DrainHoldHandle {
+            reached: Some(reached_rx),
+            release: Some(release_tx),
+        }
+    }
+}
 
 #[cfg(test)]
 #[allow(
@@ -4632,5 +4768,137 @@ mod tests {
         assert_eq!(a.0, b.0, "second page differs");
         assert_eq!(a.1, b.1);
         assert!(!a.0.is_empty());
+    }
+
+    /// The server contract the client's overflow handling relies on. A live
+    /// subscribe whose delta buffer overflows between its snapshot and its drain
+    /// (i) enqueues the `QUERY_SNAPSHOT_OVERFLOW` frame on the connection BEFORE
+    /// the handler returns its snapshot, (ii) still returns the snapshot, (iii)
+    /// stays registered, and (iv) a resubscribe with the same id replaces it.
+    ///
+    /// Why the order of (i)/(ii) is pinned: a client older than error routing
+    /// applies the overflow frame as an empty result and wipes its rows; today
+    /// the snapshot that follows puts them back. Reversing the order would make
+    /// that wipe stick. A server change that sends the snapshot first must flip
+    /// (i)/(ii) here and state that cost for old clients.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn overflow_frame_precedes_the_snapshot_and_the_subscription_stays() {
+        use crate::storage::record_store::CallerProvenance;
+
+        const QUERY_ID: &str = "pin-overflow";
+        let map_name = "pin-map";
+        let registry = Arc::new(QueryRegistry::new());
+        let factory = make_factory();
+        for i in 0..3 {
+            let key = format!("seed-{i}");
+            factory
+                .get_or_create(map_name, topgun_core::hash_to_partition(&key))
+                .put(
+                    &KeyWriteToken::for_test(map_name, &key),
+                    &key,
+                    RecordValue::Lww {
+                        value: Value::Int(i),
+                        timestamp: make_timestamp(),
+                        ttl_ms: None,
+                    },
+                    CallerProvenance::Client,
+                )
+                .await
+                .expect("seed put");
+        }
+
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &test_config());
+        let conn_id = handle.id;
+        let svc = Arc::new(QueryService::new(
+            registry.clone(),
+            factory,
+            conn_registry,
+            10_000,
+            None,
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
+        let subscribe = || Operation::QuerySubscribe {
+            ctx: make_ctx(Some(conn_id)),
+            payload: QuerySubMessage {
+                payload: QuerySubPayload {
+                    query_id: QUERY_ID.to_string(),
+                    map_name: map_name.to_string(),
+                    query: Query::default(),
+                    fields: None,
+                    snapshot_only: false,
+                },
+            },
+        };
+        let snapshot_of = |response: OperationResponse| match response {
+            OperationResponse::Message(msg) => match *msg {
+                Message::QueryResp(resp) => resp.payload,
+                other => panic!("expected QueryResp, got {other:?}"),
+            },
+            _ => panic!("expected a Message response"),
+        };
+
+        let mut hold = svc.test_hold_before_drain(QUERY_ID);
+        let task = tokio::spawn(Arc::clone(&svc).oneshot(subscribe()));
+        hold.wait_reached().await;
+
+        // Held after the scan with the buffer active: 4097 distinct keys overflow it.
+        let sub = registry
+            .get_subscription(map_name, conn_id, QUERY_ID)
+            .expect("the subscription is registered before the hold");
+        for i in 0..=4096 {
+            sub.delta_buffer
+                .route(&format!("w-{i}"), rmpv::Value::Nil, make_timestamp(), true);
+        }
+        assert!(rx.try_recv().is_err(), "nothing is sent before the drain");
+        hold.release();
+        let returned = snapshot_of(task.await.expect("join").expect("subscribe"));
+
+        // (i) the overflow frame was already on the connection when the handler returned.
+        let frame = match rx.try_recv().expect("the overflow frame is enqueued") {
+            OutboundMessage::Binary(bytes) => {
+                rmp_serde::from_slice::<Message>(&bytes).expect("decode")
+            }
+            OutboundMessage::Close(_) => panic!("expected a Binary frame"),
+        };
+        let Message::QueryResp(overflow) = frame else {
+            panic!("expected a QueryResp overflow frame, got {frame:?}");
+        };
+        assert_eq!(overflow.payload.query_id, QUERY_ID);
+        assert_eq!(
+            overflow.payload.code.as_deref(),
+            Some(QUERY_SNAPSHOT_OVERFLOW)
+        );
+        assert!(overflow.payload.error.is_some());
+        assert!(overflow.payload.results.is_empty());
+        assert!(rx.try_recv().is_err(), "the overflow frame is the only one");
+
+        // (ii) the returned response is the snapshot, with the seeded rows.
+        assert_eq!(returned.code, None);
+        assert_eq!(returned.error, None);
+        let mut keys: Vec<String> = returned.results.iter().map(|e| e.key.clone()).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["seed-0", "seed-1", "seed-2"]);
+
+        // (iii) the subscription is still registered.
+        assert!(registry
+            .get_subscription(map_name, conn_id, QUERY_ID)
+            .is_some());
+
+        // (iv) a resubscribe with the same id (the hold fired once) returns a
+        // snapshot and leaves exactly one registration for (connection, id).
+        let again = snapshot_of(
+            Arc::clone(&svc)
+                .oneshot(subscribe())
+                .await
+                .expect("resubscribe"),
+        );
+        assert_eq!(again.code, None);
+        assert_eq!(again.results.len(), 3);
+        assert_eq!(registry.subscription_count(), 1);
+        assert!(registry
+            .get_subscription(map_name, conn_id, QUERY_ID)
+            .is_some());
     }
 }
