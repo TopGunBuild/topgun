@@ -41,6 +41,10 @@ export const QueryRespPayloadSchema = z.object({
   hasMore: z.boolean().optional(),
   cursorStatus: CursorStatusSchema.optional(),
   merkleRootHash: z.number().int().optional(),
+  // Set only on a response that is not a result set: the server refused the
+  // query or could not deliver every change. Absent on success.
+  error: z.string().optional(),
+  code: z.string().optional(),
 });
 export type QueryRespPayload = z.infer<typeof QueryRespPayloadSchema>;
 
