@@ -532,3 +532,83 @@ describe('snapshot-only one-shot queries', () => {
     }
   });
 });
+
+describe('one-shot reads on a server error QUERY_RESP', () => {
+  /** A client whose engine double routes subscribe and unsubscribe through a real QueryManager. */
+  function makeRoutedClient(): { client: TopGunClient; sent: jest.Mock; manager: QueryManager } {
+    const { client, engine } = makeClient(SyncState.CONNECTED);
+    const sent = jest.fn(() => true);
+    const manager = new QueryManager({
+      storageAdapter: new MemoryStorageAdapter(),
+      sendMessage: sent,
+      isAuthenticated: () => true,
+    });
+    engine.subscribeToQuery.mockImplementation((handle: QueryHandle<unknown>) =>
+      manager.subscribeToQuery(handle),
+    );
+    engine.unsubscribeFromQuery.mockImplementation((queryId: string) =>
+      manager.unsubscribeFromQuery(queryId),
+    );
+    return { client, sent, manager };
+  }
+
+  function sentOfType(sent: jest.Mock, type: string): Array<{ queryId: string }> {
+    return sent.mock.calls
+      .map(([message]) => message as { type: string; payload: { queryId: string } })
+      .filter((message) => message.type === type)
+      .map((message) => message.payload);
+  }
+
+  /** Answer the one subscribed handle with an error frame. */
+  async function refuse(manager: QueryManager, code: string): Promise<string> {
+    await Promise.resolve();
+    const [queryId] = Array.from(manager.getQueries().keys());
+    manager.handleQueryResp({ queryId, results: [], error: 'refused here', code });
+    return queryId;
+  }
+
+  test('queryOnce rejects with the QueryError and unsubscribes', async () => {
+    const { client, sent, manager } = makeRoutedClient();
+    const promise = client.queryOnce('orders', {});
+    const queryId = await refuse(manager, 'QUERY_LIVE_AGGREGATE_UNSUPPORTED');
+    const error = await promise.then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(error).toBeInstanceOf(QueryError);
+    expect((error as QueryError).code).toBe('QUERY_LIVE_AGGREGATE_UNSUPPORTED');
+    expect(manager.getQueries().size).toBe(0);
+    expect(sentOfType(sent, 'QUERY_UNSUB')).toEqual([{ queryId }]);
+  });
+
+  test('queryOncePaged rejects with the QueryError and unsubscribes', async () => {
+    const { client, sent, manager } = makeRoutedClient();
+    const promise = client.queryOncePaged('orders', { limit: 5 });
+    const queryId = await refuse(manager, 'QUERY_SNAPSHOT_OVERFLOW');
+    await expect(promise).rejects.toMatchObject({
+      name: 'QueryError',
+      code: 'QUERY_SNAPSHOT_OVERFLOW',
+    });
+    expect(manager.getQueries().size).toBe(0);
+    expect(sentOfType(sent, 'QUERY_UNSUB')).toEqual([{ queryId }]);
+  });
+
+  test('loadMore rejects, unsubscribes its page handle and clears the in-flight cursor', async () => {
+    const { client, sent, manager } = makeRoutedClient();
+    const live = client.query('posts', { limit: 2 });
+    const unsubscribe = live.subscribe(() => {});
+    await Promise.resolve();
+    live.updatePaginationInfo({ nextCursor: 'cursor-1', hasMore: true, cursorStatus: 'valid' });
+
+    const more = live.loadMore();
+    await Promise.resolve();
+    const pageId = Array.from(manager.getQueries().keys()).find((id) => id !== live.id)!;
+    manager.handleQueryResp({ queryId: pageId, results: [], error: 'x', code: 'SOMETHING_NEW' });
+
+    await expect(more).rejects.toMatchObject({ name: 'QueryError', code: 'QUERY_FAILED' });
+    expect(Array.from(manager.getQueries().keys())).toEqual([live.id]);
+    expect(sentOfType(sent, 'QUERY_UNSUB')).toEqual([{ queryId: pageId }]);
+    expect((live as unknown as { _loadMoreInFlight: string | null })._loadMoreInFlight).toBeNull();
+    unsubscribe();
+  });
+});

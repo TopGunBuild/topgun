@@ -18,7 +18,13 @@
 
 import { randomUUID } from 'node:crypto';
 
-import type { ChangeEvent, QueryFilter, QueryHandle, TopGunClient } from '@topgunbuild/client';
+import type {
+  ChangeEvent,
+  QueryError,
+  QueryFilter,
+  QueryHandle,
+  TopGunClient,
+} from '@topgunbuild/client';
 
 /** Upper bound on buffered deltas per subscription; oldest are dropped first. */
 export const MAX_BUFFERED_DELTAS = 1000;
@@ -58,12 +64,13 @@ export interface ActiveSubscription {
 
 /**
  * Outcome of `start`: the subscription, or a typed reason it could not open, so
- * the tool can tell the agent precisely what happened (offline vs. at capacity)
- * rather than collapsing both into one vague error.
+ * the tool can tell the agent precisely what happened (offline, at capacity, or
+ * refused by the server) rather than collapsing them into one vague error.
  */
 export type StartResult =
   | { ok: true; sub: ActiveSubscription }
-  | { ok: false; reason: 'offline' | 'capacity' };
+  | { ok: false; reason: 'offline' | 'capacity' }
+  | { ok: false; reason: 'refused'; error: QueryError };
 
 interface InternalSubscription extends ActiveSubscription {
   handle: QueryHandle<Record<string, unknown>>;
@@ -167,7 +174,15 @@ export class SubscriptionRegistry {
     // full result set, so the callback body is intentionally empty.
     sub.unsubscribe = handle.subscribe(() => {});
 
-    const settled = await this.waitForBaseline(handle, SUBSCRIBE_SETTLE_TIMEOUT_MS);
+    let settled: boolean;
+    try {
+      settled = await this.waitForBaseline(handle, SUBSCRIBE_SETTLE_TIMEOUT_MS);
+    } catch (error) {
+      // The server answered the baseline with an error (whenSettled rejects only
+      // with a QueryError): the query is refused, not offline.
+      this.teardown(sub);
+      return { ok: false, reason: 'refused', error: error as QueryError };
+    }
     if (!settled) {
       // Could not establish a server baseline — do not register a half-open
       // subscription that would feed the agent local-only or empty data.
@@ -191,12 +206,19 @@ export class SubscriptionRegistry {
 
   /**
    * Drain and clear the buffered deltas for a subscription, refreshing its idle
-   * expiry. Returns `null` if the id is unknown (stopped or expired).
+   * expiry, together with the query's current server error (the feed may be
+   * missing changes while it is set). Returns `null` if the id is unknown
+   * (stopped or expired).
    */
   poll(
     id: string,
     ttlMs: number,
-  ): { deltas: DeltaRecord[]; dropped: number; sub: ActiveSubscription } | null {
+  ): {
+    deltas: DeltaRecord[];
+    dropped: number;
+    sub: ActiveSubscription;
+    error: QueryError | null;
+  } | null {
     const sub = this.subs.get(id);
     if (!sub) return null;
     const deltas = sub.buffer;
@@ -204,7 +226,7 @@ export class SubscriptionRegistry {
     sub.buffer = [];
     sub.dropped = 0;
     this.resetExpiry(sub, ttlMs);
-    return { deltas, dropped, sub };
+    return { deltas, dropped, sub, error: sub.handle.getError() };
   }
 
   /** Tear down one subscription. Returns false if the id was already gone. */

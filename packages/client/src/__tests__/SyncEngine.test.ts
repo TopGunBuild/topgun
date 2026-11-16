@@ -2,6 +2,7 @@ import { SyncEngine, SyncEngineConfig, OpLogEntry } from '../SyncEngine';
 import { IStorageAdapter, OpLogEntry as StoredOpLogEntry } from '../IStorageAdapter';
 import { serialize, deserialize, LWWMap, ORMap, HLC } from '@topgunbuild/core';
 import { SingleServerProvider } from '../connection/SingleServerProvider';
+import { QueryHandle } from '../QueryHandle';
 import { logger } from '../utils/logger';
 
 // --- Mock WebSocket ---
@@ -544,6 +545,73 @@ describe('SyncEngine', () => {
       const queryUnsub = ws.sentMessages.find((m) => m.type === 'QUERY_UNSUB');
       expect(queryUnsub).toBeDefined();
       expect(queryUnsub?.payload?.queryId).toBe('query-1');
+    });
+  });
+
+  describe('an error QUERY_RESP from the socket', () => {
+    /** An authenticated engine and a live handle that shows rows from the server. */
+    async function handleShowingRows() {
+      syncEngine = new SyncEngine(config);
+      syncEngine.setAuthToken('test-token');
+      await jest.runAllTimersAsync();
+      const ws = MockWebSocket.getLastInstance()!;
+      ws.simulateMessage({ type: 'AUTH_ACK' });
+      await jest.runAllTimersAsync();
+
+      const handle = new QueryHandle<any>(syncEngine, 'users', {});
+      const results: unknown[] = [];
+      handle.subscribe((rows) => results.push(rows));
+      await jest.runAllTimersAsync();
+      ws.simulateMessage({
+        type: 'QUERY_RESP',
+        payload: { queryId: handle.id, results: [{ key: 'user1', value: { name: 'Alice' } }] },
+      });
+      await jest.runAllTimersAsync();
+      expect(handle.getSnapshot().map((row) => row._key)).toEqual(['user1']);
+      return { ws, handle, results };
+    }
+
+    test('keeps the rows, calls no result callback and sets the error', async () => {
+      const { ws, handle, results } = await handleShowingRows();
+      results.length = 0;
+
+      ws.simulateMessage({
+        type: 'QUERY_RESP',
+        payload: {
+          queryId: handle.id,
+          results: [],
+          error: 'live grouped query',
+          code: 'QUERY_LIVE_AGGREGATE_UNSUPPORTED',
+        },
+      });
+      await jest.runAllTimersAsync();
+
+      expect(handle.getSnapshot().map((row) => row._key)).toEqual(['user1']);
+      expect(results).toEqual([]);
+      expect(handle.getError()?.code).toBe('QUERY_LIVE_AGGREGATE_UNSUPPORTED');
+    });
+
+    test('close() cancels a pending overflow resubscribe', async () => {
+      const { ws, handle } = await handleShowingRows();
+      ws.simulateMessage({
+        type: 'QUERY_RESP',
+        payload: {
+          queryId: handle.id,
+          results: [],
+          error: 'overflow',
+          code: 'QUERY_SNAPSHOT_OVERFLOW',
+        },
+      });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(jest.getTimerCount()).toBe(1);
+
+      syncEngine!.close();
+      syncEngine = undefined;
+
+      expect(jest.getTimerCount()).toBe(0);
+      ws.sentMessages = [];
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(ws.sentMessages.filter((m) => m.type === 'QUERY_SUB')).toEqual([]);
     });
   });
 

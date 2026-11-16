@@ -226,4 +226,60 @@ describe('useQuery', () => {
     });
     expect(mockLoadMore).toHaveBeenCalledTimes(1);
   });
+
+  describe('a server error on the handle', () => {
+    function handleWithError() {
+      let emit: (results: any[]) => void = () => {};
+      let raise: (error: QueryError | null) => void = () => {};
+      const onError = jest.fn((listener: (error: QueryError | null) => void) => {
+        raise = listener;
+        listener(null);
+        return () => {};
+      });
+      mockQuery.mockReturnValueOnce({
+        subscribe: (cb: (results: any[]) => void) => {
+          emit = cb;
+          return () => {};
+        },
+        onDelta: mockOnDelta,
+        onPaginationChange: mockOnPaginationChange,
+        onSyncStateChange: mockOnSyncStateChange,
+        onError,
+        loadMore: mockLoadMore,
+      });
+      return { emit: (rows: any[]) => emit(rows), raise: (e: QueryError | null) => raise(e) };
+    }
+
+    const overflow = new QueryError(
+      'QUERY_SNAPSHOT_OVERFLOW: too many concurrent writes',
+      'QUERY_SNAPSHOT_OVERFLOW',
+      'm',
+    );
+
+    it('surfaces the QueryError, keeps the rows and is not loading', () => {
+      const handle = handleWithError();
+      const { result } = renderHook(() => useQuery('m', {}), { wrapper });
+      const rows = [{ _key: 'a', n: 1 }];
+      act(() => handle.emit(rows));
+      act(() => handle.raise(overflow));
+
+      expect(result.current.error).toBeInstanceOf(QueryError);
+      expect((result.current.error as QueryError).code).toBe('QUERY_SNAPSHOT_OVERFLOW');
+      expect(result.current.data).toEqual(rows);
+      expect(result.current.loading).toBe(false);
+
+      act(() => handle.raise(null));
+      expect(result.current.error).toBeNull();
+      expect(result.current.data).toEqual(rows);
+    });
+
+    it('is not loading when the error comes before any rows', () => {
+      const handle = handleWithError();
+      const { result } = renderHook(() => useQuery('m', {}), { wrapper });
+      expect(result.current.loading).toBe(true);
+      act(() => handle.raise(overflow));
+      expect(result.current.error).toBe(overflow);
+      expect(result.current.loading).toBe(false);
+    });
+  });
 });

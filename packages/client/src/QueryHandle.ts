@@ -218,9 +218,24 @@ export class QueryHandle<T> {
   // read this single internal signal.
   private settled: boolean = false;
   private settledResolve: (() => void) | null = null;
-  private settledPromise: Promise<void> = new Promise((resolve) => {
-    this.settledResolve = resolve;
-  });
+  private settledReject: ((err: QueryError) => void) | null = null;
+  private settledPromise: Promise<void> = this.createSettledPromise();
+
+  // The server's last error for this query, kept beside the rows: an error
+  // response never replaces the rows the handle shows.
+  private serverError: QueryError | null = null;
+  private errorListeners: Set<(error: QueryError | null) => void> = new Set();
+
+  private createSettledPromise(): Promise<void> {
+    const promise = new Promise<void>((resolve, reject) => {
+      this.settledResolve = resolve;
+      this.settledReject = reject;
+    });
+    // A handle nobody awaits must not raise an unhandled rejection when an
+    // error arrives before settlement; awaiters still see the rejection.
+    promise.catch(() => {});
+    return promise;
+  }
 
   /**
    * True once the first server QUERY_RESP has arrived for this query (even an
@@ -236,7 +251,11 @@ export class QueryHandle<T> {
   /**
    * Resolves when the first server QUERY_RESP arrives (settlement). If already
    * settled, resolves immediately. One-shot — subsequent settlements re-use the
-   * already-resolved promise. Consumed by queryOnce and the { settled }
+   * already-resolved promise. Rejects with the QueryError when a server error
+   * arrives before settlement. Once the error clears, later calls get a
+   * resolved promise if the handle has settled, else a new promise that the
+   * next settlement resolves.
+   * Consumed by queryOnce, queryOncePaged, loadMore and the { settled }
    * subscribe option.
    *
    * @internal
@@ -251,6 +270,74 @@ export class QueryHandle<T> {
     this.settled = true;
     this.settledResolve?.();
     this.settledResolve = null;
+    this.settledReject = null;
+  }
+
+  /**
+   * The server's error for this query, or null. Rows are kept while it is set.
+   */
+  public getError(): QueryError | null {
+    return this.serverError;
+  }
+
+  /**
+   * Subscribe to the query's error. The listener is called at once with the
+   * current value and again on every change (null when the error clears).
+   *
+   * @returns Unsubscribe function
+   */
+  public onError(listener: (error: QueryError | null) => void): () => void {
+    this.errorListeners.add(listener);
+    this.callErrorListener(listener, this.serverError);
+    return () => this.errorListeners.delete(listener);
+  }
+
+  /**
+   * Record a server error. Rows and result subscribers are untouched; an
+   * awaiter of whenSettled() is rejected if the query has not settled.
+   *
+   * @internal
+   */
+  public setServerError(error: QueryError): void {
+    this.serverError = error;
+    if (!this.settled) {
+      this.settledReject?.(error);
+      this.settledResolve = null;
+      this.settledReject = null;
+    }
+    this.notifyErrorListeners();
+  }
+
+  /**
+   * Clear the server error, if one is set.
+   *
+   * @internal
+   */
+  public clearServerError(): void {
+    if (this.serverError === null) return;
+    this.serverError = null;
+    // An error before settlement rejected the settled promise for good. Once it
+    // clears, a settled handle answers whenSettled() at once, and an unsettled
+    // one waits for the chain that cleared it.
+    this.settledPromise = this.settled ? Promise.resolve() : this.createSettledPromise();
+    this.notifyErrorListeners();
+  }
+
+  private notifyErrorListeners(): void {
+    for (const listener of this.errorListeners) {
+      this.callErrorListener(listener, this.serverError);
+    }
+  }
+
+  private callErrorListener(
+    listener: (error: QueryError | null) => void,
+    error: QueryError | null,
+  ): void {
+    try {
+      listener(error);
+    } catch (e) {
+      logger.error({ err: e }, 'QueryHandle error listener error');
+    }
   }
 
   /**
@@ -583,6 +670,7 @@ export class QueryHandle<T> {
     if (this._loadMoreInFlight === nextCursor) return;
 
     this._loadMoreInFlight = nextCursor;
+    let unsub: (() => void) | undefined;
 
     try {
       // Create a temporary one-shot handle with the next cursor, exactly
@@ -596,7 +684,7 @@ export class QueryHandle<T> {
 
       const pageItems: { key: string; value: T }[] = [];
 
-      const unsub = tempHandle.subscribe((results) => {
+      unsub = tempHandle.subscribe((results) => {
         pageItems.length = 0;
         for (const item of results) {
           // Destructure the synthetic _key field added by getSortedResults.
@@ -606,7 +694,6 @@ export class QueryHandle<T> {
       });
 
       await tempHandle.whenSettled();
-      unsub();
 
       // Append-only merge: preserves rows from all prior pages.
       this.mergePageResults(pageItems);
@@ -620,6 +707,9 @@ export class QueryHandle<T> {
       };
       this.notifyPaginationListeners();
     } finally {
+      // In the finally, so a rejected page (a server error) still unsubscribes
+      // the temporary handle.
+      unsub?.();
       this._loadMoreInFlight = null;
     }
   }

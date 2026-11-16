@@ -1,0 +1,9 @@
+{
+  "type": "QUERY_RESP",
+  "payload": {
+    "queryId": "q-overflow-1",
+    "results": [],
+    "error": "Too many concurrent writes during snapshot; please resubscribe.",
+    "code": "QUERY_SNAPSHOT_OVERFLOW"
+  }
+}

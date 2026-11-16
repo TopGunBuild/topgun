@@ -22,7 +22,7 @@ import type { QueryHandle, QueryFilter } from '../QueryHandle';
 import type { HybridQueryHandle, HybridQueryFilter } from '../HybridQueryHandle';
 import type { IStorageAdapter } from '../IStorageAdapter';
 import type { TopicHandle } from '../TopicHandle';
-import type { EntryProcessorDef, EntryProcessorResult } from '@topgunbuild/core';
+import type { EntryProcessorDef, EntryProcessorResult, QueryRespPayload } from '@topgunbuild/core';
 
 /**
  * Interface for WebSocket connection management.
@@ -317,6 +317,18 @@ export interface IQueryManager {
    * Re-subscribe all queries (called after auth).
    */
   resubscribeAll(): void;
+
+  /**
+   * Route a QUERY_RESP to its handle: a result set is applied, an error
+   * response never is.
+   * @param payload - The QUERY_RESP payload
+   */
+  handleQueryResp(payload: QueryRespPayload): void;
+
+  /**
+   * Cancel every pending timer (called when the engine closes).
+   */
+  close(): void;
 }
 
 /**

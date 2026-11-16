@@ -209,21 +209,22 @@ export function useQuery<T = any>(
 
   const data = useExternalStore(subscribeData, getData);
 
+  // ---- error: construction errors surface synchronously; a server error on
+  // the handle (QueryHandle.onError) lands in the runtime slot. The rows stay
+  // in `data` while either is set.
+  const [runtimeError, setRuntimeError] = useState<Error | null>(null);
+  const error = constructError ?? runtimeError;
+
   const loading = useMemo(() => {
-    if (constructError) return false;
+    // An answered query is not loading, even when the answer is an error.
+    if (error) return false;
     if (handle && typeof handle.getSnapshotMeta === 'function') {
       return !handle.getSnapshotMeta().hasEmitted;
     }
     return !dataCacheRef.current.emitted;
     // `data` is included so loading re-derives after each emission for the
     // fallback path; the getSnapshotMeta path is also re-read per render.
-  }, [handle, constructError, data]);
-
-  // ---- error: construction errors surface synchronously; runtime errors
-  // (if any) could be added to a state slot. We track a state slot for parity
-  // and OR it with the synchronous construction error.
-  const [runtimeError, setRuntimeError] = useState<Error | null>(null);
-  const error = constructError ?? runtimeError;
+  }, [handle, error, data]);
 
   // ---- change accumulation (genuine reducer over a push stream) -----------
   const [changes, setChanges] = useState<ChangeEvent<T>[]>([]);
@@ -311,7 +312,7 @@ export function useQuery<T = any>(
       }
     });
 
-    // onPaginationChange / onSyncStateChange always exist on the real
+    // onPaginationChange / onSyncStateChange / onError always exist on the real
     // QueryHandle; guard for partial test handles that omit them.
     const unsubscribePagination =
       typeof handle.onPaginationChange === 'function'
@@ -327,10 +328,18 @@ export function useQuery<T = any>(
           })
         : noop;
 
+    const unsubscribeError =
+      typeof handle.onError === 'function'
+        ? handle.onError((queryError) => {
+            setRuntimeError(queryError);
+          })
+        : noop;
+
     return () => {
       unsubscribeChanges();
       unsubscribePagination();
       unsubscribeSyncState();
+      unsubscribeError();
     };
     // mapName + queryJson are included so the change-accumulation reset fires
     // whenever the query identity changes — even if a (test) client reuses the

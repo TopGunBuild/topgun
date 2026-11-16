@@ -2235,12 +2235,7 @@ export class SyncEngine {
   }
 
   private handleQueryResp(message: QueryRespMessage): void {
-    const { queryId, results, nextCursor, hasMore, cursorStatus, merkleRootHash } = message.payload;
-    const query = this.queryManager.getQueries().get(queryId);
-    if (query) {
-      query.onResult(results, 'server', merkleRootHash);
-      query.updatePaginationInfo({ nextCursor, hasMore, cursorStatus });
-    }
+    this.queryManager.handleQueryResp(message.payload);
   }
 
   private handleQueryUpdate(message: QueryUpdateMessage): void {
@@ -2906,6 +2901,9 @@ export class SyncEngine {
     }
 
     this.webSocketManager.close();
+
+    // Cancel pending overflow resubscribes so no QUERY_SUB is sent after close.
+    this.queryManager.close();
 
     // Cancel pending Write Concern promises (delegates to WriteConcernManager)
     this.writeConcernManager.cancelAllWriteConcernPromises(new Error('SyncEngine closed'));

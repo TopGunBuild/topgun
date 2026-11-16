@@ -381,3 +381,397 @@ describe('QueryManager', () => {
     });
   });
 });
+
+describe('QueryManager error QUERY_RESP routing', () => {
+  const OVERFLOW = 'QUERY_SNAPSHOT_OVERFLOW';
+  const REFUSAL = 'QUERY_LIVE_AGGREGATE_UNSUPPORTED';
+  const ROWS = [
+    { key: 'a', value: { n: 1 } },
+    { key: 'b', value: { n: 2 } },
+  ];
+
+  let manager: QueryManager;
+  let sent: jest.Mock;
+  let authenticated: boolean;
+  let random: jest.SpyInstance;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    random = jest.spyOn(Math, 'random').mockReturnValue(1);
+    sent = jest.fn(() => true);
+    authenticated = true;
+    manager = new QueryManager({
+      storageAdapter: createMockStorageAdapter(),
+      sendMessage: sent,
+      isAuthenticated: () => authenticated,
+    });
+  });
+
+  afterEach(() => {
+    random.mockRestore();
+    jest.useRealTimers();
+  });
+
+  /** A live handle subscribed through the manager that already shows ROWS. */
+  function liveHandleWithRows(options?: { snapshotOnly: boolean }): QueryHandle<any> {
+    const handle = new QueryHandle<any>(mockSyncEngine, 'm', {}, options);
+    manager.subscribeToQuery(handle);
+    manager.handleQueryResp({
+      queryId: handle.id,
+      results: ROWS,
+      nextCursor: 'c1',
+      hasMore: true,
+      cursorStatus: 'valid',
+    });
+    return handle;
+  }
+
+  function querySubs(handle: QueryHandle<any>): number {
+    return sent.mock.calls.filter(
+      ([message]) => message.type === 'QUERY_SUB' && message.payload.queryId === handle.id,
+    ).length;
+  }
+
+  function overflow(handle: QueryHandle<any>): void {
+    manager.handleQueryResp({
+      queryId: handle.id,
+      results: [],
+      error: 'buffer overflowed',
+      code: OVERFLOW,
+    });
+  }
+
+  function refuse(handle: QueryHandle<any>, code: string = REFUSAL): void {
+    manager.handleQueryResp({ queryId: handle.id, results: [], error: 'refused', code });
+  }
+
+  function clean(handle: QueryHandle<any>): void {
+    manager.handleQueryResp({ queryId: handle.id, results: ROWS });
+  }
+
+  /** Overflow until the bound runs out; the handle ends with the overflow error. */
+  function exhaust(handle: QueryHandle<any>): void {
+    for (let i = 0; i < 3; i++) {
+      overflow(handle);
+      jest.advanceTimersByTime(4000);
+    }
+    overflow(handle);
+    expect(handle.getError()?.code).toBe(OVERFLOW);
+  }
+
+  function keys(handle: QueryHandle<any>): string[] {
+    return handle.getSnapshot().map((row) => row._key);
+  }
+
+  describe('an error frame never touches rows', () => {
+    test.each([
+      ['with rows in the frame', [{ key: 'z', value: { n: 9 } }]],
+      ['with no rows in the frame', []],
+    ])('%s', (_label, results) => {
+      const handle = liveHandleWithRows();
+      const callback = jest.fn();
+      const deltas = jest.fn();
+      handle.subscribe(callback);
+      handle.onDelta(deltas);
+      callback.mockClear();
+      const pagination = handle.getPaginationInfo();
+
+      for (const code of [OVERFLOW, REFUSAL]) {
+        manager.handleQueryResp({ queryId: handle.id, results, error: 'e', code });
+      }
+
+      expect(callback).not.toHaveBeenCalled();
+      expect(deltas).not.toHaveBeenCalled();
+      expect(handle.getPaginationInfo()).toEqual(pagination);
+      expect(keys(handle)).toEqual(['a', 'b']);
+    });
+
+    test('a frame for an unknown query id is ignored', () => {
+      expect(() =>
+        manager.handleQueryResp({ queryId: 'nope', results: [], error: 'e', code: OVERFLOW }),
+      ).not.toThrow();
+      expect(sent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('a snapshot overflow resubscribes with a bound', () => {
+    test('overflows 1-3 each resubscribe after 250/1000/4000 ms; the 4th raises the error', () => {
+      const handle = liveHandleWithRows();
+      expect(querySubs(handle)).toBe(1);
+      const delays = [250, 1000, 4000];
+      for (const [i, delay] of delays.entries()) {
+        overflow(handle);
+        jest.advanceTimersByTime(delay - 1);
+        expect(querySubs(handle)).toBe(1 + i);
+        jest.advanceTimersByTime(1);
+        expect(querySubs(handle)).toBe(2 + i);
+        const resub = sent.mock.calls[sent.mock.calls.length - 1][0];
+        expect(resub.payload.queryId).toBe(handle.id);
+        expect(handle.getError()).toBeNull();
+      }
+      overflow(handle);
+      jest.advanceTimersByTime(60_000);
+      expect(querySubs(handle)).toBe(4);
+      expect(handle.getError()?.code).toBe(OVERFLOW);
+      expect(handle.getError()?.message).toContain(OVERFLOW);
+      expect(keys(handle)).toEqual(['a', 'b']);
+    });
+
+    test('the delay is scaled by full jitter in [0.5, 1]', () => {
+      random.mockReturnValue(0);
+      const handle = liveHandleWithRows();
+      overflow(handle);
+      jest.advanceTimersByTime(124);
+      expect(querySubs(handle)).toBe(1);
+      jest.advanceTimersByTime(1);
+      expect(querySubs(handle)).toBe(2);
+    });
+
+    test('a timer that fires while unauthenticated sends nothing', () => {
+      const handle = liveHandleWithRows();
+      overflow(handle);
+      authenticated = false;
+      jest.advanceTimersByTime(10_000);
+      expect(querySubs(handle)).toBe(1);
+    });
+
+    test('an overflow while a timer is pending schedules nothing more; the pending one still sends', () => {
+      const handle = liveHandleWithRows();
+      overflow(handle);
+      overflow(handle);
+      jest.advanceTimersByTime(250);
+      expect(querySubs(handle)).toBe(2);
+      jest.advanceTimersByTime(60_000);
+      expect(querySubs(handle)).toBe(2);
+      expect(handle.getError()).toBeNull();
+    });
+
+    test('an overflow that finds the count at 3 cancels a pending timer and raises at once', () => {
+      const handle = liveHandleWithRows();
+      overflow(handle);
+      jest.advanceTimersByTime(250);
+      overflow(handle);
+      jest.advanceTimersByTime(1000);
+      overflow(handle); // third: its timer is pending
+      expect(querySubs(handle)).toBe(3);
+      overflow(handle); // fourth: count is already 3
+      expect(handle.getError()?.code).toBe(OVERFLOW);
+      jest.advanceTimersByTime(60_000);
+      expect(querySubs(handle)).toBe(3);
+    });
+  });
+
+  describe('every other code is terminal', () => {
+    test('QUERY_LIVE_AGGREGATE_UNSUPPORTED raises its code and never resubscribes', () => {
+      const handle = liveHandleWithRows();
+      refuse(handle);
+      jest.advanceTimersByTime(60_000);
+      expect(querySubs(handle)).toBe(1);
+      expect(handle.getError()?.code).toBe(REFUSAL);
+    });
+
+    test('an unknown code becomes QUERY_FAILED with the raw code in the message', () => {
+      const handle = liveHandleWithRows();
+      refuse(handle, 'X_NEW_CODE');
+      jest.advanceTimersByTime(60_000);
+      expect(querySubs(handle)).toBe(1);
+      expect(handle.getError()?.code).toBe('QUERY_FAILED');
+      expect(handle.getError()?.message).toContain('X_NEW_CODE');
+    });
+
+    test('an error without a code becomes QUERY_FAILED', () => {
+      const handle = liveHandleWithRows();
+      manager.handleQueryResp({ queryId: handle.id, results: [], error: 'refused' });
+      expect(handle.getError()?.code).toBe('QUERY_FAILED');
+      expect(handle.getError()?.message).toBe('QUERY_FAILED: refused');
+    });
+
+    test('an overflow on a one-shot handle is terminal', () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'm', {}, { snapshotOnly: true });
+      manager.subscribeToQuery(handle);
+      overflow(handle);
+      jest.advanceTimersByTime(60_000);
+      expect(querySubs(handle)).toBe(1);
+      expect(handle.getError()?.code).toBe(OVERFLOW);
+      // Terminal kind: a chain start does not clear it, a clean answer in that later chain does.
+      manager.resubscribeAll();
+      expect(handle.getError()?.code).toBe(OVERFLOW);
+      clean(handle);
+      expect(handle.getError()).toBeNull();
+    });
+  });
+
+  describe("the error's lifetime", () => {
+    test('overflow error: resubscribeAll clears it and the next overflow resubscribes again', () => {
+      const handle = liveHandleWithRows();
+      exhaust(handle);
+      const exhausted = handle.getError();
+      const seen: unknown[] = [];
+      handle.onError((error) => seen.push(error));
+      manager.resubscribeAll();
+      expect(seen).toEqual([exhausted, null]);
+      const before = querySubs(handle);
+      overflow(handle);
+      jest.advanceTimersByTime(250);
+      expect(querySubs(handle)).toBe(before + 1);
+    });
+
+    test('overflow error: a remount (every listener left, a new one subscribes) clears it', () => {
+      const handle = liveHandleWithRows();
+      exhaust(handle);
+      manager.unsubscribeFromQuery(handle.id);
+      manager.subscribeToQuery(handle);
+      expect(handle.getError()).toBeNull();
+      const before = querySubs(handle);
+      overflow(handle);
+      jest.advanceTimersByTime(249);
+      expect(querySubs(handle)).toBe(before);
+      jest.advanceTimersByTime(1);
+      expect(querySubs(handle)).toBe(before + 1);
+    });
+
+    test('overflow error: the snapshot that follows the exhausting overflow does not clear it', () => {
+      const handle = liveHandleWithRows();
+      exhaust(handle);
+      clean(handle);
+      expect(handle.getError()?.code).toBe(OVERFLOW);
+    });
+
+    test('terminal error: a reconnect keeps it; a clean answer in the new chain clears it', () => {
+      const handle = liveHandleWithRows();
+      refuse(handle);
+      const seen: unknown[] = [];
+      handle.onError((error) => seen.push(error));
+      seen.length = 0;
+      manager.resubscribeAll();
+      expect(handle.getError()?.code).toBe(REFUSAL);
+      expect(seen).toEqual([]);
+      clean(handle);
+      expect(handle.getError()).toBeNull();
+      expect(seen).toEqual([null]);
+    });
+
+    test('terminal error: a clean answer in the chain that raised it does not clear it', () => {
+      const handle = liveHandleWithRows();
+      refuse(handle);
+      clean(handle);
+      expect(handle.getError()?.code).toBe(REFUSAL);
+    });
+
+    test('unsubscribeFromQuery with a pending timer sends no later QUERY_SUB', () => {
+      const handle = liveHandleWithRows();
+      overflow(handle);
+      manager.unsubscribeFromQuery(handle.id);
+      jest.advanceTimersByTime(60_000);
+      expect(querySubs(handle)).toBe(1);
+    });
+
+    test('close() leaves no pending timer', () => {
+      const handle = liveHandleWithRows();
+      overflow(handle);
+      expect(jest.getTimerCount()).toBe(1);
+      manager.close();
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    test('resubscribeAll with a pending timer: only the new chain sends a QUERY_SUB', () => {
+      const handle = liveHandleWithRows();
+      overflow(handle);
+      const before = querySubs(handle);
+      manager.resubscribeAll();
+      jest.advanceTimersByTime(60_000);
+      expect(querySubs(handle)).toBe(before + 1);
+    });
+
+    test('unsubscribe then subscribeToQuery with a pending timer: only the new chain sends a QUERY_SUB', () => {
+      const handle = liveHandleWithRows();
+      overflow(handle);
+      manager.unsubscribeFromQuery(handle.id);
+      const before = querySubs(handle);
+      manager.subscribeToQuery(handle);
+      jest.advanceTimersByTime(60_000);
+      expect(querySubs(handle)).toBe(before + 1);
+    });
+
+    test('a second subscribeToQuery without unsubscribe (StrictMode) with a pending timer: one new QUERY_SUB', () => {
+      const handle = liveHandleWithRows();
+      overflow(handle);
+      const before = querySubs(handle);
+      manager.subscribeToQuery(handle);
+      jest.advanceTimersByTime(60_000);
+      expect(querySubs(handle)).toBe(before + 1);
+    });
+  });
+
+  /** How a promise stands once pending microtasks have run: a bounded check, never a hang. */
+  async function outcome(promise: Promise<unknown>): Promise<'resolved' | 'rejected' | 'pending'> {
+    let state: 'resolved' | 'rejected' | 'pending' = 'pending';
+    promise.then(
+      () => (state = 'resolved'),
+      () => (state = 'rejected'),
+    );
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    return state;
+  }
+
+  describe('whenSettled on a settled handle whose error clears', () => {
+    test('overflow error cleared by resubscribeAll: whenSettled resolves', async () => {
+      const handle = liveHandleWithRows();
+      exhaust(handle);
+      manager.resubscribeAll();
+      expect(handle.getError()).toBeNull();
+      expect(await outcome(handle.whenSettled())).toBe('resolved');
+    });
+
+    test("refusal cleared by a later chain's clean answer: whenSettled resolves", async () => {
+      const handle = liveHandleWithRows();
+      refuse(handle);
+      manager.resubscribeAll();
+      clean(handle);
+      expect(handle.getError()).toBeNull();
+      expect(await outcome(handle.whenSettled())).toBe('resolved');
+    });
+
+    test('an error before settlement, settled in the same chain, then cleared: whenSettled resolves', async () => {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'm', {});
+      manager.subscribeToQuery(handle);
+      refuse(handle);
+      clean(handle);
+      expect(handle.isSettled).toBe(true);
+      expect(await outcome(handle.whenSettled())).toBe('rejected');
+      manager.resubscribeAll();
+      clean(handle);
+      expect(handle.getError()).toBeNull();
+      expect(await outcome(handle.whenSettled())).toBe('resolved');
+    });
+  });
+
+  describe('whenSettled after an error clears before settlement', () => {
+    function unsettledHandle(): QueryHandle<any> {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'm', {});
+      manager.subscribeToQuery(handle);
+      return handle;
+    }
+
+    test('overflow error: the next chain gives new awaiters a promise its snapshot resolves', async () => {
+      const handle = unsettledHandle();
+      exhaust(handle);
+      await expect(handle.whenSettled()).rejects.toMatchObject({ code: OVERFLOW });
+      manager.resubscribeAll();
+      const settled = handle.whenSettled();
+      clean(handle);
+      await expect(settled).resolves.toBeUndefined();
+      expect(handle.isSettled).toBe(true);
+    });
+
+    test('terminal error: the clean answer of a later chain resolves whenSettled', async () => {
+      const handle = unsettledHandle();
+      refuse(handle);
+      await expect(handle.whenSettled()).rejects.toMatchObject({ code: REFUSAL });
+      manager.resubscribeAll();
+      clean(handle);
+      expect(handle.getError()).toBeNull();
+      await expect(handle.whenSettled()).resolves.toBeUndefined();
+    });
+  });
+});

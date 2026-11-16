@@ -16,6 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reported, a new matching record is an add, and a record that stops matching is a remove. Keys
   such as `where`, `limit`, `sort` or `groupBy` in `filter` are field names, so a feed can no longer
   be windowed, sorted or grouped through `filter`.
+- **Fixed: a server error on a query no longer replaces its rows.** The client applied a
+  `QUERY_RESP` that carries `error` / `code` as an empty result set: a live query's rows
+  disappeared and every `onDelta` listener saw a `remove` per row.
+  - The rows are kept. On `QUERY_SNAPSHOT_OVERFLOW` a live query resubscribes on its own, at most
+    three times per subscription, after at most 250 ms, 1 s and 4 s (each scaled by a random
+    factor between 0.5 and 1); a fourth overflow, or any other error code, is raised as a
+    `QueryError` on the handle: `QueryHandle.getError()` and `QueryHandle.onError(listener)`.
+    `QueryErrorCode` gains `QUERY_SNAPSHOT_OVERFLOW` and `QUERY_FAILED` (a code this client does not know).
+  - `queryOnce()`, `queryOncePaged()` and `loadMore()` reject with the `QueryError` instead of
+    resolving to an empty result; `loadMore()` also unsubscribes its page query on that rejection.
+  - `useQuery` returns the error in `error`, keeps `data`, and reports `loading: false` while the
+    error is set.
+  - MCP: `topgun_subscribe` reports a refused feed as an error with its code instead of "offline",
+    and a poll reports the query's error together with the changes that arrived; `topgun_query`
+    reports the error with its code.
+  - Read from source, not tested: a client older than this release still applies an error
+    `QUERY_RESP` as an empty result, so its rows flash out.
 
 - **Changed (breaking for an undocumented option): a live query refuses `groupBy` and
   `aggregations`.** A live query receives per-record changes, which mixed raw records into its

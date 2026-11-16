@@ -840,3 +840,79 @@ describe('QueryHandle live aggregate refusal', () => {
     expect(handle.isSnapshotOnly()).toBe(true);
   });
 });
+
+describe('QueryHandle server error state', () => {
+  const overflow = () =>
+    new QueryError('QUERY_SNAPSHOT_OVERFLOW: x', 'QUERY_SNAPSHOT_OVERFLOW', 'm');
+
+  test('onError fires at once with null, then with the error, then with null on clear', () => {
+    const handle = new QueryHandle<any>(mockSyncEngine, 'm', {});
+    const seen: Array<QueryError | null> = [];
+    handle.onError((error) => seen.push(error));
+    const error = overflow();
+    handle.setServerError(error);
+    handle.clearServerError();
+    handle.clearServerError();
+    expect(seen).toEqual([null, error, null]);
+    expect(handle.getError()).toBeNull();
+  });
+
+  test('a throwing error listener is isolated from the others', () => {
+    const handle = new QueryHandle<any>(mockSyncEngine, 'm', {});
+    const seen: Array<QueryError | null> = [];
+    handle.onError((error) => {
+      if (error) throw new Error('listener failure');
+    });
+    handle.onError((error) => seen.push(error));
+    const error = overflow();
+    handle.setServerError(error);
+    expect(seen).toEqual([null, error]);
+  });
+
+  test('whenSettled rejects with the QueryError when the error comes before settlement', async () => {
+    const handle = new QueryHandle<any>(mockSyncEngine, 'm', {});
+    const error = overflow();
+    handle.setServerError(error);
+    await expect(handle.whenSettled()).rejects.toBe(error);
+    // A later clean response settles the handle but cannot turn the promise.
+    handle.onResult([], 'server');
+    expect(handle.isSettled).toBe(true);
+    await expect(handle.whenSettled()).rejects.toBe(error);
+  });
+
+  test('whenSettled stays resolved when the error comes after settlement', async () => {
+    const handle = new QueryHandle<any>(mockSyncEngine, 'm', {});
+    handle.onResult([{ key: 'a', value: { n: 1 } }], 'server');
+    handle.setServerError(overflow());
+    await expect(handle.whenSettled()).resolves.toBeUndefined();
+  });
+
+  test('an error on a handle nobody awaits raises no unhandled rejection', async () => {
+    const unhandled = jest.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const handle = new QueryHandle<any>(mockSyncEngine, 'm', {});
+      handle.setServerError(overflow());
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
+  test('setting an error calls no result subscriber and keeps the rows', () => {
+    const handle = new QueryHandle<any>(mockSyncEngine, 'm', {});
+    const callback = jest.fn();
+    const deltas = jest.fn();
+    handle.subscribe(callback);
+    handle.onResult([{ key: 'a', value: { n: 1 } }], 'server');
+    handle.onDelta(deltas);
+    callback.mockClear();
+    deltas.mockClear();
+    handle.setServerError(overflow());
+    expect(callback).not.toHaveBeenCalled();
+    expect(deltas).not.toHaveBeenCalled();
+    expect(handle.getSnapshot().map((row) => row._key)).toEqual(['a']);
+  });
+});
