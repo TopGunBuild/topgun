@@ -16,6 +16,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reported, a new matching record is an add, and a record that stops matching is a remove. Keys
   such as `where`, `limit`, `sort` or `groupBy` in `filter` are field names, so a feed can no longer
   be windowed, sorted or grouped through `filter`.
+- **Fixed: a server error on a query no longer replaces its rows.** The client applied a
+  `QUERY_RESP` that carries `error` / `code` as an empty result set: a live query's rows
+  disappeared, every `onDelta` listener saw a `remove` per row, and after a snapshot overflow
+  (`QUERY_SNAPSHOT_OVERFLOW`, more than 4096 keys written while the server built the snapshot) the
+  writes the server dropped stayed missing until their keys changed again.
+  - The rows are kept. A live query whose snapshot overflowed resubscribes on its own, at most three
+    times per subscription, after about 250 ms, 1 s and 4 s with random jitter, and ends with the
+    server's rows; a fourth overflow, or any other error code, is raised as a `QueryError` on the
+    handle: `QueryHandle.getError()` and `QueryHandle.onError(listener)`. `QueryErrorCode` gains
+    `QUERY_SNAPSHOT_OVERFLOW` and `QUERY_FAILED` (a code this client does not know).
+  - `queryOnce()`, `queryOncePaged()` and `loadMore()` reject with the `QueryError` instead of
+    resolving to an empty result; `loadMore()` also unsubscribes its page query on that rejection.
+  - `useQuery` returns the error in `error`, keeps `data`, and reports `loading: false` while the
+    error is set.
+  - MCP: `topgun_subscribe` reports a refused feed as an error with its code instead of "offline",
+    and a poll reports the query's error together with the changes that arrived; `topgun_query`
+    reports the error with its code.
+  - The overflow path is shown against a real server built with the `fault-injection` feature
+    (`pnpm test:integration-rust:liveness`, `query-snapshot-overflow`): the rows stayed through the
+    overflow, one resubscribe was sent, and the final rows equalled the server's.
+  - Read from source, not tested: a client older than this release still applies an error
+    `QUERY_RESP` as an empty result — its rows flash out, and writes dropped by an overflow stay
+    missing.
 
 - **Changed (breaking for an undocumented option): a live query refuses `groupBy` and
   `aggregations`.** A live query receives per-record changes, which mixed raw records into its
