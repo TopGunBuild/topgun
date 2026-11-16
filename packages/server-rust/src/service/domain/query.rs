@@ -512,22 +512,6 @@ pub struct QueryService {
     drain_hold: DrainHold,
 }
 
-/// Environment variable naming the sentinel file of the live-query drain hold:
-/// while a file exists at that path, a live subscribe waits between its
-/// snapshot and its drain (see `QueryService::hold_before_drain`). Read only by
-/// `fault-injection` builds.
-#[cfg(feature = "fault-injection")]
-const FAULT_QUERY_DRAIN_HOLD_FILE_ENV: &str = "TOPGUN_FAULT_QUERY_DRAIN_HOLD_FILE";
-
-/// The sentinel path of the drain hold, read from the environment once per
-/// process, as the store seams read theirs.
-#[cfg(feature = "fault-injection")]
-fn fault_query_drain_hold_path() -> Option<&'static std::path::Path> {
-    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    PATH.get_or_init(|| std::env::var_os(FAULT_QUERY_DRAIN_HOLD_FILE_ENV).map(Into::into))
-        .as_deref()
-}
-
 /// `QUERY_RESP.code` of a refused live subscription that carries a non-empty
 /// `group_by` or `aggregations`: the live fan-out sends per-record deltas, which
 /// would mix raw records into a grouped result.
@@ -1069,8 +1053,8 @@ impl QueryService {
         let Some((_, delta_buffer, fence)) = live else {
             return Ok(resp_msg);
         };
-        #[cfg(any(test, feature = "fault-injection"))]
-        self.hold_before_drain(&query_id, &map_name).await;
+        #[cfg(test)]
+        self.drain_hold.pass(&query_id).await;
         match delta_buffer.deactivate_and_drain(&fence) {
             Ok(post_fence_entries) => {
                 if let Some(sub) =
@@ -1121,32 +1105,6 @@ impl QueryService {
         }
 
         Ok(resp_msg)
-    }
-
-    /// Holds a live subscribe after its snapshot is built and before its delta
-    /// buffer is drained, while a test asks for it. Writes made meanwhile are in
-    /// no snapshot and are captured by the still-active buffer, so a test can
-    /// overflow it deterministically.
-    ///
-    /// Compiled only into test and `fault-injection` builds. While it holds, it
-    /// stalls the global worker that runs the subscribe, and with it every
-    /// connection's `PING` and `SYNC_INIT`. It also runs inside the pipeline's
-    /// operation timeout (30 s by default): a hold longer than that cancels the
-    /// handler with the buffer still active and the subscription registered, so
-    /// a test keeps its hold far below it.
-    #[cfg(any(test, feature = "fault-injection"))]
-    async fn hold_before_drain(&self, query_id: &str, map_name: &str) {
-        #[cfg(test)]
-        self.drain_hold.pass(query_id).await;
-        #[cfg(feature = "fault-injection")]
-        if let Some(path) = fault_query_drain_hold_path().filter(|path| path.exists()) {
-            tracing::warn!(query_id, map_name, "fault injection: live query drain held");
-            while path.exists() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        }
-        #[cfg(not(feature = "fault-injection"))]
-        let _ = map_name;
     }
 
     /// Sends a `QUERY_UPDATE` to a subscriber's connection.
@@ -1682,8 +1640,11 @@ type DrainHoldGate = (
 
 #[cfg(test)]
 /// At most one armed hold, for one `query_id`, between a live subscribe's
-/// snapshot and its drain. It belongs to one service, so tests running side by
-/// side in one process cannot consume each other's hold.
+/// snapshot and its drain, so a test can fill the still-active delta buffer
+/// deterministically. It belongs to one service, so tests running side by side
+/// in one process cannot consume each other's hold. A hold must stay far below
+/// the pipeline's operation timeout (30 s by default), which would cancel the
+/// handler with the buffer still active and the subscription registered.
 #[derive(Default)]
 struct DrainHold(std::sync::Mutex<Option<(String, DrainHoldGate)>>);
 

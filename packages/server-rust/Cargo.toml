@@ -35,12 +35,10 @@ count-alloc = ["dep:stats_alloc"]
 # (jemalloc wins); never enabled in production builds.
 alloc-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 alloc-mimalloc = ["dep:mimalloc"]
-# Fault-injection seams (off by default), each armed while a sentinel file named
-# in the environment exists: the store-refusal seam makes the write-behind flush
-# fail on demand, as an unreachable database or a full disk would; the
-# live-query drain hold (TOPGUN_FAULT_QUERY_DRAIN_HOLD_FILE) holds a live
-# subscribe between its snapshot and its drain, so a test can overflow its delta
-# buffer with concurrent writes. Never enabled in production builds.
+# Store-refusal seam (off by default): lets a test make the write-behind flush
+# fail on demand, as an unreachable database or a full disk would, by creating a
+# sentinel file named in the environment. Used to prove the node keeps serving
+# when the store refuses a write; never enabled in production builds.
 fault-injection = []
 
 [dependencies]
