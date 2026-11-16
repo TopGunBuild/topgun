@@ -135,6 +135,12 @@ async function handleStart(
         true,
       );
     }
+    if (!result.ok && result.reason === 'refused') {
+      return textResult(
+        `Error: the server refused the change feed on map '${map}': ${result.error.message}`,
+        true,
+      );
+    }
     if (!result.ok) {
       // The server never delivered the baseline snapshot — do not pretend to be
       // watching. Mirrors the mutate tool's honesty about an unconfirmed write.
@@ -176,11 +182,17 @@ function handlePoll(
     );
   }
 
-  const { deltas, dropped, sub } = result;
+  const { deltas, dropped, sub, error } = result;
+  // While the query carries a server error the feed may be missing changes; say
+  // so with the code, and still list whatever deltas did arrive.
+  const errorNote = error
+    ? `Error: the change feed on map '${sub.map}' may be missing changes: ${error.message}\n\n`
+    : '';
   if (deltas.length === 0) {
     return textResult(
-      `No changes on map '${sub.map}' since the last poll (subscriptionId: ${sub.id}). ` +
+      `${errorNote}No changes on map '${sub.map}' since the last poll (subscriptionId: ${sub.id}). ` +
         `Poll again later.`,
+      error !== null,
     );
   }
 
@@ -195,8 +207,9 @@ function handlePoll(
       : '';
 
   return textResult(
-    `${deltas.length} change(s) on map '${sub.map}' since the last poll ` +
+    `${errorNote}${deltas.length} change(s) on map '${sub.map}' since the last poll ` +
       `(subscriptionId: ${sub.id}):\n\n${formatDeltas(deltas)}${truncated}`,
+    error !== null,
   );
 }
 

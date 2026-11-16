@@ -4,7 +4,8 @@
 
 import type { ToolContext, ResolvedMCPServerConfig } from '../types';
 import { SubscriptionRegistry } from '../subscriptions';
-import { QueryOnceUnsettledError } from '@topgunbuild/client';
+import { QueryError, QueryHandle, QueryOnceUnsettledError } from '@topgunbuild/client';
+import type { SyncEngine } from '@topgunbuild/client';
 import { handleQuery } from '../tools/query';
 import { handleMutate } from '../tools/mutate';
 import { handleSchema } from '../tools/schema';
@@ -12,6 +13,7 @@ import { handleStats } from '../tools/stats';
 import { handleExplain } from '../tools/explain';
 import { handleListMaps } from '../tools/listMaps';
 import { handleSearch } from '../tools/search';
+import { handleSubscribe } from '../tools/subscribe';
 
 // Mock TopGunClient
 class MockLWWMap {
@@ -1070,6 +1072,84 @@ describe('MCP Tools', () => {
       expect(result.content[0].text).toContain("Full-text search is not available for map 'fresh'");
       expect(result.content[0].text).toContain('topgun_query');
       expect(result.content[0].text).not.toContain('index registry not found');
+    });
+  });
+
+  describe('a server error QUERY_RESP', () => {
+    const refusal = () =>
+      new QueryError(
+        'QUERY_LIVE_AGGREGATE_UNSUPPORTED: a live query cannot carry groupBy',
+        'QUERY_LIVE_AGGREGATE_UNSUPPORTED',
+        'orders',
+      );
+    const overflow = () =>
+      new QueryError(
+        'QUERY_SNAPSHOT_OVERFLOW: too many concurrent writes',
+        'QUERY_SNAPSHOT_OVERFLOW',
+        'orders',
+      );
+
+    /** A context whose client hands out real query handles the test drives. */
+    function contextWithLiveHandles(): { ctx: ToolContext; handles: QueryHandle<any>[] } {
+      const handles: QueryHandle<any>[] = [];
+      const engine = {
+        subscribeToQuery: () => {},
+        unsubscribeFromQuery: () => {},
+        runLocalQuery: async () => [],
+      } as unknown as SyncEngine;
+      const ctx = createTestContext();
+      (ctx.client as unknown as { query: unknown }).query = (map: string, filter: object) => {
+        const handle = new QueryHandle<any>(engine, map, filter);
+        handles.push(handle);
+        return handle;
+      };
+      ctx.subscriptions = new SubscriptionRegistry(ctx.client);
+      return { ctx, handles };
+    }
+
+    it('topgun_query reports the QueryError as an error with its code', async () => {
+      const ctx = createTestContext();
+      (ctx.client as unknown as MockTopGunClient).queryOnceRejection = refusal();
+      const result = await handleQuery({ map: 'orders' }, ctx);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('QUERY_LIVE_AGGREGATE_UNSUPPORTED');
+      expect(result.content[0].text).not.toMatch(/no results|offline/i);
+    });
+
+    it('topgun_subscribe start on a refusal reports the code, not offline, and registers nothing', async () => {
+      const { ctx, handles } = contextWithLiveHandles();
+      const started = handleSubscribe({ action: 'start', map: 'orders' }, ctx);
+      await Promise.resolve();
+      handles[0].setServerError(refusal());
+      const result = await started;
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('QUERY_LIVE_AGGREGATE_UNSUPPORTED');
+      expect(result.content[0].text).not.toMatch(/offline/i);
+      expect(ctx.subscriptions.size).toBe(0);
+    });
+
+    it('topgun_subscribe poll after an exhausted overflow reports the code and still lists deltas', async () => {
+      const { ctx, handles } = contextWithLiveHandles();
+      const started = handleSubscribe({ action: 'start', map: 'orders' }, ctx);
+      await Promise.resolve();
+      handles[0].onResult([{ key: 'a', value: { n: 1 } }], 'server');
+      const startResult = await started;
+      expect(startResult.isError).toBeFalsy();
+      const subscriptionId = /subscriptionId: ([^)]+)\)/.exec(
+        startResult.content[0].text ?? '',
+      )![1];
+
+      handles[0].onUpdate('b', { n: 2 });
+      handles[0].setServerError(overflow());
+      const polled = await handleSubscribe({ action: 'poll', subscriptionId }, ctx);
+      expect(polled.isError).toBe(true);
+      expect(polled.content[0].text).toContain('QUERY_SNAPSHOT_OVERFLOW');
+      expect(polled.content[0].text).toContain('b');
+
+      const empty = await handleSubscribe({ action: 'poll', subscriptionId }, ctx);
+      expect(empty.isError).toBe(true);
+      expect(empty.content[0].text).toContain('QUERY_SNAPSHOT_OVERFLOW');
+      ctx.subscriptions.teardownAll();
     });
   });
 });
