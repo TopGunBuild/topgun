@@ -131,6 +131,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     status 101. Before this, a buffer of large values could exhaust the process's memory before
     the key bound refused anything.
   - **A buffered value is held once**, shared by the queue and the read overlay, instead of twice.
+  - **A write refused at either bound is no longer visible to reads or subscribers.** A write now
+    reaches the write-behind buffer before the in-memory record and the change feed, so a refused
+    write leaves memory, subscribers, the write-ahead log and the counters as they were. Before
+    this, a write refused at the key bound had already replaced the record in memory, where reads
+    saw it and eviction could not drop it, and subscribers had been sent it.
   - **Measured.** Measured on Linux (Hetzner ccx33, 8 vCPU AMD EPYC-Milan) with the in-process
     open-loop load harness on RocksDB, at the default bounds, values of 0 bytes, three runs per arm
     against the release before it: at 2·10⁴ and at 4·10⁴ new keys/s this release acknowledged the
@@ -138,7 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     its 10 000-key bound and refused writes in 4 of 6 runs. At 4·10⁴/s its service latency was p50
     1.63–1.71 ms and p99 12.98–13.92 ms, against 1.72–1.92 ms and 13.69–14.50 ms in the two runs of
     the release before it that refused nothing. With 4 KiB values at 10⁴/s (key bound off) the
-    buffered bytes peaked at 18.1 MB, with 64 KiB values at 10³/s at 9.6 MB; the byte bound refused
+    buffered charge (the structural estimate, not heap bytes) peaked at 18.1 MB, with 64 KiB values at 10³/s at 9.6 MB; the byte bound refused
     nothing at the default budget. Throughput smoke (median of three, 50 connections, 10 s):
     fire-and-wait 9 536 ops/s against 9 526, fire-and-forget 503 076 against 511 550. Not shown:
     that the key bound is never reached at 4·10⁴/s (peak 5 916 of 10 000 keys in three runs), any

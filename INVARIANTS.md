@@ -685,7 +685,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `::an_unframed_mutation_rejected_by_the_shutdown_gate_is_unacked_and_idempotent`,
   `::an_unframed_or_remove_is_unacked_and_idempotent`,
   `::a_cancelled_append_never_lets_the_watermark_pass_its_sequence`,
-  `::a_capacity_rejected_mutation_is_persisted_by_the_next_write_through`.
+  `::a_capacity_refused_in_place_op_is_not_applied_and_the_next_write_through_persists` (a
+  refusal at the key bound now comes before the mutation, `TG-WB-011`, so it leaves no un-framed
+  mutation: the refused op is absent after the next write-through and a crash).
   (a), lead-not-lag (AC-3):
   `storage::impls::default_record_store::tests::materialize::two_in_place_writes_with_a_flush_between_persist_both`,
   `storage::datastores::write_behind::prefix_watermark_proptest::a_flush_racing_an_in_flight_op_persists_every_resolved_frame`
@@ -905,7 +907,7 @@ measured; do not read it as reported.
 | `a_refused_entry_with_a_queued_newer_write_is_retired_into_it` | the retirement with the newer write already queued when the store refuses: the refused entry is not tagged `Abandoned`, and the key becomes durable through the newer write | CI (`cargo test`) |
 | `a_retired_delta_entry_stays_replayable_until_its_survivor_is_durable` | WHY the sequences are carried for a delta frame too: the newer entry is refused ten times and stays queued with both sequences `Live`; with a second key in the same partition, a crash before the newer entry is durable must still replay the retired frame | CI (`cargo test`) |
 | `a_retired_entry_hands_its_earlier_due_time_to_the_queued_write` | the queued entry takes the earlier due time of the two, so a key rewritten during an outage keeps its flush schedule | CI (`cargo test`) |
-| `buffered_bytes_equal_the_live_charges` | the byte counter, over generated adds, removes, `remove_all`s, rewrites, refusals and accepts against a refusing-then-accepting inner store: after every step the counter equals the queued charges plus the held ones; at idle both counters are 0 | CI (`cargo test`) |
+| `buffered_bytes_equal_the_live_charges` | the byte counter, over generated adds, in-place cell write-throughs, removes, `remove_all`s, rewrites, refusals and accepts against a refusing-then-accepting inner store, with no pass holding an entry at a step boundary: after every step the counter equals the queued charges; at idle both counters are 0. Charges held by a pass and the release of a retired entry are covered by the fixed tests in the next row and by `the_byte_bound_overshoot_is_the_stated_one` | CI (`cargo test`) |
 | `buffered_bytes_follow_insert_coalesce_and_settle`, `a_rewrite_while_a_pass_holds_the_key_counts_both_until_each_settles`, `a_superseded_put_back_releases_the_retired_charge`, `an_in_place_write_is_charged_at_the_cell_cost` | each site that moves the byte counter, one fixed order each: insert, smaller and larger coalesce, settle; a rewrite of a key a parked pass holds; the release of a retired entry; an in-place write charged at its cell's cost | CI (`cargo test`) |
 | `two_writers_of_one_key_interleaved_between_sequence_and_insert_leave_nothing_unaccounted` | NOT an enforcer of the precondition. Evidence for accounting only, under one interleaving of two writers that the precondition excludes. It asserts nothing about the stored value | CI (`cargo test`) |
 | `tests/integration-rust/store-refusal-liveness.test.ts`, arm `REFUSAL-LIFTED-UNDER-LOAD` | the predicate at node level: six keys refused while they are still written; after the refusal is lifted every partition's WAL lag returns to 0 | local only (`pnpm test:integration-rust:liveness`), for the reason given under `TG-WB-004` (TODO-770) |
@@ -1766,7 +1768,8 @@ weaker than a test.
 ### TG-WB-011: A write that adds a key or value bytes to the write-behind buffer is refused, temporarily, while the buffer is at its key or byte bound; an in-place write is refused before its mutation; acknowledgement never waits for the store engine
 
 - **Scope:** `WriteBehindDataStore` — `admit_write` (the one gate of `add`, `remove` and
-  `remove_all`) and `admit_in_place` — and `DefaultRecordStore::update_in_place`, which calls
+  `remove_all`) and `admit_in_place` — and `DefaultRecordStore`: `put` and `remove`, which reach
+  the data store before the engine, and `update_in_place`, which calls
   `MapDataStore::admit_in_place` for `Client` and `CrdtMerge` provenance before its first engine
   call.
 - **Statement:** with `B = capacity_bytes > 0` (`TOPGUN_WRITEBEHIND_CAPACITY_MB`), while the
@@ -1776,12 +1779,20 @@ weaker than a test.
     rewrite that does not grow, whether the key's entry is queued or held by a pass;
   - every in-place write of `Client` or `CrdtMerge` provenance is refused before the engine is
     called, so the cell, its cost, the engine slot, the WAL (no sequence assigned) and both
-    counters are as before; its write-through after an admitted mutation is never byte-refused;
+    counters are as before; this pre-check applies the key rule too, and the write-through after
+    an admitted mutation is refused by neither bound;
   - a remove, a `remove_all` and an LWW write of a top-level `null` (charge 0) are never refused
     by the byte bound; the key bound is unchanged and can still refuse a remove of a key that is
     not buffered once the buffer is at its key capacity, as a write of any new key;
   - every refusal is a temporary error (the transient `internal`, 500), counted once under
-    `bound="keys"` or `bound="bytes"`, the key bound checked first.
+    `bound="keys"` or `bound="bytes"`, the key bound checked first;
+  - **a refused write leaves no trace** at the record store: a `put`, `remove` or in-place write
+    of `Client` or `CrdtMerge` provenance refused at either bound leaves the engine (the key's
+    value, residency, dirty flag and write token), the mutation observers (no call), the WAL and
+    both counters as they were, so no read and no subscriber sees a write that was not
+    acknowledged. `put` reads the record it replaces only after the data store accepted the
+    write, so a reader that loaded the staged value meanwhile is replaced and reported as an
+    update.
   No write call waits for the store engine: a flush commit blocked inside the store reaches
   writers only as refusals at these bounds, and once it returns both counters fall.
 - **Mechanical predicate:** under a paused clock with a flush pass parked inside its commit,
@@ -1790,7 +1801,8 @@ weaker than a test.
   rewrite of a queued or held key and a remove of a buffered key are admitted; after the release
   both counters fall and a new key is admitted.
 - **Maintaining code:** `write_behind.rs` — `admit_write`, `admit_in_place`, `charge_of`,
-  `stage` (the slot carries its write's charge); `default_record_store.rs` —
+  `stage` (the slot carries its write's charge); `default_record_store.rs` — `put` (the data
+  store's `add` before the engine and the observers), `remove` (its delete staged first), and
   `admit_in_place_write`, called from `update_in_place` after `refuse_foreign_token`.
 - **Enforcing test:** `write_behind.rs::a_commit_blocked_in_the_store_reaches_writers_as_bound_refusals`
   and `prefix_watermark_proptest.rs::an_in_place_write_over_the_byte_budget_is_refused_before_its_mutation`.
@@ -1810,7 +1822,10 @@ weaker than a test.
 | `a_remove_is_never_refused_by_the_byte_budget`, `a_null_lww_write_is_never_refused_by_the_byte_budget`, `a_zero_byte_budget_refuses_nothing` | charge-0 writes over the budget, with the key count below capacity; a top-level `null` with and without TTL charged 0, a nested `Null` charged and refused; `B = 0` | CI (`cargo test`) |
 | `a_key_refusal_is_not_also_a_byte_refusal`, `capacity_refusals_are_counted_by_bound` | the key rule first, one refusal counted once, each under its own bound | CI (`cargo test`) |
 | `the_byte_bound_overshoot_is_the_stated_one` | the counter reaches but does not exceed `B − 1 + W_b + H_b` with parked writers and a parked pass | CI (`cargo test`) |
-| `an_in_place_write_over_the_byte_budget_is_refused_before_its_mutation`, `an_admitted_in_place_write_is_not_byte_refused_after_its_mutation`, `an_in_place_write_of_backup_provenance_is_not_pre_checked` (`prefix_watermark_proptest.rs`) | the in-place rule on a record store over the write-behind store: OR add and remove refused with the cell, cost, WAL and counters unchanged; an admitted write acked although the budget was reached before its write-through; `Backup` not pre-checked | CI (`cargo test`) |
+| `an_in_place_write_over_the_byte_budget_is_refused_before_its_mutation`, `an_in_place_write_of_backup_provenance_is_not_pre_checked` (`prefix_watermark_proptest.rs`) | the in-place rule on a record store over the write-behind store: OR add and remove refused with the cell, cost, WAL and counters unchanged; `Backup` not pre-checked | CI (`cargo test`) |
+| `an_admitted_in_place_write_is_not_byte_refused_after_its_mutation`, `an_admitted_in_place_write_is_not_key_refused_after_its_mutation` (`write_behind.rs`) | an in-place write admitted by the pre-check is acked although the budget, or the key capacity, was reached before its write-through | CI (`cargo test`) |
+| `a_put_refused_at_the_byte_bound_leaves_no_trace`, `a_write_refused_at_the_key_bound_leaves_no_trace` (`prefix_watermark_proptest.rs`) | a refused write leaves no trace, with a recording observer: a growing rewrite and a new key at the byte bound; a put of a resident and of a new key, a remove and an in-place write at the key bound — engine value, residency, dirty flag and token, observer calls, last WAL sequence and both counters unchanged | CI (`cargo test`) |
+| `a_reader_that_loads_the_staged_value_during_a_put_is_replaced_by_the_put` (`prefix_watermark_proptest.rs`) | a reader loads the staged value while `put` awaits the data store; the put replaces it with its own record (clean, its token) and reports an update | CI (`cargo test`) |
 | `a_push_diff_over_the_byte_budget_merges_up_to_the_refused_entry` (`prefix_watermark_proptest.rs`) | a client's OR push diff over the budget: the entry whose write-through reaches the budget is merged and buffered, the next is refused and it and the rest are not merged; the same push after the drain merges all | CI (`cargo test`) |
 
 **Not claimed.**
