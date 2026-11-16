@@ -5811,6 +5811,9 @@ impl MapDataStore for WriteBehindDataStore {
     /// close are checked again there, because either can change in between.
     fn admit_value(&self, map: &str, key: &str, value: &RecordValue) -> anyhow::Result<()> {
         self.refuse_unless_running(map, key)?;
+        // A fast refusal only: a tenant drop that begins after this check is
+        // caught by `tenant_closes.enter` in the write-through, which re-checks
+        // under the in-flight guard and is the check `TG-TEN-002` rests on.
         self.tenant_closes.refuse_closed(map)?;
         let charge = charge_of(&WriteSource::Value(value), key);
         self.admit_write(map, &[key], charge)

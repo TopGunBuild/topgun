@@ -381,7 +381,7 @@ impl RecordStore for DefaultRecordStore {
         {
             // Record was evicted between the engine put and this mark, or
             // another record now occupies the slot. Harmless: the value is
-            // durable via add(), and a write that owns the slot marks itself
+            // durable via the write-through above, and a write that owns the slot marks itself
             // clean when its own persist completes.
             tracing::trace!(
                 key,
