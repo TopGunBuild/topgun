@@ -40,8 +40,8 @@ use crate::storage::datastores::kv_engine::{
 };
 use crate::storage::datastores::RedbKvEngine;
 use crate::storage::map_data_store::{
-    AppliedWatermarks, FlushCommit, LeafSink, Loaded, MapDataStore, PutValue, ScanBatch,
-    ScanCursor, ScanOrder, StoreBrokenCause, StoreErrorClass, StoreWrite, WriteSource,
+    AppliedWatermarks, FlushCommit, KeyVersion, LeafSink, Loaded, MapDataStore, PutValue,
+    ScanBatch, ScanCursor, ScanOrder, StoreBrokenCause, StoreErrorClass, StoreWrite, WriteSource,
 };
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
 use crate::storage::wal::{Wal, WalFsyncPolicy, WalWriter};
@@ -521,6 +521,14 @@ impl MapDataStore for CommitSpy {
 
     fn import_applied_watermarks(&self, rows: &[(u32, u64)]) -> anyhow::Result<()> {
         self.inner.import_applied_watermarks(rows)
+    }
+
+    async fn load_version(&self, map: &str, key: &str) -> anyhow::Result<Option<KeyVersion>> {
+        self.inner.load_version(map, key).await
+    }
+
+    fn reclaim_record_versions(&self, watermarks: &[u64]) -> anyhow::Result<u64> {
+        self.inner.reclaim_record_versions(watermarks)
     }
 }
 

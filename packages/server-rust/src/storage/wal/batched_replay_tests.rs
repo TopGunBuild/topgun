@@ -34,8 +34,8 @@ use super::tests::delta_frame;
 use super::{OrDelta, Wal, WalEntry, WalFsyncPolicy, WalOp, WalRecovery, WalWriter};
 use crate::storage::datastores::engine_store::{EngineMapDataStore, KS_PARTITION_META, KS_PRIMARY};
 use crate::storage::map_data_store::{
-    FlushCommit, LeafSink, MapDataStore, PutValue, RecordRefused, ScanBatch, ScanCursor,
-    StoreBrokenCause, StoreErrorClass, StoreWrite,
+    FlushCommit, KeyVersion, LeafSink, MapDataStore, PutValue, RecordRefused, ScanBatch,
+    ScanCursor, StoreBrokenCause, StoreErrorClass, StoreWrite,
 };
 use crate::storage::record::{OrMapEntry, RecordValue};
 
@@ -341,6 +341,19 @@ impl MapDataStore for FaultStore {
 
     fn import_applied_watermarks(&self, rows: &[(u32, u64)]) -> anyhow::Result<()> {
         self.inner.import_applied_watermarks(rows)
+    }
+
+    async fn load_version(&self, map: &str, key: &str) -> anyhow::Result<Option<KeyVersion>> {
+        // Replay reads the version before anything else of a frame, so a key
+        // whose read is armed to fail fails its prepare here too (`TG-WAL-015`).
+        if self.failing_loads.lock().contains(key) {
+            anyhow::bail!("injected: the version read of {map}/{key} fails");
+        }
+        self.inner.load_version(map, key).await
+    }
+
+    fn reclaim_record_versions(&self, watermarks: &[u64]) -> anyhow::Result<u64> {
+        self.inner.reclaim_record_versions(watermarks)
     }
 }
 
@@ -768,7 +781,8 @@ async fn batched_outcome(window: &Window, entries: &[WalEntry], batch_frames: us
 }
 
 /// Seeds a fresh store and replays the window frame by frame through
-/// `replay_entry`, keeping the contiguous-success frontier by hand.
+/// `replay_entry`, keeping the contiguous-success frontier and the held keys
+/// by hand.
 async fn per_frame_outcome(window: &Window, entries: &[WalEntry]) -> Outcome {
     let root = Root::new();
     let engine = open_engine(&root);
@@ -800,11 +814,34 @@ async fn per_frame_outcome(window: &Window, entries: &[WalEntry]) -> Outcome {
     let dyn_store = Arc::clone(&store) as Arc<dyn MapDataStore>;
     let mut frontier = 0;
     let mut failed = false;
+    // Batched replay holds a key once one of its frames failed: its later
+    // non-subsuming frames stay unapplied until a written subsuming frame of
+    // the key above every failed one (`TG-WAL-015`). Frame by frame, that is
+    // the key's highest failed sequence, cleared by such a frame.
+    let mut held: BTreeMap<(String, String), u64> = BTreeMap::new();
     for e in entries {
-        match WalRecovery::replay_entry(&dyn_store, e, 0, true).await {
-            Ok(()) if !failed => frontier = e.sequence,
-            Ok(()) => {}
-            Err(_) => failed = true,
+        let id = (e.map.clone(), e.key.clone());
+        let subsumes = e.op.subsumes_on_coalesce();
+        let result = if held.contains_key(&id) && !subsumes {
+            Err(())
+        } else {
+            WalRecovery::replay_entry(&dyn_store, e, 0, true)
+                .await
+                .map_err(|_| ())
+        };
+        match result {
+            Ok(()) => {
+                if held.get(&id).is_some_and(|f| e.sequence > *f) {
+                    held.remove(&id);
+                }
+                if !failed {
+                    frontier = e.sequence;
+                }
+            }
+            Err(()) => {
+                held.insert(id, e.sequence);
+                failed = true;
+            }
         }
     }
     let mut values = Vec::new();
