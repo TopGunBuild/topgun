@@ -1218,6 +1218,9 @@ impl WalWriter {
     }
 
     /// Constructs the writer and starts its log writer and syncer.
+    // One call site, `open_over_store`, which holds every input already
+    // checked; a parameter struct would only restate them.
+    #[allow(clippy::too_many_arguments)]
     fn build(
         wal_dir: PathBuf,
         policy: WalFsyncPolicy,
@@ -3472,6 +3475,7 @@ impl WalRecovery {
     /// folded without it (`TG-WAL-015`). A store that reports itself broken
     /// (`TG-WB-010`) ends the partition's replay: nothing more is committed
     /// for it.
+    #[allow(clippy::too_many_lines)]
     async fn commit_batch(
         &self,
         inner_store: &Arc<dyn MapDataStore>,
