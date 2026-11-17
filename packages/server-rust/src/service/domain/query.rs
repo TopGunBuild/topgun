@@ -388,14 +388,14 @@ impl Drop for SubscribeGuard {
 /// live path would applying them one by one, and the deltas edit `results` — ENTER and UPDATE upsert the projected value
 /// by key (an existing key keeps its position, a new key is appended), LEAVE
 /// removes the key. A captured value expired at `now` (TG-TTL-001) is folded as
-/// "no row", as the scan would have left it out. Returns whether a delta
-/// changed the rows; their order is then the caller's to restore.
+/// "no row", as the scan would have left it out. The rows' order is then the
+/// caller's to restore.
 fn fold_captured(
     results: &mut Vec<QueryResultEntry>,
     sub: &QuerySubscription,
     entries: &[(String, DeltaEntry)],
     now: u64,
-) -> bool {
+) {
     let mut slots: Vec<Option<QueryResultEntry>> = results.drain(..).map(Some).collect();
     let mut index: HashMap<String, usize> = slots
         .iter()
@@ -415,9 +415,7 @@ fn fold_captured(
             live_value.is_some() && entry.matches,
         )
     });
-    let deltas = sub.apply_and_project(mutations);
-    let changed = !deltas.is_empty();
-    for delta in deltas {
+    for delta in sub.apply_and_project(mutations) {
         match delta.event {
             ChangeEventType::ENTER | ChangeEventType::UPDATE => {
                 let row = QueryResultEntry {
@@ -439,7 +437,6 @@ fn fold_captured(
         }
     }
     results.extend(slots.into_iter().flatten());
-    changed
 }
 
 /// Why a live subscribe answered with `QUERY_SNAPSHOT_OVERFLOW`.
@@ -484,9 +481,10 @@ fn folded_snapshot_frame(
     entries: &[(String, DeltaEntry)],
     now: u64,
 ) -> Result<Vec<u8>, rmp_serde::encode::Error> {
-    if fold_captured(&mut snapshot.results, sub, entries, now) {
-        page_cursor.repaginate(&mut snapshot, &sub.live_window);
-    }
+    fold_captured(&mut snapshot.results, sub, entries, now);
+    // Also when no row of the page changed: a capture past the page means
+    // more rows follow it.
+    page_cursor.repaginate(&mut snapshot, &sub.live_window);
     rmp_serde::to_vec_named(&Message::QueryResp(QueryRespMessage { payload: snapshot }))
 }
 
@@ -519,12 +517,15 @@ impl PageCursor {
         })
     }
 
-    /// Restores a folded page: its rows in the query's order, `has_more` also
-    /// when the fold pushed rows past the page, and the cursor after its new
-    /// last row, so paging on from it skips no row.
+    /// Restores a folded page: its rows in the window's order (of the
+    /// unprojected values), `has_more` raised when the window holds rows past
+    /// the page, and the cursor after its new last row, so paging on from it
+    /// skips no row. `has_more` is never lowered: rows past the page removed
+    /// during the scan are not seen without the store.
     fn repaginate(&self, page: &mut QueryRespPayload, window: &LiveWindow) {
+        let ranks = window.ranks();
         page.results
-            .sort_by(|a, b| window.compare((&a.key, &a.value), (&b.key, &b.value)));
+            .sort_by_key(|row| ranks.get(&row.key).copied().unwrap_or(usize::MAX));
         if window.holds_past_limit() {
             page.has_more = Some(true);
         }
@@ -5281,6 +5282,39 @@ mod tests {
         apply_updates(&mut rows, query_frames(&mut fx.s_rx, LIVE_ID));
         assert!(rows.is_empty(), "{rows:?}");
         assert_eq!(rows, fx.fresh_rows(Query::default()).await);
+    }
+
+    /// A captured put past a full page changes none of its rows, but more rows
+    /// now follow it: the snapshot says so and hands out the cursor a fresh
+    /// one-shot query hands out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_captured_put_past_a_full_page_raises_has_more() {
+        let mut fx = live();
+        for (key, n) in [("a", 1), ("b", 2), ("c", 3)] {
+            fx.client(fx.w, put(key, v(n))).await;
+        }
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe_query(by_v(3));
+        hold.wait_reached().await;
+        fx.client(fx.w, put("d", v(4))).await;
+        release(hold, task).await;
+        let Some(Message::QueryResp(snapshot)) =
+            query_frames(&mut fx.s_rx, LIVE_ID).into_iter().next()
+        else {
+            panic!("a snapshot");
+        };
+        let fresh = fx.fresh(by_v(3)).await;
+        assert_eq!(snapshot.payload.has_more, Some(true));
+        assert_eq!(fresh.has_more, Some(true));
+        let last_key = |cursor: Option<&String>| {
+            decode_cursor(cursor.expect("a next cursor"))
+                .expect("decodes")
+                .last_key
+        };
+        assert_eq!(
+            last_key(snapshot.payload.next_cursor.as_ref()),
+            last_key(fresh.next_cursor.as_ref())
+        );
     }
 
     /// A write that sorts before the page's cursor takes no slot of the page:

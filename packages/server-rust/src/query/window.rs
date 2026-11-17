@@ -268,9 +268,20 @@ impl LiveWindow {
             .is_some_and(|limit| self.state.lock().len() > limit as usize)
     }
 
+    /// Each tracked key's position in the window's order: the keyset
+    /// comparator over the unprojected values, the key breaking ties.
+    pub fn ranks(&self) -> HashMap<String, usize> {
+        self.state
+            .lock()
+            .iter()
+            .enumerate()
+            .map(|(i, row)| (row.key.clone(), i))
+            .collect()
+    }
+
     /// The window's order of two `(key, value)` rows: the keyset comparator over
     /// its sort fields, the key breaking ties.
-    pub fn compare(&self, a: (&str, &rmpv::Value), b: (&str, &rmpv::Value)) -> std::cmp::Ordering {
+    fn compare(&self, a: (&str, &rmpv::Value), b: (&str, &rmpv::Value)) -> std::cmp::Ordering {
         if self.row_before(a, b) {
             std::cmp::Ordering::Less
         } else if self.row_before(b, a) {
