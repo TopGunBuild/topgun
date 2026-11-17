@@ -77,7 +77,8 @@ async function startOrThrow(
  * whose files RocksDB's open rewrites; the WAL directory is wholly included.
  */
 function outsideEngineSnapshot(dir: string): TreeSnapshot {
-  const outside = (rel: string) => !rel.startsWith(ENGINE_PREFIX);
+  // The engine directory's own entry stays, so the snapshot shows the store was there.
+  const outside = (rel: string) => rel === ENGINE_PREFIX || !rel.startsWith(ENGINE_PREFIX);
   const snap = treeSnapshot(dir, outside);
   return { paths: snap.paths.filter(outside), sha256: snap.sha256 };
 }
