@@ -7125,6 +7125,10 @@ mod store_mode_tests;
 #[path = "batched_replay_tests.rs"]
 mod batched_replay_tests;
 
+#[cfg(test)]
+#[path = "replay_idempotence_tests.rs"]
+mod replay_idempotence_tests;
+
 #[cfg(all(test, feature = "redb"))]
 mod durable_collect_tests;
 
