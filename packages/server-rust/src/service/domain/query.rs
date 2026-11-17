@@ -98,8 +98,9 @@ pub struct QuerySubscription {
 }
 
 impl QuerySubscription {
-    /// Runs one write through this subscription's window and returns the
-    /// deltas the subscriber is sent: the window's complete delta set (ENTER,
+    /// Runs writes through this subscription's window at once (one write on
+    /// the live path, every captured write in the snapshot fold) and returns
+    /// the deltas the subscriber is sent: the window's delta set (ENTER,
     /// displacement LEAVE, promotion ENTER, in-window UPDATE, delete LEAVE),
     /// without the rows outside the subscription's cursor page, with ENTER and
     /// UPDATE values projected to `fields` and LEAVE values `Nil`.
@@ -108,13 +109,11 @@ impl QuerySubscription {
     /// the snapshot leaves the window and the rows exactly as the live path
     /// would have (TG-LIVE-001(b)).
     #[must_use]
-    pub fn apply_and_project(
+    pub fn apply_and_project<'a>(
         &self,
-        key: &str,
-        new_value: Option<&rmpv::Value>,
-        matches: bool,
+        mutations: impl IntoIterator<Item = (&'a str, Option<&'a rmpv::Value>, bool)>,
     ) -> Vec<WindowDelta> {
-        let deltas = self.live_window.apply_mutation(key, new_value, matches);
+        let deltas = self.live_window.apply_batch(mutations);
         if deltas.is_empty() {
             return deltas;
         }
@@ -293,7 +292,7 @@ impl QueryRegistry {
             if exclude == Some(sub.connection_id) {
                 continue;
             }
-            let deltas = sub.apply_and_project(key, new_value, matches);
+            let deltas = sub.apply_and_project([(key, new_value, matches)]);
             if deltas.is_empty() {
                 continue;
             }
@@ -394,8 +393,8 @@ impl Drop for SubscribeGuard {
 }
 
 /// Folds the writes captured during a subscribe's scan into its snapshot
-/// rows: each one goes through the window as the live path would apply it,
-/// and its deltas edit `results` — ENTER and UPDATE upsert the projected value
+/// rows: they go through the window in one batch, which leaves it as the
+/// live path would applying them one by one, and the deltas edit `results` — ENTER and UPDATE upsert the projected value
 /// by key (an existing key keeps its position, a new key is appended), LEAVE
 /// removes the key. A captured value expired at `now` (TG-TTL-001) is folded as
 /// "no row", as the scan would have left it out. Row order after a fold is not
@@ -403,7 +402,7 @@ impl Drop for SubscribeGuard {
 fn fold_captured(
     results: &mut Vec<QueryResultEntry>,
     sub: &QuerySubscription,
-    entries: Vec<(String, DeltaEntry)>,
+    entries: &[(String, DeltaEntry)],
     now: u64,
 ) {
     let mut slots: Vec<Option<QueryResultEntry>> = results.drain(..).map(Some).collect();
@@ -412,32 +411,36 @@ fn fold_captured(
         .enumerate()
         .filter_map(|(i, slot)| slot.as_ref().map(|e| (e.key.clone(), i)))
         .collect();
-    for (key, entry) in entries {
+    let mutations = entries.iter().map(|(key, entry)| {
         let live_value = entry.record.as_ref().and_then(|record| {
             record
                 .value
                 .as_ref()
                 .filter(|_| lww_is_live(&record.timestamp, record.ttl_ms, now))
         });
-        let matches = live_value.is_some() && entry.matches;
-        for delta in sub.apply_and_project(&key, live_value, matches) {
-            match delta.event {
-                ChangeEventType::ENTER | ChangeEventType::UPDATE => {
-                    let row = QueryResultEntry {
-                        key: delta.key,
-                        value: delta.value,
-                    };
-                    if let Some(&i) = index.get(&row.key) {
-                        slots[i] = Some(row);
-                    } else {
-                        index.insert(row.key.clone(), slots.len());
-                        slots.push(Some(row));
-                    }
+        (
+            key.as_str(),
+            live_value,
+            live_value.is_some() && entry.matches,
+        )
+    });
+    for delta in sub.apply_and_project(mutations) {
+        match delta.event {
+            ChangeEventType::ENTER | ChangeEventType::UPDATE => {
+                let row = QueryResultEntry {
+                    key: delta.key,
+                    value: delta.value,
+                };
+                if let Some(&i) = index.get(&row.key) {
+                    slots[i] = Some(row);
+                } else {
+                    index.insert(row.key.clone(), slots.len());
+                    slots.push(Some(row));
                 }
-                ChangeEventType::LEAVE => {
-                    if let Some(&i) = index.get(&delta.key) {
-                        slots[i] = None;
-                    }
+            }
+            ChangeEventType::LEAVE => {
+                if let Some(&i) = index.get(&delta.key) {
+                    slots[i] = None;
                 }
             }
         }
@@ -938,9 +941,11 @@ impl QueryService {
         // Seed the window from the snapshot page, before field projection so
         // sort-field values are present for ordering.
         if let Some((live_window, _, _)) = &live {
-            for entry in &results {
-                let _ = live_window.apply_mutation(&entry.key, Some(&entry.value), true);
-            }
+            let _ = live_window.apply_batch(
+                results
+                    .iter()
+                    .map(|entry| (entry.key.as_str(), Some(&entry.value), true)),
+            );
         }
 
         // Apply field projection.
@@ -1096,7 +1101,7 @@ impl QueryService {
                 fold_captured(
                     &mut folded.results,
                     &sub,
-                    entries,
+                    &entries,
                     self.record_store_factory.now_ms(),
                 );
                 match rmp_serde::to_vec_named(&Message::QueryResp(QueryRespMessage {
@@ -4597,6 +4602,40 @@ mod tests {
             )
         }
 
+        /// Spawns a live subscribe of `query` on the live map.
+        fn spawn_subscribe_query(
+            &self,
+            query: Query,
+        ) -> tokio::task::JoinHandle<Result<OperationResponse, OperationError>> {
+            let mut op = self.subscribe_op(LIVE_ID, LIVE_MAP, None);
+            if let Operation::QuerySubscribe { payload, .. } = &mut op {
+                payload.payload.query = query;
+            }
+            tokio::spawn(Arc::clone(&self.svc).oneshot(op))
+        }
+
+        /// The rows a fresh one-shot query of `query` returns now.
+        async fn fresh_rows(&self, query: Query) -> BTreeMap<String, rmpv::Value> {
+            let mut op = self.subscribe_op("fresh", LIVE_MAP, None);
+            if let Operation::QuerySubscribe { payload, .. } = &mut op {
+                payload.payload.query = query;
+                payload.payload.snapshot_only = true;
+            }
+            let OperationResponse::Message(msg) =
+                Arc::clone(&self.svc).oneshot(op).await.expect("one-shot")
+            else {
+                panic!("a one-shot answers on the response path");
+            };
+            let Message::QueryResp(resp) = *msg else {
+                panic!("a QUERY_RESP");
+            };
+            resp.payload
+                .results
+                .into_iter()
+                .map(|e| (e.key, e.value))
+                .collect()
+        }
+
         fn buffer(&self) -> Arc<DeltaBuffer> {
             let sub = self
                 .registry
@@ -4805,24 +4844,7 @@ mod tests {
                     .expect("resubscribe");
                 assert!(matches!(again, OperationResponse::Empty));
                 let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
-                let mut fresh = fx.subscribe_op("fresh", LIVE_MAP, None);
-                if let Operation::QuerySubscribe { payload, .. } = &mut fresh {
-                    payload.payload.snapshot_only = true;
-                }
-                let OperationResponse::Message(fresh) =
-                    Arc::clone(&fx.svc).oneshot(fresh).await.expect("one-shot")
-                else {
-                    panic!("a one-shot answers on the response path");
-                };
-                let Message::QueryResp(fresh) = *fresh else {
-                    panic!("a QUERY_RESP");
-                };
-                let fresh: BTreeMap<String, rmpv::Value> = fresh
-                    .payload
-                    .results
-                    .into_iter()
-                    .map(|e| (e.key, e.value))
-                    .collect();
+                let fresh = fx.fresh_rows(Query::default()).await;
                 assert_eq!(rows, fresh, "the resubscribe holds what a fresh scan holds");
                 assert_eq!(fx.registry.get_subscriptions_for_map(LIVE_MAP).len(), 1);
             });
@@ -5068,6 +5090,100 @@ mod tests {
         assert!(!rows.contains_key("ke"), "{rows:?}");
     }
 
+    /// The first three rows by `v`.
+    fn top3() -> Query {
+        use topgun_core::messages::base::{SortDirection, SortField};
+        Query {
+            sort: Some(vec![SortField {
+                field: "v".to_string(),
+                direction: SortDirection::Asc,
+            }]),
+            limit: Some(3),
+            ..Query::default()
+        }
+    }
+
+    /// Subscribes to [`top3`] over `a`=1, `b`=2, `c`=3, makes the `captured`
+    /// writes during the scan, and returns the snapshot rows and the rows of a
+    /// fresh one-shot query made after it.
+    async fn top3_fold(
+        captured: Vec<ClientOp>,
+    ) -> (BTreeMap<String, rmpv::Value>, BTreeMap<String, rmpv::Value>) {
+        let mut fx = live();
+        for (key, n) in [("a", 1), ("b", 2), ("c", 3)] {
+            fx.client(fx.w, put(key, v(n))).await;
+        }
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe_query(top3());
+        hold.wait_reached().await;
+        for op in captured {
+            fx.client(fx.w, op).await;
+        }
+        release(hold, task).await;
+        let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        (rows, fx.fresh_rows(top3()).await)
+    }
+
+    /// A captured remove of a row in the window takes it out of the snapshot.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_captured_remove_of_a_windowed_row_leaves_the_snapshot() {
+        let (rows, fresh) = top3_fold(vec![remove("b")]).await;
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["a", "c"]);
+        assert_eq!(rows, fresh);
+    }
+
+    /// A captured put that enters the window pushes its last row out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_captured_put_that_enters_the_window_pushes_the_last_row_out() {
+        let (rows, fresh) = top3_fold(vec![put("x", v(0))]).await;
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["a", "b", "x"]);
+        assert_eq!(rows, fresh);
+    }
+
+    /// A captured put that sorts a windowed row past the limit takes it out,
+    /// and the row it had pushed out comes back.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_captured_put_that_leaves_the_window_promotes_the_retained_row() {
+        let (rows, fresh) = top3_fold(vec![put("x", v(0)), put("a", v(9))]).await;
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["b", "c", "x"]);
+        assert_eq!(rows, fresh);
+    }
+
+    /// A captured put into the window that expires before the fold is left
+    /// out, and the row it would have pushed out stays (TG-TTL-001).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_captured_put_into_the_window_that_expires_before_the_fold_is_left_out() {
+        let clock = Arc::new(ManualClock::new(make_timestamp().millis));
+        let factory = Arc::new(
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            )
+            .with_clock(Arc::clone(&clock) as _),
+        );
+        let mut fx = live_over(factory, test_config().outbound_channel_capacity);
+        for (key, n) in [("a", 1), ("b", 2), ("c", 3)] {
+            fx.client(fx.w, put(key, v(n))).await;
+        }
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe_query(top3());
+        hold.wait_reached().await;
+        let mut op = put("x", v(0));
+        if let Some(Some(record)) = op.record.as_mut() {
+            record.ttl_ms = Some(1000);
+        }
+        fx.client(fx.w, op).await;
+        let Some(RecordValue::Lww { timestamp, .. }) = fx.stored("x").await else {
+            panic!("x is stored");
+        };
+        clock.set(timestamp.millis + 1001);
+        release(hold, task).await;
+        let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["a", "b", "c"]);
+        assert_eq!(rows, fx.fresh_rows(top3()).await);
+    }
+
     /// `remove_if_same` releases the outer read guard before it drops an empty
     /// map entry (it would deadlock otherwise), drops that entry, and never
     /// removes a newer registration of the same id.
@@ -5153,15 +5269,18 @@ mod tests {
                 fields: Some(vec!["v".to_string()]),
                 delta_buffer: Arc::new(DeltaBuffer::new(SNAPSHOT_BUFFER_CAPACITY)),
             };
-            let mut results = Vec::new();
-            for n in 0..ROWS {
-                let key = format!("r{n:05}");
-                let _ = sub.live_window.apply_mutation(&key, Some(&row(n)), true);
-                results.push(QueryResultEntry {
-                    key,
-                    value: project_fields(&["v".to_string()], &row(n)),
-                });
-            }
+            let rows: Vec<(String, rmpv::Value)> =
+                (0..ROWS).map(|n| (format!("r{n:05}"), row(n))).collect();
+            let _ = sub
+                .live_window
+                .apply_batch(rows.iter().map(|(k, v)| (k.as_str(), Some(v), true)));
+            let results = rows
+                .iter()
+                .map(|(key, value)| QueryResultEntry {
+                    key: key.clone(),
+                    value: project_fields(&["v".to_string()], value),
+                })
+                .collect();
             let snapshot = QueryRespPayload {
                 query_id: "m".to_string(),
                 results,
@@ -5186,7 +5305,7 @@ mod tests {
                     panic!("no overflow");
                 };
                 let mut folded = snapshot.take().expect("once");
-                fold_captured(&mut folded.results, &sub, entries, u64::MAX / 2);
+                fold_captured(&mut folded.results, &sub, &entries, u64::MAX / 2);
                 let bytes = rmp_serde::to_vec_named(&Message::QueryResp(QueryRespMessage {
                     payload: folded,
                 }))
