@@ -563,6 +563,54 @@ mod tests {
             proptest::prop_assert_eq!(&held_batched, &held_one_by_one);
             proptest::prop_assert_eq!(held_batched, in_window(&batched));
         }
+
+        /// Past the trim of twice the limit, a batch over a window loaded
+        /// within it shows the page a fresh sort and limit over the values its
+        /// keys end with gives, and so do the rows its deltas leave a
+        /// subscriber holding.
+        #[test]
+        fn a_batch_shows_the_page_of_the_values_its_keys_end_with(
+            limit in 1u32..5,
+            seed in proptest::collection::vec(0i64..20, 0..10),
+            batch in proptest::collection::vec(
+                (0u8..20, proptest::option::of(0i64..20), proptest::bool::ANY),
+                0..40,
+            ),
+        ) {
+            let w = LiveWindow::new(sort_asc("score"), Some(limit));
+            let seed: Vec<(String, rmpv::Value)> = seed
+                .into_iter()
+                .take(2 * limit as usize)
+                .enumerate()
+                .map(|(i, n)| (format!("k{i}"), rec("score", n)))
+                .collect();
+            let _ = w.apply_batch(seed.iter().map(|(k, v)| (k.as_str(), Some(v), true)));
+            let mut end: std::collections::BTreeMap<String, rmpv::Value> = seed.into_iter().collect();
+            let batch: Vec<(String, Option<rmpv::Value>)> = batch
+                .iter()
+                .map(|(k, n, m)| (format!("k{k}"), n.filter(|_| *m).map(|n| rec("score", n))))
+                .collect();
+            for (key, value) in &batch {
+                match value {
+                    Some(value) => end.insert(key.clone(), value.clone()),
+                    None => end.remove(key),
+                };
+            }
+            let held = replay(
+                in_window(&w),
+                w.apply_batch(batch.iter().map(|(k, v)| (k.as_str(), v.as_ref(), v.is_some()))),
+            );
+            let mut page: Vec<(i64, String)> = end
+                .iter()
+                .map(|(k, v)| (v.as_map().expect("a map")[0].1.as_i64().expect("an int"), k.clone()))
+                .collect();
+            page.sort();
+            page.truncate(limit as usize);
+            let page: std::collections::BTreeMap<String, rmpv::Value> =
+                page.into_iter().map(|(n, k)| (k, rec("score", n))).collect();
+            proptest::prop_assert_eq!(&in_window(&w), &page);
+            proptest::prop_assert_eq!(held, page);
+        }
     }
 
     /// Report-only: the time to load a 10 000-row window from a sorted scan,
