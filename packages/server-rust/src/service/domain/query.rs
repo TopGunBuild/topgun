@@ -1810,7 +1810,7 @@ mod tests {
     /// returns `Empty` (TG-LIVE-001): the `QUERY_RESP` is on the receiver, and
     /// no `QUERY_UPDATE` of the query precedes it.
     fn live_snapshot(
-        resp: OperationResponse,
+        resp: &OperationResponse,
         rx: &mut tokio::sync::mpsc::Receiver<OutboundMessage>,
     ) -> QueryRespMessage {
         assert!(
@@ -2095,7 +2095,7 @@ mod tests {
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
-        let resp = live_snapshot(svc.oneshot(op).await.unwrap(), &mut rx);
+        let resp = live_snapshot(&svc.oneshot(op).await.unwrap(), &mut rx);
         assert_eq!(resp.payload.query_id, "q-1");
         assert!(resp.payload.results.is_empty());
 
@@ -2193,7 +2193,7 @@ mod tests {
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
-        let resp = live_snapshot(svc.oneshot(op).await.unwrap(), &mut rx);
+        let resp = live_snapshot(&svc.oneshot(op).await.unwrap(), &mut rx);
 
         let results = resp.payload.results;
         assert_eq!(results.len(), 5);
@@ -2287,7 +2287,7 @@ mod tests {
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
-        let resp = live_snapshot(svc.oneshot(op).await.unwrap(), &mut rx);
+        let resp = live_snapshot(&svc.oneshot(op).await.unwrap(), &mut rx);
 
         // (1) COMPLETENESS — the TODO-530 invariant (holds for both designs).
         assert_eq!(
@@ -2381,7 +2381,7 @@ mod tests {
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
-        let resp = live_snapshot(svc.oneshot(op).await.unwrap(), &mut rx);
+        let resp = live_snapshot(&svc.oneshot(op).await.unwrap(), &mut rx);
 
         // (1) PAGE CORRECTNESS — exactly LIMIT rows, the first LIMIT keys ascending.
         let keys: Vec<String> = resp.payload.results.iter().map(|e| e.key.clone()).collect();
@@ -2473,7 +2473,7 @@ mod tests {
             },
         };
         let resp = live_snapshot(
-            svc.oneshot(Operation::QuerySubscribe { ctx, payload })
+            &svc.oneshot(Operation::QuerySubscribe { ctx, payload })
                 .await
                 .unwrap(),
             &mut rx,
@@ -3180,7 +3180,7 @@ mod tests {
                     other => panic!("expected QueryResp, got {other:?}"),
                 }
             }
-            live => live_snapshot(live, &mut fx.rx).payload,
+            live => live_snapshot(&live, &mut fx.rx).payload,
         }
     }
 
@@ -4295,7 +4295,7 @@ mod tests {
             ctx: make_ctx(Some(conn)),
             payload,
         };
-        let resp = live_snapshot(Arc::clone(svc).oneshot(op).await.unwrap(), rx);
+        let resp = live_snapshot(&Arc::clone(svc).oneshot(op).await.unwrap(), rx);
         let mut results: Vec<(String, rmpv::Value)> = resp
             .payload
             .results
@@ -4674,7 +4674,7 @@ mod tests {
 
         fx.client(fx.w, put("k1", v(2))).await;
         fx.client(fx.w, put("k3", v(1))).await;
-        let wall = u64::try_from(make_timestamp().millis).unwrap_or(0);
+        let wall = make_timestamp().millis;
         let high = Timestamp {
             millis: wall + 10_000_000_000_000,
             counter: 0,
@@ -4761,9 +4761,9 @@ mod tests {
                 let OperationResponse::Messages(frames) = returned else {
                     panic!("expected [snapshot, overflow], got {returned:?}");
                 };
-                assert_eq!(frames.len(), 2);
-                let Message::QueryResp(snapshot) = &frames[0] else {
-                    panic!("element 0 is the snapshot");
+                let [Message::QueryResp(snapshot), Message::QueryResp(overflow)] = &frames[..]
+                else {
+                    panic!("expected [snapshot, overflow], got {frames:?}");
                 };
                 assert_eq!(snapshot.payload.code, None);
                 let mut keys: Vec<&str> = snapshot
@@ -4774,9 +4774,6 @@ mod tests {
                     .collect();
                 keys.sort_unstable();
                 assert_eq!(keys, vec!["seed-0", "seed-1", "seed-2"], "the scan rows");
-                let Message::QueryResp(overflow) = &frames[1] else {
-                    panic!("element 1 is the overflow");
-                };
                 assert_eq!(overflow.payload.query_id, LIVE_ID);
                 assert_eq!(
                     overflow.payload.code.as_deref(),
@@ -4899,7 +4896,9 @@ mod tests {
         assert!(!registry.subscriptions.contains_key(LIVE_MAP));
     }
 
-    /// An unsubscribe during the scan: nothing is sent and the buffer is freed.
+    /// An unsubscribe during the scan, then a resubscribe of the same id that
+    /// completes before the scan does: the held subscribe sends nothing, the
+    /// resubscribe's registration stays, and the held buffer is freed.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_unsubscribe_during_the_scan_sends_nothing_and_frees_the_buffer() {
         let mut fx = live();
@@ -4911,11 +4910,23 @@ mod tests {
             .oneshot(query_unsubscribe(fx.s, LIVE_ID))
             .await
             .expect("unsubscribe");
+        let again = Arc::clone(&fx.svc)
+            .oneshot(fx.subscribe_op(LIVE_ID, LIVE_MAP, None))
+            .await
+            .expect("resubscribe");
+        assert!(matches!(again, OperationResponse::Empty));
+        assert_eq!(query_frames(&mut fx.s_rx, LIVE_ID).len(), 1);
         let returned = release(hold, task).await;
         assert!(matches!(returned, OperationResponse::Empty));
         assert!(
             query_frames(&mut fx.s_rx, LIVE_ID).is_empty(),
-            "no QUERY_RESP"
+            "the held subscribe sends no QUERY_RESP"
+        );
+        assert!(
+            fx.registry
+                .get_subscription(LIVE_MAP, fx.s, LIVE_ID)
+                .is_some(),
+            "the resubscribe's registration stays"
         );
         assert!(weak.upgrade().is_none(), "the buffer is freed");
     }
@@ -5025,7 +5036,7 @@ mod tests {
     /// A captured value that expires before the fold is not folded (TG-TTL-001).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_value_that_expires_before_the_fold_is_not_folded() {
-        let wall = u64::try_from(make_timestamp().millis).unwrap_or(0);
+        let wall = make_timestamp().millis;
         let clock = Arc::new(ManualClock::new(wall));
         let factory = Arc::new(
             RecordStoreFactory::new(
