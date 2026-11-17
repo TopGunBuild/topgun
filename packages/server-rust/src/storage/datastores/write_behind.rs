@@ -4837,6 +4837,7 @@ impl WriteBehindDataStore {
                             map,
                             key,
                             store_time,
+                            seq: 0,
                         }
                     }
                     DelayedOp::Store { value } => Some(value.as_ref()),
@@ -4854,6 +4855,7 @@ impl WriteBehindDataStore {
                     key,
                     value,
                     store_time,
+                    seq: 0,
                 }
             })
             .collect();

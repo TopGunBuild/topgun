@@ -3513,11 +3513,13 @@ fn batch_writes<'a>(
                 key: &entry.key,
                 value: PutValue::Encoded(encoded.clone()),
                 store_time: now,
+                seq: 0,
             },
             Prepared::Remove => StoreWrite::Remove {
                 map: &entry.map,
                 key: &entry.key,
                 store_time: now,
+                seq: 0,
             },
             Prepared::Nothing | Prepared::Failed => continue,
         };

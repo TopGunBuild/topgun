@@ -971,6 +971,7 @@ async fn max_observed_sequence_reads_watermark_of_compacted_empty_partition() {
                 key: "k",
                 value: PutValue::Value(&value),
                 store_time: 0,
+                seq: 0,
             }],
             applied: vec![(3, watermark)],
         })

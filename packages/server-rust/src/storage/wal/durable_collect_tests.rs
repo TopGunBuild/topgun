@@ -351,6 +351,7 @@ async fn commit_and_mark(
             key,
             value: PutValue::Value(value),
             store_time: 0,
+            seq: 0,
         })
         .collect();
     store
@@ -553,6 +554,7 @@ async fn ac1_on_rocksdb_without_a_wal_commits_stay_synced() {
                 key: &recs[0].0,
                 value: PutValue::Value(&recs[0].1),
                 store_time: 0,
+                seq: 0,
             }],
             applied: vec![(P, 1)],
         })

@@ -1994,11 +1994,13 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
                 imported: held.imported,
                 import_pending: held.import_pending,
                 by_partition: held.applied.to_vec(),
+                max_version: 0,
             },
             None => AppliedWatermarks {
                 imported: false,
                 import_pending: false,
                 by_partition: vec![0; WAL_PARTITIONS],
+                max_version: 0,
             },
         }))
     }

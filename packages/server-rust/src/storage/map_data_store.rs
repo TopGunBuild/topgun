@@ -476,6 +476,10 @@ pub enum StoreWrite<'a> {
         value: PutValue<'a>,
         /// The `now` the per-entry call would be given.
         store_time: i64,
+        /// The WAL sequence this write stores: the frame's on replay, the
+        /// highest one the entry resolves on a flush; 0 when no WAL is
+        /// attached. A frame's sequence is never 0 (`TG-WAL-015`).
+        seq: u64,
     },
     /// Removes a record, as [`MapDataStore::remove`].
     Remove {
@@ -485,7 +489,20 @@ pub enum StoreWrite<'a> {
         key: &'a str,
         /// The `now` the per-entry call would be given.
         store_time: i64,
+        /// The WAL sequence this write stores, as for [`StoreWrite::Put`].
+        seq: u64,
     },
+}
+
+/// The version a store keeps for a key: the WAL sequence of the last write
+/// committed to it, and whether that write removed the record. Replay
+/// discards a frame at or below it (`TG-WAL-015`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyVersion {
+    /// The WAL sequence of the key's last committed write.
+    pub seq: u64,
+    /// That write removed the record.
+    pub removed: bool,
 }
 
 /// The record of a [`StoreWrite::Put`]: a value, or its msgpack encoding
@@ -508,6 +525,9 @@ pub struct AppliedWatermarks {
     /// The watermark of every WAL partition, indexed by partition (length
     /// `PARTITION_COUNT`); an absent row is 0.
     pub by_partition: Vec<u64>,
+    /// At least every record version the store holds; 0 when it holds none.
+    /// The WAL seeds its sequence above it (`TG-WAL-010`).
+    pub max_version: u64,
 }
 
 /// Writes of a [`FlushCommit`] the store refused on their own (a map name it
@@ -947,6 +967,7 @@ pub trait MapDataStore: Send + Sync {
                     key,
                     value: PutValue::Encoded(bytes),
                     store_time,
+                    ..
                 } => {
                     self.add_encoded(map, key, bytes, *store_time).await?;
                 }
@@ -955,6 +976,7 @@ pub trait MapDataStore: Send + Sync {
                     key,
                     value: PutValue::Value(value),
                     store_time,
+                    ..
                 } => {
                     self.add(map, key, value, *store_time).await?;
                 }
@@ -962,6 +984,7 @@ pub trait MapDataStore: Send + Sync {
                     map,
                     key,
                     store_time,
+                    ..
                 } => self.remove(map, key, *store_time).await?,
             }
         }
@@ -1002,6 +1025,42 @@ pub trait MapDataStore: Send + Sync {
     fn import_applied_watermarks(&self, rows: &[(u32, u64)]) -> anyhow::Result<()> {
         let _ = rows;
         anyhow::bail!("this store keeps no applied watermark to import into")
+    }
+
+    /// The version this store keeps for `key` of `map`, or `None` when it
+    /// keeps none for the key (version 0).
+    ///
+    /// The default refuses, like
+    /// [`import_applied_watermarks`](MapDataStore::import_applied_watermarks):
+    /// a WAL is opened only over a store that keeps watermarks, and such a
+    /// store must answer this, so replay can never run with its gate silently
+    /// off (`TG-WAL-015`).
+    ///
+    /// # Errors
+    ///
+    /// A store that keeps no record version; a store error; a malformed
+    /// version row.
+    async fn load_version(&self, map: &str, key: &str) -> anyhow::Result<Option<KeyVersion>> {
+        let _ = (map, key);
+        anyhow::bail!("this store keeps no record version")
+    }
+
+    /// Drops every record version at or below its WAL partition's applied
+    /// watermark in `watermarks` (indexed by partition), and returns how many
+    /// it dropped. No frame at or below the watermark is replayed, so such a
+    /// version is never read by a decision.
+    ///
+    /// Synchronous, like
+    /// [`durable_applied_watermarks`](MapDataStore::durable_applied_watermarks):
+    /// the WAL calls it off the runtime workers. The default drops nothing: a
+    /// store keeping no version has none to drop.
+    ///
+    /// # Errors
+    ///
+    /// A store error.
+    fn reclaim_record_versions(&self, watermarks: &[u64]) -> anyhow::Result<u64> {
+        let _ = watermarks;
+        Ok(0)
     }
 
     /// The applied WAL watermarks, made durable before they are returned: the
@@ -1071,6 +1130,7 @@ impl<S> WatermarkKeeping<S> {
                 imported: false,
                 import_pending: false,
                 by_partition: vec![0; topgun_core::PARTITION_COUNT as usize],
+                max_version: 0,
             }),
         }
     }
@@ -1255,6 +1315,7 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
                         map,
                         key,
                         store_time,
+                        seq,
                         ..
                     },
                     Some(value),
@@ -1263,6 +1324,7 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
                     key,
                     value: PutValue::Value(value),
                     store_time: *store_time,
+                    seq: *seq,
                 },
                 _ => write.clone(),
             })

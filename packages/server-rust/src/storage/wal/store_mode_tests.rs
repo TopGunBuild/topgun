@@ -716,6 +716,7 @@ impl Node {
                 key,
                 value: PutValue::Value(value),
                 store_time: 0,
+                seq: 0,
             })
             .collect();
         self.store
@@ -2734,6 +2735,7 @@ async fn a20_a_commit_carrying_a_watermark_below_the_held_row_is_refused_and_wri
                         key: &key,
                         value: PutValue::Value(&value),
                         store_time: 0,
+                        seq: 0,
                     }],
                     applied: vec![(P, sequence)],
                 })

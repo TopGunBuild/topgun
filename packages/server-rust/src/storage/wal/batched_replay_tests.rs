@@ -393,6 +393,7 @@ impl FaultNode {
                 key,
                 value: PutValue::Value(value),
                 store_time: 0,
+                seq: 0,
             })
             .collect();
         self.store
@@ -785,6 +786,7 @@ async fn per_frame_outcome(window: &Window, entries: &[WalEntry]) -> Outcome {
             key,
             value: PutValue::Value(value),
             store_time: 0,
+            seq: 0,
         })
         .collect();
     inner
