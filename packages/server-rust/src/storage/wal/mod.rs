@@ -2851,12 +2851,6 @@ impl WalRecovery {
     /// own frame. Frames above the frontier stay in the replay window and are
     /// re-applied on a later boot.
     ///
-    /// That re-application is idempotent for `RecordValue::Lww` (TG-WAL-006):
-    /// `prepare_entry` reads the current durable value and discards a frame whose HLC
-    /// timestamp is strictly older, so a stale replayed frame can no longer clobber a
-    /// newer durable value written outside the window (e.g. a frameless write-behind
-    /// flush). Legacy frames keep always-merge replay.
-    ///
     /// OR frames come in TWO kinds, and each is idempotent under a DIFFERENT
     /// argument — neither argument covers the other kind (`TG-OR-003`):
     ///
@@ -3061,36 +3055,6 @@ impl WalRecovery {
     /// the merge that upholds re-replay idempotency lives HERE, at the recovery
     /// boundary, not in the store (`write_one` stays a CRDT-agnostic blind insert).
     ///
-    /// Re-replay of a `RecordValue::Lww` frame is idempotent (TG-WAL-006): before
-    /// applying a modern Lww frame this reads the current durable value and, if the
-    /// incoming frame's HLC timestamp is strictly OLDER than the stored value's,
-    /// discards it (last-write-wins by timestamp). A stale replayed frame therefore
-    /// can no longer clobber a newer durable value written outside the replay window
-    /// (e.g. a frameless write-behind flush). Ties and newer timestamps write
-    /// through unchanged. The read-then-write is not atomic, which is safe because
-    /// recovery runs before the listener accepts connections — there are no
-    /// concurrent writers at boot.
-    ///
-    /// The gate is scoped to modern `WalStorePayload::Record(RecordValue::Lww)`
-    /// frames only:
-    /// - `WalStorePayload::Legacy` frames carry a SYNTHESIZED timestamp (zero-epoch
-    ///   when the WAL recorded none) whose intent is always-merge, so they BYPASS
-    ///   the gate and keep the pre-existing blind replay.
-    /// - `RecordValue::OrMap`/`OrTombstones` frames carried by a `WalOp::Store`
-    ///   BYPASS the gate: their CROSS-NODE convergence is set-union of
-    ///   tags+tombstones, not a scalar timestamp max — replay itself is never a
-    ///   union but an absolute-set REPLACE, since unioning a snapshot onto the
-    ///   durable value would resurrect tombstoned tags. Such a frame is a post-RMW
-    ///   COMPLETE snapshot of the key that is monotone in `wal_seq` order, so
-    ///   in-sequence replay converges to the newest snapshot regardless of
-    ///   re-replay. That argument
-    ///   covers snapshot framing only — a `WalOp::OrDelta` frame is not a snapshot
-    ///   and rests on the separate argument below. OR merge-idempotency as its own
-    ///   property is owned by `TG-OR-003`, not this path.
-    /// - A cross-kind case (stored value is not `Lww` while the incoming frame is)
-    ///   cannot be compared by timestamp, so it also BYPASSES the gate and writes
-    ///   through.
-    ///
     /// Re-replay of a `WalOp::Remove` frame is idempotent WITHOUT a gate, under a
     /// DISTINCT invariant (`TG-WAL-009`, Remove-scoped — not the `TG-WAL-006` value
     /// claim above). A Remove replays UNCONDITIONALLY, identical to the live remove
@@ -3134,7 +3098,7 @@ impl WalRecovery {
         inner_store: &Arc<dyn MapDataStore>,
         overlay: &ReplayOverlay,
         entry: &WalEntry,
-        merge_gate: bool,
+        _merge_gate: bool,
     ) -> anyhow::Result<Option<ReplayWrite>> {
         match &entry.op {
             WalOp::Store { value } => {
@@ -3158,33 +3122,6 @@ impl WalRecovery {
                         }
                     }
                 };
-
-                // Merge-idempotency gate (TG-WAL-006), scoped to modern Lww frames.
-                // Only a `Record`-payload `Lww` frame carries a real value timestamp
-                // to compare; if the current value is a strictly-newer Lww value,
-                // this frame is stale (it was superseded by a write outside the
-                // replay window) and must be discarded rather than clobber it.
-                // Legacy frames, OR frames, and a non-Lww current value all fall
-                // through to the blind replay unchanged (see the doc-contract on
-                // `prepare_entry`). `merge_gate` is always `true` in production; the
-                // harness flips it off to reproduce the pre-fix blind clobber.
-                if merge_gate {
-                    if let WalStorePayload::Record(RecordValue::Lww {
-                        timestamp: incoming_ts,
-                        ..
-                    }) = value
-                    {
-                        if let Some(RecordValue::Lww {
-                            timestamp: stored_ts,
-                            ..
-                        }) = overlay.load(inner_store, &entry.map, &entry.key).await?
-                        {
-                            if *incoming_ts < stored_ts {
-                                return Ok(None);
-                            }
-                        }
-                    }
-                }
 
                 // ABSOLUTE SET, in this frame's sequence position — for an OR
                 // value as much as for an LWW one. The write REPLACES the key's
