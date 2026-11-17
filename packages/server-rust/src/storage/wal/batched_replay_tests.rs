@@ -829,19 +829,16 @@ async fn per_frame_outcome(window: &Window, entries: &[WalEntry]) -> Outcome {
                 .await
                 .map_err(|_| ())
         };
-        match result {
-            Ok(()) => {
-                if held.get(&id).is_some_and(|f| e.sequence > *f) {
-                    held.remove(&id);
-                }
-                if !failed {
-                    frontier = e.sequence;
-                }
+        if result.is_ok() {
+            if held.get(&id).is_some_and(|f| e.sequence > *f) {
+                held.remove(&id);
             }
-            Err(()) => {
-                held.insert(id, e.sequence);
-                failed = true;
+            if !failed {
+                frontier = e.sequence;
             }
+        } else {
+            held.insert(id, e.sequence);
+            failed = true;
         }
     }
     let mut values = Vec::new();
