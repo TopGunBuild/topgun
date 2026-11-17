@@ -3329,7 +3329,8 @@ weaker than a test.
 - **Maintaining code:** `service/domain/query.rs` — `QueryRegistry::deliver_mutation`,
   `QueryRegistry::remove_if_same`, `QuerySubscription::apply_and_project`,
   `handle_query_subscribe` and `deliver_live_snapshot`, the subscribe guard and the fold;
-  `query/delta_buffer.rs`; the two fan-out sites of `service/domain/crdt.rs`
+  `query/delta_buffer.rs`; `query/window.rs` (`LiveWindow::apply_batch`, which the fold, the
+  window's first load and each live write share); the two fan-out sites of `service/domain/crdt.rs`
   (`apply_op_under_writer`, `handle_expire_record`). Lock order: a buffer lock may be taken before
   a registry lock, never after. Citations are line-number-free.
 - **Enforcing test:** `a_write_during_the_scan_is_in_the_snapshot_and_no_update_precedes_it`,
