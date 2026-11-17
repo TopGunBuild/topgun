@@ -29,7 +29,7 @@ use topgun_core::vector::distance::DistanceMetric;
 
 use crate::dag::coordinator::{run_dag_local, ClusterQueryCoordinator};
 use crate::query::cursor::{
-    build_next_cursor, classify_cursor_status, cursor_query_hashes, decode_cursor, is_after_cursor,
+    build_next_cursor, classify_cursor_status, cursor_query_hashes, decode_cursor,
     SortValue,
 };
 use crate::query::delta_buffer::{
@@ -102,8 +102,9 @@ impl QuerySubscription {
     /// the live path, every captured write in the snapshot fold) and returns
     /// the deltas the subscriber is sent: the window's delta set (ENTER,
     /// displacement LEAVE, promotion ENTER, in-window UPDATE, delete LEAVE),
-    /// without the rows outside the subscription's cursor page, with ENTER and
-    /// UPDATE values projected to `fields` and LEAVE values `Nil`.
+    /// with ENTER and UPDATE values projected to `fields` and LEAVE values
+    /// `Nil`. A paged subscription's window holds no row at or before its
+    /// cursor, so a row moved there leaves through an ordinary LEAVE.
     ///
     /// Live delivery and the snapshot fold share it, so a write folded into
     /// the snapshot leaves the window and the rows exactly as the live path
@@ -113,35 +114,15 @@ impl QuerySubscription {
         &self,
         mutations: impl IntoIterator<Item = (&'a str, Option<&'a rmpv::Value>, bool)>,
     ) -> Vec<WindowDelta> {
-        let deltas = self.live_window.apply_batch(mutations);
-        if deltas.is_empty() {
-            return deltas;
-        }
-        // A row strictly before the cursor is on an earlier page the subscriber
-        // is not observing: one that enters there is not sent, and one updated
-        // to there leaves this page, so the subscriber drops the row it holds. A
-        // LEAVE carries no row value to test, so it is always delivered.
-        let page_cursor = self.query.cursor.as_deref().and_then(decode_cursor);
-        deltas
-            .into_iter()
-            .filter_map(|mut delta| {
-                if let Some(cursor) = &page_cursor {
-                    let before = !matches!(delta.event, ChangeEventType::LEAVE)
-                        && !is_after_cursor(&delta.key, &delta.value, cursor);
-                    match delta.event {
-                        ChangeEventType::ENTER if before => return None,
-                        ChangeEventType::UPDATE if before => delta.event = ChangeEventType::LEAVE,
-                        _ => {}
-                    }
-                }
-                if matches!(delta.event, ChangeEventType::LEAVE) {
-                    delta.value = rmpv::Value::Nil;
-                } else if let Some(fields) = &self.fields {
+        let mut deltas = self.live_window.apply_batch(mutations);
+        if let Some(fields) = &self.fields {
+            for delta in &mut deltas {
+                if !matches!(delta.event, ChangeEventType::LEAVE) {
                     delta.value = project_fields(fields, &delta.value);
                 }
-                Some(delta)
-            })
-            .collect()
+            }
+        }
+        deltas
     }
 }
 
@@ -879,16 +860,26 @@ impl QueryService {
         // SIZE/RESIDENCY-gated reject, not as a blanket reject of the sort clause. The
         // `QUERY_UNBOUNDED_SORT` code is retained for that gated reject.
 
+        // A cursor is decoded once, before anything is registered; one that does
+        // not decode is refused, as the scan refuses it for a one-shot request.
+        let input_cursor = match query.cursor.as_deref() {
+            None => None,
+            Some(cursor) => Some(decode_cursor(cursor).ok_or_else(|| {
+                OperationError::Internal(anyhow::anyhow!("query cursor: failed to decode cursor"))
+            })?),
+        };
+
         // A one-shot request needs no window, buffer or registration: nothing is
         // registered for it, so no live update can follow its snapshot, and a
         // subscription already registered under the same id is left untouched.
         let live = if snapshot_only {
             None
         } else {
-            let live_window = Arc::new(LiveWindow::new(
-                query.sort.clone().unwrap_or_default(),
-                query.limit,
-            ));
+            let mut live_window = LiveWindow::new(query.sort.clone().unwrap_or_default(), query.limit);
+            if let Some(cursor) = &input_cursor {
+                live_window = live_window.after_cursor(cursor.clone());
+            }
+            let live_window = Arc::new(live_window);
             let delta_buffer = Arc::new(DeltaBuffer::new(SNAPSHOT_BUFFER_CAPACITY));
             // Active before it is registered: a fan-out that finds the registration
             // must find a capturing buffer, or its update could precede the snapshot.
@@ -923,7 +914,6 @@ impl QueryService {
         // Capture cursor-emission inputs before `query` is moved into QuerySubscription.
         let (predicate_hash, sort_hash) = cursor_query_hashes(&query);
         let query_limit = query.limit;
-        let input_cursor = query.cursor.as_deref().and_then(decode_cursor);
         let sort_values_template: Vec<SortValue> = query
             .sort
             .as_ref()
@@ -5291,6 +5281,42 @@ mod tests {
         apply_updates(&mut rows, query_frames(&mut fx.s_rx, LIVE_ID));
         assert!(rows.is_empty(), "{rows:?}");
         assert_eq!(rows, fx.fresh_rows(Query::default()).await);
+    }
+
+    /// A write that sorts before the page's cursor takes no slot of the page:
+    /// the page keeps its rows, and a later write after the cursor enters it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_before_the_cursor_takes_no_slot_of_the_page() {
+        let mut fx = live();
+        let mut query = second_page(&fx).await;
+        query.limit = Some(3);
+        let subscribed = fx.spawn_subscribe_query(query.clone()).await;
+        assert!(matches!(subscribed, Ok(Ok(OperationResponse::Empty))));
+        let (mut rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["c", "d"]);
+        fx.client(fx.w, put("x", v(0))).await;
+        fx.client(fx.w, put("y", v(5))).await;
+        apply_updates(&mut rows, query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["c", "d", "y"]);
+        assert_eq!(rows, fx.fresh_rows(query).await);
+    }
+
+    /// A live subscribe whose cursor does not decode is refused before
+    /// anything is registered, as a one-shot query with it is.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cursor_that_does_not_decode_is_refused_at_subscribe() {
+        let fx = live();
+        let mut query = by_v(2);
+        query.cursor = Some("not a cursor".to_string());
+        let returned = fx.spawn_subscribe_query(query.clone()).await.expect("join");
+        assert!(returned.is_err(), "{returned:?}");
+        assert_eq!(fx.registry.subscription_count(), 0);
+        let mut op = fx.subscribe_op("fresh", LIVE_MAP, None);
+        if let Operation::QuerySubscribe { payload, .. } = &mut op {
+            payload.payload.query = query;
+            payload.payload.snapshot_only = true;
+        }
+        assert!(Arc::clone(&fx.svc).oneshot(op).await.is_err());
     }
 
     /// A live update that moves a row of the page before its cursor takes the

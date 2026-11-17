@@ -81,6 +81,10 @@ pub struct LiveWindow {
     /// the guard is only active when an explicit HLC is supplied via
     /// `apply_mutation_with_hlc`.
     hlc_seen: Mutex<HashMap<String, (u64, u32)>>,
+    /// The page cursor of a subscription that pages from one: the window tracks
+    /// no row that sorts at or before it, so a row moved there leaves and a row
+    /// written there takes no slot of the page.
+    page_cursor: Option<CursorData>,
 }
 
 impl LiveWindow {
@@ -92,7 +96,15 @@ impl LiveWindow {
             limit,
             state: Mutex::new(Vec::new()),
             hlc_seen: Mutex::new(HashMap::new()),
+            page_cursor: None,
         }
+    }
+
+    /// The same window for a page that follows `cursor`.
+    #[must_use]
+    pub fn after_cursor(mut self, cursor: CursorData) -> Self {
+        self.page_cursor = Some(cursor);
+        self
     }
 
     /// Encodes a row as a [`CursorData`] so [`is_after_cursor`] can order it against
@@ -155,11 +167,16 @@ impl LiveWindow {
         &self,
         mutations: impl IntoIterator<Item = (&'a str, Option<&'a rmpv::Value>, bool)>,
     ) -> Vec<WindowDelta> {
-        // The value each mutated key ends with; `None` = no row (delete or
-        // predicate-false).
+        // The value each mutated key ends with; `None` = no row (delete,
+        // predicate-false, or a row at or before the page cursor).
         let mut last: HashMap<&str, Option<&rmpv::Value>> = HashMap::new();
         for (key, value, matches_predicate) in mutations {
-            last.insert(key, value.filter(|_| matches_predicate));
+            let after = |value: &&rmpv::Value| {
+                self.page_cursor
+                    .as_ref()
+                    .is_none_or(|cursor| is_after_cursor(key, value, cursor))
+            };
+            last.insert(key, value.filter(|v| matches_predicate && after(v)));
         }
         let window = self.limit.map_or(usize::MAX, |limit| limit as usize);
         let mut state = self.state.lock();
