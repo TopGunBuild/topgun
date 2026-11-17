@@ -268,7 +268,8 @@ impl QueryRegistry {
     /// `new_record` is the write event's record: the stored record of an LWW
     /// put, else `None` or a value-less record (an LWW remove, an expiry
     /// remove, an OR add or remove), both a non-match. So is a record already
-    /// expired at `now`, the store clock (TG-TTL-001), as the fold treats it.
+    /// expired at `now()`, the store clock (TG-TTL-001), as the fold treats it;
+    /// the clock is read only when the map has a live subscription.
     ///
     /// Per subscription the write is first offered to its snapshot buffer: a
     /// subscription whose snapshot is still being built captures it, the
@@ -283,12 +284,13 @@ impl QueryRegistry {
         key: &str,
         new_record: Option<&LWWRecord<rmpv::Value>>,
         exclude: Option<ConnectionId>,
-        now: u64,
+        now: impl FnOnce() -> u64,
     ) {
         let subs = self.get_subscriptions_for_map(map_name);
         if subs.is_empty() {
             return;
         }
+        let now = now();
         let new_value = new_record
             .filter(|r| lww_is_live(&r.timestamp, r.ttl_ms, now))
             .and_then(|r| r.value.as_ref());
@@ -2776,7 +2778,7 @@ mod tests {
         )]));
         writer
             .registry
-            .deliver_mutation(&writer.connections, "users", key, Some(&record), None, 0);
+            .deliver_mutation(&writer.connections, "users", key, Some(&record), None, || 0);
     }
 
     fn update(query_id: &str, key: &str) -> Vec<(String, String)> {
@@ -3284,7 +3286,7 @@ mod tests {
             (rmpv::Value::from("price"), rmpv::Value::from(5)),
         ]));
         fx.registry
-            .deliver_mutation(&fx.conn_registry, "orders", "o4", Some(&record), None, 0);
+            .deliver_mutation(&fx.conn_registry, "orders", "o4", Some(&record), None, || 0);
         assert!(fx.rx.try_recv().is_err(), "no frame for a refused query");
     }
 

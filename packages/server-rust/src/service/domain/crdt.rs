@@ -966,7 +966,7 @@ impl CrdtService {
             &event_payload.key,
             event_payload.record.as_ref(),
             exclude_connection_id,
-            self.record_store_factory.now_ms(),
+            || self.record_store_factory.now_ms(),
         );
         self.record_journal(&event_payload, sanitized_ts.as_ref(), None);
 
@@ -1084,7 +1084,7 @@ impl CrdtService {
                 &event_payload.key,
                 event_payload.record.as_ref(),
                 None,
-                self.record_store_factory.now_ms(),
+                || self.record_store_factory.now_ms(),
             );
             // One stamp per event, as a client remove gets, so no expiry
             // DELETE falls back to the zero stamp.
