@@ -34,6 +34,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Read from source, not tested: a client older than this release still applies an error
     `QUERY_RESP` as an empty result, so its rows flash out.
 
+- **Fixed: a live query's snapshot holds the writes made while it was built.** A write that
+  landed while the server was building a live query's first result could be missing from it
+  without ever reaching the client as a change, and a change could reach the client before the
+  first result it belongs to (`TG-LIVE-001`).
+  - The snapshot now holds every write made to the map while it was built, the subscriber's own
+    included, and no change of the query reaches the client before its snapshot. A value that
+    expired before the snapshot was sent is left out of it.
+  - `QUERY_SNAPSHOT_OVERFLOW` is now sent: when more than 4096 distinct keys of the map are written
+    while one snapshot is built (a key written several times, by any kind of write, counts once),
+    or when the connection's outbound queue has no room for the snapshot. It follows the snapshot,
+    the server drops that subscription, and the client's resubscribe brings the rows back. Shown
+    in-process, not against a running server.
+  - New counter `topgun_query_snapshot_overflow_total{reason}`, `reason` = `buffer` or `channel`;
+    it appears with the first overflow.
+  - Read from source, not tested: a client older than this release applies the overflow frame as
+    an empty result, so it shows no rows and gets no changes until it subscribes again.
+  - Performance, measured on a Mac (M1 Max) with the in-process load harness, fire-and-wait,
+    50 connections, 10 s, three runs each, medians: 9 482 ops/s and p99 6.83 ms against 9 450
+    ops/s and p99 8.11 ms on the release before it. The harness opens no subscription, so this
+    shows only that writes with no live query did not slow down. The fold of a snapshot holds the
+    subscription's buffer lock, and so every writer of that map, while it runs: 11.0 s (median of
+    five) to fold 4096 captured writes into a sorted 10 000-row window, serialize and send it.
+
 - **Changed (breaking for an undocumented option): a live query refuses `groupBy` and
   `aggregations`.** A live query receives per-record changes, which mixed raw records into its
   grouped rows after the first write.

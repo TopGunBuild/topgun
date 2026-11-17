@@ -9,7 +9,7 @@ an explicit `NAKED` marker; the gate is "the NAKED count never grows silently", 
 Conventions: IDs are `TG-<DOMAIN>-<NNN>` (domains: WAL, WB write-behind, OR, LWW, MRK merkle,
 EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch, ENG byte engine, AUTHZ
 authorization, ENC encryption at rest, READ whole-map reads, IDX scalar indexes, VEC vector indexes,
-TTL record expiry). Cite the ID verbatim in code comments and test names. Statuses:
+TTL record expiry, LIVE live queries). Cite the ID verbatim in code comments and test names. Statuses:
 `decided` (holds by design) · `open (SPEC/TODO-nnn)` (not yet true / not yet wired) ·
 `aspirational`. Precedent: omnigraph `docs/invariants.md` (structure) — improved here with the
 CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
@@ -3286,6 +3286,95 @@ weaker than a test.
 | `nested_empty_op_batch_emits_no_frame` | an empty enveloped `OP_BATCH` is not dispatched and gets no frame, while a non-empty one after it in the same envelope is dispatched and acknowledged. Shown red on the tree where the envelope skips an inner `OP_BATCH` | CI (`cargo test`) |
 | `classify_refuses_an_op_batch` | classification returns `RequiresPartitionSplit` for an `OP_BATCH` | CI (`cargo test`) |
 | `tests/integration-rust/enveloped-op-batch.test.ts` | clause (a), envelope order — the only enforcer of it — against a real server binary: an enveloped `OP_BATCH` with one refused op is answered with the refusal and the acknowledgement of the accepted ops, ahead of the acknowledgement of a write placed after it in the same envelope. Shown red on the tree that dispatches the inner items last-to-first and on the tree that dispatches them all at once: nothing arrived ahead of the later write's acknowledgement | CI (`pnpm test:integration-rust`) |
+
+### TG-LIVE-001: A live query's snapshot carries the writes made during its scan and precedes every update of its subscription
+
+- **Scope:** a live (`snapshot_only = false`) query subscription served by one node: its
+  snapshot `QUERY_RESP`, the `QUERY_UPDATE`s of that registration, and the writes to its map whose
+  query fan-out runs (`CrdtService`'s two fan-out sites, under the key's writer, `TG-KEY-001`).
+- **Statement:** for a live subscription served by one node:
+  (a) its snapshot `QUERY_RESP` is enqueued on the connection before every `QUERY_UPDATE` of that
+  registration;
+  (b) for every key, the subscriber ends on the last write of the key whose fan-out ran: the last
+  frame of that registration the connection is sent that concerns the key reflects it, except a
+  write of the subscriber's own connection after the snapshot, which is not sent;
+  (c) an overflow (more than 4096 distinct keys of any event kind captured, or no free slot for
+  the snapshot) answers with the snapshot and then `QUERY_SNAPSHOT_OVERFLOW` on the response path,
+  and that registration is removed;
+  (d) a subscribe that ends before delivery leaves no registration;
+  (e) a captured value folded into the snapshot obeys `TG-TTL-001` at fold time: one expired on
+  the server clock when the fold runs is folded as "no row", as the scan would have left it out.
+  The mechanism: the subscription's snapshot buffer is active before the subscription is
+  registered; while it is active the fan-out records each write in it (the last arrival per key,
+  no stamp compared) instead of sending it; when the scan is done the handler closes the buffer
+  under its lock, folds what was captured into the snapshot through the same window and
+  projection as the live path, and enqueues the snapshot through a reserved channel slot before
+  the lock is released.
+- **Not claimed:**
+  - Cross-node live delivery (TODO-276/277/471/494/850).
+  - OR-Map entries as rows: an OR event is a non-match (TODO-993).
+  - Store writes that run no query fan-out: the SYNC `ORMAP_PUSH_DIFF` path (TODO-993) and the
+    embedding write-back (TODO-1000).
+  - Frames of a replaced registration of the same `(connection, query_id)`: a fan-out that
+    collected the old registration before `register` replaced it can enqueue an update of the old
+    one after the new snapshot. Its write preceded the new registration, so the new snapshot
+    already reflects it; (a) is per registration.
+  - An expired row on the live path after the snapshot (`TG-TTL-001`'s stated limit, until the
+    sweep's LEAVE).
+  - The order of `SERVER_EVENT` relative to `QUERY_RESP` (TODO-995); `has_more` / `next_cursor`
+    and row order after a fold (TODO-994); the subscriber-path throughput (TODO-996); clients
+    older than error routing (TODO-997); window membership after the subscriber's own writes on
+    the live path (TODO-999).
+  - The overflow against a running server: shown in-process only.
+- **Maintaining code:** `service/domain/query.rs` — `QueryRegistry::deliver_mutation`,
+  `QueryRegistry::remove_if_same`, `QuerySubscription::apply_and_project`,
+  `handle_query_subscribe` and `deliver_live_snapshot`, the subscribe guard and the fold;
+  `query/delta_buffer.rs`; the two fan-out sites of `service/domain/crdt.rs`
+  (`apply_op_under_writer`, `handle_expire_record`). Lock order: a buffer lock may be taken before
+  a registry lock, never after. Citations are line-number-free.
+- **Enforcing test:** `a_write_during_the_scan_is_in_the_snapshot_and_no_update_precedes_it`,
+  `an_overflow_sends_the_snapshot_then_the_overflow_and_drops_the_subscription`,
+  `a_full_outbound_channel_answers_with_the_snapshot_and_the_overflow`,
+  `a_disconnect_during_the_scan_frees_the_buffer`,
+  `an_unsubscribe_during_the_scan_sends_nothing_and_frees_the_buffer`,
+  `a_cancelled_subscribe_leaves_no_registration`,
+  `the_fold_projects_a_projected_subscription`,
+  `an_lww_remove_during_the_scan_leaves_the_snapshot`,
+  `an_or_op_on_a_scanned_lww_key_during_the_scan_leaves_the_snapshot`,
+  `or_ops_on_a_new_key_during_the_scan_add_no_row`,
+  `the_subscribers_own_write_during_the_scan_is_in_the_snapshot`,
+  `a_write_right_after_register_is_captured`,
+  `a_value_that_expires_before_the_fold_is_not_folded`,
+  `remove_if_same_drops_the_outer_entry_and_returns` (`query.rs`);
+  `the_bound_counts_distinct_keys_of_any_event_kind` (`delta_buffer.rs`). Each but the disconnect
+  test was shown red on the mutant the table below names. The simulation smoke
+  `sim_live_subscribe_converges_under_concurrent_writes` is not an enforcer: nothing in it makes a
+  write land during the scan.
+- **Violation consequence:** a write made while a live query's first result was built is missing
+  from it and never reaches the client as a change, so the subscriber holds a stale row for as
+  long as the key is not written again; or a change reaches the client before the result it
+  belongs to and is overwritten by it.
+- **Discovered by:** TODO-985 (the snapshot fence dropped writes made during the scan by their stamp); fixed and catalogued by SPEC-418a.
+- **Status:** decided, **enforced**.
+
+| Enforcer | What it covers | Where it runs |
+|----------|----------------|---------------|
+| `a_write_during_the_scan_is_in_the_snapshot_and_no_update_precedes_it` | (a), (b): a write made during the scan is in the snapshot, the snapshot is enqueued on the connection and no update of the query precedes it. Shown red on five trees: the write not routed into the buffer; captured but not folded; a wall-clock fence instead of the capture; only a strictly newer stamp folded; the snapshot returned on the response path instead of enqueued | CI (`cargo test`) |
+| `an_overflow_sends_the_snapshot_then_the_overflow_and_drops_the_subscription` | (c), the buffer bound: 4097 distinct keys written during the scan answer with the snapshot followed by `QUERY_SNAPSHOT_OVERFLOW`, drop that registration and keep the same id on another map; a resubscribe holds what a fresh one-shot scan holds. Shown red on the tree that keeps the registration on overflow, on the one that sends the overflow before the snapshot, and on the one that unregisters the id on every map | CI (`cargo test`) |
+| `a_full_outbound_channel_answers_with_the_snapshot_and_the_overflow` | (c), the channel: a connection with no free slot gets the snapshot and the overflow on the response path. Shown red on the tree that sends the snapshot without reserving a slot | CI (`cargo test`) |
+| `a_cancelled_subscribe_leaves_no_registration` | (d), cancellation: a subscribe aborted during its scan leaves no registration and its buffer is freed. Shown red on the tree without the subscribe guard | CI (`cargo test`) |
+| `an_unsubscribe_during_the_scan_sends_nothing_and_frees_the_buffer` | (d), unsubscribe: an unsubscribe during the scan, then a resubscribe of the same id, leave the held subscribe sending nothing and the newer registration in place. Shown red on the tree whose close does not check that the registration holds its own buffer | CI (`cargo test`) |
+| `a_disconnect_during_the_scan_frees_the_buffer` | (d), disconnect: the registration and the map's outer entry are gone and the buffer is freed. No mutant of its own | CI (`cargo test`) |
+| `the_fold_projects_a_projected_subscription` | the fold projects captured values as the live path does. Shown red on the tree that folds unprojected values | CI (`cargo test`) |
+| `an_lww_remove_during_the_scan_leaves_the_snapshot` | (a), removes: an LWW remove during the scan takes the row out of the snapshot. Shown red on the tree that captures only events with a value | CI (`cargo test`) |
+| `an_or_op_on_a_scanned_lww_key_during_the_scan_leaves_the_snapshot` | (a), OR ops: an OR op on a scanned LWW key takes it out. Shown red on the tree that captures a value-less event only for a key in the window | CI (`cargo test`) |
+| `or_ops_on_a_new_key_during_the_scan_add_no_row` | (a), OR ops: OR adds and removes on a new key add no row. Shown red on the tree where an OR add routes its value (`crdt.rs`) | CI (`cargo test`) |
+| `the_subscribers_own_write_during_the_scan_is_in_the_snapshot` | (a), the subscriber's own write is in the snapshot. Shown red on the tree that skips the writer's connection before routing | CI (`cargo test`) |
+| `a_write_right_after_register_is_captured` | (a), the window between register and scan: a write right after register is captured. Shown red on the tree that activates the buffer after register | CI (`cargo test`) |
+| `a_value_that_expires_before_the_fold_is_not_folded` | (e): a captured value that expired before the fold is not folded. Shown red on the tree without the TG-TTL-001 check at the fold | CI (`cargo test`) |
+| `remove_if_same_drops_the_outer_entry_and_returns` | `remove_if_same` removes only its own registration, drops the emptied outer entry and returns without deadlock. Shown red on three trees: the outer guard held across the outer remove; no outer remove; no buffer identity check | CI (`cargo test`) |
+| `the_bound_counts_distinct_keys_of_any_event_kind` (`delta_buffer.rs`) | (c), the bound counts distinct keys of any kind of event. Shown red on the tree that counts every route | CI (`cargo test`) |
+| `sim_live_subscribe_converges_under_concurrent_writes` | not an enforcer: a fault-scenario smoke (partition and heal of the other nodes) that checks the replayed frames end at the stored rows; nothing in it makes a write land during the scan | CI (`pnpm test:sim`) |
 
 ### TG-RATE-001: The cost a frame presents to its connection's limiter is not less than the number of client operations it hands to dispatch
 
