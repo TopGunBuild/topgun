@@ -237,6 +237,14 @@ This guide covers common issues you may encounter when using TopGun, organized b
 
 **One server process per data directory.** Nothing stops a second server started on the same directory, and the removal above does not take RocksDB's lock, so a second server started while the first one creates its store — or, during the engine migration, until its first copy batch is wholly written — can delete it.
 
+### Server refuses to start with `a key in the reserved keyspace 0x12`
+
+**Symptom:** An **older** server version exits with code 1 at startup, before it listens, with `Error: store open: refusing to start: store format: refusing to open: a key in the reserved keyspace 0x12` on stderr.
+
+**Cause:** The data directory was written by a newer version. Since that version the store keeps, for each record written ahead of the WAL's applied watermark, the WAL sequence of the newest write the record reflects, so recovery after a crash never replays an older write over a newer one; it keeps these rows in the reserved keyspace `0x12`, which an older version does not know. Every write the newer version stored leaves such a row, so an older version refuses every data directory the newer one has written to. The refusal comes before the older version opens the WAL, and it changes no WAL file. A data directory the newer version only opened, with no write, holds no such row and the older version starts on it.
+
+**Solution:** Start the newer version again: it serves the data directory as it was. There is no tool that removes these rows, and no way to give the data directory to the older version as it is. To go back to an older version anyway, use the [engine rollback](#upgrading-to-the-rocksdb-store-and-rolling-back), which returns to the redb store kept at the RocksDB migration (`engine.redb.pre-rocksdb`): it applies only to a node that was migrated from redb and still holds that file, and every write acknowledged since that migration is then gone on the server.
+
 ### Upgrading to the RocksDB store and rolling back
 
 **Upgrading.** The first start of this version on a data directory that holds `engine.redb` migrates it into `engine.rocksdb/` inside the store open, before it listens; nothing is run by hand. Give the start time: measured in-process on a Mac, 1 000 000 rows of 1 KiB took 6.56 s. The migration needs `1.5 × the size of engine.redb + 64 MiB` free on the data directory's file system. The next release no longer reads redb stores or the store files of earlier versions, so **upgrading from a version before this release: start this release first, then the next one.**

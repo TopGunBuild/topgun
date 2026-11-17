@@ -200,6 +200,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server now exits at startup with a message naming the variable. Set a positive value, or remove
   the variable to take the default of `100`.
 
+- **Changed (on-disk format): WAL replay discards a frame its key's stored state already
+  reflects.** The store now keeps, beside each primary record written ahead of its partition's
+  applied watermark, a record version — the WAL sequence of the newest write the stored state
+  reflects, and whether that write removed the key — in the reserved keyspace `0x12`, committed in
+  the same engine batch as the record. Recovery discards a frame at or below its key's version, of
+  every frame kind, so replaying a frame again, or a stale frame alone, no longer overwrites newer
+  stored state: a stale `Store` no longer brings back a removed key, a stale `Remove` no longer
+  deletes a newer value, and an OR add applied again no longer moves its tag (`TG-WAL-015`). The
+  earlier gate, which compared an LWW frame's HLC stamp with the stored value's, is gone.
+  - **The rows stay small.** A version row is dropped once its partition's durable applied
+    watermark passes it (no frame there is ever replayed again), by the WAL collection tick, at
+    most 1 000 rows per hold of the commit lock; one `DEBUG` line per pass,
+    `record versions reclaimed`, gives `rows_seen`, `rows_dropped` and `elapsed_ms`. One
+    node-wide `max_version` row is kept for good, and the WAL sequence counter is seeded above it,
+    so a write made after a restart is never sequenced below a stored version, also when the WAL
+    ends below one (a `batched` power loss). Version rows hold record keys and sequences and are
+    not sealed under encryption at rest.
+  - **Rolling back.** Every earlier binary that opens the RocksDB store refuses a data directory
+    this binary has stored a record in, at its store open — before it opens the WAL and before it listens — and exits 1:
+    `Error: store open: refusing to start: store format: refusing to open: a key in the reserved keyspace 0x12`.
+    It writes no WAL file. A data directory this binary only opened, with no write, holds no
+    `0x12` row and is served by the earlier binary. There is no tool that removes version rows;
+    the way back is the engine rollback ("Rolling a node BACK across the engine change" in the
+    operations notes), unchanged. Proven against the build of `67ff9b67` by `version-rollback`.
+  - **Upgrade note.** Stop the older binary until its stop logs `drained=true` before upgrading.
+    After an unclean stop of an older binary under `batched` fsync, its store can hold a key's
+    value whose frame was never fsynced while an older frame of the key is still in the WAL; this
+    binary's first boot has no version for the key yet and replays the older frame over that
+    value. That is within the `batched` loss contract, and a drained stop leaves no frame to
+    replay.
+  - **Held frames.** A frame recovery leaves unapplied (the store refuses it at the start, or it
+    fails to prepare, TODO-823) is not applied again once a live write of its key has been
+    stored above it: the node served the key without that frame and the live write was made over
+    that state. The non-subsuming frames of a key that follow such a failed frame, with no written
+    `Store` or `Remove` of the key above it before them, share that outcome: they are left
+    unapplied at that boot with their failed predecessor, served without, and lost for good once
+    a live write of the key is stored above them. A frame that follows a written `Store` or
+    `Remove` of its key above the failed one is applied at that boot.
+
 - **Changed (on-disk format): the server stores its data in RocksDB.** The data directory now
   holds `engine.rocksdb/`, and the server moves an existing `engine.redb` there by itself, once,
   at the first start of this version. Nothing has to be run by hand, and the redb store is kept.
