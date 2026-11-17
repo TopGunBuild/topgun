@@ -401,14 +401,14 @@ impl Drop for SubscribeGuard {
 /// live path would applying them one by one, and the deltas edit `results` — ENTER and UPDATE upsert the projected value
 /// by key (an existing key keeps its position, a new key is appended), LEAVE
 /// removes the key. A captured value expired at `now` (TG-TTL-001) is folded as
-/// "no row", as the scan would have left it out. Row order after a fold is not
-/// part of the contract.
+/// "no row", as the scan would have left it out. Returns whether a delta
+/// changed the rows; their order is then the caller's to restore.
 fn fold_captured(
     results: &mut Vec<QueryResultEntry>,
     sub: &QuerySubscription,
     entries: &[(String, DeltaEntry)],
     now: u64,
-) {
+) -> bool {
     let mut slots: Vec<Option<QueryResultEntry>> = results.drain(..).map(Some).collect();
     let mut index: HashMap<String, usize> = slots
         .iter()
@@ -428,7 +428,9 @@ fn fold_captured(
             live_value.is_some() && entry.matches,
         )
     });
-    for delta in sub.apply_and_project(mutations) {
+    let deltas = sub.apply_and_project(mutations);
+    let changed = !deltas.is_empty();
+    for delta in deltas {
         match delta.event {
             ChangeEventType::ENTER | ChangeEventType::UPDATE => {
                 let row = QueryResultEntry {
@@ -450,6 +452,49 @@ fn fold_captured(
         }
     }
     results.extend(slots.into_iter().flatten());
+    changed
+}
+
+/// What a snapshot page's `next_cursor` is built from, kept so that a fold
+/// that changes the page can rebuild it.
+struct PageCursor {
+    limit: Option<u32>,
+    template: Vec<SortValue>,
+    predicate_hash: u64,
+    sort_hash: u64,
+    now_ms: i64,
+}
+
+impl PageCursor {
+    /// The cursor after `last`, the page's last row in the query's order, when
+    /// more rows follow a page of a sorted, limited query.
+    fn next(&self, has_more: Option<bool>, last: Option<&QueryResultEntry>) -> Option<String> {
+        if has_more != Some(true) || self.limit.is_none() || self.template.is_empty() {
+            return None;
+        }
+        last.map(|last| {
+            build_next_cursor(
+                &last.key,
+                &last.value,
+                &self.template,
+                self.predicate_hash,
+                self.sort_hash,
+                self.now_ms,
+            )
+        })
+    }
+
+    /// Restores a folded page: its rows in the query's order, `has_more` also
+    /// when the fold pushed rows past the page, and the cursor after its new
+    /// last row, so paging on from it skips no row.
+    fn repaginate(&self, page: &mut QueryRespPayload, window: &LiveWindow) {
+        page.results
+            .sort_by(|a, b| window.compare((&a.key, &a.value), (&b.key, &b.value)));
+        if window.holds_past_limit() {
+            page.has_more = Some(true);
+        }
+        page.next_cursor = self.next(page.has_more, page.results.last());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -965,23 +1010,14 @@ impl QueryService {
             .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0);
 
-        let next_cursor = if has_more == Some(true)
-            && query_limit.is_some()
-            && !sort_values_template.is_empty()
-        {
-            results.last().map(|last| {
-                build_next_cursor(
-                    &last.key,
-                    &last.value,
-                    &sort_values_template,
-                    predicate_hash,
-                    sort_hash,
-                    now_ms,
-                )
-            })
-        } else {
-            None
+        let page_cursor = PageCursor {
+            limit: query_limit,
+            template: sort_values_template,
+            predicate_hash,
+            sort_hash,
+            now_ms,
         };
+        let next_cursor = page_cursor.next(has_more, results.last());
 
         let cursor_status = Some(classify_cursor_status(
             input_cursor.as_ref(),
@@ -1007,7 +1043,7 @@ impl QueryService {
             ))));
         };
 
-        self.deliver_live_snapshot(snapshot, &delta_buffer, &mut guard)
+        self.deliver_live_snapshot(snapshot, &page_cursor, &delta_buffer, &mut guard)
     }
 
     /// Delivers a live subscribe's snapshot (TG-LIVE-001): closes the buffer
@@ -1017,6 +1053,7 @@ impl QueryService {
     fn deliver_live_snapshot(
         &self,
         snapshot: QueryRespPayload,
+        page_cursor: &PageCursor,
         delta_buffer: &Arc<DeltaBuffer>,
         guard: &mut SubscribeGuard,
     ) -> Result<OperationResponse, OperationError> {
@@ -1105,12 +1142,10 @@ impl QueryService {
                 scan_bytes
             } else {
                 let mut folded = snapshot;
-                fold_captured(
-                    &mut folded.results,
-                    &sub,
-                    &entries,
-                    self.record_store_factory.now_ms(),
-                );
+                let now = self.record_store_factory.now_ms();
+                if fold_captured(&mut folded.results, &sub, &entries, now) {
+                    page_cursor.repaginate(&mut folded, &sub.live_window);
+                }
                 match rmp_serde::to_vec_named(&Message::QueryResp(QueryRespMessage {
                     payload: folded,
                 })) {
@@ -5141,6 +5176,40 @@ mod tests {
         query
     }
 
+    /// A captured put that enters a full page pushes its last row out: the
+    /// snapshot says more rows follow and hands out the cursor a fresh one-shot
+    /// query hands out, so paging on skips no row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_captured_put_into_a_full_page_moves_its_cursor() {
+        let mut fx = live();
+        for (key, n) in [("a", 1), ("b", 2), ("c", 3)] {
+            fx.client(fx.w, put(key, v(n))).await;
+        }
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe_query(by_v(3));
+        hold.wait_reached().await;
+        fx.client(fx.w, put("x", v(0))).await;
+        release(hold, task).await;
+        let Some(Message::QueryResp(snapshot)) = query_frames(&mut fx.s_rx, LIVE_ID).into_iter().next()
+        else {
+            panic!("a snapshot");
+        };
+        let fresh = fx.fresh(by_v(3)).await;
+        let keys = |page: &QueryRespPayload| page.results.iter().map(|e| e.key.clone()).collect::<Vec<_>>();
+        assert_eq!(keys(&snapshot.payload), ["x", "a", "b"]);
+        assert_eq!(keys(&snapshot.payload), keys(&fresh));
+        assert_eq!(snapshot.payload.has_more, Some(true));
+        assert_eq!(fresh.has_more, Some(true));
+        let position = |cursor: Option<&String>| {
+            let cursor = decode_cursor(cursor.expect("a next cursor")).expect("decodes");
+            (cursor.last_key, format!("{:?}", cursor.sort_values), cursor.predicate_hash, cursor.sort_hash)
+        };
+        assert_eq!(
+            position(snapshot.payload.next_cursor.as_ref()),
+            position(fresh.next_cursor.as_ref())
+        );
+    }
+
     /// A live update that moves a row of the page before its cursor takes the
     /// row off the subscriber.
     #[tokio::test(flavor = "multi_thread")]
@@ -5375,7 +5444,7 @@ mod tests {
                     panic!("no overflow");
                 };
                 let mut folded = snapshot.take().expect("once");
-                fold_captured(&mut folded.results, &sub, &entries, u64::MAX / 2);
+                let _ = fold_captured(&mut folded.results, &sub, &entries, u64::MAX / 2);
                 let bytes = rmp_serde::to_vec_named(&Message::QueryResp(QueryRespMessage {
                     payload: folded,
                 }))

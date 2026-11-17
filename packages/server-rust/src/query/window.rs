@@ -133,9 +133,9 @@ impl LiveWindow {
     ///
     /// Implemented as "b comes after a" via the shared cursor comparator so a single
     /// ordering definition governs both pagination and live windowing.
-    fn row_before(&self, a: &WindowRow, b: &WindowRow) -> bool {
-        let a_cursor = self.row_cursor(&a.key, &a.value);
-        is_after_cursor(&b.key, &b.value, &a_cursor)
+    fn row_before(&self, a: (&str, &rmpv::Value), b: (&str, &rmpv::Value)) -> bool {
+        let a_cursor = self.row_cursor(a.0, a.1);
+        is_after_cursor(b.0, b.1, &a_cursor)
     }
 
     /// Applies several mutations at once and returns every delta the subscriber
@@ -207,7 +207,7 @@ impl LiveWindow {
         }
         // Removals keep the rows in order; only a new or changed value moves one.
         if adds {
-            rows.sort_by(|(a, ..), (b, ..)| self.compare(a, b));
+            rows.sort_by(|(a, ..), (b, ..)| self.compare((&a.key, &a.value), (&b.key, &b.value)));
         }
 
         for (i, (row, was_in, mutated)) in rows.iter().enumerate() {
@@ -242,8 +242,16 @@ impl LiveWindow {
         leaves
     }
 
-    /// The keyset comparator's order of two rows.
-    fn compare(&self, a: &WindowRow, b: &WindowRow) -> std::cmp::Ordering {
+    /// Whether the window tracks rows past its limit: rows a write pushed out of
+    /// the window, which still match and follow its last row.
+    pub fn holds_past_limit(&self) -> bool {
+        self.limit
+            .is_some_and(|limit| self.state.lock().len() > limit as usize)
+    }
+
+    /// The window's order of two `(key, value)` rows: the keyset comparator over
+    /// its sort fields, the key breaking ties.
+    pub fn compare(&self, a: (&str, &rmpv::Value), b: (&str, &rmpv::Value)) -> std::cmp::Ordering {
         if self.row_before(a, b) {
             std::cmp::Ordering::Less
         } else if self.row_before(b, a) {
