@@ -22,8 +22,9 @@
 //! The design admits both of the following as **cases on this harness**, not forks:
 //!
 //! - **Value-equality oracle.** `OracleConfig::value_equality` defaults to `false` (opt-in per run);
-//!   `TG-WAL-006` is enforced (LWW-scoped), so a run with the flag on is green on the fixed path and
-//!   `DefectMode::ReplayClobberOlderFrame` is caught by it. No driver change is needed to exercise it.
+//!   replay is gated by record versions (`TG-WAL-015`), so a run with the flag on is green on the
+//!   fixed path and `DefectMode::ReplayClobberOlderFrame` is caught by it. No driver change is
+//!   needed to exercise it.
 //! - **OR-Map delta-fold recovery across a restart.** This lands as an `OrDelta`-shaped variant
 //!   added to [`WorkOp`] plus an OR-shaped variant added to [`ModelValue`] — the OR-Map delta-fold
 //!   recovery proof lands as a case on this harness, rather than a fork of it. The driver's
@@ -221,28 +222,26 @@ pub(crate) enum DefectMode {
     EmptyBootSeed,
     /// Re-introduces C13 via `write_behind.rs`'s new `WatermarkMode::InclusiveOffByOne` seam.
     InclusiveOffByOne,
-    /// Re-introduces the pre-`TG-WAL-006` recovery clobber via `wal/mod.rs`'s
-    /// `WalRecovery` test seams: the `RecordValue::Lww` merge gate is disabled
-    /// (blind replay) AND each partition's oldest un-applied frame is re-replayed
-    /// once more after the in-order pass — reproducing "an older frame is
-    /// re-applied over a newer durable value". Caught by the `value_equality`
-    /// oracle as an `AckedValueMismatch`.
+    /// Turns the record-version replay gate off (`TG-WAL-015`) via `wal/mod.rs`'s
+    /// `WalRecovery` test seams — a blind replay — AND re-replays each partition's
+    /// oldest un-applied frame once more after the in-order pass. Its case arranges the
+    /// stale state: the store already holds a newer flushed value of the key above a
+    /// pinned watermark, and the oldest frame in the window is an older LWW Store of
+    /// it. Re-applied blind it overwrites the newer value; caught by the
+    /// `value_equality` oracle as an `AckedValueMismatch`.
     ReplayClobberOlderFrame,
-    /// Fabricates a stale-Remove clobber via `wal/mod.rs`'s `re_replay_oldest_frame`
-    /// seam: each partition's oldest un-applied frame is re-replayed once more AFTER
-    /// the in-order pass. Replay-remove is UNCONDITIONAL (identical to live, TG-WAL-009
-    /// — there is no Remove gate to disable), so when a case arranges that oldest
-    /// frame to be a `WalOp::Remove` over a key re-created with a newer durable value,
-    /// the out-of-order re-replay deletes the re-creation. This state is unreachable
-    /// under in-order replay (which always ends on the newest frame) — only the seam
-    /// manufactures it. Caught by the O1 `AckedWriteLost` oracle (expected Live, got
-    /// absent) — NO new oracle needed.
+    /// As [`DefectMode::ReplayClobberOlderFrame`] — the version gate off and the oldest
+    /// un-applied frame re-replayed — over a case whose oldest frame is a stale
+    /// `WalOp::Remove` of a key re-created and flushed above the pinned watermark. A
+    /// Remove deletes unconditionally once past the gate, as the live remove does, so
+    /// re-applied blind it deletes the re-creation. Caught by the O1 `AckedWriteLost`
+    /// oracle (expected Live, got absent) — NO new oracle needed.
     ReplayStaleRemoveOverNewerValue,
     /// NOT a defect: the stale re-replay seam (`re_replay_oldest_frame`) with the
-    /// `RecordValue::Lww` merge gate left ON — the production gate configuration under
-    /// an out-of-order replay. It exists so a run can DISCRIMINATE "the gate defeats a
-    /// stale re-replay" (`TG-WAL-006`) from the trivial "no re-replay happened at all"
-    /// that [`DefectMode::None`] proves. A run under this mode is expected GREEN; a
+    /// record-version gate left ON — the production configuration under an out-of-order
+    /// replay. It exists so a run can DISCRIMINATE "the gate defeats a stale re-replay"
+    /// (`TG-WAL-015`) from the trivial "no re-replay happened at all" that
+    /// [`DefectMode::None`] proves. A run under this mode is expected GREEN; a
     /// violation here means the gate stopped holding.
     ReReplayOldestFrameGateOn,
 }
@@ -259,19 +258,18 @@ pub(crate) enum BootSeedMode {
 
 /// Which oracles are active for a run (R5).
 ///
-/// `value_equality` gates a comparison between the model's per-key MAX acked live HLC millis (the
-/// true LWW winner, held separately from O1/O2's latest-arrival `acked` value) and the recovered
+/// `value_equality` gates a comparison between the model's LAST acked value of a key (the live
+/// value: the live store keeps the last arrival without comparing stamps) and the recovered
 /// value's `RecordValue::Lww` timestamp, layered on top of O1/O2. When on, a recovered value whose
-/// timestamp is older than that maximum is reported as an `AckedValueMismatch` — the shape a stale
-/// re-replay clobber produces. The maximum (not the latest arrival) is the reference so that a
-/// clobber over a key whose writes are non-monotone in arrival order is still caught.
+/// timestamp differs from it is reported as an `AckedValueMismatch` — the shape a stale re-replay
+/// clobber produces, whichever way its stamp lies from the live one.
 ///
 /// It defaults to `false` deliberately: the equality oracle is opt-in per run, and
 /// `ac11_value_equality_defaults_off` guards that `OracleConfig::default()` never silently enables
-/// it. `TG-WAL-006` is now enforced (LWW-scoped): `WalRecovery::replay_entry` discards a modern Lww
-/// frame older than the current durable value, so the baseline suite is GREEN with this flag turned
-/// on — that green run is the closing evidence the invariant refers to. `DefectMode::ReplayClobberOlderFrame`
-/// re-introduces the pre-fix blind clobber and IS caught by this oracle.
+/// it. Replay discards every frame at or below its key's record version (`TG-WAL-015`), so it
+/// keeps the frame of the highest WAL sequence — the last arrival — and the baseline suite is GREEN
+/// with this flag turned on. `DefectMode::ReplayClobberOlderFrame` turns the gate off and IS caught
+/// by this oracle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct OracleConfig {
     pub value_equality: bool,
@@ -414,12 +412,11 @@ pub(crate) enum InvariantViolation {
         sequence: Sequence,
     },
 
-    /// `TG-WAL-006`: the recovered `RecordValue::Lww` value for `key` carries a timestamp STRICTLY
-    /// OLDER than the MAXIMUM acked live HLC millis the model holds for that key — a stale
-    /// re-replayed frame clobbered a newer durable value. Only reported when the `value_equality`
-    /// oracle is enabled. A recovered value at or newer than that maximum is the LWW winner and is
-    /// NOT flagged. Carries the incarnation the mismatch surfaced at, the model's expected millis
-    /// (the maximum), and the recovered millis.
+    /// `TG-WAL-015`: the recovered `RecordValue::Lww` value for `key` carries a timestamp other
+    /// than that of the key's LAST acked write — a stale re-replayed frame clobbered a newer
+    /// durable value. Only reported when the `value_equality` oracle is enabled. Carries the
+    /// incarnation the mismatch surfaced at, the model's expected millis (the last arrival's), and
+    /// the recovered millis.
     AckedValueMismatch {
         key: Key,
         incarnation: usize,

@@ -334,7 +334,7 @@ fn open_wal(dir: &Path, inner: &Arc<KeptStore>) -> Arc<WalWriter> {
 pub(crate) struct RunConfig {
     /// At most one re-introduced defect per run (R6).
     pub defect: DefectMode,
-    /// Which oracles are active. Value equality defaults OFF (TG-WAL-006).
+    /// Which oracles are active. Value equality defaults OFF (TG-WAL-015).
     pub oracle: OracleConfig,
     /// Case-shape constraints, including the below-floor control flags.
     pub shape: CaseShape,
@@ -496,14 +496,11 @@ struct BufferEntry {
 /// derived purely from the driver's log and fault schedule.
 #[derive(Debug, Default)]
 struct LogModel {
-    /// Latest acked value per key (O1 holds only the latest per key).
+    /// Latest acked value per key (O1 holds only the latest per key). It is
+    /// also the `value_equality` oracle's reference: the live store keeps the
+    /// last arrival of a key, whatever its stamp, and replay keeps the frame of
+    /// the highest WAL sequence, which is that arrival (`TG-WAL-015`).
     acked: HashMap<Key, ModelValue>,
-    /// Per-key MAXIMUM acked live HLC millis — the true LWW winner, which is what
-    /// the `value_equality` oracle must compare a recovered timestamp against.
-    /// Deliberately SEPARATE from `acked` (latest arrival): the two coincide only
-    /// while a key's writes are monotone in arrival order, and O1/O2 need the
-    /// latest-arrival view. Cleared on a remove so a re-created key starts fresh.
-    max_live_millis: HashMap<Key, i64>,
     /// `Acked ∧ ¬DurablyApplied ∧ ¬Indeterminate`, per partition (the O2
     /// "unresolved" set).
     unresolved: HashMap<PartitionId, BTreeSet<Sequence>>,
@@ -568,19 +565,6 @@ impl LogModel {
     /// so the two pending views stay in lockstep, while preserving the original
     /// `store_time` on the surviving entry.
     fn ack(&mut self, p: PartitionId, seq: Sequence, key: Key, value: ModelValue, store_time: i64) {
-        match &value {
-            ModelValue::Live { millis } => {
-                let entry = self.max_live_millis.entry(key).or_insert(*millis);
-                *entry = (*entry).max(*millis);
-            }
-            // Both wipe the key's LWW history. A remove supersedes it, so a later
-            // re-creation must be compared against ITS own timestamps; an OR write
-            // replaces the slot with a non-Lww shape, which no LWW timestamp
-            // describes any more.
-            ModelValue::Tombstone | ModelValue::Or { .. } => {
-                self.max_live_millis.remove(&key);
-            }
-        }
         self.acked.insert(key, value);
 
         // A WAL-only frame owns no queue entry: it coalesces with nothing, retires
@@ -680,11 +664,14 @@ impl LogModel {
         self.indeterminate.get(&p).is_some_and(|s| !s.is_empty())
     }
 
-    /// The `value_equality` oracle's reference point: the MAXIMUM acked live millis
-    /// for `key`, or `None` when the model holds no live ack for it (never written,
-    /// or removed since).
-    fn max_live_millis(&self, key: Key) -> Option<i64> {
-        self.max_live_millis.get(&key).copied()
+    /// The `value_equality` oracle's reference point: the millis of the last
+    /// acked write of `key` when it is a live LWW value, else `None` (never
+    /// written, removed, or an OR slot).
+    fn live_millis(&self, key: Key) -> Option<i64> {
+        match self.acked.get(&key) {
+            Some(ModelValue::Live { millis }) => Some(*millis),
+            _ => None,
+        }
     }
 
     /// Records the whole-slot value an absolute-set write left for `key` (an LWW
@@ -1515,32 +1502,27 @@ impl Driver {
                     .push(InvariantViolation::AckedWriteLost { key, incarnation });
             }
 
-            // value_equality oracle (opt-in, R5): a present acked-live value must NOT
-            // carry a timestamp OLDER than the MAXIMUM acked live HLC millis the model
-            // holds for the key — the true LWW winner. A stale re-replay clobber
-            // resurrects an older durable value — the exact regression TG-WAL-006's fix
-            // prevents. Only a strictly-older recovered timestamp is flagged: a recovered
-            // value at or above the maximum is the LWW-by-timestamp winner (never data
-            // loss), so it must not false-positive when the generator emits
-            // out-of-timestamp-order writes for a key. The reference is the MAXIMUM rather
-            // than the latest arrival because the two coincide only on keys whose writes
-            // are monotone in arrival order; against a latest-arrival reference any clobber
-            // landing in `[latest_arrival, max_live)` is invisible. Off by default; enabled
-            // explicitly for the closing-evidence and regression runs.
+            // value_equality oracle (opt-in, R5): a present acked-live value must
+            // carry the millis of the key's LAST acked write. The live store keeps the
+            // last arrival of a key without comparing stamps, and replay discards every
+            // frame at or below the key's record version, so it keeps the frame of the
+            // highest WAL sequence: that same arrival (`TG-WAL-015`). Any other value is
+            // a stale frame applied over a newer one — older or newer in stamp order
+            // alike, which is why the check is equality and not "not older". Off by
+            // default; enabled explicitly for the replay-clobber regression runs.
             //
             // Soundness constraint — value coupling (do not break in `lww()`): comparing
             // millis alone is sound only because `lww(millis)` makes value a pure function
-            // of millis and fixes `counter:0`/`node_id:""`, so full-`Timestamp` order
-            // collapses to millis order and equal millis implies an identical value. A
-            // generator that emitted distinct values at equal millis, or varied
-            // counter/node_id, would let an equal-millis different-value clobber slip this
-            // check.
+            // of millis and fixes `counter:0`/`node_id:""`, so equal millis implies an
+            // identical value. A generator that emitted distinct values at equal millis,
+            // or varied counter/node_id, would let an equal-millis different-value
+            // clobber slip this check.
             if self.config.oracle.value_equality {
                 if let (Some(expected), Some(RecordValue::Lww { timestamp, .. })) =
-                    (self.model.max_live_millis(key), &loaded)
+                    (self.model.live_millis(key), &loaded)
                 {
                     let recovered = i64::try_from(timestamp.millis).unwrap_or(i64::MAX);
-                    if recovered < expected {
+                    if recovered != expected {
                         self.outcome
                             .violations
                             .push(InvariantViolation::AckedValueMismatch {
@@ -1616,15 +1598,17 @@ impl Driver {
         }
 
         let mut recovery = WalRecovery::new(Arc::clone(self.wal()), vec![self.partition]);
-        // Both replay-clobber defects re-replay each partition's oldest un-applied
-        // frame over the newer durable value the in-order pass left behind.
-        // `ReplayClobberOlderFrame` (TG-WAL-006) arranges that oldest frame to be a
-        // stale Lww Store and ALSO disables the Lww merge gate (which live-Store's
-        // LWW semantics require replay to mirror); `ReplayStaleRemoveOverNewerValue`
-        // (TG-WAL-009) arranges it to be a stale `WalOp::Remove`, whose replay is
-        // unconditional (no gate to disable — the `merge_gate=false` below is a
-        // vestigial no-op for the Remove arm). The out-of-order re-replay seam is
-        // what produces the clobber; in-order replay never does.
+        // Both replay-clobber defects turn the record-version gate off
+        // (`TG-WAL-015`) and re-replay each partition's oldest un-applied frame once
+        // more after the in-order pass. Their cases build the stale state: a later
+        // write of the key was flushed, with its version, while an earlier sequence
+        // of the partition stayed unresolved, so the store already holds the newer
+        // state above the pinned watermark and the key's older frames are still in
+        // the window. `ReplayClobberOlderFrame` arranges the oldest frame to be a
+        // stale LWW Store, `ReplayStaleRemoveOverNewerValue` a stale Remove. With the
+        // gate on each of those frames is at or below the key's version and is
+        // discarded; with it off the in-order pass still ends on the newest frame,
+        // and the out-of-order re-replay is what clobbers.
         //
         // The two seams are SELECTED INDEPENDENTLY: `ReReplayOldestFrameGateOn`
         // takes the re-replay seam alone, leaving the gate in its production state,
@@ -1743,8 +1727,8 @@ fn or_record(slot: &OrSlot) -> RecordValue {
 /// artifact a future emitter binds to, so the frame's byte image is asserted against
 /// the golden fixture through THIS constructor.
 ///
-/// `timestamp` stays `None`: the merge gate is Lww-scoped and never consults it, and
-/// OR ordering comes from the sequence, not from an HLC.
+/// `timestamp` stays `None`: replay never consults it — the version gate and the OR
+/// ordering both come from the WAL sequence, not from an HLC.
 pub(super) fn or_delta_frame(map: &str, key: &str, delta: OrDelta, sequence: u64) -> WalEntry {
     WalEntry {
         map: map.to_string(),
@@ -1856,7 +1840,7 @@ mod smoke {
         assert!(coverage.floors.o1_floor_met);
     }
 
-    /// The default oracle config keeps value equality OFF (AC11 / TG-WAL-006).
+    /// The default oracle config keeps value equality OFF (AC11).
     #[test]
     fn value_equality_defaults_off() {
         assert!(!OracleConfig::default().value_equality);
@@ -1898,15 +1882,14 @@ mod smoke {
         assert_eq!(ReferenceModel::unresolved(&model, p), vec![3]);
     }
 
-    /// Both directions of the `value_equality` reference point, over ONE modelled
-    /// history: key 0 written 20 → 30 → 10 (non-monotone in arrival order), then
-    /// recovered as 20 — a state that has LOST the true LWW winner (30). The MAX-live
-    /// reference flags it; the latest-arrival reference (10) does NOT, because 20 is
-    /// not strictly older than 10. That blind spot — any clobber landing in
-    /// `[latest_arrival, max_live)` — is why the oracle references the maximum:
-    /// a proof instrument that can silently pass is not a proof.
+    /// The `value_equality` reference is the LAST arrival of a key, not its
+    /// highest stamp: key 0 written 20 → 30 → 10 (non-monotone in arrival order)
+    /// must recover as 10, the value the live store kept. A recovery that kept the
+    /// highest stamp (30, what the deleted HLC replay gate kept) or a re-replayed
+    /// older frame (20) is flagged; a remove leaves no reference, and a re-creation
+    /// is compared with its own millis.
     #[test]
-    fn value_equality_max_live_reference_catches_what_latest_arrival_misses() {
+    fn value_equality_reference_is_the_last_arrival() {
         let mut model = LogModel::default();
         let p: PartitionId = 7;
         for (step, millis) in [(0_usize, 20_i64), (1, 30), (2, 10)] {
@@ -1914,50 +1897,22 @@ mod smoke {
             model.bind_sequence(p, 0, step, seq);
             model.record_ack(0, step, 0, ModelValue::Live { millis });
         }
-
-        let latest_arrival = match model.acked_value(0) {
-            Some(ModelValue::Live { millis }) => *millis,
-            other => panic!("expected a live latest-arrival value, got {other:?}"),
-        };
-        let max_live = model.max_live_millis(0).expect("a live key has a maximum");
         assert_eq!(
-            (latest_arrival, max_live),
-            (10, 30),
-            "non-monotone arrival order must make the two reference points DIFFER"
+            model.live_millis(0),
+            Some(10),
+            "the reference is the last arrival, not the highest stamp (30)"
         );
 
-        // The timestamp a stale re-replay of the oldest frame leaves durable.
-        let recovered = 20_i64;
-        assert!(
-            recovered >= latest_arrival,
-            "direction 1: the latest-arrival reference MISSES this clobber \
-             (recovered {recovered} is not strictly older than {latest_arrival})"
+        model.bind_sequence(p, 0, 3, 4);
+        model.record_ack(0, 3, 0, ModelValue::Tombstone);
+        assert_eq!(model.live_millis(0), None, "a removed key has no reference");
+
+        model.bind_sequence(p, 0, 4, 5);
+        model.record_ack(0, 4, 0, ModelValue::Live { millis: 5 });
+        assert_eq!(
+            model.live_millis(0),
+            Some(5),
+            "a re-creation is compared with its own millis"
         );
-        assert!(
-            recovered < max_live,
-            "direction 2: the max-live reference CATCHES this clobber \
-             (recovered {recovered} is strictly older than {max_live})"
-        );
-    }
-
-    /// A remove CLEARS the max-live reference, so a re-created key is compared only
-    /// against its own timestamps. Without the clear, a re-creation legitimately
-    /// older than the removed value would be reported as a clobber it is not.
-    #[test]
-    fn value_equality_max_live_reference_clears_on_remove() {
-        let mut model = LogModel::default();
-        let p: PartitionId = 7;
-
-        model.bind_sequence(p, 0, 0, 1);
-        model.record_ack(0, 0, 0, ModelValue::Live { millis: 30 });
-        assert_eq!(model.max_live_millis(0), Some(30));
-
-        model.bind_sequence(p, 0, 1, 2);
-        model.record_ack(0, 1, 0, ModelValue::Tombstone);
-        assert_eq!(model.max_live_millis(0), None);
-
-        model.bind_sequence(p, 0, 2, 3);
-        model.record_ack(0, 2, 0, ModelValue::Live { millis: 5 });
-        assert_eq!(model.max_live_millis(0), Some(5));
     }
 }

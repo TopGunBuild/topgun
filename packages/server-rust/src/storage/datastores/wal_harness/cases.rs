@@ -206,46 +206,18 @@ fn incarnation_strategy(shape: &CaseShape) -> BoxedStrategy<Incarnation> {
         .boxed()
 }
 
-/// Rewrites every `Append`'s `millis` to a strictly-increasing, arrival-ordered
-/// value across the whole case, so each key's HLCs are MONOTONE in arrival order.
-///
-/// This is the O1/O2 LWW reference model's SOUND DOMAIN, and it matches production:
-/// a single node's HLC never goes backwards, so a key's WAL frames arrive in
-/// non-decreasing timestamp order. Under a NON-monotone arrival (a later frame with
-/// a lower HLC) the model's latest-arrival value diverges from the impl's max-HLC
-/// LWW winner: the impl's recovery discards the stale lower-HLC frame (advancing the
-/// watermark store-health-INDEPENDENTLY), while the health-gated reference model
-/// keeps it unresolved — producing false `WatermarkAboveUnresolved` / `AckedWriteLost`
-/// reports that are oracle artefacts, not real losses. Generating only monotone
-/// arrivals keeps the oracle inside its proven-sound domain; the non-monotone-arrival
-/// extension (a per-key max-live-millis reference) is owned by TODO-610, not this
-/// harness.
-fn make_hlc_monotone(mut case: Case) -> Case {
-    let mut next: i64 = 1;
-    for incarnation in &mut case {
-        for op in &mut incarnation.ops {
-            if let WorkOp::Append { millis, .. } = op {
-                *millis = next;
-                next += 1;
-            }
-        }
-    }
-    case
-}
-
 /// A whole case: `1..=max_incarnations` incarnations (R1). `force_single_incarnation`
 /// pins it to exactly one incarnation — AC5(c)'s negative control — so no crash and
-/// therefore no recovery can occur. Generated HLCs are made monotone in arrival order
-/// (see `make_hlc_monotone`) so the run stays in the oracle's sound domain.
+/// therefore no recovery can occur. Generated stamps need not be monotone in arrival
+/// order: replay keeps a key's last arrival whatever its stamp (`TG-WAL-015`), as the
+/// live store and the model do.
 fn case_strategy(shape: &CaseShape) -> BoxedStrategy<Case> {
     let max_inc = if shape.force_single_incarnation {
         1
     } else {
         shape.max_incarnations
     };
-    proptest::collection::vec(incarnation_strategy(shape), 1..=max_inc)
-        .prop_map(make_hlc_monotone)
-        .boxed()
+    proptest::collection::vec(incarnation_strategy(shape), 1..=max_inc).boxed()
 }
 
 // ---------------------------------------------------------------------------
@@ -587,9 +559,9 @@ fn ac14e_coverage_guard_discriminates_below_floor() {
 // AC11 — value-equality oracle stays off by default
 // ---------------------------------------------------------------------------
 
-/// The value-equality oracle stays OFF by default (opt-in per run): `TG-WAL-006`
-/// is enforced LWW-scoped, but the oracle is enabled explicitly only for the
-/// closing-evidence and regression runs, never silently for every case.
+/// The value-equality oracle stays OFF by default (opt-in per run): it is enabled
+/// explicitly only for the replay-clobber regression runs, never silently for every
+/// case.
 #[test]
 fn ac11_value_equality_defaults_off() {
     assert!(!OracleConfig::default().value_equality);
@@ -679,26 +651,25 @@ fn ac4_c3_scalar_max_watermark_regression() {
 }
 
 // ---------------------------------------------------------------------------
-// AC4 / AC5 — TG-WAL-006 replay-clobber proof via the value_equality oracle
+// AC4 / AC5 — stale LWW Store replay-clobber proof via the value_equality oracle
 // ---------------------------------------------------------------------------
 
-/// `DefectMode::ReplayClobberOlderFrame` (the pre-`TG-WAL-006` blind clobber) must
-/// be CAUGHT by the `value_equality` oracle as an `AckedValueMismatch` naming the
+/// `DefectMode::ReplayClobberOlderFrame` (the record-version gate off, `TG-WAL-015`)
+/// must be CAUGHT by the `value_equality` oracle as an `AckedValueMismatch` naming the
 /// key and the (expected, recovered) millis (AC4); and the identical case on the
 /// fixed path (`DefectMode::None`, gate on, no re-replay) must be GREEN under the
-/// same opt-in oracle (AC5 — the closing evidence the `OracleConfig` doc-comment
-/// names).
+/// same opt-in oracle (AC5).
 ///
-/// The case writes key 0 twice, timestamp-monotonic (ts=10 then ts=20). The FIRST
-/// write's flush is rejected (store unhealthy) so its sequence strands un-applied
-/// and holds the partition watermark back; the SECOND write flushes durably (ts=20)
-/// but its frame therefore ALSO stays un-applied. At recovery both frames replay
-/// in order (leaving ts=20 durable), then the seam re-replays the oldest (ts=10)
-/// frame over it — an older frame re-applied over a newer durable value, which
-/// generated ops cannot manufacture (in-order replay always ends on the newest
-/// frame); the seam exists to exercise the merge gate against it.
-/// Monotonic timestamps keep the last-arrival model and the LWW gate in agreement,
-/// so the oracle is sound.
+/// The stale state: key 0 is written twice (ts=10, then ts=20). The FIRST write's
+/// flush is rejected (store unhealthy), so its sequence strands un-applied and pins
+/// the partition watermark below it; the SECOND write flushes durably, ahead of the
+/// pinned watermark, so the store keeps its record version, and its frame ALSO stays
+/// un-applied. The store already holds the newer value, and both frames are still
+/// above the watermark. At recovery the gate discards both (each at or below the
+/// key's version); the seam then re-replays the oldest (ts=10) frame once more —
+/// with the gate on it is discarded again, with it off it overwrites the ts=20
+/// value. Generated ops cannot manufacture that out-of-order re-replay (in-order
+/// replay always ends on the newest frame); the seam exists to exercise the gate.
 #[test]
 fn ac4_5_replay_clobber_caught_by_value_equality_oracle() {
     let case: Case = vec![
@@ -765,9 +736,9 @@ fn ac4_5_replay_clobber_caught_by_value_equality_oracle() {
 
     // (c) the DISCRIMINATING discriminator: arm (b) sets neither seam, so it only
     // proves "no re-replay happened → no clobber". This arm fires the SAME stale
-    // re-replay the defect arm uses but leaves the `RecordValue::Lww` merge gate in
-    // its production state, so a GREEN result is the gate DEFEATING an out-of-order
-    // stale frame (TG-WAL-006) rather than the absence of one.
+    // re-replay the defect arm uses but leaves the record-version gate in its
+    // production state, so a GREEN result is the gate DEFEATING an out-of-order
+    // stale frame (TG-WAL-015) rather than the absence of one.
     let gate_on_cfg = RunConfig {
         defect: DefectMode::ReReplayOldestFrameGateOn,
         oracle: value_eq,
@@ -776,7 +747,7 @@ fn ac4_5_replay_clobber_caught_by_value_equality_oracle() {
     let gate_on_outcome = block_on_async(run_case(&case, &gate_on_cfg));
     assert!(
         gate_on_outcome.violations.is_empty(),
-        "AC5: a stale re-replay with the merge gate still ON must be GREEN — the gate \
+        "AC5: a stale re-replay with the version gate still ON must be GREEN — the gate \
          must discard the older frame; got {:?}",
         gate_on_outcome.violations
     );
@@ -786,37 +757,37 @@ fn ac4_5_replay_clobber_caught_by_value_equality_oracle() {
     assert!(
         gate_on_outcome.re_replayed_frames >= 1,
         "AC5: arm (c) must actually re-replay a stale frame — a GREEN run that \
-         re-replayed nothing is arm (b), not a demonstration that the merge gate \
+         re-replayed nothing is arm (b), not a demonstration that the version gate \
          defeated an out-of-order frame"
     );
 }
 
 // ---------------------------------------------------------------------------
-// AC12 — the value_equality oracle's reference point on a NON-MONOTONE key
+// AC12 — out-of-stamp-order writes recover to the last arrival
 // ---------------------------------------------------------------------------
 
-/// A replay clobber over a key whose writes are NON-MONOTONE in arrival order must
-/// still be caught. This is the regression case for the oracle's reference point:
-/// against the old latest-arrival reference the very same run is silent, because the
-/// clobbered-in value is NEWER than the last arrival while still being OLDER than the
-/// key's true LWW winner.
+/// Writes of a key that arrive out of stamp order (a trusted origin's verbatim
+/// stamps) are recovered as the LAST arrival, which is what the live store kept,
+/// and a stale re-replay over them is caught against that reference
+/// (`TG-WAL-015`: replay orders by WAL sequence, not by stamp).
 ///
 /// Key 0 is written 20 → 30 → 10 (arrival order), so the last arrival (10) and the
-/// max live millis (30) DIFFER. As in `ac4_5_...`, the FIRST write's flush is rejected
-/// (store unhealthy) so its ts=20 frame strands un-applied and holds the partition
-/// watermark back; the later writes coalesce in the staging buffer and the healthy
-/// flush persists the surviving value (ts=10) durably, but their frames stay
-/// un-applied behind the stranded one. At recovery the blind in-order pass replays
-/// 20 → 30 → 10, then the seam re-replays the OLDEST frame (ts=20) over it, so the
-/// durable value ends at 20 — the true winner (30) is lost.
+/// highest stamp (30) DIFFER. As in `ac4_5_...`, the FIRST write's flush is rejected
+/// (store unhealthy), so its ts=20 frame strands un-applied and pins the partition
+/// watermark; the later writes coalesce in the staging buffer and the healthy flush
+/// stores the survivor (ts=10) ahead of the pinned watermark, with its version. All
+/// three frames stay above the watermark.
 ///
-/// `recovered = 20` is NOT strictly older than the latest arrival (10), so the old
-/// reference reports nothing; it IS strictly older than the max live millis (30), so
-/// the current reference reports `AckedValueMismatch { expected: 30, recovered: 20 }`.
-/// The two reference points are compared directly, over one modelled history, by
-/// `driver.rs::value_equality_max_live_reference_catches_what_latest_arrival_misses`.
+/// - Fixed path: the gate discards all three frames (each at or below the key's
+///   version), so the key recovers as 10 — GREEN against the last-arrival
+///   reference. A stamp-ordered replay would have left 30.
+/// - Defect (gate off): the blind in-order pass ends on 10, then the seam re-replays
+///   the OLDEST frame (ts=20) over it: `AckedValueMismatch { expected: 10,
+///   recovered: 20 }` — a clobber with a NEWER stamp than the live value, which only
+///   an equality reference sees.
+/// - Gate on with the same re-replay: GREEN, and the seam fired.
 #[test]
-fn ac12_non_monotone_replay_clobber_caught_by_max_live_reference() {
+fn ac12_out_of_stamp_order_writes_recover_to_the_last_arrival() {
     let case: Case = vec![
         Incarnation {
             ops: vec![
@@ -840,9 +811,7 @@ fn ac12_non_monotone_replay_clobber_caught_by_max_live_reference() {
         value_equality: true,
     };
 
-    // (a) defect present: the clobber is caught AGAINST THE MAXIMUM (30), not the
-    // latest arrival (10) — the recovered 20 sits inside the old reference's blind
-    // spot `[latest_arrival, max_live)`.
+    // (a) defect present: the clobber is caught against the last arrival (10).
     let defect_cfg = RunConfig {
         defect: DefectMode::ReplayClobberOlderFrame,
         oracle: value_eq,
@@ -860,15 +829,13 @@ fn ac12_non_monotone_replay_clobber_caught_by_max_live_reference() {
     });
     assert_eq!(
         mismatch,
-        Some((0, 30, 20)),
-        "AC12: the non-monotone replay clobber must be caught against the MAX live millis \
-         (key 0, expected 30, recovered 20); got violations {:?}",
+        Some((0, 10, 20)),
+        "AC12: the replay clobber must be caught against the last arrival (key 0, expected \
+         10, recovered 20); got violations {:?}",
         defect_outcome.violations
     );
 
-    // (b) discriminator: the fixed path over the identical non-monotone history is
-    // GREEN — the max-live reference does not manufacture a violation out of
-    // out-of-timestamp-order writes.
+    // (b) the fixed path recovers the last arrival: GREEN.
     let fixed_cfg = RunConfig {
         defect: DefectMode::None,
         oracle: value_eq,
@@ -877,42 +844,53 @@ fn ac12_non_monotone_replay_clobber_caught_by_max_live_reference() {
     let fixed_outcome = block_on_async(run_case(&case, &fixed_cfg));
     assert!(
         fixed_outcome.violations.is_empty(),
-        "AC12: the fixed path must report zero violations for the identical non-monotone run; \
-         got {:?}",
+        "AC12: the fixed path must recover the last arrival with zero violations; got {:?}",
         fixed_outcome.violations
+    );
+
+    // (c) the same stale re-replay with the gate on: GREEN, and the seam fired.
+    let gate_on_cfg = RunConfig {
+        defect: DefectMode::ReReplayOldestFrameGateOn,
+        oracle: value_eq,
+        ..RunConfig::baseline()
+    };
+    let gate_on_outcome = block_on_async(run_case(&case, &gate_on_cfg));
+    assert!(
+        gate_on_outcome.violations.is_empty() && gate_on_outcome.re_replayed_frames >= 1,
+        "AC12: a stale re-replay with the version gate on must be GREEN and must have fired \
+         (re-replayed {}); got {:?}",
+        gate_on_outcome.re_replayed_frames,
+        gate_on_outcome.violations
     );
 }
 
 // ---------------------------------------------------------------------------
-// AC1 / AC5 / AC6 — TG-WAL-009 stale-Remove-clobber proof via the O1 oracle
+// AC1 / AC5 / AC6 — stale-Remove-clobber proof via the O1 oracle
 // ---------------------------------------------------------------------------
 
-/// `DefectMode::ReplayStaleRemoveOverNewerValue` (the pre-`TG-WAL-009` blind Remove
-/// clobber) must be CAUGHT by the O1 `AckedWriteLost` oracle naming the deleted key
-/// (AC5 — defect-present detection, NO model/oracle fork); and the identical case on
-/// the fixed path (`DefectMode::None`, gate on, no re-replay) must be GREEN (AC1/AC6
-/// — the fix holds).
+/// `DefectMode::ReplayStaleRemoveOverNewerValue` (the record-version gate off,
+/// `TG-WAL-015`) must be CAUGHT by the O1 `AckedWriteLost` oracle naming the deleted
+/// key (AC5 — defect-present detection, NO model/oracle fork); the identical case on
+/// the fixed path (`DefectMode::None`, gate on, no re-replay) must be GREEN (AC1/AC6),
+/// and so must the same stale re-replay with the gate on.
 ///
-/// The case arranges a stale Remove as the OLDEST un-applied frame over a newer
-/// durable re-creation, then relies on the harness `re_replay_oldest_frame` seam to
-/// re-apply that Remove OUT OF ORDER — the only way to fabricate the clobber, since
-/// in-order replay always ends on the newest frame (production can never manufacture
-/// it — see TG-WAL-009's non-reachability argument):
+/// The stale state — a Remove frame below a newer flushed re-creation, both above a
+/// pinned watermark:
 ///  1. Append key 0 (ts=5) and flush it durably — its frame is applied, advancing
 ///     the watermark past it, so it drops OUT of the replay window.
 ///  2. Remove key 0 (frame carries no timestamp); its flush is REJECTED (store
-///     unhealthy), so the Remove frame strands un-applied and holds the watermark
-///     back. It is now the oldest un-applied frame.
-///  3. Re-create key 0 (ts=20) and flush it durably — its frame stays un-applied
-///     because the stranded Remove blocks the contiguous frontier.
+///     unhealthy), so the Remove frame strands un-applied and pins the watermark.
+///     It is now the oldest un-applied frame.
+///  3. Re-create key 0 (ts=20) and flush it durably, ahead of the pinned watermark:
+///     the store keeps its version, and its frame stays un-applied.
 ///
-/// At recovery the in-order pass replays the Remove THEN the ts=20 re-creation, so
-/// key 0 ends `Live{20}` — matching the model. Under `DefectMode::None` there is no
-/// re-replay, so the run is GREEN (AC1/AC6 — replay is correct without a gate). The
-/// defect then re-replays the OLDEST frame (the Remove) after the in-order pass;
-/// replay-remove is unconditional (identical to live), so it blind-deletes the
-/// re-creation, and O1 reports `AckedWriteLost` for key 0 (AC5 — the seam-injected
-/// out-of-order clobber is detected).
+/// At recovery the gate discards both frames (each at or below the key's version),
+/// so key 0 stays `Live{20}` — matching the model. The seam then re-replays the
+/// OLDEST frame (the Remove) once more: with the gate on it is discarded again; with
+/// it off it reaches the delete, which is unconditional as the live remove is, so it
+/// deletes the re-creation, and O1 reports `AckedWriteLost` for key 0. In-order
+/// replay alone, gate on or off, ends on the newest frame; only the seam's
+/// out-of-order re-replay manufactures the clobber.
 #[test]
 fn ac1_ac6_stale_remove_clobber_caught_by_o1_oracle() {
     let case: Case = vec![
@@ -962,6 +940,21 @@ fn ac1_ac6_stale_remove_clobber_caught_by_o1_oracle() {
         fixed_outcome.violations.is_empty(),
         "AC6: the fixed path must report zero violations for the identical run; got {:?}",
         fixed_outcome.violations
+    );
+
+    // (c) the same stale re-replay with the version gate on: GREEN, and the seam
+    // fired — the gate, not the absence of a re-replay, keeps the re-creation.
+    let gate_on_cfg = RunConfig {
+        defect: DefectMode::ReReplayOldestFrameGateOn,
+        ..RunConfig::baseline()
+    };
+    let gate_on_outcome = block_on_async(run_case(&case, &gate_on_cfg));
+    assert!(
+        gate_on_outcome.violations.is_empty() && gate_on_outcome.re_replayed_frames >= 1,
+        "AC6: a stale Remove re-replayed with the version gate on must be discarded \
+         (re-replayed {}); got {:?}",
+        gate_on_outcome.re_replayed_frames,
+        gate_on_outcome.violations
     );
 }
 
@@ -1281,7 +1274,7 @@ fn tg_or_003_a_value_write_over_a_queued_cell_recovers_like_either_path() {
     );
 }
 
-/// The re-replay seam with the `RecordValue::Lww` merge gate left in its production
+/// The re-replay seam with the record-version gate left in its production
 /// state: after the in-order pass, each partition's OLDEST un-applied frame is
 /// replayed once more. A case that arranges that frame to be an OR frame the store
 /// already reflects turns "OR merge-idempotency holds by construction" into a
