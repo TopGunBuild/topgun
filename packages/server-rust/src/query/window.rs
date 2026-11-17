@@ -527,7 +527,10 @@ mod tests {
         w.apply_mutation("a", Some(&rec("score", 1)), true);
         w.apply_mutation("b", Some(&rec("score", 2)), true);
         let deltas = w.apply_batch([("a", None, false), ("z", None, false)]);
-        assert_eq!(events(&deltas), vec![("a".to_string(), ChangeEventType::LEAVE)]);
+        assert_eq!(
+            events(&deltas),
+            vec![("a".to_string(), ChangeEventType::LEAVE)]
+        );
     }
 
     /// The tracked rows in window order.

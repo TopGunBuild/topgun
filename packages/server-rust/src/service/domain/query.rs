@@ -29,8 +29,7 @@ use topgun_core::vector::distance::DistanceMetric;
 
 use crate::dag::coordinator::{run_dag_local, ClusterQueryCoordinator};
 use crate::query::cursor::{
-    build_next_cursor, classify_cursor_status, cursor_query_hashes, decode_cursor,
-    SortValue,
+    build_next_cursor, classify_cursor_status, cursor_query_hashes, decode_cursor, SortValue,
 };
 use crate::query::delta_buffer::{
     Captured, Closing, DeltaBuffer, DeltaEntry, QUERY_SNAPSHOT_OVERFLOW,
@@ -876,7 +875,8 @@ impl QueryService {
         let live = if snapshot_only {
             None
         } else {
-            let mut live_window = LiveWindow::new(query.sort.clone().unwrap_or_default(), query.limit);
+            let mut live_window =
+                LiveWindow::new(query.sort.clone().unwrap_or_default(), query.limit);
             if let Some(cursor) = &input_cursor {
                 live_window = live_window.after_cursor(cursor.clone());
             }
@@ -2767,9 +2767,14 @@ mod tests {
             rmpv::Value::from("n"),
             rmpv::Value::from(1),
         )]));
-        writer
-            .registry
-            .deliver_mutation(&writer.connections, "users", key, Some(&record), None, || 0);
+        writer.registry.deliver_mutation(
+            &writer.connections,
+            "users",
+            key,
+            Some(&record),
+            None,
+            || 0,
+        );
     }
 
     fn update(query_id: &str, key: &str) -> Vec<(String, String)> {
