@@ -267,7 +267,8 @@ impl QueryRegistry {
     ///
     /// `new_record` is the write event's record: the stored record of an LWW
     /// put, else `None` or a value-less record (an LWW remove, an expiry
-    /// remove, an OR add or remove), both a non-match.
+    /// remove, an OR add or remove), both a non-match. So is a record already
+    /// expired at `now`, the store clock (TG-TTL-001), as the fold treats it.
     ///
     /// Per subscription the write is first offered to its snapshot buffer: a
     /// subscription whose snapshot is still being built captures it, the
@@ -282,12 +283,15 @@ impl QueryRegistry {
         key: &str,
         new_record: Option<&LWWRecord<rmpv::Value>>,
         exclude: Option<ConnectionId>,
+        now: u64,
     ) {
         let subs = self.get_subscriptions_for_map(map_name);
         if subs.is_empty() {
             return;
         }
-        let new_value = new_record.and_then(|r| r.value.as_ref());
+        let new_value = new_record
+            .filter(|r| lww_is_live(&r.timestamp, r.ttl_ms, now))
+            .and_then(|r| r.value.as_ref());
         for sub in &subs {
             let matches = new_value.is_some_and(|v| matches_query(&sub.query, v));
             if sub.delta_buffer.route(key, new_record, matches) {
@@ -2737,7 +2741,7 @@ mod tests {
         )]));
         writer
             .registry
-            .deliver_mutation(&writer.connections, "users", key, Some(&record), None);
+            .deliver_mutation(&writer.connections, "users", key, Some(&record), None, 0);
     }
 
     fn update(query_id: &str, key: &str) -> Vec<(String, String)> {
@@ -3245,7 +3249,7 @@ mod tests {
             (rmpv::Value::from("price"), rmpv::Value::from(5)),
         ]));
         fx.registry
-            .deliver_mutation(&fx.conn_registry, "orders", "o4", Some(&record), None);
+            .deliver_mutation(&fx.conn_registry, "orders", "o4", Some(&record), None, 0);
         assert!(fx.rx.try_recv().is_err(), "no frame for a refused query");
     }
 
@@ -4587,6 +4591,17 @@ mod tests {
 
         /// Applies a trusted LWW put that keeps `stamp` (`StampPolicy::Verbatim`).
         async fn trusted_put(&self, key: &str, value: rmpv::Value, stamp: Timestamp) {
+            self.trusted_record(key, value, stamp, None).await;
+        }
+
+        /// Applies a trusted LWW put that keeps `stamp` and `ttl_ms`.
+        async fn trusted_record(
+            &self,
+            key: &str,
+            value: rmpv::Value,
+            stamp: Timestamp,
+            ttl_ms: Option<u64>,
+        ) {
             let mut ctx = OperationContext::new(1, service_names::CRDT, make_timestamp(), 5000);
             ctx.caller_origin = crate::service::operation::CallerOrigin::System;
             ctx.partition_id = Some(topgun_core::hash_to_partition(key));
@@ -4594,7 +4609,7 @@ mod tests {
             op.record = Some(Some(LWWRecord {
                 value: op.record.flatten().and_then(|r| r.value),
                 timestamp: stamp,
-                ttl_ms: None,
+                ttl_ms,
             }));
             Arc::clone(&self.crdt)
                 .oneshot(Operation::ClientOp {
@@ -5208,6 +5223,21 @@ mod tests {
             position(snapshot.payload.next_cursor.as_ref()),
             position(fresh.next_cursor.as_ref())
         );
+    }
+
+    /// A live write of a record already expired on the store clock
+    /// (TG-TTL-001) is not sent, as a fresh one-shot query leaves it out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_live_write_of_an_expired_record_is_not_sent() {
+        let mut fx = live();
+        let subscribed = fx.spawn_subscribe(None).await;
+        assert!(matches!(subscribed, Ok(Ok(OperationResponse::Empty))));
+        let (mut rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        // Stamped in 2023 with a one-second TTL: expired on the system clock.
+        fx.trusted_record("x", v(1), make_timestamp(), Some(1000)).await;
+        apply_updates(&mut rows, query_frames(&mut fx.s_rx, LIVE_ID));
+        assert!(rows.is_empty(), "{rows:?}");
+        assert_eq!(rows, fx.fresh_rows(Query::default()).await);
     }
 
     /// A live update that moves a row of the page before its cursor takes the
