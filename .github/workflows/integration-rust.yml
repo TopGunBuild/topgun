@@ -137,10 +137,11 @@ jobs:
         # and why, is listed in one place — tests/integration-rust/opt-in-suites.js —
         # and printed at the start of the run:
         # - map-name-upgrade, map-name-rollback, watermark-rollback,
-        #   encryption-rollback, engine-upgrade, engine-rollback and
-        #   engine-migration-resume each drive two server binaries, the current
-        #   one and an older one (built from 07d009f0, b346e277, 6a030bb6,
-        #   727db547 and 7692c380), and CI does not build the older ones.
+        #   encryption-rollback, engine-upgrade, engine-rollback,
+        #   engine-migration-resume and version-rollback each drive two server
+        #   binaries, the current one and an older one (built from 07d009f0,
+        #   b346e277, 6a030bb6, 727db547, 7692c380 and 67ff9b67), and CI does
+        #   not build the older ones.
         #   Upgrade and rollback across each boundary is a one-time property,
         #   not a regression surface, so these files are run locally
         #   (`pnpm test:integration-rust:two-binary`) and their output is carried

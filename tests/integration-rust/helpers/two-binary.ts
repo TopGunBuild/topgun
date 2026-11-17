@@ -252,6 +252,37 @@ export function requireEngineEnv(): TwoBinaryEnv {
   return env;
 }
 
+/** The build of the version rollback test's older binary: the last one that keeps no record version rows. */
+export const VERSION_OLD_COMMIT_PREFIX = '67ff9b67';
+
+const VERSION_BUILD_HINT =
+  `Version rollback: build the server at ${VERSION_OLD_COMMIT_PREFIX} (the last binary that keeps no ` +
+  'record version rows) in its own worktree and target directory (`git worktree add ' +
+  `<scratch>/topgun-version-old ${VERSION_OLD_COMMIT_PREFIX}\`, then \`cargo build --release -p ` +
+  'topgun-server --manifest-path <scratch>/topgun-version-old/Cargo.toml --target-dir ' +
+  '<scratch>/topgun-version-old-target`), build the newer one in this checkout, and export ' +
+  'VERSION_OLD_SERVER_BINARY, VERSION_OLD_SERVER_COMMIT (the full commit the older binary was built ' +
+  'from), RUST_SERVER_BINARY and NEW_SERVER_COMMIT.';
+
+/**
+ * Reads the variables of the version rollback test: the older binary is the
+ * build from VERSION_OLD_COMMIT_PREFIX. Throws when one is missing or the
+ * commit is another one, since the refusal under test is that binary's.
+ */
+export function requireVersionRollbackEnv(): TwoBinaryEnv {
+  const env = requireOlderBinaryEnv(
+    'VERSION_OLD_SERVER_BINARY',
+    'VERSION_OLD_SERVER_COMMIT',
+    VERSION_BUILD_HINT,
+  );
+  if (!env.oldCommit.startsWith(VERSION_OLD_COMMIT_PREFIX)) {
+    throw new Error(
+      `VERSION_OLD_SERVER_COMMIT is ${env.oldCommit}, not a commit starting ${VERSION_OLD_COMMIT_PREFIX}. ${VERSION_BUILD_HINT}`,
+    );
+  }
+  return env;
+}
+
 export function sha256OfFile(filePath: string): string {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
