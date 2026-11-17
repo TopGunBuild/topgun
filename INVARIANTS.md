@@ -3302,8 +3302,14 @@ weaker than a test.
   the snapshot) answers with the snapshot and then `QUERY_SNAPSHOT_OVERFLOW` on the response path,
   and that registration is removed;
   (d) a subscribe that ends before delivery leaves no registration;
-  (e) a captured value folded into the snapshot obeys `TG-TTL-001` at fold time: one expired on
-  the server clock when the fold runs is folded as "no row", as the scan would have left it out.
+  (e) a value obeys `TG-TTL-001` when it is delivered: a captured value expired on the store clock
+  when the fold runs is folded as "no row", as the scan would have left it out, and a live write
+  of a record already expired on it is a non-match;
+  (f) a paged subscription's window tracks no row that sorts at or before its cursor: a write
+  there takes no slot of the page, and a row moved there leaves it;
+  (g) a snapshot with captured writes is repaginated: its rows in the window's order, `has_more`
+  raised when the window holds rows past the page, and `next_cursor` after its last row, so
+  paging on from it skips no row; `has_more` is never lowered.
   The mechanism: the subscription's snapshot buffer is active before the subscription is
   registered; while it is active the fan-out records each write in it (the last arrival per key,
   no stamp compared) instead of sending it; when the scan is done the handler closes the buffer
@@ -3321,8 +3327,15 @@ weaker than a test.
     already reflects it; (a) is per registration.
   - An expired row on the live path after the snapshot (`TG-TTL-001`'s stated limit, until the
     sweep's LEAVE).
-  - The order of `SERVER_EVENT` relative to `QUERY_RESP` (TODO-995); `has_more` / `next_cursor`
-    and row order after a fold (TODO-994); the subscriber-path throughput (TODO-996); clients
+  - A snapshot that says `has_more = true` where a fresh query says false (the client's next page
+    is empty): rows past the page removed during the scan are not seen without the store. Never
+    the reverse.
+  - A limited window refilling from the store: it is seeded from the scanned page and keeps at
+    most twice its limit, so a removal can leave the subscriber a row short of a fresh query
+    (TODO-1005).
+  - A map clear or reset reaching live subscribers (TODO-1003); a live `QUERY_UPDATE` dropped on a
+    full outbound channel (TODO-1004).
+  - The order of `SERVER_EVENT` relative to `QUERY_RESP` (TODO-995); the subscriber-path throughput (TODO-996); clients
     older than error routing (TODO-997); window membership after the subscriber's own writes on
     the live path (TODO-999).
   - The overflow against a running server: shown in-process only.
@@ -3346,8 +3359,16 @@ weaker than a test.
   `the_subscribers_own_write_during_the_scan_is_in_the_snapshot`,
   `a_write_right_after_register_is_captured`,
   `a_value_that_expires_before_the_fold_is_not_folded`,
+  `a_live_write_of_an_expired_record_is_not_sent`,
+  `a_write_before_the_cursor_takes_no_slot_of_the_page`,
+  `a_live_update_to_before_the_cursor_leaves_the_page`,
+  `a_captured_update_to_before_the_cursor_leaves_the_snapshot`,
+  `a_captured_put_into_a_full_page_moves_its_cursor`,
+  `a_captured_put_past_a_full_page_raises_has_more`,
   `remove_if_same_drops_the_outer_entry_and_returns` (`query.rs`);
-  `the_bound_counts_distinct_keys_of_any_event_kind` (`delta_buffer.rs`). Each but the disconnect
+  `the_bound_counts_distinct_keys_of_any_event_kind` (`delta_buffer.rs`);
+  `a_batch_ends_where_its_mutations_one_by_one_end`,
+  `a_batch_shows_the_page_of_the_values_its_keys_end_with` (`window.rs`). Each but the disconnect
   test was shown red on the mutant the table below names. The simulation smoke
   `sim_live_subscribe_converges_under_concurrent_writes` is not an enforcer: nothing in it makes a
   write land during the scan.
@@ -3367,6 +3388,11 @@ weaker than a test.
 | `an_unsubscribe_during_the_scan_sends_nothing_and_frees_the_buffer` | (d), unsubscribe: an unsubscribe during the scan, then a resubscribe of the same id, leave the held subscribe sending nothing and the newer registration in place. Shown red on the tree whose close does not check that the registration holds its own buffer | CI (`cargo test`) |
 | `a_disconnect_during_the_scan_frees_the_buffer` | (d), disconnect: the registration and the map's outer entry are gone and the buffer is freed. No mutant of its own | CI (`cargo test`) |
 | `the_fold_projects_a_projected_subscription` | the fold projects captured values as the live path does. Shown red on the tree that folds unprojected values | CI (`cargo test`) |
+| `a_live_write_of_an_expired_record_is_not_sent` | (e), the live path: a Verbatim put already expired on the store clock reaches no subscriber, as a fresh one-shot query leaves it out. Shown red on the tree without the expiry check in the fan-out | CI (`cargo test`) |
+| `a_write_before_the_cursor_takes_no_slot_of_the_page` | (f): on a page with a free slot, a write before the cursor changes nothing and a later write after it enters; the rows equal a fresh one-shot query from the same cursor. Shown red on the tree whose window ignores the cursor | CI (`cargo test`) |
+| `a_live_update_to_before_the_cursor_leaves_the_page`, `a_captured_update_to_before_the_cursor_leaves_the_snapshot` | (f), on the live path and in the fold: a row of the page moved before the cursor leaves it, as a fresh one-shot query from the same cursor shows. Shown red on the tree whose window ignores the cursor | CI (`cargo test`) |
+| `a_captured_put_into_a_full_page_moves_its_cursor`, `a_captured_put_past_a_full_page_raises_has_more` | (g): a captured put that pushes the page's last row out, or lands past a full page, gives the snapshot the `has_more` and the cursor position of a fresh one-shot query. Shown red on the tree that does not repaginate, and the second on the tree that repaginates only when a row of the page changed | CI (`cargo test`) |
+| `a_batch_ends_where_its_mutations_one_by_one_end`, `a_batch_shows_the_page_of_the_values_its_keys_end_with` (`window.rs`) | the one-pass window the fold, the first load and each live write share: a batch ends where its mutations applied one by one end (checked against the per-row algorithm before it was removed), and past the trim of twice the limit it shows the page of a fresh sort and limit. Shown red on the tree that never sorts and on the tree that skips the window for removals of tracked keys | CI (`cargo test`) |
 | `an_lww_remove_during_the_scan_leaves_the_snapshot` | (a), removes: an LWW remove during the scan takes the row out of the snapshot. Shown red on the tree that captures only events with a value | CI (`cargo test`) |
 | `an_or_op_on_a_scanned_lww_key_during_the_scan_leaves_the_snapshot` | (a), OR ops: an OR op on a scanned LWW key takes it out. Shown red on the tree that captures a value-less event only for a key in the window | CI (`cargo test`) |
 | `or_ops_on_a_new_key_during_the_scan_add_no_row` | (a), OR ops: OR adds and removes on a new key add no row. Shown red on the tree where an OR add routes its value (`crdt.rs`) | CI (`cargo test`) |
