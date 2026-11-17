@@ -43,8 +43,8 @@ use crate::storage::map_data_store::{
     AppliedWatermarks, FlushCommit, KeyVersion, LeafSink, Loaded, MapDataStore, PutValue,
     ScanBatch, ScanCursor, ScanOrder, StoreBrokenCause, StoreErrorClass, StoreWrite, WriteSource,
 };
-use crate::storage::record::{Record, RecordMetadata, RecordValue};
-use crate::storage::wal::{Wal, WalFsyncPolicy, WalWriter};
+use crate::storage::record::{OrMapEntry, Record, RecordMetadata, RecordValue};
+use crate::storage::wal::{OrDelta, Wal, WalFsyncPolicy, WalWriter};
 
 // ---------------------------------------------------------------------------
 // The engine
@@ -343,7 +343,15 @@ struct CommitCall {
 struct CommitSpy {
     inner: Arc<EngineMapDataStore<BatchEngine>>,
     commits: Mutex<Vec<CommitCall>>,
+    /// `(key, seq, ok)` of every write of every commit, in commit order.
+    versions: Mutex<Vec<(String, u64, bool)>>,
+    /// One-shot: the next commit naming the key parks before it reaches the
+    /// store, notifying `reached` and waiting for `release`.
+    park: Mutex<Option<CommitPark>>,
 }
+
+/// `(key, reached, release)` of a parked commit.
+type CommitPark = (String, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
 
 impl CommitSpy {
     fn mark(&self) -> usize {
@@ -484,6 +492,30 @@ impl MapDataStore for CommitSpy {
     }
 
     async fn commit(&self, commit: &FlushCommit<'_>) -> anyhow::Result<()> {
+        let seqs: Vec<(String, u64)> = commit
+            .writes
+            .iter()
+            .map(|write| match write {
+                StoreWrite::Put { key, seq, .. } | StoreWrite::Remove { key, seq, .. } => {
+                    ((*key).to_string(), *seq)
+                }
+            })
+            .collect();
+        let park = {
+            let mut park = self.park.lock();
+            if park
+                .as_ref()
+                .is_some_and(|(key, ..)| seqs.iter().any(|(k, _)| k == key))
+            {
+                park.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, reached, release)) = park {
+            reached.notify_one();
+            release.notified().await;
+        }
         let writes = commit
             .writes
             .iter()
@@ -504,6 +536,10 @@ impl MapDataStore for CommitSpy {
             })
             .collect();
         let result = self.inner.commit(commit).await;
+        self.versions.lock().extend(
+            seqs.into_iter()
+                .map(|(key, seq)| (key, seq, result.is_ok())),
+        );
         self.commits.lock().push(CommitCall {
             writes,
             ok: result.is_ok(),
@@ -558,6 +594,8 @@ impl Node {
         let spy = Arc::new(CommitSpy {
             inner: store,
             commits: Mutex::new(Vec::new()),
+            versions: Mutex::new(Vec::new()),
+            park: Mutex::new(None),
         });
         let wal = WalWriter::open_over_store(
             dir.join("wal"),
@@ -2359,4 +2397,173 @@ async fn b19_a_run_of_passes_yields_and_stops_at_the_shutdown_signal() {
         (true, vec![1000, 1000], Some(true), 4_000),
         "the observer saw {seen:?} committed writes"
     );
+}
+
+/// The WAL sequences of `key`'s frames in `partition`, oldest first.
+async fn wal_seqs(node: &Node, partition: u32, key: &str) -> Vec<u64> {
+    node.wal
+        .unapplied(partition)
+        .await
+        .expect("unapplied")
+        .into_iter()
+        .filter(|frame| frame.key == key)
+        .map(|frame| frame.sequence)
+        .collect()
+}
+
+/// `(seq, ok)` of every committed write of `key`, in commit order.
+fn committed_versions(node: &Node, key: &str) -> Vec<(u64, bool)> {
+    node.spy
+        .versions
+        .lock()
+        .iter()
+        .filter(|(k, ..)| k == key)
+        .map(|(_, seq, ok)| (*seq, *ok))
+        .collect()
+}
+
+/// An OR write of `key` adding `tag`, as the OR write path makes it: the
+/// key's current value with the delta applied, the delta as its witness.
+async fn or_add(wb: &WriteBehindDataStore, key: &str, tag: &str, store_time: i64) {
+    let delta = OrDelta::Add {
+        entry: OrMapEntry {
+            value: Value::String(tag.to_string()),
+            tag: tag.to_string(),
+            timestamp: Timestamp {
+                millis: 1,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
+            ttl_ms: None,
+        },
+    };
+    let mut value = wb
+        .load(MAP, key)
+        .await
+        .expect("load")
+        .unwrap_or(RecordValue::OrMap {
+            records: Vec::new(),
+            tombstones: Vec::new(),
+        });
+    crate::service::domain::crdt::normalize_to_or_map(&mut value);
+    crate::service::domain::crdt::apply_or_delta(delta.clone(), &mut value);
+    wb.add_with_witness(
+        MAP,
+        key,
+        WriteSource::Value(&value),
+        store_time,
+        Some(&delta),
+    )
+    .await
+    .expect("OR write");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn b20_a_key_commits_in_wal_order_across_passes_and_a_coalesced_survivor_stores_its_own_wal_sequence(
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let node = Node::open(dir.path());
+    // The WAL counter starts far above the entry counter (from 0), so a
+    // version taken from an entry's own sequence differs from its WAL
+    // sequence.
+    let wb = WriteBehindDataStore::new_with_wal(
+        Arc::clone(&node.spy) as Arc<dyn MapDataStore>,
+        config(),
+        Some(WalBootstrap {
+            wal: Arc::clone(&node.wal) as Arc<dyn Wal>,
+            sequence_start: 1001,
+        }),
+    );
+    let partition = 7;
+    let keys = keys_in_partition(MAP, "k", partition, 3);
+    let (pin, k, c) = (keys[0].as_str(), keys[1].as_str(), keys[2].as_str());
+
+    // A refused write holds the partition's watermark below every later
+    // write, so each of them stores its version row (`TG-WAL-015`).
+    node.engine.refuse_writes_holding(pin, Refusal::Unknown);
+    add_at(&wb, pin, 1).await;
+    one_pass(&wb).await;
+    assert!(
+        wb.test_retry_state(MAP, pin).is_some(),
+        "the pin stays queued"
+    );
+
+    // A pass holds K's entry inside its commit while a newer write of K is
+    // queued behind it.
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *node.spy.park.lock() = Some((k.to_string(), Arc::clone(&reached), Arc::clone(&release)));
+    wb.add(MAP, k, &lww("v1", 1), 2).await.expect("add v1");
+    wb.soft_flush().await.expect("soft_flush");
+    reached.notified().await;
+    wb.add(MAP, k, &lww("v2", 2), 3).await.expect("add v2");
+    release.notify_one();
+    flush_until_gone(&wb, &[k.to_string()]).await;
+
+    let k_seqs = wal_seqs(&node, partition, k).await;
+    assert_eq!(k_seqs.len(), 2, "two frames of K: {k_seqs:?}");
+    assert!(k_seqs[0] > 1000, "WAL sequences start at 1001: {k_seqs:?}");
+    assert_eq!(
+        committed_versions(&node, k),
+        vec![(k_seqs[0], true), (k_seqs[1], true)],
+        "K's entries are committed in WAL-sequence order, each at its WAL sequence"
+    );
+    assert_eq!(
+        node.spy
+            .load_version(MAP, k)
+            .await
+            .expect("load_version")
+            .map(|v| v.seq),
+        Some(k_seqs[1])
+    );
+    assert_eq!(
+        node.spy.load(MAP, k).await.expect("load"),
+        Some(lww("v2", 2))
+    );
+
+    // Two OR writes of C coalesce into one entry; the second carries the
+    // first's sequence.
+    or_add(&wb, c, "a", 4).await;
+    or_add(&wb, c, "b", 5).await;
+    let frames: Vec<_> = node
+        .wal
+        .unapplied(partition)
+        .await
+        .expect("unapplied")
+        .into_iter()
+        .filter(|frame| frame.key == c)
+        .collect();
+    assert!(
+        frames.iter().all(|frame| !frame.op.subsumes_on_coalesce()),
+        "both writes are framed as deltas, so the survivor carries the first"
+    );
+    let c_seqs: Vec<u64> = frames.iter().map(|frame| frame.sequence).collect();
+    assert_eq!(c_seqs.len(), 2);
+    flush_until_gone(&wb, &[c.to_string()]).await;
+    assert_eq!(
+        committed_versions(&node, c),
+        vec![(c_seqs[1], true)],
+        "one commit of the survivor, at its own WAL sequence"
+    );
+    assert_eq!(
+        node.spy
+            .load_version(MAP, c)
+            .await
+            .expect("load_version")
+            .map(|v| v.seq),
+        Some(c_seqs[1])
+    );
+    let stored = node.spy.load(MAP, c).await.expect("load").expect("C");
+    let RecordValue::OrMap { records, .. } = &stored else {
+        panic!("C is an OR slot: {stored:?}");
+    };
+    let tags: BTreeSet<&str> = records.iter().map(|e| e.tag.as_str()).collect();
+    assert_eq!(
+        tags,
+        BTreeSet::from(["a", "b"]),
+        "the survivor's value holds the carried write's effect"
+    );
+
+    node.engine.allow_writes_holding(pin);
+    stop(wb).await;
 }
