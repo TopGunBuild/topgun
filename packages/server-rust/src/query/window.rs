@@ -163,6 +163,16 @@ impl LiveWindow {
         }
         let window = self.limit.map_or(usize::MAX, |limit| limit as usize);
         let mut state = self.state.lock();
+        // Removals of keys the window does not track change nothing: the common
+        // case of a write that does not match a live query.
+        let adds = last.values().any(Option::is_some);
+        let only = (last.len() == 1).then(|| last.keys().next().copied()).flatten();
+        let tracked = |row: &WindowRow| {
+            only.map_or_else(|| last.contains_key(row.key.as_str()), |key| row.key == key)
+        };
+        if !adds && !state.iter().any(tracked) {
+            return Vec::new();
+        }
         let (mut leaves, mut enters, mut updates) = (Vec::new(), Vec::new(), Vec::new());
         // Each row with whether it was in the window and whether it was mutated.
         let mut rows: Vec<(WindowRow, bool, bool)> = Vec::with_capacity(state.len() + last.len());
@@ -195,7 +205,10 @@ impl LiveWindow {
                 rows.push((row, false, true));
             }
         }
-        rows.sort_by(|(a, ..), (b, ..)| self.compare(a, b));
+        // Removals keep the rows in order; only a new or changed value moves one.
+        if adds {
+            rows.sort_by(|(a, ..), (b, ..)| self.compare(a, b));
+        }
 
         for (i, (row, was_in, mutated)) in rows.iter().enumerate() {
             match (*was_in, i < window) {
@@ -575,6 +588,20 @@ mod tests {
         }
         report("initial_load per_row", per_row);
         report("initial_load batch", batched);
+
+        // A write that does not match the query, to a key the window does not
+        // track, against the loaded window: per call, over 1000 calls.
+        let w = LiveWindow::new(sort_asc("v"), Some(10_000));
+        let _ = w.apply_batch(rows.iter().map(|(k, v)| (k.as_str(), Some(v), true)));
+        let mut non_matching = Vec::new();
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            for _ in 0..1000 {
+                assert!(w.apply_mutation("absent", None, false).is_empty());
+            }
+            non_matching.push(start.elapsed() / 1000);
+        }
+        report("non_matching_write per call", non_matching);
     }
 
     // ---- HLC monotone guard tests ----
