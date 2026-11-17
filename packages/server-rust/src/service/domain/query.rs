@@ -459,6 +459,21 @@ fn fold_captured(
     changed
 }
 
+/// The frame a subscriber is sent for `snapshot` with the `entries` captured
+/// during its scan folded in. Runs under the snapshot buffer's lock.
+fn folded_snapshot_frame(
+    mut snapshot: QueryRespPayload,
+    page_cursor: &PageCursor,
+    sub: &QuerySubscription,
+    entries: &[(String, DeltaEntry)],
+    now: u64,
+) -> Result<Vec<u8>, rmp_serde::encode::Error> {
+    if fold_captured(&mut snapshot.results, sub, entries, now) {
+        page_cursor.repaginate(&mut snapshot, &sub.live_window);
+    }
+    rmp_serde::to_vec_named(&Message::QueryResp(QueryRespMessage { payload: snapshot }))
+}
+
 /// What a snapshot page's `next_cursor` is built from, kept so that a fold
 /// that changes the page can rebuild it.
 struct PageCursor {
@@ -1145,14 +1160,8 @@ impl QueryService {
             let bytes = if entries.is_empty() {
                 scan_bytes
             } else {
-                let mut folded = snapshot;
                 let now = self.record_store_factory.now_ms();
-                if fold_captured(&mut folded.results, &sub, &entries, now) {
-                    page_cursor.repaginate(&mut folded, &sub.live_window);
-                }
-                match rmp_serde::to_vec_named(&Message::QueryResp(QueryRespMessage {
-                    payload: folded,
-                })) {
+                match folded_snapshot_frame(snapshot, page_cursor, &sub, &entries, now) {
                     Ok(bytes) => bytes,
                     Err(e) => {
                         remove();
@@ -5398,9 +5407,11 @@ mod tests {
         assert!(Arc::ptr_eq(&kept.delta_buffer, &new));
     }
 
-    /// Report-only: the time the snapshot buffer's lock is held to fold 4096
-    /// captured writes (a third updates, a third new keys, a third removes)
-    /// into a 10 000-row projected, sorted snapshot, serialize it and send it.
+    /// Report-only: the whole time the snapshot buffer's lock is held to close
+    /// it with 4096 captured writes (a third updates, a third new keys, a third
+    /// removes) over a 10 000-row projected, sorted, limited snapshot: the fold,
+    /// the page's cursor, the encoding and the send on a reserved slot, by the
+    /// code the subscribe runs.
     #[test]
     #[ignore = "measurement; run with --ignored --nocapture"]
     fn fold_lock_hold_of_4096_entries_over_10000_rows() {
@@ -5466,31 +5477,38 @@ mod tests {
                     .delta_buffer
                     .route(&key, record.as_ref(), record.is_some()));
             }
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut snapshot = Some(snapshot);
+            let page_cursor = PageCursor {
+                limit: Some(10_000),
+                template: vec![SortValue {
+                    field: "v".to_string(),
+                    value: serde_json::Value::Null,
+                    direction: SortDirection::Asc,
+                }],
+                predicate_hash: 0,
+                sort_hash: 0,
+                now_ms: 0,
+            };
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
             let start = std::time::Instant::now();
             sub.delta_buffer.close(|captured| {
                 let Captured::Entries(entries) = captured else {
                     panic!("no overflow");
                 };
-                let mut folded = snapshot.take().expect("once");
-                let _ = fold_captured(&mut folded.results, &sub, &entries, u64::MAX / 2);
-                let bytes = rmp_serde::to_vec_named(&Message::QueryResp(QueryRespMessage {
-                    payload: folded,
-                }))
-                .expect("serializes");
-                tx.send(OutboundMessage::Binary(bytes)).expect("sends");
+                let permit = tx.try_reserve().expect("a free slot");
+                let frame =
+                    folded_snapshot_frame(snapshot, &page_cursor, &sub, &entries, u64::MAX / 2);
+                permit.send(OutboundMessage::Binary(frame.expect("encodes")));
                 Closing::Live
             });
             runs.push(start.elapsed());
             assert!(rx.try_recv().is_ok());
         }
         for (i, run) in runs.iter().enumerate() {
-            println!("fold_lock_hold run {i}: {:.3} ms", run.as_secs_f64() * 1e3);
+            println!("close_lock_hold run {i}: {:.3} ms", run.as_secs_f64() * 1e3);
         }
         runs.sort();
         println!(
-            "fold_lock_hold median: {:.3} ms",
+            "close_lock_hold median: {:.3} ms",
             runs[runs.len() / 2].as_secs_f64() * 1e3
         );
     }
