@@ -4886,7 +4886,11 @@ mod tests {
                     overflow.payload.code.as_deref(),
                     Some(QUERY_SNAPSHOT_OVERFLOW)
                 );
-                assert!(overflow.payload.error.as_ref().is_some_and(|e| e.starts_with("Too many")));
+                assert!(overflow
+                    .payload
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.starts_with("Too many")));
                 assert!(overflow.payload.results.is_empty());
 
                 assert!(
@@ -5214,19 +5218,30 @@ mod tests {
         hold.wait_reached().await;
         fx.client(fx.w, put("x", v(0))).await;
         release(hold, task).await;
-        let Some(Message::QueryResp(snapshot)) = query_frames(&mut fx.s_rx, LIVE_ID).into_iter().next()
+        let Some(Message::QueryResp(snapshot)) =
+            query_frames(&mut fx.s_rx, LIVE_ID).into_iter().next()
         else {
             panic!("a snapshot");
         };
         let fresh = fx.fresh(by_v(3)).await;
-        let keys = |page: &QueryRespPayload| page.results.iter().map(|e| e.key.clone()).collect::<Vec<_>>();
+        let keys = |page: &QueryRespPayload| {
+            page.results
+                .iter()
+                .map(|e| e.key.clone())
+                .collect::<Vec<_>>()
+        };
         assert_eq!(keys(&snapshot.payload), ["x", "a", "b"]);
         assert_eq!(keys(&snapshot.payload), keys(&fresh));
         assert_eq!(snapshot.payload.has_more, Some(true));
         assert_eq!(fresh.has_more, Some(true));
         let position = |cursor: Option<&String>| {
             let cursor = decode_cursor(cursor.expect("a next cursor")).expect("decodes");
-            (cursor.last_key, format!("{:?}", cursor.sort_values), cursor.predicate_hash, cursor.sort_hash)
+            (
+                cursor.last_key,
+                format!("{:?}", cursor.sort_values),
+                cursor.predicate_hash,
+                cursor.sort_hash,
+            )
         };
         assert_eq!(
             position(snapshot.payload.next_cursor.as_ref()),
@@ -5243,7 +5258,8 @@ mod tests {
         assert!(matches!(subscribed, Ok(Ok(OperationResponse::Empty))));
         let (mut rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
         // Stamped in 2023 with a one-second TTL: expired on the system clock.
-        fx.trusted_record("x", v(1), make_timestamp(), Some(1000)).await;
+        fx.trusted_record("x", v(1), make_timestamp(), Some(1000))
+            .await;
         apply_updates(&mut rows, query_frames(&mut fx.s_rx, LIVE_ID));
         assert!(rows.is_empty(), "{rows:?}");
         assert_eq!(rows, fx.fresh_rows(Query::default()).await);

@@ -166,7 +166,9 @@ impl LiveWindow {
         // Removals of keys the window does not track change nothing: the common
         // case of a write that does not match a live query.
         let adds = last.values().any(Option::is_some);
-        let only = (last.len() == 1).then(|| last.keys().next().copied()).flatten();
+        let only = (last.len() == 1)
+            .then(|| last.keys().next().copied())
+            .flatten();
         let tracked = |row: &WindowRow| {
             only.map_or_else(|| last.contains_key(row.key.as_str()), |key| row.key == key)
         };
