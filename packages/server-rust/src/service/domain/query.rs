@@ -1037,17 +1037,20 @@ impl QueryService {
             self.query_registry
                 .remove_if_same(map_name, connection_id, query_id, delta_buffer);
         };
-        let overflow = |snapshot: QueryRespPayload| {
+        let overflow = |snapshot: QueryRespPayload, reason: &'static str| {
+            let error = if reason == "buffer" {
+                "Too many concurrent writes during snapshot; \
+                 please resubscribe to get a fresh snapshot."
+            } else {
+                "The connection's outbound queue was full; \
+                 please resubscribe to get a fresh snapshot."
+            };
             OperationResponse::Messages(vec![
                 Message::QueryResp(QueryRespMessage { payload: snapshot }),
                 Message::QueryResp(QueryRespMessage {
                     payload: QueryRespPayload {
                         query_id: query_id.to_string(),
-                        error: Some(
-                            "Too many concurrent writes during snapshot; \
-                             please resubscribe to get a fresh snapshot."
-                                .to_string(),
-                        ),
+                        error: Some(error.to_string()),
                         code: Some(QUERY_SNAPSHOT_OVERFLOW.to_string()),
                         ..Default::default()
                     },
@@ -1070,7 +1073,7 @@ impl QueryService {
                 Captured::Overflowed => {
                     remove();
                     overflow_reason = Some("buffer");
-                    outcome = Ok(overflow(snapshot));
+                    outcome = Ok(overflow(snapshot, "buffer"));
                     return Closing::Sealed;
                 }
                 Captured::Entries(entries) => entries,
@@ -1086,7 +1089,7 @@ impl QueryService {
                 Err(TrySendError::Full(())) => {
                     remove();
                     overflow_reason = Some("channel");
-                    outcome = Ok(overflow(snapshot));
+                    outcome = Ok(overflow(snapshot, "channel"));
                     return Closing::Sealed;
                 }
                 Err(TrySendError::Closed(())) => {
@@ -4818,7 +4821,7 @@ mod tests {
                     overflow.payload.code.as_deref(),
                     Some(QUERY_SNAPSHOT_OVERFLOW)
                 );
-                assert!(overflow.payload.error.is_some());
+                assert!(overflow.payload.error.as_ref().is_some_and(|e| e.starts_with("Too many")));
                 assert!(overflow.payload.results.is_empty());
 
                 assert!(
@@ -4887,7 +4890,8 @@ mod tests {
         assert!(
             matches!(&frames[..], [Message::QueryResp(s), Message::QueryResp(o)]
             if s.payload.code.is_none()
-                && o.payload.code.as_deref() == Some(QUERY_SNAPSHOT_OVERFLOW))
+                && o.payload.code.as_deref() == Some(QUERY_SNAPSHOT_OVERFLOW)
+                && o.payload.error.as_ref().is_some_and(|e| e.starts_with("The connection's outbound queue was full")))
         );
         assert_eq!(fx.registry.subscription_count(), 0);
     }
