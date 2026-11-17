@@ -4724,7 +4724,10 @@ mod tests {
 
     /// An overflow answers with the scan snapshot, then the overflow frame, on
     /// the response path; the subscription is removed, a subscription of the
-    /// same id on another map stays, and a resubscribe restores every row.
+    /// same id on another map stays, and a resubscribe holds what a fresh
+    /// one-shot scan holds. It is not compared with the store: overflowing
+    /// needs more distinct keys than the local DAG scan returns rows, and
+    /// that scan stops at 4096 rows (TODO-1001).
     #[test]
     fn an_overflow_sends_the_snapshot_then_the_overflow_and_drops_the_subscription() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -4805,10 +4808,6 @@ mod tests {
                     .expect("resubscribe");
                 assert!(matches!(again, OperationResponse::Empty));
                 let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
-                // OPEN (reported to the conductor): the local DAG scan returns at
-                // most 4096 of the 4101 stored rows, a cap that predates this
-                // change, so the resubscribe is compared with a fresh one-shot
-                // scan of the map rather than with the store.
                 let mut fresh = fx.subscribe_op("fresh", LIVE_MAP, None);
                 if let Operation::QuerySubscribe { payload, .. } = &mut fresh {
                     payload.payload.snapshot_only = true;

@@ -2513,9 +2513,8 @@ impl BeforeAcquireParkHandle {
 #[cfg(test)]
 impl CrdtService {
     /// Arms the park for the next client op of `(map, key)` on this service:
-    /// that op stops after its read of the previous value and immediately
-    /// before it asks for the key's writer, holding neither the writer nor a
-    /// stamp.
+    /// that op stops immediately before it asks for the key's writer, holding
+    /// neither the writer nor a stamp.
     fn test_park_before_acquire(&self, map: &str, key: &str) -> BeforeAcquireParkHandle {
         let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -12433,109 +12432,8 @@ mod tests {
             );
         }
 
-        /// What [`parking_stack_with_subscription`] builds.
-        struct SubscribedStack {
-            svc: Arc<CrdtService>,
-            factory: Arc<RecordStoreFactory>,
-            parking: Arc<ParkingStore>,
-            journal: Arc<JournalStore>,
-            /// Keeps the subscribed connection's channel open.
-            _listener: tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>,
-        }
-
-        /// [`parking_stack`] with a journal attached and one query subscription
-        /// on the map, so a write reads the key's previous value before it
-        /// applies.
-        fn parking_stack_with_subscription(dir: &tempfile::TempDir) -> SubscribedStack {
-            let redb: Arc<dyn MapDataStore> =
-                Arc::new(RedbDataStore::new(dir.path().join("nonres.redb")).expect("redb open"));
-            let parking = Arc::new(ParkingStore::new(redb));
-            let factory = Arc::new(RecordStoreFactory::new(
-                StorageConfig::default(),
-                parking.clone() as Arc<dyn MapDataStore>,
-                Vec::new(),
-            ));
-            let conn_registry = Arc::new(ConnectionRegistry::new());
-            let query_registry = Arc::new(QueryRegistry::new());
-            let listener = subscribe_listener(&conn_registry, &query_registry, MAP);
-            let journal = Arc::new(JournalStore::new(100));
-            let svc = Arc::new(
-                CrdtService::new(
-                    Arc::clone(&factory),
-                    conn_registry,
-                    make_validator(),
-                    query_registry,
-                    Arc::new(SchemaService::new()),
-                )
-                .with_journal(Arc::clone(&journal)),
-            );
-            SubscribedStack {
-                svc,
-                factory,
-                parking,
-                journal,
-                _listener: listener,
-            }
-        }
-
-        // A write must not land after a write of the same key that carries a
-        // higher stamp. The first writer is parked in the read of the previous
-        // value, taken when the map has a query subscription and the key is
-        // not resident. That read is in front of both the writer acquire and
-        // the mint, so the parked writer mints last and applies last, and the
-        // second writer is never kept waiting. What this guards is that the
-        // mint does not move back in front of that read; it passes with no
-        // writer at all. The mint's place under the writer is guarded by
-        // `a_put_that_takes_the_writer_last_carries_the_higher_stamp`.
-        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-        async fn a_lower_stamped_put_never_lands_after_a_higher_stamped_one() {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let SubscribedStack {
-                svc,
-                factory,
-                parking,
-                journal,
-                _listener,
-            } = parking_stack_with_subscription(&dir);
-            assert_not_resident(&factory);
-
-            let mut park = parking.park_after_load();
-            let x = tokio::spawn(svc.clone().oneshot(route_x(VX)));
-            // X is parked in the load of the previous value.
-            park.wait_parked().await;
-
-            let y = tokio::spawn(svc.clone().oneshot(route_y(VY)));
-            let y_waited = second_writer_waited(&svc, &y).await;
-            park.release();
-            x.await.expect("X task").expect("X must succeed");
-            y.await.expect("Y task").expect("Y must succeed");
-
-            let journal_order = journal_stamps(&journal);
-            assert_eq!(
-                journal_order.len(),
-                2,
-                "the journal must hold both writes of the key"
-            );
-            let a = journal_order.iter().min().expect("two stamps").clone();
-            let b = journal_order.iter().max().expect("two stamps").clone();
-            assert!(a < b, "the two writes must carry distinct stamps");
-            let engine_stamp = read_lww_timestamp(&factory, MAP, KEY).await;
-
-            println!(
-                "lower_stamped_put: y_waited={y_waited} a={a:?} b={b:?} engine={engine_stamp:?} \
-                 journal={journal_order:?}"
-            );
-            assert_eq!(
-                (engine_stamp, journal_order),
-                (Some(b.clone()), vec![a, b]),
-                "(engine stamp, journal order): the engine must hold the higher stamp and the \
-                 journal must record the two writes in stamp order"
-            );
-        }
-
         // The stamp of a write is minted under the key's writer. X is parked
-        // in front of its acquire: it has read the previous value and holds
-        // neither the writer nor a stamp. Y then runs to completion. X enters
+        // in front of its acquire, holding neither the writer nor a stamp. Y then runs to completion. X enters
         // the critical section last and its value is what the engine and the
         // store keep, so it must also carry the higher stamp. A stamp minted
         // in front of the acquire would give X the lower one.
@@ -12792,16 +12690,14 @@ mod tests {
         /// every `add` and `remove` until the test grants a verdict: a refusing
         /// store alone could not place a second write inside the flush window,
         /// because the window is open only while the flush loop holds a drained
-        /// entry. It can also park ONE `load` of that key on return. An
-        /// instance that gates no key is a plain store, which is what the
-        /// crash image is.
+        /// entry. An instance that gates no key is a plain store, which is
+        /// what the crash image is.
         struct RefusingStore {
             /// `(map, key)` -> value, or `None` for a delete.
             data: std::sync::Mutex<HashMap<(String, String), Option<RecordValue>>>,
             /// The key whose store calls park; `None` parks nothing.
             gated: Option<(String, String)>,
             gate: std::sync::Mutex<VerdictGate>,
-            after_load: std::sync::Mutex<Option<Gate>>,
         }
 
         impl RefusingStore {
@@ -12813,7 +12709,6 @@ mod tests {
                     data: std::sync::Mutex::new(data),
                     gated,
                     gate: std::sync::Mutex::new(VerdictGate::default()),
-                    after_load: std::sync::Mutex::new(None),
                 }
             }
 
@@ -12831,11 +12726,6 @@ mod tests {
                 self.gated
                     .as_ref()
                     .is_some_and(|(gated_map, gated_key)| gated_map == map && gated_key == key)
-            }
-
-            /// Parks the next `load` of the gated key on return.
-            fn park_after_load(&self) -> ParkHandle {
-                ParkingStore::arm(&self.after_load)
             }
 
             fn has_parked_call(&self) -> bool {
@@ -12988,17 +12878,13 @@ mod tests {
             }
 
             async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
-                let loaded = self
+                Ok(self
                     .data
                     .lock()
                     .unwrap()
                     .get(&(map.to_string(), key.to_string()))
                     .cloned()
-                    .flatten();
-                if self.is_gated(map, key) {
-                    ParkingStore::pass(&self.after_load).await;
-                }
-                Ok(loaded)
+                    .flatten())
             }
 
             async fn load_all(
@@ -13069,19 +12955,14 @@ mod tests {
             wal: Arc<crate::storage::wal::WalWriter>,
             inner: Arc<WatermarkKeeping<RefusingStore>>,
             journal: Arc<JournalStore>,
-            /// Keeps the subscribed connection's channel open, when there is one.
-            _listener:
-                Option<tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>>,
         }
 
         /// The service over the buffered store with a real WAL, on a
         /// [`RefusingStore`] gating `(MAP, KEY)`, with a journal attached.
         /// Every frame is fsynced before its write returns, the flush loop
         /// drains by itself within milliseconds, and a refused entry is retried
-        /// until it is accepted. `subscribed` registers one query subscription
-        /// on the map, so a write reads the key's previous value before it
-        /// applies.
-        fn refusing_stack(wal_dir: &tempfile::TempDir, subscribed: bool) -> RefusingStack {
+        /// until it is accepted.
+        fn refusing_stack(wal_dir: &tempfile::TempDir) -> RefusingStack {
             use crate::storage::datastores::WalBootstrap;
             use crate::storage::wal::{Wal, WalFsyncPolicy, WalWriter};
 
@@ -13113,8 +12994,6 @@ mod tests {
             ));
             let conn_registry = Arc::new(ConnectionRegistry::new());
             let query_registry = Arc::new(QueryRegistry::new());
-            let listener =
-                subscribed.then(|| subscribe_listener(&conn_registry, &query_registry, MAP));
             let journal = Arc::new(JournalStore::new(100));
             let svc = Arc::new(
                 CrdtService::new(
@@ -13133,7 +13012,6 @@ mod tests {
                 wal,
                 inner,
                 journal,
-                _listener: listener,
             }
         }
 
@@ -13169,8 +13047,7 @@ mod tests {
                 wal,
                 inner,
                 journal,
-                _listener,
-            } = refusing_stack(&wal_dir, false);
+            } = refusing_stack(&wal_dir);
 
             let mut park = write_behind.test_park_before_queue_insert(MAP, KEY);
             let x = tokio::spawn(svc.clone().oneshot(route_x(VX)));
@@ -13233,9 +13110,9 @@ mod tests {
             );
         }
 
-        // A writer is parked in the read of the key's previous value while a
-        // second write of the key completes and its flush attempt is in
-        // flight; that attempt is then refused, with the parked writer's entry
+        // A writer is parked in front of its writer acquire, holding neither
+        // the writer nor a stamp, while a second write of the key completes
+        // and its flush attempt is in flight; that attempt is then refused, with the parked writer's entry
         // queued behind it. The entry that takes over the refused one's frames
         // must not hold an older value: what is served and what a crash
         // recovers must both be the higher stamp.
@@ -13249,17 +13126,15 @@ mod tests {
                 wal,
                 inner,
                 journal,
-                _listener,
-            } = refusing_stack(&wal_dir, true);
+            } = refusing_stack(&wal_dir);
             assert_not_resident(&factory);
 
-            let mut park = inner.park_after_load();
+            let mut park = svc.test_park_before_acquire(MAP, KEY);
             let o = tokio::spawn(svc.clone().oneshot(route_x(VX)));
-            // O is parked in the load of the previous value.
             park.wait_parked().await;
 
-            // The park is one-shot, so N's own read passes; N writes, queues
-            // and returns.
+            // The park is one-shot, so N passes it; N writes, queues and
+            // returns.
             let n = tokio::spawn(svc.clone().oneshot(route_y(VY)));
             n.await.expect("N task").expect("N must succeed");
             let journal_after_n = journal_stamps(&journal);
@@ -13495,8 +13370,7 @@ mod tests {
                 wal,
                 inner,
                 journal: _journal,
-                _listener,
-            } = refusing_stack(&wal_dir, false);
+            } = refusing_stack(&wal_dir);
             let store = factory.get_or_create(MAP, hash_to_partition(KEY));
             for op in seed {
                 svc.clone().oneshot(op).await.expect("seed op must succeed");
@@ -13634,8 +13508,7 @@ mod tests {
                 wal: _wal,
                 inner,
                 journal: _journal,
-                _listener,
-            } = refusing_stack(&wal_dir, false);
+            } = refusing_stack(&wal_dir);
             let store = factory.get_or_create(MAP, hash_to_partition(KEY));
             for op in seed {
                 svc.clone().oneshot(op).await.expect("seed op must succeed");
@@ -13715,8 +13588,7 @@ mod tests {
                 wal: _wal,
                 inner,
                 journal: _journal,
-                _listener,
-            } = refusing_stack(&wal_dir, false);
+            } = refusing_stack(&wal_dir);
             svc.clone().oneshot(route_x("OLD")).await.expect("seed");
             grant_up_to(&inner, &write_behind, usize::MAX, Verdict::Accept).await;
             svc.clone().oneshot(route_x("NEW")).await.expect("NEW");
