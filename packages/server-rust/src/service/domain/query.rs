@@ -459,6 +459,39 @@ fn fold_captured(
     changed
 }
 
+/// Why a live subscribe answered with `QUERY_SNAPSHOT_OVERFLOW`.
+#[derive(Clone, Copy)]
+enum OverflowReason {
+    /// More distinct keys were written during the scan than the buffer holds.
+    Buffer,
+    /// The connection's outbound queue had no free slot for the snapshot.
+    Channel,
+}
+
+impl OverflowReason {
+    /// The `reason` label of `topgun_query_snapshot_overflow_total`.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Buffer => "buffer",
+            Self::Channel => "channel",
+        }
+    }
+
+    /// The overflow frame's error text.
+    fn error(self) -> &'static str {
+        match self {
+            Self::Buffer => {
+                "Too many concurrent writes during snapshot; \
+                 please resubscribe to get a fresh snapshot."
+            }
+            Self::Channel => {
+                "The connection's outbound queue was full; \
+                 please resubscribe to get a fresh snapshot."
+            }
+        }
+    }
+}
+
 /// The frame a subscriber is sent for `snapshot` with the `entries` captured
 /// during its scan folded in. Runs under the snapshot buffer's lock.
 fn folded_snapshot_frame(
@@ -1092,25 +1125,18 @@ impl QueryService {
         };
 
         let mut outcome: Result<OperationResponse, OperationError> = Ok(OperationResponse::Empty);
-        let mut overflow_reason: Option<&'static str> = None;
+        let mut overflow_reason: Option<OverflowReason> = None;
         let remove = || {
             self.query_registry
                 .remove_if_same(map_name, connection_id, query_id, delta_buffer);
         };
-        let overflow = |snapshot: QueryRespPayload, reason: &'static str| {
-            let error = if reason == "buffer" {
-                "Too many concurrent writes during snapshot; \
-                 please resubscribe to get a fresh snapshot."
-            } else {
-                "The connection's outbound queue was full; \
-                 please resubscribe to get a fresh snapshot."
-            };
+        let overflow = |snapshot: QueryRespPayload, reason: OverflowReason| {
             OperationResponse::Messages(vec![
                 Message::QueryResp(QueryRespMessage { payload: snapshot }),
                 Message::QueryResp(QueryRespMessage {
                     payload: QueryRespPayload {
                         query_id: query_id.to_string(),
-                        error: Some(error.to_string()),
+                        error: Some(reason.error().to_string()),
                         code: Some(QUERY_SNAPSHOT_OVERFLOW.to_string()),
                         ..Default::default()
                     },
@@ -1132,8 +1158,8 @@ impl QueryService {
             let entries = match captured {
                 Captured::Overflowed => {
                     remove();
-                    overflow_reason = Some("buffer");
-                    outcome = Ok(overflow(snapshot, "buffer"));
+                    overflow_reason = Some(OverflowReason::Buffer);
+                    outcome = Ok(overflow(snapshot, OverflowReason::Buffer));
                     return Closing::Sealed;
                 }
                 Captured::Entries(entries) => entries,
@@ -1148,8 +1174,8 @@ impl QueryService {
                 Ok(permit) => permit,
                 Err(TrySendError::Full(())) => {
                     remove();
-                    overflow_reason = Some("channel");
-                    outcome = Ok(overflow(snapshot, "channel"));
+                    overflow_reason = Some(OverflowReason::Channel);
+                    outcome = Ok(overflow(snapshot, OverflowReason::Channel));
                     return Closing::Sealed;
                 }
                 Err(TrySendError::Closed(())) => {
@@ -1176,7 +1202,7 @@ impl QueryService {
         guard.armed = false;
 
         if let Some(reason) = overflow_reason {
-            metrics::counter!("topgun_query_snapshot_overflow_total", "reason" => reason)
+            metrics::counter!("topgun_query_snapshot_overflow_total", "reason" => reason.label())
                 .increment(1);
         }
         outcome

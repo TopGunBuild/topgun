@@ -491,6 +491,17 @@ mod tests {
         assert_eq!(delta.value, rec("score", 42));
     }
 
+    /// A batch of a tracked key's removal and an untracked key's removal
+    /// sends only the tracked key's LEAVE.
+    #[test]
+    fn a_batch_of_removals_leaves_only_the_tracked_key() {
+        let w = LiveWindow::new(sort_asc("score"), Some(3));
+        w.apply_mutation("a", Some(&rec("score", 1)), true);
+        w.apply_mutation("b", Some(&rec("score", 2)), true);
+        let deltas = w.apply_batch([("a", None, false), ("z", None, false)]);
+        assert_eq!(events(&deltas), vec![("a".to_string(), ChangeEventType::LEAVE)]);
+    }
+
     /// The tracked rows in window order.
     fn rows_of(w: &LiveWindow) -> Vec<(String, rmpv::Value)> {
         w.state
