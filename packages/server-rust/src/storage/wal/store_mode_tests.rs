@@ -36,7 +36,8 @@ use super::{
 };
 use crate::storage::datastores::engine_store::{
     decode_map_by_name_row, map_by_name_key, meta_key, EngineMapDataStore, RecordKey, RecordSpace,
-    KS_BACKUP, KS_PARTITION_META, KS_PRIMARY, META_WAL_IMPORT_PENDING, META_WAL_WATERMARK,
+    KS_BACKUP, KS_PARTITION_META, KS_PRIMARY, MAX_VERSION_KEY, META_WAL_IMPORT_PENDING,
+    META_WAL_WATERMARK,
 };
 use crate::storage::datastores::kv_engine::{
     BatchOp, KeyRange, KvCapabilities, KvEngine, KvError, KvResult, KvSnapshot, WriteBatch,
@@ -1038,9 +1039,22 @@ async fn a01_a_commit_is_one_engine_write_holding_its_records_and_its_watermark_
             vec![record.clone()],
             "the commit holds its own record and no other"
         );
+        // The commit's own row moves its partition's watermark to `seq`, so
+        // the write is at the replay horizon and gets no version row; it
+        // stores a record at a non-zero sequence above every earlier one, so
+        // it raises `max_version` to `seq` in the same batch (TG-WAL-003).
+        assert_eq!(
+            write.other_keys(),
+            vec![MAX_VERSION_KEY.to_vec()],
+            "the commit holds nothing but its record, its rows and max_version: {write:?}"
+        );
         assert!(
-            write.other_keys().is_empty(),
-            "the commit holds nothing but its record and its rows: {write:?}"
+            write.ops.iter().any(|op| matches!(
+                op,
+                BatchOp::Put { key, value }
+                    if key.as_slice() == MAX_VERSION_KEY && decode_u64(value) == *seq
+            )),
+            "the commit of {key} raises max_version to {seq}: {write:?}"
         );
         assert!(
             write.rows().contains(&(*partition, *seq)),
