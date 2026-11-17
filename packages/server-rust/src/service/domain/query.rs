@@ -118,19 +118,23 @@ impl QuerySubscription {
             return deltas;
         }
         // A row strictly before the cursor is on an earlier page the subscriber
-        // is not observing. A LEAVE carries no row value to test, so it is always
-        // delivered: the subscriber must drop a row it may hold.
+        // is not observing: one that enters there is not sent, and one updated
+        // to there leaves this page, so the subscriber drops the row it holds. A
+        // LEAVE carries no row value to test, so it is always delivered.
         let page_cursor = self.query.cursor.as_deref().and_then(decode_cursor);
         deltas
             .into_iter()
             .filter_map(|mut delta| {
-                let leave = matches!(delta.event, ChangeEventType::LEAVE);
                 if let Some(cursor) = &page_cursor {
-                    if !leave && !is_after_cursor(&delta.key, &delta.value, cursor) {
-                        return None;
+                    let before = !matches!(delta.event, ChangeEventType::LEAVE)
+                        && !is_after_cursor(&delta.key, &delta.value, cursor);
+                    match delta.event {
+                        ChangeEventType::ENTER if before => return None,
+                        ChangeEventType::UPDATE if before => delta.event = ChangeEventType::LEAVE,
+                        _ => {}
                     }
                 }
-                if leave {
+                if matches!(delta.event, ChangeEventType::LEAVE) {
                     delta.value = rmpv::Value::Nil;
                 } else if let Some(fields) = &self.fields {
                     delta.value = project_fields(fields, &delta.value);
@@ -4617,8 +4621,8 @@ mod tests {
             tokio::spawn(Arc::clone(&self.svc).oneshot(op))
         }
 
-        /// The rows a fresh one-shot query of `query` returns now.
-        async fn fresh_rows(&self, query: Query) -> BTreeMap<String, rmpv::Value> {
+        /// What a fresh one-shot query of `query` answers now.
+        async fn fresh(&self, query: Query) -> QueryRespPayload {
             let mut op = self.subscribe_op("fresh", LIVE_MAP, None);
             if let Operation::QuerySubscribe { payload, .. } = &mut op {
                 payload.payload.query = query;
@@ -4633,10 +4637,12 @@ mod tests {
                 panic!("a QUERY_RESP");
             };
             resp.payload
-                .results
-                .into_iter()
-                .map(|e| (e.key, e.value))
-                .collect()
+        }
+
+        /// The rows a fresh one-shot query of `query` returns now.
+        async fn fresh_rows(&self, query: Query) -> BTreeMap<String, rmpv::Value> {
+            let results = self.fresh(query).await.results;
+            results.into_iter().map(|e| (e.key, e.value)).collect()
         }
 
         fn buffer(&self) -> Arc<DeltaBuffer> {
@@ -5094,20 +5100,80 @@ mod tests {
         assert!(!rows.contains_key("ke"), "{rows:?}");
     }
 
-    /// The first three rows by `v`.
-    fn top3() -> Query {
+    /// The first `limit` rows by `v`.
+    fn by_v(limit: u32) -> Query {
         use topgun_core::messages::base::{SortDirection, SortField};
         Query {
             sort: Some(vec![SortField {
                 field: "v".to_string(),
                 direction: SortDirection::Asc,
             }]),
-            limit: Some(3),
+            limit: Some(limit),
             ..Query::default()
         }
     }
 
-    /// Subscribes to [`top3`] over `a`=1, `b`=2, `c`=3, makes the `captured`
+    /// Applies the `QUERY_UPDATE`s among `frames` to `rows` as the client does.
+    fn apply_updates(rows: &mut BTreeMap<String, rmpv::Value>, frames: Vec<Message>) {
+        for frame in frames {
+            if let Message::QueryUpdate { payload } = frame {
+                match payload.change_type {
+                    ChangeEventType::ENTER | ChangeEventType::UPDATE => {
+                        rows.insert(payload.key, payload.value);
+                    }
+                    ChangeEventType::LEAVE => {
+                        rows.remove(&payload.key);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Writes `a`..`d` = 1..4 and returns [`by_v`]`(2)` from the cursor a
+    /// one-shot of its first page hands out: the page `c`, `d`.
+    async fn second_page(fx: &Live) -> Query {
+        for (key, n) in [("a", 1), ("b", 2), ("c", 3), ("d", 4)] {
+            fx.client(fx.w, put(key, v(n))).await;
+        }
+        let mut query = by_v(2);
+        query.cursor = fx.fresh(by_v(2)).await.next_cursor;
+        assert!(query.cursor.is_some(), "the first page hands out a cursor");
+        query
+    }
+
+    /// A live update that moves a row of the page before its cursor takes the
+    /// row off the subscriber.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_live_update_to_before_the_cursor_leaves_the_page() {
+        let mut fx = live();
+        let query = second_page(&fx).await;
+        let subscribed = fx.spawn_subscribe_query(query.clone()).await;
+        assert!(matches!(subscribed, Ok(Ok(OperationResponse::Empty))));
+        let (mut rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["c", "d"]);
+        fx.client(fx.w, put("c", v(0))).await;
+        apply_updates(&mut rows, query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["d"]);
+        assert_eq!(rows, fx.fresh_rows(query).await);
+    }
+
+    /// A captured update that moves a row of the page before its cursor takes
+    /// the row out of the snapshot.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_captured_update_to_before_the_cursor_leaves_the_snapshot() {
+        let mut fx = live();
+        let query = second_page(&fx).await;
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe_query(query.clone());
+        hold.wait_reached().await;
+        fx.client(fx.w, put("c", v(0))).await;
+        release(hold, task).await;
+        let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["d"]);
+        assert_eq!(rows, fx.fresh_rows(query).await);
+    }
+
+    /// Subscribes to [`by_v`]`(3)` over `a`=1, `b`=2, `c`=3, makes the `captured`
     /// writes during the scan, and returns the snapshot rows and the rows of a
     /// fresh one-shot query made after it.
     async fn top3_fold(
@@ -5118,14 +5184,14 @@ mod tests {
             fx.client(fx.w, put(key, v(n))).await;
         }
         let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
-        let task = fx.spawn_subscribe_query(top3());
+        let task = fx.spawn_subscribe_query(by_v(3));
         hold.wait_reached().await;
         for op in captured {
             fx.client(fx.w, op).await;
         }
         release(hold, task).await;
         let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
-        (rows, fx.fresh_rows(top3()).await)
+        (rows, fx.fresh_rows(by_v(3)).await)
     }
 
     /// A captured remove of a row in the window takes it out of the snapshot.
@@ -5171,7 +5237,7 @@ mod tests {
             fx.client(fx.w, put(key, v(n))).await;
         }
         let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
-        let task = fx.spawn_subscribe_query(top3());
+        let task = fx.spawn_subscribe_query(by_v(3));
         hold.wait_reached().await;
         let mut op = put("x", v(0));
         if let Some(Some(record)) = op.record.as_mut() {
@@ -5185,7 +5251,7 @@ mod tests {
         release(hold, task).await;
         let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
         assert_eq!(rows.keys().collect::<Vec<_>>(), ["a", "b", "c"]);
-        assert_eq!(rows, fx.fresh_rows(top3()).await);
+        assert_eq!(rows, fx.fresh_rows(by_v(3)).await);
     }
 
     /// `remove_if_same` releases the outer read guard before it drops an empty
