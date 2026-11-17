@@ -4812,6 +4812,19 @@ impl WriteBehindDataStore {
 
         let encoded = self.inner.accepts_encoded();
         let as_bytes = |prepared: &PreparedEntry| encoded && prepared.encoded.is_some();
+        // The record version an entry stores is the highest WAL sequence it
+        // resolves: the survivor's own frame, since every carried sequence is
+        // an older write of the same key (TG-KEY-001), and the stored value
+        // reflects every frame that covers (TG-WB-009). With no WAL the
+        // sequence identifies no frame, so `0` stores no version (TG-WAL-015).
+        let has_wal = self.wal.is_some();
+        let version = |entry: &DelayedEntry| {
+            if has_wal {
+                entry.wal_sequences.last().copied().unwrap_or(0)
+            } else {
+                0
+            }
+        };
         // A store that takes no encoded record gets a cell's value as a
         // value, cloned out under the cell lock; the guard never outlives the
         // closure, so it is not held across the commit's await.
@@ -4837,7 +4850,7 @@ impl WriteBehindDataStore {
                             map,
                             key,
                             store_time,
-                            seq: 0,
+                            seq: version(entry),
                         }
                     }
                     DelayedOp::Store { value } => Some(value.as_ref()),
@@ -4855,7 +4868,7 @@ impl WriteBehindDataStore {
                     key,
                     value,
                     store_time,
-                    seq: 0,
+                    seq: version(entry),
                 }
             })
             .collect();
