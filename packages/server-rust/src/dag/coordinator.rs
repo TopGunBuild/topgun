@@ -1148,8 +1148,7 @@ mod tests {
             pairs
                 .iter()
                 .find(|(k, _)| k.as_str() == Some(name))
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| panic!("{name} missing in {item:?}"))
+                .map_or_else(|| panic!("{name} missing in {item:?}"), |(_, v)| v.clone())
         };
 
         // Group i has a partial of count 1 on node i % 3 and one of count 2 on
