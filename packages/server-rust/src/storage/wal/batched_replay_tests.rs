@@ -2339,6 +2339,13 @@ async fn run_crash_loops(test: &str, kills: u64) {
         batched.below_w > 0,
         "no batched incarnation ended with a row above the frames its cut left (seed {batched_seed})"
     );
+    // No count of frames the version gate discards is required here: measured
+    // with a temporary counter, the recoveries of this loop and of its 50-kill
+    // variant discarded none under either policy — the kills never caught a
+    // flush that stored a write ahead of its partition's contiguous prefix.
+    // The gate on such a frame is proven by `replay_idempotence_tests` (every
+    // frame kind, each stale case, and the property over flush points, watermark
+    // pins and crash points) (`TG-WAL-015`).
 }
 
 #[tokio::test(flavor = "multi_thread")]
