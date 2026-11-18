@@ -5340,6 +5340,59 @@ mod tests {
         assert_eq!(rows, fx.fresh_rows(query).await);
     }
 
+    /// On a full page, a write before the cursor pushes no row of the page
+    /// out: the page keeps its rows, as a fresh one-shot query shows.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_before_the_cursor_pushes_no_row_off_a_full_page() {
+        let mut fx = live();
+        let query = second_page(&fx).await;
+        let subscribed = fx.spawn_subscribe_query(query.clone()).await;
+        assert!(matches!(subscribed, Ok(Ok(OperationResponse::Empty))));
+        let (mut rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["c", "d"]);
+        fx.client(fx.w, put("x", v(0))).await;
+        apply_updates(&mut rows, query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["c", "d"]);
+        assert_eq!(rows, fx.fresh_rows(query).await);
+    }
+
+    /// A live LEAVE of a projected subscription carries no value, whether the
+    /// row was removed or pushed out of the window.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_projected_live_leave_carries_no_value() {
+        let mut fx = live();
+        for (key, n) in [("a", 1), ("b", 2)] {
+            fx.client(fx.w, put(key, v(n))).await;
+        }
+        let mut op = fx.subscribe_op(LIVE_ID, LIVE_MAP, Some(vec!["v".to_string()]));
+        if let Operation::QuerySubscribe { payload, .. } = &mut op {
+            payload.payload.query = by_v(2);
+        }
+        let subscribed = Arc::clone(&fx.svc).oneshot(op).await;
+        assert!(matches!(subscribed, Ok(OperationResponse::Empty)));
+        let _ = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        fx.client(fx.w, put("x", v(0))).await;
+        fx.client(fx.w, remove("a")).await;
+        let leaves: Vec<(String, rmpv::Value)> = query_frames(&mut fx.s_rx, LIVE_ID)
+            .into_iter()
+            .filter_map(|frame| match frame {
+                Message::QueryUpdate { payload }
+                    if payload.change_type == ChangeEventType::LEAVE =>
+                {
+                    Some((payload.key, payload.value))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            leaves,
+            [
+                ("b".to_string(), rmpv::Value::Nil),
+                ("a".to_string(), rmpv::Value::Nil)
+            ]
+        );
+    }
+
     /// A live subscribe whose cursor does not decode is refused before
     /// anything is registered, as a one-shot query with it is.
     #[tokio::test(flavor = "multi_thread")]
