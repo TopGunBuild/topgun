@@ -5573,9 +5573,10 @@ mod tests {
     /// TG-WAL-011: recovery replays the unapplied window in strictly ASCENDING
     /// WAL-sequence order — `Wal::unapplied` sorts frames by sequence regardless of
     /// the order they were appended (its defensive `sort_by_key`), and `run`
-    /// replays them in that order. This is premise (d) of the TG-WAL-009 gate-free
-    /// warrant — the "a strictly-newer re-creation is replayed AFTER the stale
-    /// Remove" step. Frames appended OUT OF ORDER (seq 3, 1, 2) come back — and
+    /// replays them in that order. Forward replay equals the live write only when
+    /// each frame of a key is applied after every lower one (TG-WAL-015): a
+    /// strictly-newer re-creation is replayed AFTER the stale Remove. Frames
+    /// appended OUT OF ORDER (seq 3, 1, 2) come back — and
     /// replay — 1, 2, 3. Removing the `sort_by_key` in `unapplied` makes both
     /// assertions FAIL — the discriminator for the ordering contract.
     #[tokio::test]
@@ -5597,7 +5598,7 @@ mod tests {
             wal.append(0, &entry).await.unwrap();
         }
         // `unapplied` sorts the shuffled appends into strictly ascending sequence
-        // order — the contract `run`'s in-order replay (and TG-WAL-009) depends on.
+        // order — the contract `run`'s in-order replay (and TG-WAL-015) depends on.
         let enumerated: Vec<u64> = wal
             .unapplied(0)
             .await

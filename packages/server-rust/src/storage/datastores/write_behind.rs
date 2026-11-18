@@ -6076,8 +6076,10 @@ impl MapDataStore for WriteBehindDataStore {
 
         // Append to WAL before updating in-memory state so crash recovery can
         // replay the tombstone if the process dies after ack but before flush. A
-        // Remove frame carries no timestamp: replay deletes unconditionally, exactly
-        // as this live path does (see `WalRecovery::prepare_entry`, TG-WAL-009).
+        // Remove frame carries no timestamp: above its key's record version replay
+        // deletes unconditionally, exactly as this live path does, and at or below
+        // it the version gate discards the frame, so no stamp is needed (see
+        // `WalRecovery::prepare_entry`, TG-WAL-015).
         let wal_entry = WalEntry {
             map: map.to_string(),
             key: key.to_string(),
@@ -6250,8 +6252,10 @@ impl MapDataStore for WriteBehindDataStore {
 
             // Append each tombstone to the WAL before queuing so crash recovery
             // can replay every individual key deletion, not just the batch call. A
-            // Remove frame carries no timestamp: replay deletes unconditionally, as
-            // this live path does (see `WalRecovery::prepare_entry`, TG-WAL-009).
+            // Remove frame carries no timestamp: above its key's record version
+            // replay deletes unconditionally, as this live path does, and at or
+            // below it the version gate discards the frame (see
+            // `WalRecovery::prepare_entry`, TG-WAL-015).
             let wal_entry = WalEntry {
                 map: map.to_string(),
                 key: key.clone(),
@@ -8056,9 +8060,10 @@ mod tests {
     }
 
     /// TG-WAL-010: WAL-sequence assignment is strictly monotone per partition and
-    /// never reuses a sequence globally. This is premise (c) of the TG-WAL-009
-    /// gate-free warrant (a strictly-newer re-creation of a key gets a strictly
-    /// HIGHER WAL sequence than an older op on the same key, so `M > N` holds).
+    /// never reuses a sequence globally. The record version gate relies on it
+    /// (TG-WAL-015): a later write of a key gets a strictly HIGHER WAL sequence
+    /// than an older op on the same key, so the version it stores discards the
+    /// older frame at replay and never the newer one.
     ///
     /// The assigns MUST be spread across distinct partitions. `assign_wal_sequence`
     /// mints inside `with_partition`, i.e. under that partition's OWN mutex, so
@@ -8108,8 +8113,8 @@ mod tests {
             let (partition, assigned) = h.await.unwrap();
 
             // Per-partition monotonicity, in ARRIVAL order (not sorted): a later
-            // arrival on a partition gets a strictly higher sequence. This is the
-            // `M > N` step of the TG-WAL-009 warrant.
+            // arrival on a partition gets a strictly higher sequence, which is
+            // what lets a stored record version order a key's writes (TG-WAL-015).
             assert!(
                 assigned.windows(2).all(|w| w[0] < w[1]),
                 "partition {partition} assignments must be strictly increasing in \
