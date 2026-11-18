@@ -4855,10 +4855,8 @@ mod tests {
 
     /// An overflow answers with the scan snapshot, then the overflow frame, on
     /// the response path; the subscription is removed, a subscription of the
-    /// same id on another map stays, and a resubscribe holds what a fresh
-    /// one-shot scan holds. It is not compared with the store: overflowing
-    /// needs more distinct keys than the local DAG scan returns rows, and
-    /// that scan stops at 4096 rows (TODO-1001).
+    /// same id on another map stays, and a resubscribe holds every row of the
+    /// map: 4101 rows, more than any 4096-row bound.
     #[test]
     fn an_overflow_sends_the_snapshot_then_the_overflow_and_drops_the_subscription() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -4940,8 +4938,20 @@ mod tests {
                     .expect("resubscribe");
                 assert!(matches!(again, OperationResponse::Empty));
                 let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
-                let fresh = fx.fresh_rows(Query::default()).await;
-                assert_eq!(rows, fresh, "the resubscribe holds what a fresh scan holds");
+                let mut map: BTreeMap<String, rmpv::Value> =
+                    (0..3).map(|i| (format!("seed-{i}"), v(i))).collect();
+                map.extend((0..=4096).map(|i| (format!("w-{i}"), v(i))));
+                map.insert("late".to_string(), v(1));
+                assert_eq!(map.len(), 4101);
+                assert_eq!(
+                    rows.len(),
+                    map.len(),
+                    "the resubscribe holds every row of the map"
+                );
+                assert!(
+                    rows == map,
+                    "the resubscribe holds every row of the map with its value"
+                );
                 assert_eq!(fx.registry.get_subscriptions_for_map(LIVE_MAP).len(), 1);
             });
         });
@@ -5320,6 +5330,439 @@ mod tests {
             last_key(snapshot.payload.next_cursor.as_ref()),
             last_key(fresh.next_cursor.as_ref())
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // TG-QRY-001: a query returns every matching row up to max_query_records
+    // ---------------------------------------------------------------------------
+
+    /// `k{i:05}`, the key of seeded row `i`.
+    fn row_key(i: usize) -> String {
+        format!("k{i:05}")
+    }
+
+    /// Stores `n` rows `k{i:05}` = `{"v": i}` straight into the live map.
+    async fn seed_rows(fx: &Live, n: usize) {
+        for i in 0..n {
+            let value = make_value_map(vec![("v", Value::Int(i64::try_from(i).unwrap()))]);
+            put_lww(
+                &fx.factory,
+                LIVE_MAP,
+                &row_key(i),
+                value,
+                make_timestamp(),
+                None,
+            )
+            .await;
+        }
+    }
+
+    /// The `v` field of a result row.
+    fn row_v(value: &rmpv::Value) -> Option<i64> {
+        let rmpv::Value::Map(pairs) = value else {
+            return None;
+        };
+        pairs
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("v"))
+            .and_then(|(_, v)| v.as_i64())
+    }
+
+    /// `sort: [v asc]`, with `limit`.
+    fn sort_v(limit: Option<u32>) -> Query {
+        Query {
+            limit,
+            ..by_v(0)
+        }
+    }
+
+    /// The page `svc` answers to `query` under `query_id`: a one-shot answers
+    /// on the response path, a live subscribe sends its snapshot to `s`.
+    async fn ask(
+        svc: &Arc<QueryService>,
+        s: ConnectionId,
+        s_rx: &mut Rx,
+        query_id: &str,
+        query: Query,
+        snapshot_only: bool,
+    ) -> QueryRespPayload {
+        let op = Operation::QuerySubscribe {
+            ctx: make_ctx(Some(s)),
+            payload: QuerySubMessage {
+                payload: QuerySubPayload {
+                    query_id: query_id.to_string(),
+                    map_name: LIVE_MAP.to_string(),
+                    query,
+                    fields: None,
+                    snapshot_only,
+                },
+            },
+        };
+        let response = Arc::clone(svc).oneshot(op).await.expect("subscribe");
+        if snapshot_only {
+            let OperationResponse::Message(msg) = response else {
+                panic!("a one-shot answers on the response path: {response:?}");
+            };
+            let Message::QueryResp(resp) = *msg else {
+                panic!("a QUERY_RESP");
+            };
+            resp.payload
+        } else {
+            assert!(
+                matches!(response, OperationResponse::Empty),
+                "a live subscribe answers on its connection: {response:?}"
+            );
+            match query_frames(s_rx, query_id).into_iter().next() {
+                Some(Message::QueryResp(resp)) => resp.payload,
+                other => panic!("the first frame of {query_id} is not its snapshot: {other:?}"),
+            }
+        }
+    }
+
+    /// What is wrong with `page` as the whole of `0..n`, in ascending `v` when
+    /// `sorted`: one line per defect, empty when the page is right.
+    fn whole_result_defects(page: &QueryRespPayload, n: usize, sorted: bool) -> Vec<String> {
+        let mut defects = Vec::new();
+        if page.results.len() != n {
+            defects.push(format!("{} rows, not {n}", page.results.len()));
+        }
+        let keys: std::collections::BTreeSet<&str> =
+            page.results.iter().map(|e| e.key.as_str()).collect();
+        let every: Vec<String> = (0..n).map(row_key).collect();
+        if keys != every.iter().map(String::as_str).collect::<std::collections::BTreeSet<_>>() {
+            defects.push(format!(
+                "the key set is not every key ({} distinct)",
+                keys.len()
+            ));
+        }
+        if page.has_more.is_some() {
+            defects.push(format!("has_more is {:?}", page.has_more));
+        }
+        if page.next_cursor.is_some() {
+            defects.push("a next_cursor".to_string());
+        }
+        if sorted {
+            let vs: Vec<Option<i64>> = page.results.iter().map(|e| row_v(&e.value)).collect();
+            if vs.windows(2).any(|w| w[0] >= w[1]) || vs.iter().any(Option::is_none) {
+                defects.push("rows not in ascending v".to_string());
+            }
+        }
+        defects
+    }
+
+    /// Every query shape and mode over `n` rows returns all `n` rows, and
+    /// says no more follow.
+    async fn every_row_at(n: usize) {
+        let mut fx = live();
+        seed_rows(&fx, n).await;
+        let mut failures = Vec::new();
+        for sorted in [false, true] {
+            for snapshot_only in [true, false] {
+                let case = format!("n={n} sorted={sorted} one_shot={snapshot_only}");
+                let query = if sorted {
+                    sort_v(None)
+                } else {
+                    Query::default()
+                };
+                let svc = Arc::clone(&fx.svc);
+                let page = ask(&svc, fx.s, &mut fx.s_rx, &case, query, snapshot_only).await;
+                for defect in whole_result_defects(&page, n, sorted) {
+                    failures.push(format!("{case}: {defect}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "failing cases: {failures:#?}");
+    }
+
+    #[tokio::test]
+    async fn tg_qry_001_every_row_at_4096() {
+        every_row_at(4096).await;
+    }
+
+    #[tokio::test]
+    async fn tg_qry_001_every_row_at_4097() {
+        every_row_at(4097).await;
+    }
+
+    #[tokio::test]
+    async fn tg_qry_001_every_row_at_10000() {
+        every_row_at(10_000).await;
+    }
+
+    /// A one-shot GROUP BY over 4097 groups returns every group with its full
+    /// count.
+    #[tokio::test]
+    async fn tg_qry_001_a_group_by_returns_every_group() {
+        let mut fx = live();
+        for i in 0..8194_i64 {
+            let value = make_value_map(vec![("v", Value::Int(i)), ("g", Value::Int(i / 2))]);
+            put_lww(
+                &fx.factory,
+                LIVE_MAP,
+                &format!("k{i:05}"),
+                value,
+                make_timestamp(),
+                None,
+            )
+            .await;
+        }
+        let query = Query {
+            group_by: Some(vec!["g".to_string()]),
+            ..Query::default()
+        };
+        let svc = Arc::clone(&fx.svc);
+        let page = ask(&svc, fx.s, &mut fx.s_rx, "group-by", query, true).await;
+        assert_eq!(page.results.len(), 4097, "one row per group");
+        let field = |value: &rmpv::Value, name: &str| {
+            let rmpv::Value::Map(pairs) = value else {
+                panic!("a group row is a map: {value:?}");
+            };
+            pairs
+                .iter()
+                .find(|(k, _)| k.as_str() == Some(name))
+                .and_then(|(_, v)| v.as_i64())
+                .unwrap_or_else(|| panic!("{name} missing in {value:?}"))
+        };
+        let groups: std::collections::BTreeSet<i64> =
+            page.results.iter().map(|e| field(&e.value, "g")).collect();
+        assert_eq!(groups, (0..4097).collect(), "every group, once");
+        for e in &page.results {
+            assert_eq!(field(&e.value, "__count"), 2, "{:?}", e.value);
+        }
+        assert_eq!(page.has_more, None);
+    }
+
+    /// A sorted page of 5000 over 10 000 rows says more follow and hands out a
+    /// cursor, and the next page completes the result: every row once, in
+    /// order. An unsorted page of 5000 says more follow and has no cursor.
+    #[tokio::test]
+    async fn tg_qry_001_a_cursor_pages_through_every_row() {
+        let mut fx = live();
+        seed_rows(&fx, 10_000).await;
+        let every: Vec<String> = (0..10_000).map(row_key).collect();
+        let svc = Arc::clone(&fx.svc);
+        let mut failures = Vec::new();
+        for predicate in [false, true] {
+            for snapshot_only in [true, false] {
+                let case = format!("predicate={predicate} one_shot={snapshot_only}");
+                let mut query = sort_v(Some(5000));
+                if predicate {
+                    query.predicate = Some(PredicateNode {
+                        op: PredicateOp::Gte,
+                        attribute: Some("v".to_string()),
+                        value: Some(rmpv::Value::from(0)),
+                        ..Default::default()
+                    });
+                }
+                let first = ask(
+                    &svc,
+                    fx.s,
+                    &mut fx.s_rx,
+                    &format!("{case} page 1"),
+                    query.clone(),
+                    snapshot_only,
+                )
+                .await;
+                if first.results.len() != 5000 {
+                    failures.push(format!("{case}: page 1 has {} rows", first.results.len()));
+                }
+                if first.has_more != Some(true) {
+                    failures.push(format!("{case}: page 1 has_more {:?}", first.has_more));
+                }
+                let Some(cursor) = first.next_cursor.clone() else {
+                    failures.push(format!("{case}: page 1 has no cursor"));
+                    continue;
+                };
+                query.cursor = Some(cursor);
+                let second = ask(
+                    &svc,
+                    fx.s,
+                    &mut fx.s_rx,
+                    &format!("{case} page 2"),
+                    query,
+                    snapshot_only,
+                )
+                .await;
+                if second.results.len() != 5000 {
+                    failures.push(format!("{case}: page 2 has {} rows", second.results.len()));
+                }
+                if second.has_more == Some(true) {
+                    failures.push(format!("{case}: page 2 has_more"));
+                }
+                if second.next_cursor.is_some() {
+                    failures.push(format!("{case}: page 2 has a cursor"));
+                }
+                let keys: Vec<String> = first
+                    .results
+                    .iter()
+                    .chain(&second.results)
+                    .map(|e| e.key.clone())
+                    .collect();
+                if keys != every {
+                    failures.push(format!("{case}: the pages are not every row once, in order"));
+                }
+            }
+        }
+
+        let case = "unsorted one_shot";
+        let query = Query {
+            limit: Some(5000),
+            ..Query::default()
+        };
+        let page = ask(&svc, fx.s, &mut fx.s_rx, case, query, true).await;
+        let keys: std::collections::BTreeSet<&str> =
+            page.results.iter().map(|e| e.key.as_str()).collect();
+        if page.results.len() != 5000 || keys.len() != 5000 {
+            failures.push(format!(
+                "{case}: {} rows, {} distinct",
+                page.results.len(),
+                keys.len()
+            ));
+        }
+        if !keys.iter().all(|k| every.binary_search(&(*k).to_string()).is_ok()) {
+            failures.push(format!("{case}: a key not in the map"));
+        }
+        if page.has_more != Some(true) {
+            failures.push(format!("{case}: has_more {:?}", page.has_more));
+        }
+        if page.next_cursor.is_some() {
+            failures.push(format!("{case}: a cursor without a sort"));
+        }
+        assert!(failures.is_empty(), "failing cases: {failures:#?}");
+    }
+
+    /// Above `max_query_records` the answer is clamped to it and says more
+    /// follow; a sorted, limited page clamped so pages on to the rest.
+    #[tokio::test]
+    async fn tg_qry_001_the_clamp_says_has_more() {
+        let mut fx = live();
+        seed_rows(&fx, 10_000).await;
+        let clamped = Arc::new(QueryService::new(
+            Arc::clone(&fx.registry),
+            Arc::clone(&fx.factory),
+            Arc::clone(&fx.conns),
+            5000,
+            None,
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
+        let every: Vec<String> = (0..10_000).map(row_key).collect();
+
+        let mut failures = Vec::new();
+
+        // (a) unsorted, no limit.
+        let page = ask(&clamped, fx.s, &mut fx.s_rx, "a", Query::default(), true).await;
+        let keys: std::collections::BTreeSet<&str> =
+            page.results.iter().map(|e| e.key.as_str()).collect();
+        if page.results.len() != 5000 || keys.len() != 5000 {
+            failures.push(format!(
+                "(a): {} rows, {} distinct, not 5000",
+                page.results.len(),
+                keys.len()
+            ));
+        }
+        if !keys.iter().all(|k| every.binary_search(&(*k).to_string()).is_ok()) {
+            failures.push("(a): a key not in the map".to_string());
+        }
+        if page.has_more != Some(true) {
+            failures.push(format!("(a): has_more {:?}", page.has_more));
+        }
+
+        // (b) sorted, limit 8000.
+        let mut query = sort_v(Some(8000));
+        let first = ask(&clamped, fx.s, &mut fx.s_rx, "b1", query.clone(), true).await;
+        let first_keys: Vec<String> = first.results.iter().map(|e| e.key.clone()).collect();
+        if first_keys != every[..5000] {
+            failures.push(format!(
+                "(b): page 1 is not k00000..k04999 ({} rows)",
+                first_keys.len()
+            ));
+        }
+        if first.has_more != Some(true) {
+            failures.push(format!("(b): page 1 has_more {:?}", first.has_more));
+        }
+        if let Some(cursor) = first.next_cursor {
+            query.cursor = Some(cursor);
+            let second = ask(&clamped, fx.s, &mut fx.s_rx, "b2", query, true).await;
+            let second_keys: Vec<String> =
+                second.results.iter().map(|e| e.key.clone()).collect();
+            if second_keys != every[5000..] {
+                failures.push(format!(
+                    "(b): page 2 is not k05000..k09999 ({} rows)",
+                    second_keys.len()
+                ));
+            }
+            if second.has_more == Some(true) {
+                failures.push("(b): page 2 has_more".to_string());
+            }
+        } else {
+            failures.push("(b): page 1 has no cursor".to_string());
+        }
+        assert!(failures.is_empty(), "failing cases: {failures:#?}");
+    }
+
+    /// The window of an unlimited live subscription over 10 000 rows holds all
+    /// of them: a write to any 4097 of them is an UPDATE, never an ENTER.
+    #[tokio::test]
+    async fn tg_qry_001_the_live_window_holds_every_row() {
+        // Each write sends S a SERVER_EVENT and a QUERY_UPDATE: four times the
+        // 8194 frames keeps the slow-consumer threshold from cancelling it.
+        let mut fx = live_over(make_factory(), 32_768);
+        seed_rows(&fx, 10_000).await;
+        let svc = Arc::clone(&fx.svc);
+        let snapshot = ask(&svc, fx.s, &mut fx.s_rx, LIVE_ID, Query::default(), false).await;
+        for i in 0..=4096 {
+            fx.client(fx.w, put(&row_key(i), v(i64::try_from(i).unwrap() + 10_000)))
+                .await;
+        }
+        let updates: Vec<ChangeEventType> = query_frames(&mut fx.s_rx, LIVE_ID)
+            .into_iter()
+            .filter_map(|frame| match frame {
+                Message::QueryUpdate { payload } => Some(payload.change_type),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updates.len(), 4097, "one update per write");
+        let enters = updates
+            .iter()
+            .filter(|t| !matches!(t, ChangeEventType::UPDATE))
+            .count();
+        assert_eq!(enters, 0, "every write updates a row of the window");
+        assert_eq!(snapshot.results.len(), 10_000, "the snapshot");
+    }
+
+    /// A write captured during the scan of a 5000-row page over 10 000 rows
+    /// enters it at the front and pushes its last row out: the page keeps
+    /// 5000 rows, says more follow, and its cursor is after its new last row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tg_qry_001_a_captured_write_repaginates_a_large_page() {
+        let mut fx = live();
+        seed_rows(&fx, 10_000).await;
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe_query(by_v(5000));
+        hold.wait_reached().await;
+        fx.client(fx.w, put("knew", v(-1))).await;
+        release(hold, task).await;
+        let Some(Message::QueryResp(snapshot)) =
+            query_frames(&mut fx.s_rx, LIVE_ID).into_iter().next()
+        else {
+            panic!("a snapshot");
+        };
+        let keys: Vec<String> = snapshot
+            .payload
+            .results
+            .iter()
+            .map(|e| e.key.clone())
+            .collect();
+        let expected: Vec<String> = std::iter::once("knew".to_string())
+            .chain((0..4999).map(row_key))
+            .collect();
+        assert_eq!(keys.len(), 5000, "the page keeps 5000 rows");
+        assert!(keys == expected, "knew, then k00000..k04998");
+        assert_eq!(snapshot.payload.has_more, Some(true));
+        let cursor = decode_cursor(snapshot.payload.next_cursor.as_ref().expect("a cursor"))
+            .expect("decodes");
+        assert_eq!(cursor.last_key, "k04998");
     }
 
     /// A write that sorts before the page's cursor takes no slot of the page:
