@@ -603,6 +603,11 @@ impl Node {
             Arc::clone(&spy) as Arc<dyn MapDataStore>,
         )
         .expect("WAL open");
+        // These tests count every engine write; a collection tick, every 5 s
+        // of the runtime's clock, reclaims record versions with an engine
+        // write of its own, which would land in a count whenever a slow run
+        // reaches the tick. No test here relies on the tick.
+        wal.test_hold_collection_task(true);
         Self { engine, spy, wal }
     }
 
@@ -1063,6 +1068,13 @@ fn b05_a_store_that_refuses_every_commit_starts_a_hold_after_three_calls() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     let events = Arc::new(Mutex::new(Vec::new()));
+    // While exactly one dispatcher is alive, `tracing` computes a callsite's
+    // interest from the default dispatcher of whichever thread hits it first:
+    // a parallel test's thread, which has none, then caches the warning as
+    // never wanted, and this thread's capture misses it. A second dispatcher,
+    // alive for the whole test and created before the capture, makes every
+    // interest computation ask all live dispatchers, the capture included.
+    let _second_dispatcher = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&events)));
     let (at_hold, over_a_minute) = metrics::with_local_recorder(&recorder, || {
         tracing::subscriber::with_default(subscriber, || {
@@ -1081,10 +1093,10 @@ fn b05_a_store_that_refuses_every_commit_starts_a_hold_after_three_calls() {
                 fill(&wb, &keys, 1, |i| lww(&format!("v{i}"), 1)).await;
                 node.engine.refuse_every_write(Some(Refusal::Unknown));
 
-                // Another test's thread can register the warning's callsite
-                // while this test's subscriber is being installed and cache
-                // it as uninteresting; re-reading the interest of every
-                // callsite here, with the subscriber installed, undoes that.
+                // An interest computation another thread began, from its own
+                // default, before the capture was installed may have finished
+                // after the capture's own rebuild; reading every interest
+                // again now, with both dispatchers alive, undoes that.
                 tracing::callsite::rebuild_interest_cache();
                 // The hold's start, before its first probe (500 ms later).
                 let mark = node.engine.mark();
