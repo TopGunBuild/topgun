@@ -4892,6 +4892,83 @@ async fn v11d_a_store_the_gate_discards_releases_nothing_and_the_next_delta_stay
     node.close().await;
 }
 
+/// The hold is decided by the unresolved frames of the key *below* the frame,
+/// not by the highest unresolved frame of the key: a store refused later in
+/// the part leaves the delta before it as complete as it was, because the
+/// written store below that delta covers every unresolved frame below it.
+/// Holding the delta by the key's highest unresolved frame (the refused store
+/// above it) would leave it out at this boot, where main applies it.
+#[tokio::test(flavor = "multi_thread")]
+async fn v11e_a_store_refused_after_a_delta_does_not_hold_that_delta_on_the_second_preparation() {
+    let root = Root::new();
+    let case = HeldCase::new();
+    let k = case.k.as_str();
+    let later = or_slot(&["z"]);
+    let f1 = or_add(k, "a", 1);
+    let f2 = store_frame(k, &case.snapshot, 2);
+    let f3 = or_add(k, "c", 3);
+    let f4 = store_frame(k, &later, 4);
+    let f5 = or_add(k, "d", 5);
+
+    let node = ArmedNode::open(&root);
+    node.seed(k, &case.seed, 0).await;
+    for frame in [&f1, &f2, &f3, &f4, &f5] {
+        node.append(frame).await;
+    }
+    // K's version reads, one batch: frames 1 (fails), 2, 3, 4, 5; the commit
+    // refuses frame 4 by name, and the part prepared again reads frames
+    // 1 (fails again), 2 and 3, while frame 5 is held before it reads.
+    node.store.fail_version_reads(k, &[1, 6]);
+    node.store.refuse_seqs(&[4]);
+    node.recover(None).await;
+    assert_eq!(
+        node.store.version_reads(k),
+        8,
+        "frame 3 was prepared again and frame 5 was held"
+    );
+    assert_eq!(
+        node.value(k).await,
+        Some(replayed(
+            &case.seed,
+            &[
+                Step::Set(case.snapshot.clone()),
+                Step::Fold(add_delta("c", 3)),
+            ],
+        )),
+        "frame 3 applies at this boot, folded onto the written frame 2"
+    );
+    assert_eq!(node.version(k).await, Some(3));
+    assert_eq!(
+        node.unapplied().await,
+        vec![1, 2, 3, 4, 5],
+        "frame 4 and frame 5 stay replayable"
+    );
+    node.close().await;
+
+    let node = ArmedNode::open(&root);
+    node.recover(None).await;
+    // Main applies every frame of K in order; frame 4 sets the key's whole
+    // state, so the result is frame 4's value with frame 5 folded in.
+    let main = replayed(
+        &case.seed,
+        &[
+            Step::Fold(add_delta("a", 1)),
+            Step::Set(case.snapshot.clone()),
+            Step::Fold(add_delta("c", 3)),
+            Step::Set(later.clone()),
+            Step::Fold(add_delta("d", 5)),
+        ],
+    );
+    assert_eq!(
+        or_tags(&main),
+        (tags(&["z", "d"]), BTreeSet::new()),
+        "the derivation of main's result"
+    );
+    assert_eq!(node.value(k).await, Some(main));
+    assert!(node.unapplied().await.is_empty(), "every frame resolved");
+    node.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn v12_a_frame_failed_in_prepare_holds_the_later_delta_of_its_key() {
     let root = Root::new();
