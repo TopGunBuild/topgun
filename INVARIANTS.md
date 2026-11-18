@@ -3307,7 +3307,8 @@ weaker than a test.
   of a record already expired on it is a non-match;
   (f) a paged subscription's window tracks no row that sorts at or before its cursor: a write
   there takes no slot of the page, and a row moved there leaves it;
-  (g) a snapshot with captured writes is repaginated: its rows in the window's order, `has_more`
+  (g) a snapshot with captured writes is repaginated: its rows in the window's order (by key for
+  a query with no sort), `has_more`
   raised when the window holds rows past the page, and `next_cursor` after its last row, so
   paging on from it skips no row; `has_more` is never lowered.
   The mechanism: the subscription's snapshot buffer is active before the subscription is
