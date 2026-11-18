@@ -1,17 +1,21 @@
 /**
  * Integration: rolling a node back across record version rows.
  *
- * - `wrote`. The newer binary stores a record under its WAL and stops with
- *   exit 0 and `drained=true`. The commit that stored the record left the
+ * - `wrote`. The newer binary stores records in two maps under its WAL and
+ *   stops with exit 0 and `drained=true`. The commit that stored them left the
  *   `max_version` row in the reserved keyspace `0x12`, which is never
  *   reclaimed. Started on that directory, the older binary (built at
  *   67ff9b67, the last binary that keeps no version rows) exits 1 with
  *   `store format: refusing to open: a key in the reserved keyspace 0x12` on
- *   stderr and never prints `PORT=`. It changes no file of the WAL directory
- *   and no file of the data directory outside the engine; the engine's own
- *   files are not compared, because its open writes RocksDB's housekeeping
- *   files before it reads the metadata, so the records are checked through
- *   the newer binary instead, which serves the record afterwards.
+ *   stderr and never prints `PORT=`. It changes no record or metadata row and
+ *   no WAL file. The engine's files are not compared, because its open
+ *   rewrites RocksDB's housekeeping files (LOG, OPTIONS, MANIFEST) before it
+ *   reads the metadata, and no tool here reads the engine's rows without the
+ *   server. So the rows are compared through the newer binary, started on the
+ *   directory before and after the refused start: it serves every record and
+ *   lists every map identically both times, and it starts at all, which it
+ *   would not on a regressed watermark or version row. The WAL directory is
+ *   compared byte for byte.
  * - `opened`. The newer binary only starts and stops, with no write: the
  *   version rows are lazy, so the directory holds no `0x12` row and the older
  *   binary starts on it, takes a write and serves it.
@@ -23,6 +27,7 @@
  */
 
 import * as fs from 'fs';
+import * as jwt from 'jsonwebtoken';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -31,6 +36,8 @@ import {
   requireVersionRollbackEnv,
   spawnBinary,
   queryKey,
+  connectWithin,
+  firstFrame,
   observe,
   sleep,
   treeSnapshot,
@@ -45,11 +52,15 @@ import {
 const REFUSAL_LINE = 'store format: refusing to open: a key in the reserved keyspace 0x12';
 
 const MAP = 'version_rollback_items';
+const MAP2 = 'version_rollback_more';
 const FLUSH_SETTLE_MS = 3_000;
 const REFUSAL_DEADLINE_MS = 30_000;
 const CASE_TIMEOUT_MS = 300_000;
 const PER_OP = { TOPGUN_WAL_FSYNC_POLICY: 'per_op' };
-const ENGINE_PREFIX = `topgun-data${path.sep}engine.rocksdb${path.sep}`;
+const ADMIN_TOKEN = jwt.sign({ sub: 'operator', roles: ['admin'] }, 'test-e2e-secret', {
+  expiresIn: '1h',
+});
+const ADMIN_ENV = { TOPGUN_ADMIN_SUBJECTS: 'operator' };
 
 async function startOrThrow(
   running: SpawnedBinary[],
@@ -72,15 +83,37 @@ async function startOrThrow(
   return server as SpawnedBinary & { port: number };
 }
 
-/**
- * Every path and file hash under `dir` except inside the engine directory,
- * whose files RocksDB's open rewrites; the WAL directory is wholly included.
- */
-function outsideEngineSnapshot(dir: string): TreeSnapshot {
-  // The engine directory's own entry stays, so the snapshot shows the store was there.
-  const outside = (rel: string) => rel === ENGINE_PREFIX || !rel.startsWith(ENGINE_PREFIX);
-  const snap = treeSnapshot(dir, outside);
-  return { paths: snap.paths.filter(outside), sha256: snap.sha256 };
+/** Every row of `mapName` the server serves, by key. */
+async function mapRows(
+  port: number,
+  mapName: string,
+  tag: string,
+): Promise<Record<string, unknown>> {
+  const client = await connectWithin(port, tag);
+  try {
+    client.messages.length = 0;
+    client.send({ type: 'QUERY_SUB', payload: { queryId: `q-${tag}`, mapName, query: {} } });
+    const response = await firstFrame(client, ['QUERY_RESP'], 10_000);
+    if (!response) throw new Error(`no QUERY_RESP for ${mapName}`);
+    const rows: Record<string, unknown> = {};
+    for (const r of response.payload.results as any[]) rows[r.key] = r.record?.value ?? r.value;
+    return rows;
+  } finally {
+    client.close();
+  }
+}
+
+/** What the newer binary serves of the directory: the map list and every row of both maps. */
+async function served(port: number, tag: string): Promise<unknown> {
+  const resp = await fetch(`http://127.0.0.1:${port}/api/admin/maps`, {
+    headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+  });
+  const maps = ((await resp.json()).maps ?? []).map((m: any) => m.name).sort();
+  return {
+    maps,
+    [MAP]: await mapRows(port, MAP, `${tag}-1`),
+    [MAP2]: await mapRows(port, MAP2, `${tag}-2`),
+  };
 }
 
 interface Refusal {
@@ -133,22 +166,44 @@ describe('Integration: wrote, the older binary refuses a directory the newer one
       'NEW (writes)',
       storeEnv(dir, 'rocksdb', PER_OP),
     );
-    o.write = await putLww(fresh.port, MAP, [['k', { key: 'k', run: 'new' }]], 'new');
+    o.write = {
+      ...(await putLww(
+        fresh.port,
+        MAP,
+        [
+          ['k1', { key: 'k1', run: 'new' }],
+          ['k2', { key: 'k2', run: 'new' }],
+        ],
+        'new',
+      )),
+      ...(await putLww(fresh.port, MAP2, [['k3', { key: 'k3', run: 'new' }]], 'new2')),
+    };
     await sleep(FLUSH_SETTLE_MS);
     o.newStop = await drainedStop(fresh);
 
-    o.snapshotBefore = outsideEngineSnapshot(dir);
+    const before = await startOrThrow(
+      running,
+      env.newBinary,
+      env.newCommit,
+      'NEW before the refusal',
+      storeEnv(dir, 'rocksdb', ADMIN_ENV),
+    );
+    o.servedBefore = await observe(() => served(before.port, 'before'));
+    o.beforeStop = await drainedStop(before);
+
+    const walDir = path.join(dir, 'wal');
+    o.walBefore = treeSnapshot(walDir);
     o.refusal = await refusedStart(running, env, dir);
-    o.snapshotAfter = outsideEngineSnapshot(dir);
+    o.walAfter = treeSnapshot(walDir);
 
     const again = await startOrThrow(
       running,
       env.newBinary,
       env.newCommit,
       'NEW after the refusal',
-      storeEnv(dir, 'rocksdb'),
+      storeEnv(dir, 'rocksdb', ADMIN_ENV),
     );
-    o.served = await observe(() => queryKey(again.port, MAP, 'k', 'again-k'));
+    o.servedAfter = await observe(() => served(again.port, 'after'));
     o.againStop = await drainedStop(again);
 
     process.stderr.write(`[version-rollback] wrote, observed:\n${JSON.stringify(o, null, 2)}\n`);
@@ -159,9 +214,10 @@ describe('Integration: wrote, the older binary refuses a directory the newer one
     if (dir) fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  test('setup: the newer binary acked the write and stopped drained', () => {
-    expect(o.write).toEqual({ k: 'OP_ACK' });
+  test('setup: the newer binary acked the writes and stopped drained', () => {
+    expect(o.write).toEqual({ k1: 'OP_ACK', k2: 'OP_ACK', k3: 'OP_ACK' });
     expect(o.newStop).toEqual({ exit: CLEAN_EXIT, drained: true });
+    expect(o.beforeStop).toEqual({ exit: CLEAN_EXIT, drained: true });
   });
 
   test('the older binary exits 1 with the 0x12 refusal on stderr and never prints PORT=', () => {
@@ -172,15 +228,19 @@ describe('Integration: wrote, the older binary refuses a directory the newer one
     });
   });
 
-  test('the refused start changed no file of the WAL directory or outside the engine', () => {
-    const snap = o.snapshotBefore as TreeSnapshot;
-    expect(snap.paths).toEqual(expect.arrayContaining(['topgun-data/engine.rocksdb/', 'wal/']));
-    expect(Object.keys(snap.sha256).some((rel) => rel.startsWith(`wal${path.sep}`))).toBe(true);
-    expect(o.snapshotAfter).toEqual(o.snapshotBefore);
+  test('the refused start changed no WAL file', () => {
+    const snap = o.walBefore as TreeSnapshot;
+    expect(Object.keys(snap.sha256).length).toBeGreaterThan(0);
+    expect(o.walAfter).toEqual(o.walBefore);
   });
 
-  test('the newer binary still serves the record after the refused start', () => {
-    expect(o.served).toEqual({ key: 'k', run: 'new' });
+  test('the refused start changed no record or metadata row: the newer binary serves the same', () => {
+    expect(o.servedBefore).toEqual({
+      maps: expect.arrayContaining([MAP, MAP2]),
+      [MAP]: { k1: { key: 'k1', run: 'new' }, k2: { key: 'k2', run: 'new' } },
+      [MAP2]: { k3: { key: 'k3', run: 'new' } },
+    });
+    expect(o.servedAfter).toEqual(o.servedBefore);
     expect(o.againStop).toEqual({ exit: CLEAN_EXIT, drained: true });
   });
 });

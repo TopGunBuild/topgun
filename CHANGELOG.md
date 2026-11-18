@@ -220,7 +220,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Rolling back.** Every earlier binary that opens the RocksDB store refuses a data directory
     this binary has stored a record in, at its store open — before it opens the WAL and before it listens — and exits 1:
     `Error: store open: refusing to start: store format: refusing to open: a key in the reserved keyspace 0x12`.
-    It writes no WAL file. A data directory this binary only opened, with no write, holds no
+    It changes no record or metadata row and no WAL file. A data directory this binary only opened, with no write, holds no
     `0x12` row and is served by the earlier binary. There is no tool that removes version rows;
     the way back is the engine rollback ("Rolling a node BACK across the engine change" in the
     operations notes), unchanged. Proven against the build of `67ff9b67` by `version-rollback`.
