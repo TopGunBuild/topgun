@@ -24,9 +24,6 @@ use tracing::Instrument;
 use crate::network::connection::{ConnectionId, ConnectionMetadata, ConnectionRegistry};
 use crate::service::domain::journal::JournalStore;
 use crate::service::domain::key_writer::{KeyWriteToken, KeyWriterRegistry};
-use crate::service::domain::predicate::{
-    evaluate_predicate, evaluate_where, value_to_rmpv, EvalContext,
-};
 use crate::service::domain::query::QueryRegistry;
 use crate::service::operation::{
     service_names, CallerOrigin, Operation, OperationContext, OperationError, OperationResponse,
@@ -40,25 +37,6 @@ use crate::storage::{CallerProvenance, MutateOutcome, RecordStore, RecordStoreFa
 use crate::tombstone_frontier::{Epoch, PruneEpochRecord, PruneExit, PrunePassRecord};
 use crate::tombstone_frontier_impl::{TombstoneFrontier, TombstoneRef};
 use crate::traits::SchemaProvider;
-
-// ---------------------------------------------------------------------------
-// Query predicate matching
-// ---------------------------------------------------------------------------
-
-/// Evaluates whether an `rmpv::Value` matches a query's predicate or where clause.
-///
-/// Used by `broadcast_query_updates` to determine ENTER/UPDATE/LEAVE events
-/// without depending on `QueryMutationObserver`.
-fn matches_query_predicate(query: &topgun_core::messages::base::Query, data: &rmpv::Value) -> bool {
-    if let Some(pred) = &query.predicate {
-        evaluate_predicate(pred, &EvalContext::data_only(data))
-    } else if let Some(wh) = &query.r#where {
-        evaluate_where(wh, data)
-    } else {
-        // No filter: match all
-        true
-    }
-}
 
 /// Serializes a `ServerEventPayload` as `MsgPack` and sends it only to connections
 /// with active query subscriptions for the affected map, never to the writer.
@@ -963,12 +941,6 @@ impl CrdtService {
         stamp: StampPolicy,
         exclude_connection_id: Option<ConnectionId>,
     ) -> Result<(), OperationError> {
-        // Issued before the writer is taken: this can be a disk load, and its
-        // result orders nothing, so it must not extend the critical section.
-        let old_rmpv_value = self
-            .read_old_value_for_queries(&op.map_name, &op.key, partition_id)
-            .await;
-
         #[cfg(test)]
         self.before_acquire_park.pass(&op.map_name, &op.key).await;
         let key_guard = self.key_writer.acquire(&op.map_name, &op.key).await;
@@ -986,10 +958,15 @@ impl CrdtService {
             &event_payload,
             exclude_connection_id,
         )?;
-        self.broadcast_query_updates(
-            &event_payload,
-            old_rmpv_value.as_ref(),
+        // Live-query delivery (TG-LIVE-001), under the writer so one key's
+        // writes reach every live query in the order the store applied them.
+        self.query_registry.deliver_mutation(
+            &self.connection_registry,
+            &event_payload.map_name,
+            &event_payload.key,
+            event_payload.record.as_ref(),
             exclude_connection_id,
+            || self.record_store_factory.now_ms(),
         );
         self.record_journal(&event_payload, sanitized_ts.as_ref(), None);
 
@@ -1019,8 +996,9 @@ impl CrdtService {
         expected: &ExpiryExpectation,
     ) -> Result<OperationResponse, OperationError> {
         let partition_id = hash_to_partition(key);
-        // Taken before the pre-read, which may create the map's store object
-        // for itself; the re-check below must not count that object as the map.
+        // Taken before the store read under the writer below, which creates the
+        // map's store object for itself; the re-check must not count that object
+        // as the map.
         let resident = !self
             .record_store_factory
             .get_all_for_map(map_name)
@@ -1028,10 +1006,6 @@ impl CrdtService {
         if !resident && !self.map_is_stored(map_name).await? {
             return Ok(expiry_skipped("absent"));
         }
-
-        let old_rmpv_value = self
-            .read_old_value_for_queries(map_name, key, partition_id)
-            .await;
 
         #[cfg(test)]
         self.before_acquire_park.pass(map_name, key).await;
@@ -1104,7 +1078,14 @@ impl CrdtService {
                 &event_payload,
                 None,
             )?;
-            self.broadcast_query_updates(&event_payload, old_rmpv_value.as_ref(), None);
+            self.query_registry.deliver_mutation(
+                &self.connection_registry,
+                &event_payload.map_name,
+                &event_payload.key,
+                event_payload.record.as_ref(),
+                None,
+                || self.record_store_factory.now_ms(),
+            );
             // One stamp per event, as a client remove gets, so no expiry
             // DELETE falls back to the zero stamp.
             let stamp = self.write_validator.sanitize_hlc();
@@ -1218,154 +1199,6 @@ impl CrdtService {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to serialize JOURNAL_EVENT");
-            }
-        }
-    }
-
-    /// Reads the old record value for a key before mutation, for query broadcast filtering.
-    ///
-    /// Returns `None` if no queries are active for this map, if no record exists,
-    /// or if the record is not an LWW record (OR-Map records are skipped).
-    async fn read_old_value_for_queries(
-        &self,
-        map_name: &str,
-        key: &str,
-        partition_id: u32,
-    ) -> Option<rmpv::Value> {
-        let has_queries = !self
-            .query_registry
-            .get_subscriptions_for_map(map_name)
-            .is_empty();
-        if !has_queries {
-            return None;
-        }
-
-        let store = self
-            .record_store_factory
-            .get_or_create(map_name, partition_id);
-        let old_record = store.get(key, false).await.ok().flatten()?;
-        if let RecordValue::Lww { ref value, .. } = old_record.value {
-            Some(value_to_rmpv(value))
-        } else {
-            None
-        }
-    }
-
-    /// Broadcasts `QUERY_UPDATE` messages to subscribers of queries targeting the mutated map.
-    ///
-    /// This method:
-    /// - Routes each standing subscription's mutation through its `LiveWindow`, which is the
-    ///   single authoritative top-N algorithm and returns the complete delta set (ENTER,
-    ///   displacement LEAVE, promotion ENTER, in-window UPDATE, delete LEAVE)
-    /// - Suppresses deltas for rows outside the subscription's active cursor page
-    /// - Applies field projection if the subscription has `fields`
-    /// - Skips the writing connection (writer exclusion)
-    /// - Mirrors window membership into `previous_result_keys` for `on_remove`/`on_clear`/Merkle
-    ///
-    /// The old value is no longer needed for event derivation (the window tracks prior
-    /// membership), so `_old_rmpv_value` is retained only for call-site signature stability.
-    fn broadcast_query_updates(
-        &self,
-        event_payload: &ServerEventPayload,
-        _old_rmpv_value: Option<&rmpv::Value>,
-        exclude_connection_id: Option<ConnectionId>,
-    ) {
-        let subs = self
-            .query_registry
-            .get_subscriptions_for_map(&event_payload.map_name);
-        if subs.is_empty() {
-            return;
-        }
-
-        // Extract the new value from the event payload.
-        let new_rmpv_value: Option<rmpv::Value> =
-            event_payload.record.as_ref().and_then(|r| r.value.clone());
-
-        for sub in &subs {
-            // Skip the writing connection so it does not receive its own updates.
-            if let Some(exclude_id) = exclude_connection_id {
-                if sub.connection_id == exclude_id {
-                    continue;
-                }
-            }
-
-            // The predicate result the window needs for this mutation. A delete
-            // (`new_rmpv_value == None`) is a non-match, modelled by passing `None` through.
-            let new_matches = new_rmpv_value
-                .as_ref()
-                .is_some_and(|v| matches_query_predicate(&sub.query, v));
-
-            // Single shared top-N algorithm: the window returns the COMPLETE delta set for
-            // this mutation — the new ENTER, any displacement LEAVE, any promotion ENTER, an
-            // in-window UPDATE, or a LEAVE for deletes/predicate-false rows. An empty result
-            // naturally sends nothing, so no `(false,false)` short-circuit is needed.
-            let deltas = sub.live_window.apply_mutation(
-                &event_payload.key,
-                new_rmpv_value.as_ref(),
-                new_matches,
-            );
-
-            // Decode this subscription's active page bound once (if any) so out-of-page
-            // deltas can be suppressed. `sub.query.cursor` is the only cursor state reachable
-            // from the subscription here; a row strictly before the cursor is on an earlier
-            // page the subscriber is not currently observing.
-            let page_cursor = sub
-                .query
-                .cursor
-                .as_deref()
-                .and_then(crate::query::cursor::decode_cursor);
-
-            for delta in deltas {
-                // Cursor out-of-window filter: drop deltas whose row falls outside this
-                // subscription's active page. LEAVE carries Nil (no row value to test), so it
-                // is always delivered — the subscriber must drop a row it may currently hold.
-                if let Some(ref cursor) = page_cursor {
-                    if !matches!(
-                        delta.event,
-                        topgun_core::messages::base::ChangeEventType::LEAVE
-                    ) && !crate::query::cursor::is_after_cursor(&delta.key, &delta.value, cursor)
-                    {
-                        continue;
-                    }
-                }
-
-                // Mirror window membership into `previous_result_keys`, which is still the
-                // source of truth for on_remove/on_clear/on_reset and Merkle init.
-                match delta.event {
-                    topgun_core::messages::base::ChangeEventType::ENTER => {
-                        sub.previous_result_keys.insert(delta.key.clone());
-                    }
-                    topgun_core::messages::base::ChangeEventType::LEAVE => {
-                        sub.previous_result_keys.remove(&delta.key);
-                    }
-                    topgun_core::messages::base::ChangeEventType::UPDATE => {}
-                }
-
-                // Apply field projection to ENTER/UPDATE values; LEAVE carries Nil.
-                let value = if matches!(
-                    delta.event,
-                    topgun_core::messages::base::ChangeEventType::LEAVE
-                ) {
-                    rmpv::Value::Nil
-                } else if let Some(ref fields) = sub.fields {
-                    super::query::project_fields(fields, &delta.value)
-                } else {
-                    delta.value.clone()
-                };
-
-                let payload = topgun_core::messages::client_events::QueryUpdatePayload {
-                    query_id: sub.query_id.clone(),
-                    key: delta.key.clone(),
-                    value,
-                    change_type: delta.event,
-                };
-                let msg = topgun_core::messages::Message::QueryUpdate { payload };
-                if let Ok(bytes) = rmp_serde::to_vec_named(&msg) {
-                    use crate::network::connection::OutboundMessage;
-                    if let Some(handle) = self.connection_registry.get(sub.connection_id) {
-                        let _ = handle.try_send_broadcast(OutboundMessage::Binary(bytes));
-                    }
-                }
             }
         }
     }
@@ -2682,9 +2515,8 @@ impl BeforeAcquireParkHandle {
 #[cfg(test)]
 impl CrdtService {
     /// Arms the park for the next client op of `(map, key)` on this service:
-    /// that op stops after its read of the previous value and immediately
-    /// before it asks for the key's writer, holding neither the writer nor a
-    /// stamp.
+    /// that op stops immediately before it asks for the key's writer, holding
+    /// neither the writer nor a stamp.
     fn test_park_before_acquire(&self, map: &str, key: &str) -> BeforeAcquireParkHandle {
         let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -2714,6 +2546,8 @@ impl CrdtService {
 mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Weak};
+
+    use crate::service::domain::predicate::value_to_rmpv;
 
     use metrics_exporter_prometheus::PrometheusBuilder;
     use parking_lot::Mutex;
@@ -5181,7 +5015,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // broadcast_query_updates writer exclusion test
+    // Live-query delivery: writer exclusion and projection
     // ---------------------------------------------------------------------------
 
     /// Helper: drain all QUERY_UPDATE messages from a connection receiver.
@@ -5208,9 +5042,9 @@ mod tests {
     }
 
     /// AC3: QUERY_UPDATE is NOT sent to the connection that originated the write.
-    /// This tests broadcast_query_updates() writer exclusion + field projection.
+    /// This tests `QueryRegistry::deliver_mutation`'s writer exclusion + field projection.
     #[tokio::test]
-    async fn broadcast_query_updates_writer_exclusion_and_projection() {
+    async fn deliver_mutation_excludes_the_writer_and_projects() {
         let (svc, conn_registry, query_registry) = make_broadcast_test_setup();
         let config = crate::network::config::ConnectionConfig::default();
 
@@ -12600,109 +12434,8 @@ mod tests {
             );
         }
 
-        /// What [`parking_stack_with_subscription`] builds.
-        struct SubscribedStack {
-            svc: Arc<CrdtService>,
-            factory: Arc<RecordStoreFactory>,
-            parking: Arc<ParkingStore>,
-            journal: Arc<JournalStore>,
-            /// Keeps the subscribed connection's channel open.
-            _listener: tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>,
-        }
-
-        /// [`parking_stack`] with a journal attached and one query subscription
-        /// on the map, so a write reads the key's previous value before it
-        /// applies.
-        fn parking_stack_with_subscription(dir: &tempfile::TempDir) -> SubscribedStack {
-            let redb: Arc<dyn MapDataStore> =
-                Arc::new(RedbDataStore::new(dir.path().join("nonres.redb")).expect("redb open"));
-            let parking = Arc::new(ParkingStore::new(redb));
-            let factory = Arc::new(RecordStoreFactory::new(
-                StorageConfig::default(),
-                parking.clone() as Arc<dyn MapDataStore>,
-                Vec::new(),
-            ));
-            let conn_registry = Arc::new(ConnectionRegistry::new());
-            let query_registry = Arc::new(QueryRegistry::new());
-            let listener = subscribe_listener(&conn_registry, &query_registry, MAP);
-            let journal = Arc::new(JournalStore::new(100));
-            let svc = Arc::new(
-                CrdtService::new(
-                    Arc::clone(&factory),
-                    conn_registry,
-                    make_validator(),
-                    query_registry,
-                    Arc::new(SchemaService::new()),
-                )
-                .with_journal(Arc::clone(&journal)),
-            );
-            SubscribedStack {
-                svc,
-                factory,
-                parking,
-                journal,
-                _listener: listener,
-            }
-        }
-
-        // A write must not land after a write of the same key that carries a
-        // higher stamp. The first writer is parked in the read of the previous
-        // value, taken when the map has a query subscription and the key is
-        // not resident. That read is in front of both the writer acquire and
-        // the mint, so the parked writer mints last and applies last, and the
-        // second writer is never kept waiting. What this guards is that the
-        // mint does not move back in front of that read; it passes with no
-        // writer at all. The mint's place under the writer is guarded by
-        // `a_put_that_takes_the_writer_last_carries_the_higher_stamp`.
-        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-        async fn a_lower_stamped_put_never_lands_after_a_higher_stamped_one() {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let SubscribedStack {
-                svc,
-                factory,
-                parking,
-                journal,
-                _listener,
-            } = parking_stack_with_subscription(&dir);
-            assert_not_resident(&factory);
-
-            let mut park = parking.park_after_load();
-            let x = tokio::spawn(svc.clone().oneshot(route_x(VX)));
-            // X is parked in the load of the previous value.
-            park.wait_parked().await;
-
-            let y = tokio::spawn(svc.clone().oneshot(route_y(VY)));
-            let y_waited = second_writer_waited(&svc, &y).await;
-            park.release();
-            x.await.expect("X task").expect("X must succeed");
-            y.await.expect("Y task").expect("Y must succeed");
-
-            let journal_order = journal_stamps(&journal);
-            assert_eq!(
-                journal_order.len(),
-                2,
-                "the journal must hold both writes of the key"
-            );
-            let a = journal_order.iter().min().expect("two stamps").clone();
-            let b = journal_order.iter().max().expect("two stamps").clone();
-            assert!(a < b, "the two writes must carry distinct stamps");
-            let engine_stamp = read_lww_timestamp(&factory, MAP, KEY).await;
-
-            println!(
-                "lower_stamped_put: y_waited={y_waited} a={a:?} b={b:?} engine={engine_stamp:?} \
-                 journal={journal_order:?}"
-            );
-            assert_eq!(
-                (engine_stamp, journal_order),
-                (Some(b.clone()), vec![a, b]),
-                "(engine stamp, journal order): the engine must hold the higher stamp and the \
-                 journal must record the two writes in stamp order"
-            );
-        }
-
         // The stamp of a write is minted under the key's writer. X is parked
-        // in front of its acquire: it has read the previous value and holds
-        // neither the writer nor a stamp. Y then runs to completion. X enters
+        // in front of its acquire, holding neither the writer nor a stamp. Y then runs to completion. X enters
         // the critical section last and its value is what the engine and the
         // store keep, so it must also carry the higher stamp. A stamp minted
         // in front of the acquire would give X the lower one.
@@ -12959,16 +12692,14 @@ mod tests {
         /// every `add` and `remove` until the test grants a verdict: a refusing
         /// store alone could not place a second write inside the flush window,
         /// because the window is open only while the flush loop holds a drained
-        /// entry. It can also park ONE `load` of that key on return. An
-        /// instance that gates no key is a plain store, which is what the
-        /// crash image is.
+        /// entry. An instance that gates no key is a plain store, which is
+        /// what the crash image is.
         struct RefusingStore {
             /// `(map, key)` -> value, or `None` for a delete.
             data: std::sync::Mutex<HashMap<(String, String), Option<RecordValue>>>,
             /// The key whose store calls park; `None` parks nothing.
             gated: Option<(String, String)>,
             gate: std::sync::Mutex<VerdictGate>,
-            after_load: std::sync::Mutex<Option<Gate>>,
         }
 
         impl RefusingStore {
@@ -12980,7 +12711,6 @@ mod tests {
                     data: std::sync::Mutex::new(data),
                     gated,
                     gate: std::sync::Mutex::new(VerdictGate::default()),
-                    after_load: std::sync::Mutex::new(None),
                 }
             }
 
@@ -12998,11 +12728,6 @@ mod tests {
                 self.gated
                     .as_ref()
                     .is_some_and(|(gated_map, gated_key)| gated_map == map && gated_key == key)
-            }
-
-            /// Parks the next `load` of the gated key on return.
-            fn park_after_load(&self) -> ParkHandle {
-                ParkingStore::arm(&self.after_load)
             }
 
             fn has_parked_call(&self) -> bool {
@@ -13155,17 +12880,13 @@ mod tests {
             }
 
             async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
-                let loaded = self
+                Ok(self
                     .data
                     .lock()
                     .unwrap()
                     .get(&(map.to_string(), key.to_string()))
                     .cloned()
-                    .flatten();
-                if self.is_gated(map, key) {
-                    ParkingStore::pass(&self.after_load).await;
-                }
-                Ok(loaded)
+                    .flatten())
             }
 
             async fn load_all(
@@ -13236,19 +12957,14 @@ mod tests {
             wal: Arc<crate::storage::wal::WalWriter>,
             inner: Arc<WatermarkKeeping<RefusingStore>>,
             journal: Arc<JournalStore>,
-            /// Keeps the subscribed connection's channel open, when there is one.
-            _listener:
-                Option<tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>>,
         }
 
         /// The service over the buffered store with a real WAL, on a
         /// [`RefusingStore`] gating `(MAP, KEY)`, with a journal attached.
         /// Every frame is fsynced before its write returns, the flush loop
         /// drains by itself within milliseconds, and a refused entry is retried
-        /// until it is accepted. `subscribed` registers one query subscription
-        /// on the map, so a write reads the key's previous value before it
-        /// applies.
-        fn refusing_stack(wal_dir: &tempfile::TempDir, subscribed: bool) -> RefusingStack {
+        /// until it is accepted.
+        fn refusing_stack(wal_dir: &tempfile::TempDir) -> RefusingStack {
             use crate::storage::datastores::WalBootstrap;
             use crate::storage::wal::{Wal, WalFsyncPolicy, WalWriter};
 
@@ -13280,8 +12996,6 @@ mod tests {
             ));
             let conn_registry = Arc::new(ConnectionRegistry::new());
             let query_registry = Arc::new(QueryRegistry::new());
-            let listener =
-                subscribed.then(|| subscribe_listener(&conn_registry, &query_registry, MAP));
             let journal = Arc::new(JournalStore::new(100));
             let svc = Arc::new(
                 CrdtService::new(
@@ -13300,7 +13014,6 @@ mod tests {
                 wal,
                 inner,
                 journal,
-                _listener: listener,
             }
         }
 
@@ -13336,8 +13049,7 @@ mod tests {
                 wal,
                 inner,
                 journal,
-                _listener,
-            } = refusing_stack(&wal_dir, false);
+            } = refusing_stack(&wal_dir);
 
             let mut park = write_behind.test_park_before_queue_insert(MAP, KEY);
             let x = tokio::spawn(svc.clone().oneshot(route_x(VX)));
@@ -13400,9 +13112,9 @@ mod tests {
             );
         }
 
-        // A writer is parked in the read of the key's previous value while a
-        // second write of the key completes and its flush attempt is in
-        // flight; that attempt is then refused, with the parked writer's entry
+        // A writer is parked in front of its writer acquire, holding neither
+        // the writer nor a stamp, while a second write of the key completes
+        // and its flush attempt is in flight; that attempt is then refused, with the parked writer's entry
         // queued behind it. The entry that takes over the refused one's frames
         // must not hold an older value: what is served and what a crash
         // recovers must both be the higher stamp.
@@ -13416,17 +13128,15 @@ mod tests {
                 wal,
                 inner,
                 journal,
-                _listener,
-            } = refusing_stack(&wal_dir, true);
+            } = refusing_stack(&wal_dir);
             assert_not_resident(&factory);
 
-            let mut park = inner.park_after_load();
+            let mut park = svc.test_park_before_acquire(MAP, KEY);
             let o = tokio::spawn(svc.clone().oneshot(route_x(VX)));
-            // O is parked in the load of the previous value.
             park.wait_parked().await;
 
-            // The park is one-shot, so N's own read passes; N writes, queues
-            // and returns.
+            // The park is one-shot, so N passes it; N writes, queues and
+            // returns.
             let n = tokio::spawn(svc.clone().oneshot(route_y(VY)));
             n.await.expect("N task").expect("N must succeed");
             let journal_after_n = journal_stamps(&journal);
@@ -13662,8 +13372,7 @@ mod tests {
                 wal,
                 inner,
                 journal: _journal,
-                _listener,
-            } = refusing_stack(&wal_dir, false);
+            } = refusing_stack(&wal_dir);
             let store = factory.get_or_create(MAP, hash_to_partition(KEY));
             for op in seed {
                 svc.clone().oneshot(op).await.expect("seed op must succeed");
@@ -13801,8 +13510,7 @@ mod tests {
                 wal: _wal,
                 inner,
                 journal: _journal,
-                _listener,
-            } = refusing_stack(&wal_dir, false);
+            } = refusing_stack(&wal_dir);
             let store = factory.get_or_create(MAP, hash_to_partition(KEY));
             for op in seed {
                 svc.clone().oneshot(op).await.expect("seed op must succeed");
@@ -13882,8 +13590,7 @@ mod tests {
                 wal: _wal,
                 inner,
                 journal: _journal,
-                _listener,
-            } = refusing_stack(&wal_dir, false);
+            } = refusing_stack(&wal_dir);
             svc.clone().oneshot(route_x("OLD")).await.expect("seed");
             grant_up_to(&inner, &write_behind, usize::MAX, Verdict::Accept).await;
             svc.clone().oneshot(route_x("NEW")).await.expect("NEW");

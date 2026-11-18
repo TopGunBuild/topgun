@@ -21,7 +21,7 @@ use topgun_core::types::Value;
 use tower::ServiceExt;
 
 use topgun_server::network::config::ConnectionConfig;
-use topgun_server::network::connection::{ConnectionKind, ConnectionRegistry};
+use topgun_server::network::connection::{ConnectionKind, ConnectionRegistry, OutboundMessage};
 use topgun_server::service::domain::query::QueryRegistry;
 use topgun_server::service::domain::QueryService;
 use topgun_server::service::operation::{
@@ -65,6 +65,7 @@ fn make_op_ctx(
 async fn run_scan(
     svc: Arc<QueryService>,
     conn_id: topgun_server::network::connection::ConnectionId,
+    rx: &mut tokio::sync::mpsc::Receiver<OutboundMessage>,
     query_id: &str,
     map_name: &str,
     seq: u64,
@@ -80,12 +81,21 @@ async fn run_scan(
         },
     };
     let op = Operation::QuerySubscribe { ctx, payload };
-    match svc.oneshot(op).await.unwrap() {
-        OperationResponse::Message(msg) => match *msg {
-            Message::QueryResp(resp) => resp.payload.results,
-            other => panic!("expected QueryResp, got {other:?}"),
-        },
-        other => panic!("expected Message response, got {other:?}"),
+    {
+        let returned = svc.oneshot(op).await.unwrap();
+        assert!(
+            matches!(returned, OperationResponse::Empty),
+            "a live subscribe enqueues its snapshot itself"
+        );
+        match rx.try_recv() {
+            Ok(OutboundMessage::Binary(bytes)) => {
+                match rmp_serde::from_slice::<Message>(&bytes).expect("decodes") {
+                    Message::QueryResp(resp) => resp.payload.results,
+                    other => panic!("expected QueryResp, got {other:?}"),
+                }
+            }
+            other => panic!("expected the enqueued snapshot, got {other:?}"),
+        }
     }
 }
 
@@ -119,7 +129,7 @@ async fn snapshot_reflects_durable_state_at_scan_time() {
 
     let conn_registry = Arc::new(ConnectionRegistry::new());
     let config = ConnectionConfig::default();
-    let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+    let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
     let conn_id = handle.id;
 
     let svc = Arc::new(QueryService::new(
@@ -133,7 +143,15 @@ async fn snapshot_reflects_durable_state_at_scan_time() {
     ));
 
     // Scan 1: should return exactly the 20 records written in phase 1.
-    let results1 = run_scan(Arc::clone(&svc), conn_id, "ac3-snap-1", map_name, 1).await;
+    let results1 = run_scan(
+        Arc::clone(&svc),
+        conn_id,
+        &mut rx,
+        "ac3-snap-1",
+        map_name,
+        1,
+    )
+    .await;
     assert_eq!(
         results1.len(),
         20,
@@ -155,7 +173,15 @@ async fn snapshot_reflects_durable_state_at_scan_time() {
 
     // Scan 2: must now reflect all 30 records — confirms the second scan sees
     // the new writes and no stale snapshot from scan 1 bleeds through.
-    let results2 = run_scan(Arc::clone(&svc), conn_id, "ac3-snap-2", map_name, 2).await;
+    let results2 = run_scan(
+        Arc::clone(&svc),
+        conn_id,
+        &mut rx,
+        "ac3-snap-2",
+        map_name,
+        2,
+    )
+    .await;
     assert_eq!(
         results2.len(),
         30,
@@ -238,7 +264,7 @@ async fn snapshot_merges_resident_over_datastore_by_hlc_direction() {
 
     let conn_registry = Arc::new(ConnectionRegistry::new());
     let config = ConnectionConfig::default();
-    let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+    let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
     let conn_id = handle.id;
 
     let svc = Arc::new(QueryService::new(
@@ -251,7 +277,7 @@ async fn snapshot_merges_resident_over_datastore_by_hlc_direction() {
         None,
     ));
 
-    let results = run_scan(Arc::clone(&svc), conn_id, "ac3-merge", map_name, 1).await;
+    let results = run_scan(Arc::clone(&svc), conn_id, &mut rx, "ac3-merge", map_name, 1).await;
 
     let by_key: std::collections::HashMap<String, String> = results
         .iter()

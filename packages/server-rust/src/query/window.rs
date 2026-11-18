@@ -81,6 +81,10 @@ pub struct LiveWindow {
     /// the guard is only active when an explicit HLC is supplied via
     /// `apply_mutation_with_hlc`.
     hlc_seen: Mutex<HashMap<String, (u64, u32)>>,
+    /// The page cursor of a subscription that pages from one: the window tracks
+    /// no row that sorts at or before it, so a row moved there leaves and a row
+    /// written there takes no slot of the page.
+    page_cursor: Option<CursorData>,
 }
 
 impl LiveWindow {
@@ -92,7 +96,15 @@ impl LiveWindow {
             limit,
             state: Mutex::new(Vec::new()),
             hlc_seen: Mutex::new(HashMap::new()),
+            page_cursor: None,
         }
+    }
+
+    /// The same window for a page that follows `cursor`.
+    #[must_use]
+    pub fn after_cursor(mut self, cursor: CursorData) -> Self {
+        self.page_cursor = Some(cursor);
+        self
     }
 
     /// Encodes a row as a [`CursorData`] so [`is_after_cursor`] can order it against
@@ -133,22 +145,150 @@ impl LiveWindow {
     ///
     /// Implemented as "b comes after a" via the shared cursor comparator so a single
     /// ordering definition governs both pagination and live windowing.
-    fn row_before(&self, a: &WindowRow, b: &WindowRow) -> bool {
-        let a_cursor = self.row_cursor(&a.key, &a.value);
-        is_after_cursor(&b.key, &b.value, &a_cursor)
+    fn row_before(&self, a: (&str, &rmpv::Value), b: (&str, &rmpv::Value)) -> bool {
+        let a_cursor = self.row_cursor(a.0, a.1);
+        is_after_cursor(b.0, b.1, &a_cursor)
     }
 
-    /// Sorts the tracked rows in place by the keyset comparator (ascending window order).
-    fn sort_state(&self, state: &mut [WindowRow]) {
-        state.sort_by(|a, b| {
-            if self.row_before(a, b) {
-                std::cmp::Ordering::Less
-            } else if self.row_before(b, a) {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
+    /// Applies several mutations at once and returns every delta the subscriber
+    /// must receive for their net effect: the state they leave is the state the
+    /// same mutations leave applied one by one, with the window sorted and
+    /// diffed once instead of once per mutation. A live write is a batch of
+    /// one ([`apply_mutation`](Self::apply_mutation)); a snapshot's initial
+    /// load and its captured writes are one batch each. The last mutation of a key
+    /// decides it. A key that leaves and comes back within the batch is one
+    /// `UPDATE` (or nothing, outside the window), not a `LEAVE` and an `ENTER`.
+    ///
+    /// Out-of-window rows are trimmed once, at the end, so a batch can keep a
+    /// retained row that the same mutations applied one by one would have
+    /// trimmed on the way (see the promotion-data bound on
+    /// [`apply_mutation`](Self::apply_mutation)).
+    pub fn apply_batch<'a>(
+        &self,
+        mutations: impl IntoIterator<Item = (&'a str, Option<&'a rmpv::Value>, bool)>,
+    ) -> Vec<WindowDelta> {
+        // The value each mutated key ends with; `None` = no row (delete,
+        // predicate-false, or a row at or before the page cursor).
+        let mut last: HashMap<&str, Option<&rmpv::Value>> = HashMap::new();
+        for (key, value, matches_predicate) in mutations {
+            let after = |value: &&rmpv::Value| {
+                self.page_cursor
+                    .as_ref()
+                    .is_none_or(|cursor| is_after_cursor(key, value, cursor))
+            };
+            last.insert(key, value.filter(|v| matches_predicate && after(v)));
+        }
+        let window = self.limit.map_or(usize::MAX, |limit| limit as usize);
+        let mut state = self.state.lock();
+        // Removals of keys the window does not track change nothing: the common
+        // case of a write that does not match a live query.
+        let adds = last.values().any(Option::is_some);
+        let only = (last.len() == 1)
+            .then(|| last.keys().next().copied())
+            .flatten();
+        let tracked = |row: &WindowRow| {
+            only.map_or_else(|| last.contains_key(row.key.as_str()), |key| row.key == key)
+        };
+        if !adds && !state.iter().any(tracked) {
+            return Vec::new();
+        }
+        let (mut leaves, mut enters, mut updates) = (Vec::new(), Vec::new(), Vec::new());
+        // Each row with whether it was in the window and whether it was mutated.
+        let mut rows: Vec<(WindowRow, bool, bool)> = Vec::with_capacity(state.len() + last.len());
+        for (i, row) in state.drain(..).enumerate() {
+            let was_in = i < window;
+            match last.remove(row.key.as_str()) {
+                None => rows.push((row, was_in, false)),
+                Some(Some(value)) => rows.push((
+                    WindowRow {
+                        key: row.key,
+                        value: value.clone(),
+                    },
+                    was_in,
+                    true,
+                )),
+                Some(None) if was_in => leaves.push(WindowDelta {
+                    key: row.key,
+                    value: rmpv::Value::Nil,
+                    event: ChangeEventType::LEAVE,
+                }),
+                Some(None) => {}
             }
-        });
+        }
+        for (key, value) in last {
+            if let Some(value) = value {
+                let row = WindowRow {
+                    key: key.to_string(),
+                    value: value.clone(),
+                };
+                rows.push((row, false, true));
+            }
+        }
+        // Removals keep the rows in order; only a new or changed value moves one.
+        if adds {
+            rows.sort_by(|(a, ..), (b, ..)| self.compare((&a.key, &a.value), (&b.key, &b.value)));
+        }
+
+        for (i, (row, was_in, mutated)) in rows.iter().enumerate() {
+            match (*was_in, i < window) {
+                (true, false) => leaves.push(WindowDelta {
+                    key: row.key.clone(),
+                    value: rmpv::Value::Nil,
+                    event: ChangeEventType::LEAVE,
+                }),
+                (false, true) => enters.push(WindowDelta {
+                    key: row.key.clone(),
+                    value: row.value.clone(),
+                    event: ChangeEventType::ENTER,
+                }),
+                (true, true) if *mutated => updates.push(WindowDelta {
+                    key: row.key.clone(),
+                    value: row.value.clone(),
+                    event: ChangeEventType::UPDATE,
+                }),
+                _ => {}
+            }
+        }
+
+        // Retain only enough out-of-window candidates to refill freed slots after
+        // later removals: `limit` beyond the window.
+        if let Some(limit) = self.limit {
+            rows.truncate((limit as usize).saturating_mul(2));
+        }
+        *state = rows.into_iter().map(|(row, ..)| row).collect();
+        leaves.extend(enters);
+        leaves.extend(updates);
+        leaves
+    }
+
+    /// Whether the window tracks rows past its limit: rows a write pushed out of
+    /// the window, which still match and follow its last row.
+    pub fn holds_past_limit(&self) -> bool {
+        self.limit
+            .is_some_and(|limit| self.state.lock().len() > limit as usize)
+    }
+
+    /// Each tracked key's position in the window's order: the keyset
+    /// comparator over the unprojected values, the key breaking ties.
+    pub fn ranks(&self) -> HashMap<String, usize> {
+        self.state
+            .lock()
+            .iter()
+            .enumerate()
+            .map(|(i, row)| (row.key.clone(), i))
+            .collect()
+    }
+
+    /// The window's order of two `(key, value)` rows: the keyset comparator over
+    /// its sort fields, the key breaking ties.
+    fn compare(&self, a: (&str, &rmpv::Value), b: (&str, &rmpv::Value)) -> std::cmp::Ordering {
+        if self.row_before(a, b) {
+            std::cmp::Ordering::Less
+        } else if self.row_before(b, a) {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
     }
 
     /// Applies one mutation and returns every delta the subscriber must receive.
@@ -179,10 +319,7 @@ impl LiveWindow {
         new_value: Option<&rmpv::Value>,
         matches_predicate: bool,
     ) -> Vec<WindowDelta> {
-        match self.limit {
-            None => self.apply_unbounded(key, new_value, matches_predicate),
-            Some(limit) => self.apply_bounded(key, new_value, matches_predicate, limit as usize),
-        }
+        self.apply_batch(std::iter::once((key, new_value, matches_predicate)))
     }
 
     /// Applies one mutation with an explicit HLC monotonicity guard.
@@ -221,146 +358,6 @@ impl LiveWindow {
         }
 
         self.apply_mutation(key, new_value, matches_predicate)
-    }
-
-    /// Unbounded window: predicate-only membership, no displacement and no retention of
-    /// out-of-window rows (there is no "out of window" when the window is unbounded).
-    fn apply_unbounded(
-        &self,
-        key: &str,
-        new_value: Option<&rmpv::Value>,
-        matches_predicate: bool,
-    ) -> Vec<WindowDelta> {
-        let mut state = self.state.lock();
-        let existing = state.iter().position(|r| r.key == key);
-        let stays = matches_predicate && new_value.is_some();
-
-        match (existing, stays) {
-            (None, false) => Vec::new(),
-            (None, true) => {
-                let value = new_value.cloned().unwrap_or(rmpv::Value::Nil);
-                state.push(WindowRow {
-                    key: key.to_string(),
-                    value: value.clone(),
-                });
-                self.sort_state(&mut state);
-                vec![WindowDelta {
-                    key: key.to_string(),
-                    value,
-                    event: ChangeEventType::ENTER,
-                }]
-            }
-            (Some(idx), true) => {
-                let value = new_value.cloned().unwrap_or(rmpv::Value::Nil);
-                state[idx].value = value.clone();
-                self.sort_state(&mut state);
-                vec![WindowDelta {
-                    key: key.to_string(),
-                    value,
-                    event: ChangeEventType::UPDATE,
-                }]
-            }
-            (Some(idx), false) => {
-                state.remove(idx);
-                vec![WindowDelta {
-                    key: key.to_string(),
-                    value: rmpv::Value::Nil,
-                    event: ChangeEventType::LEAVE,
-                }]
-            }
-        }
-    }
-
-    /// Bounded top-N window with displacement and promotion.
-    fn apply_bounded(
-        &self,
-        key: &str,
-        new_value: Option<&rmpv::Value>,
-        matches_predicate: bool,
-        limit: usize,
-    ) -> Vec<WindowDelta> {
-        let mut state = self.state.lock();
-
-        // Snapshot the keys currently in-window (first `limit` by sort order) so we can
-        // diff membership after mutating + re-sorting.
-        let in_window_before: std::collections::HashSet<String> =
-            state.iter().take(limit).map(|r| r.key.clone()).collect();
-
-        let existing = state.iter().position(|r| r.key == key);
-        let stays = matches_predicate && new_value.is_some();
-
-        match (existing, stays) {
-            (None, false) => return Vec::new(),
-            (None, true) => {
-                let value = new_value.cloned().unwrap_or(rmpv::Value::Nil);
-                state.push(WindowRow {
-                    key: key.to_string(),
-                    value,
-                });
-            }
-            (Some(idx), true) => {
-                state[idx].value = new_value.cloned().unwrap_or(rmpv::Value::Nil);
-            }
-            (Some(idx), false) => {
-                // Delete or predicate-false: drop the row entirely (not a retained
-                // candidate — it no longer matches the query).
-                state.remove(idx);
-            }
-        }
-
-        self.sort_state(&mut state);
-
-        // Re-derive in-window membership after the mutation.
-        let in_window_after: std::collections::HashSet<String> =
-            state.iter().take(limit).map(|r| r.key.clone()).collect();
-
-        let mut deltas = Vec::new();
-
-        // Rows that left the top-N (displacement or removal) → LEAVE.
-        for k in &in_window_before {
-            if !in_window_after.contains(k) {
-                deltas.push(WindowDelta {
-                    key: k.clone(),
-                    value: rmpv::Value::Nil,
-                    event: ChangeEventType::LEAVE,
-                });
-            }
-        }
-
-        // Rows that entered the top-N (the new row, or a promoted retained row) → ENTER.
-        for row in state.iter().take(limit) {
-            if !in_window_before.contains(&row.key) {
-                deltas.push(WindowDelta {
-                    key: row.key.clone(),
-                    value: row.value.clone(),
-                    event: ChangeEventType::ENTER,
-                });
-            }
-        }
-
-        // A row that stayed in-window and was the mutated key → UPDATE.
-        if matches_predicate
-            && new_value.is_some()
-            && in_window_before.contains(key)
-            && in_window_after.contains(key)
-        {
-            let value = new_value.cloned().unwrap_or(rmpv::Value::Nil);
-            deltas.push(WindowDelta {
-                key: key.to_string(),
-                value,
-                event: ChangeEventType::UPDATE,
-            });
-        }
-
-        // Trim retained out-of-window candidates: we only need to retain enough to refill
-        // freed slots after later removals. Retaining everything seen would grow unbounded,
-        // so cap retained rows at `limit` beyond the window (a displaced row plus headroom).
-        let retain_cap = limit.saturating_mul(2);
-        if state.len() > retain_cap {
-            state.truncate(retain_cap);
-        }
-
-        deltas
     }
 }
 
@@ -520,6 +517,191 @@ mod tests {
         // keyed-map writes), so no persistent wrong answer survives.
         let delta = converge.iter().find(|d| d.key == "k").unwrap();
         assert_eq!(delta.value, rec("score", 42));
+    }
+
+    /// A batch of a tracked key's removal and an untracked key's removal
+    /// sends only the tracked key's LEAVE.
+    #[test]
+    fn a_batch_of_removals_leaves_only_the_tracked_key() {
+        let w = LiveWindow::new(sort_asc("score"), Some(3));
+        w.apply_mutation("a", Some(&rec("score", 1)), true);
+        w.apply_mutation("b", Some(&rec("score", 2)), true);
+        let deltas = w.apply_batch([("a", None, false), ("z", None, false)]);
+        assert_eq!(
+            events(&deltas),
+            vec![("a".to_string(), ChangeEventType::LEAVE)]
+        );
+    }
+
+    /// The tracked rows in window order.
+    fn rows_of(w: &LiveWindow) -> Vec<(String, rmpv::Value)> {
+        w.state
+            .lock()
+            .iter()
+            .map(|r| (r.key.clone(), r.value.clone()))
+            .collect()
+    }
+
+    /// The rows a subscriber holds after applying `deltas` to `held`.
+    fn replay(
+        mut held: std::collections::BTreeMap<String, rmpv::Value>,
+        deltas: Vec<WindowDelta>,
+    ) -> std::collections::BTreeMap<String, rmpv::Value> {
+        for delta in deltas {
+            match delta.event {
+                ChangeEventType::ENTER | ChangeEventType::UPDATE => {
+                    held.insert(delta.key, delta.value);
+                }
+                ChangeEventType::LEAVE => {
+                    held.remove(&delta.key);
+                }
+            }
+        }
+        held
+    }
+
+    fn in_window(w: &LiveWindow) -> std::collections::BTreeMap<String, rmpv::Value> {
+        let take = w.limit.map_or(usize::MAX, |l| l as usize);
+        rows_of(w).into_iter().take(take).collect()
+    }
+
+    proptest::proptest! {
+        /// A batch leaves the window's rows, and the rows its deltas leave a
+        /// subscriber holding, exactly as the same mutations applied one by
+        /// one, each a batch of one; checked against the per-row algorithm
+        /// this replaced before it was removed. Ten keys and a limit of at least five keep the rows within
+        /// the trim of twice the limit, where the two paths can differ.
+        #[test]
+        fn a_batch_ends_where_its_mutations_one_by_one_end(
+            limit in proptest::option::of(5u32..9),
+            seed in proptest::collection::vec((0u8..10, 0i64..20), 0..10),
+            batch in proptest::collection::vec(
+                (0u8..10, proptest::option::of(0i64..20), proptest::bool::ANY),
+                0..24,
+            ),
+        ) {
+            let one_by_one = LiveWindow::new(sort_asc("score"), limit);
+            let batched = LiveWindow::new(sort_asc("score"), limit);
+            for (k, n) in &seed {
+                let key = format!("k{k}");
+                one_by_one.apply_mutation(&key, Some(&rec("score", *n)), true);
+                batched.apply_mutation(&key, Some(&rec("score", *n)), true);
+            }
+            let held = in_window(&one_by_one);
+            let mutations: Vec<(String, Option<rmpv::Value>, bool)> = batch
+                .iter()
+                .map(|(k, n, m)| (format!("k{k}"), n.map(|n| rec("score", n)), *m))
+                .collect();
+            let mut held_one_by_one = held.clone();
+            for (key, value, matches) in &mutations {
+                held_one_by_one = replay(
+                    held_one_by_one,
+                    one_by_one.apply_mutation(key, value.as_ref(), *matches),
+                );
+            }
+            let held_batched = replay(
+                held,
+                batched.apply_batch(mutations.iter().map(|(k, v, m)| (k.as_str(), v.as_ref(), *m))),
+            );
+            proptest::prop_assert_eq!(rows_of(&batched), rows_of(&one_by_one));
+            proptest::prop_assert_eq!(&held_batched, &held_one_by_one);
+            proptest::prop_assert_eq!(held_batched, in_window(&batched));
+        }
+
+        /// Past the trim of twice the limit, a batch over a window loaded
+        /// within it shows the page a fresh sort and limit over the values its
+        /// keys end with gives, and so do the rows its deltas leave a
+        /// subscriber holding.
+        #[test]
+        fn a_batch_shows_the_page_of_the_values_its_keys_end_with(
+            limit in 1u32..5,
+            seed in proptest::collection::vec(0i64..20, 0..10),
+            batch in proptest::collection::vec(
+                (0u8..20, proptest::option::of(0i64..20), proptest::bool::ANY),
+                0..40,
+            ),
+        ) {
+            let w = LiveWindow::new(sort_asc("score"), Some(limit));
+            let seed: Vec<(String, rmpv::Value)> = seed
+                .into_iter()
+                .take(2 * limit as usize)
+                .enumerate()
+                .map(|(i, n)| (format!("k{i}"), rec("score", n)))
+                .collect();
+            let _ = w.apply_batch(seed.iter().map(|(k, v)| (k.as_str(), Some(v), true)));
+            let mut end: std::collections::BTreeMap<String, rmpv::Value> = seed.into_iter().collect();
+            let batch: Vec<(String, Option<rmpv::Value>)> = batch
+                .iter()
+                .map(|(k, n, m)| (format!("k{k}"), n.filter(|_| *m).map(|n| rec("score", n))))
+                .collect();
+            for (key, value) in &batch {
+                match value {
+                    Some(value) => end.insert(key.clone(), value.clone()),
+                    None => end.remove(key),
+                };
+            }
+            let held = replay(
+                in_window(&w),
+                w.apply_batch(batch.iter().map(|(k, v)| (k.as_str(), v.as_ref(), v.is_some()))),
+            );
+            let mut page: Vec<(i64, String)> = end
+                .iter()
+                .map(|(k, v)| (v.as_map().expect("a map")[0].1.as_i64().expect("an int"), k.clone()))
+                .collect();
+            page.sort();
+            page.truncate(limit as usize);
+            let page: std::collections::BTreeMap<String, rmpv::Value> =
+                page.into_iter().map(|(n, k)| (k, rec("score", n))).collect();
+            proptest::prop_assert_eq!(&in_window(&w), &page);
+            proptest::prop_assert_eq!(held, page);
+        }
+    }
+
+    /// Report-only: the time to load a 10 000-row window from a sorted scan,
+    /// one row at a time and in one batch, five runs each.
+    #[test]
+    #[ignore = "measurement; run with --ignored --nocapture"]
+    fn initial_load_of_10000_rows() {
+        let rows: Vec<(String, rmpv::Value)> = (0..10_000)
+            .map(|n| (format!("r{n:05}"), rec("v", n)))
+            .collect();
+        let report = |name: &str, mut runs: Vec<std::time::Duration>| {
+            for (i, run) in runs.iter().enumerate() {
+                println!("{name} run {i}: {:.3} ms", run.as_secs_f64() * 1e3);
+            }
+            runs.sort();
+            let median = runs[runs.len() / 2].as_secs_f64() * 1e3;
+            println!("{name} median: {median:.3} ms");
+        };
+        let (mut per_row, mut batched) = (Vec::new(), Vec::new());
+        for _ in 0..5 {
+            let w = LiveWindow::new(sort_asc("v"), Some(10_000));
+            let start = std::time::Instant::now();
+            for (key, value) in &rows {
+                let _ = w.apply_mutation(key, Some(value), true);
+            }
+            per_row.push(start.elapsed());
+            let w = LiveWindow::new(sort_asc("v"), Some(10_000));
+            let start = std::time::Instant::now();
+            let _ = w.apply_batch(rows.iter().map(|(k, v)| (k.as_str(), Some(v), true)));
+            batched.push(start.elapsed());
+        }
+        report("initial_load per_row", per_row);
+        report("initial_load batch", batched);
+
+        // A write that does not match the query, to a key the window does not
+        // track, against the loaded window: per call, over 1000 calls.
+        let w = LiveWindow::new(sort_asc("v"), Some(10_000));
+        let _ = w.apply_batch(rows.iter().map(|(k, v)| (k.as_str(), Some(v), true)));
+        let mut non_matching = Vec::new();
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            for _ in 0..1000 {
+                assert!(w.apply_mutation("absent", None, false).is_empty());
+            }
+            non_matching.push(start.elapsed() / 1000);
+        }
+        report("non_matching_write per call", non_matching);
     }
 
     // ---- HLC monotone guard tests ----

@@ -2,10 +2,11 @@
 //!
 //! Manages an in-memory `QueryRegistry` of standing query subscriptions,
 //! evaluates queries against `RecordStore` contents, and pushes incremental
-//! `QUERY_UPDATE` messages (ENTER/UPDATE/LEAVE) to subscribers via
-//! `CrdtService::broadcast_query_updates()` when data changes.
+//! `QUERY_UPDATE` messages (ENTER/UPDATE/LEAVE) to subscribers through
+//! [`QueryRegistry::deliver_mutation`], the one live-delivery path, which
+//! `CrdtService` calls under the key's writer for every applied write.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -13,8 +14,8 @@ use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
-use parking_lot::Mutex;
-use topgun_core::HLC;
+use tokio::sync::mpsc::error::TrySendError;
+use topgun_core::LWWRecord;
 use tower::Service;
 
 use topgun_core::messages::base::{ChangeEventType, Query};
@@ -30,8 +31,10 @@ use crate::dag::coordinator::{run_dag_local, ClusterQueryCoordinator};
 use crate::query::cursor::{
     build_next_cursor, classify_cursor_status, cursor_query_hashes, decode_cursor, SortValue,
 };
-use crate::query::delta_buffer::{DeltaBuffer, QUERY_SNAPSHOT_OVERFLOW};
-use crate::query::window::LiveWindow;
+use crate::query::delta_buffer::{
+    Captured, Closing, DeltaBuffer, DeltaEntry, QUERY_SNAPSHOT_OVERFLOW,
+};
+use crate::query::window::{LiveWindow, WindowDelta};
 
 use tracing::Instrument;
 
@@ -45,14 +48,18 @@ use crate::service::domain::predicate::{
 };
 use crate::service::operation::{service_names, Operation, OperationError, OperationResponse};
 use crate::service::registry::{ManagedService, ServiceContext};
-use crate::storage::mutation_observer::MutationObserver;
-use crate::storage::record::{Record, RecordValue};
+use crate::storage::expiry::lww_is_live;
+use crate::storage::record::RecordValue;
 use crate::storage::RecordStoreFactory;
 
 /// Machine-distinguishable `SqlQueryResp.code` returned when SQL is unavailable
 /// (the `datafusion` feature is compiled out, or compiled in without a wired
 /// backend). Clients match on this code rather than the human-readable message.
 pub const SQL_FEATURE_DISABLED_CODE: &str = "FEATURE_DISABLED";
+
+/// Distinct keys a live subscribe's snapshot buffer captures before it
+/// overflows (TG-LIVE-001(c)).
+const SNAPSHOT_BUFFER_CAPACITY: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // QuerySubscription
@@ -68,29 +75,66 @@ pub struct QuerySubscription {
     pub map_name: String,
     /// The query parameters (filter, sort, pagination).
     pub query: Query,
-    /// Keys that matched on the last evaluation (for ENTER/UPDATE/LEAVE detection).
+    /// Nothing reads or writes this set: window membership lives in
+    /// `live_window`. It is still declared because test constructors name it.
     pub previous_result_keys: DashSet<String>,
     /// Sorted top-N window maintaining live membership for this subscription.
     ///
     /// Interior-mutable (its state lives behind a `Mutex`), so mutations route through
     /// `apply_mutation(&self, …)` over the `Arc<QuerySubscription>` with no `&mut` path.
-    /// This is the single authoritative window algorithm — the observer derives every
-    /// ENTER/UPDATE/LEAVE (including top-N displacement and promotion) from it.
-    ///
-    /// Wrapped in `Arc` so the mutation broadcast path can clone the handle cheaply out
-    /// of the `Arc<QuerySubscription>` and call `apply_mutation` without holding the
-    /// subscription borrow.
+    /// This is the single authoritative window algorithm — live delivery and the
+    /// snapshot fold derive every ENTER/UPDATE/LEAVE (including top-N displacement
+    /// and promotion) from it, through [`QuerySubscription::apply_and_project`].
     pub live_window: Arc<LiveWindow>,
     /// Optional field projection list. When `Some`, only these fields are
     /// included in `QUERY_RESP` and `QUERY_UPDATE` payloads sent to this subscriber.
     pub fields: Option<Vec<String>>,
-    /// Per-subscription delta accumulator that captures concurrent mutations arriving
-    /// during the initial full-scan snapshot window (between registration and drain).
-    ///
-    /// Active only during `handle_query_subscribe`'s scan phase; the observer routes
-    /// incoming mutations through the buffer while it is active so no write races
-    /// the snapshot flip. After drain, subsequent mutations go directly to `send_update`.
+    /// The snapshot buffer (TG-LIVE-001): active from before the subscription
+    /// is registered until its subscribe enqueues the snapshot. While active,
+    /// live delivery records every write of the map in it, the subscriber's
+    /// own included, and the subscribe folds them into the snapshot.
     pub delta_buffer: Arc<DeltaBuffer>,
+}
+
+impl QuerySubscription {
+    /// Runs writes through this subscription's window at once (one write on
+    /// the live path, every captured write in the snapshot fold) and returns
+    /// the deltas the subscriber is sent: the window's delta set (ENTER,
+    /// displacement LEAVE, promotion ENTER, in-window UPDATE, delete LEAVE),
+    /// with ENTER and UPDATE values projected to `fields` and LEAVE values
+    /// `Nil`. A paged subscription's window holds no row at or before its
+    /// cursor, so a row moved there leaves through an ordinary LEAVE.
+    ///
+    /// Live delivery and the snapshot fold share it, so a write folded into
+    /// the snapshot leaves the window and the rows exactly as the live path
+    /// would have (TG-LIVE-001(b)).
+    #[must_use]
+    pub fn apply_and_project<'a>(
+        &self,
+        mutations: impl IntoIterator<Item = (&'a str, Option<&'a rmpv::Value>, bool)>,
+    ) -> Vec<WindowDelta> {
+        let mut deltas = self.live_window.apply_batch(mutations);
+        if let Some(fields) = &self.fields {
+            for delta in &mut deltas {
+                if !matches!(delta.event, ChangeEventType::LEAVE) {
+                    delta.value = project_fields(fields, &delta.value);
+                }
+            }
+        }
+        deltas
+    }
+}
+
+/// Whether `data` matches the query's predicate or where clause; a query with
+/// neither matches every value.
+fn matches_query(query: &Query, data: &rmpv::Value) -> bool {
+    if let Some(pred) = &query.predicate {
+        evaluate_predicate(pred, &EvalContext::data_only(data))
+    } else if let Some(wh) = &query.r#where {
+        evaluate_where(wh, data)
+    } else {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +147,10 @@ pub struct QuerySubscription {
 /// during mutation observation, then by the owning connection and the
 /// client-chosen `query_id`: two connections may pick the same id, and neither
 /// may replace or remove the other's subscription.
+///
+/// Lock order (TG-LIVE-001): a subscription's buffer lock may be taken before a
+/// registry lock, never after. Nothing here holds a registry guard while it
+/// takes a buffer lock.
 pub struct QueryRegistry {
     /// `map_name` -> { (`connection_id`, `query_id`) -> `QuerySubscription` }
     subscriptions: DashMap<String, DashMap<(ConnectionId, String), Arc<QuerySubscription>>>,
@@ -147,6 +195,35 @@ impl QueryRegistry {
         found
     }
 
+    /// Removes `connection_id`'s subscription `query_id` on `map_name` only if
+    /// it is still the registration that owns `buffer`, so a subscribe that
+    /// gives up never removes a newer registration of the same id, nor one of
+    /// the same id on another map. Returns whether it removed one; drops the
+    /// map's entry once it holds no subscription.
+    pub fn remove_if_same(
+        &self,
+        map_name: &str,
+        connection_id: ConnectionId,
+        query_id: &str,
+        buffer: &Arc<DeltaBuffer>,
+    ) -> bool {
+        let key = (connection_id, query_id.to_string());
+        // The outer read guard must be gone before the outer `remove_if` below,
+        // which takes the write lock of the same shard: DashMap shard locks are
+        // not reentrant.
+        let removed = {
+            let Some(inner) = self.subscriptions.get(map_name) else {
+                return false;
+            };
+            inner
+                .remove_if(&key, |_, sub| Arc::ptr_eq(&sub.delta_buffer, buffer))
+                .is_some()
+        };
+        self.subscriptions
+            .remove_if(map_name, |_, inner| inner.is_empty());
+        removed
+    }
+
     /// Removes all subscriptions for a disconnected connection.
     pub fn unregister_by_connection(&self, conn_id: ConnectionId) {
         self.subscriptions.retain(|_, inner| {
@@ -161,6 +238,70 @@ impl QueryRegistry {
         match self.subscriptions.get(map_name) {
             Some(inner) => inner.iter().map(|entry| entry.value().clone()).collect(),
             None => Vec::new(),
+        }
+    }
+
+    /// Delivers one applied write of `key` in `map_name` to every live query
+    /// of the map (TG-LIVE-001). The caller holds the key's writer, so one
+    /// key's writes are delivered in the order the store applied them.
+    ///
+    /// `new_record` is the write event's record: the stored record of an LWW
+    /// put, else `None` or a value-less record (an LWW remove, an expiry
+    /// remove, an OR add or remove), both a non-match. So is a record already
+    /// expired at `now()`, the store clock (TG-TTL-001), as the fold treats it;
+    /// the clock is read only when the map has a live subscription.
+    ///
+    /// Per subscription the write is first offered to its snapshot buffer: a
+    /// subscription whose snapshot is still being built captures it, the
+    /// writer's own included, and the snapshot carries it. Otherwise the
+    /// window's deltas are sent as `QUERY_UPDATE`s, except to `exclude`, the
+    /// writing connection. Holds no registry guard while it takes a buffer
+    /// lock: it walks a cloned list of the map's subscriptions.
+    pub fn deliver_mutation(
+        &self,
+        connections: &ConnectionRegistry,
+        map_name: &str,
+        key: &str,
+        new_record: Option<&LWWRecord<rmpv::Value>>,
+        exclude: Option<ConnectionId>,
+        now: impl FnOnce() -> u64,
+    ) {
+        let subs = self.get_subscriptions_for_map(map_name);
+        if subs.is_empty() {
+            return;
+        }
+        let now = now();
+        let new_value = new_record
+            .filter(|r| lww_is_live(&r.timestamp, r.ttl_ms, now))
+            .and_then(|r| r.value.as_ref());
+        for sub in &subs {
+            let matches = new_value.is_some_and(|v| matches_query(&sub.query, v));
+            if sub.delta_buffer.route(key, new_record, matches) {
+                continue;
+            }
+            if exclude == Some(sub.connection_id) {
+                continue;
+            }
+            let deltas = sub.apply_and_project([(key, new_value, matches)]);
+            if deltas.is_empty() {
+                continue;
+            }
+            let Some(handle) = connections.get(sub.connection_id) else {
+                continue;
+            };
+            for delta in deltas {
+                let msg = Message::QueryUpdate {
+                    payload: QueryUpdatePayload {
+                        query_id: sub.query_id.clone(),
+                        key: delta.key,
+                        value: delta.value,
+                        change_type: delta.event,
+                    },
+                };
+                if let Ok(bytes) = rmp_serde::to_vec_named(&msg) {
+                    let _ = handle.try_send_broadcast(OutboundMessage::Binary(bytes));
+                }
+            }
         }
     }
 
@@ -208,257 +349,186 @@ impl Default for QueryRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// QueryMutationObserver
+// Live subscribe: registration guard and snapshot fold
 // ---------------------------------------------------------------------------
 
-/// Mutation observer that re-evaluates standing queries when data changes.
-///
-/// Implements `MutationObserver` to receive notifications from `RecordStore`
-/// and pushes `QUERY_UPDATE` messages to subscribers via `ConnectionRegistry`.
-pub struct QueryMutationObserver {
+/// Owns a live subscribe's registration from `register` until the snapshot is
+/// delivered or refused. Dropped while armed — the handler returned an error,
+/// was cancelled by the pipeline's timeout, or its future was dropped — it
+/// seals the buffer and removes the registration by identity, so a subscribe
+/// that ends before delivery leaves no registration (TG-LIVE-001(d)).
+struct SubscribeGuard {
     registry: Arc<QueryRegistry>,
-    connection_registry: Arc<ConnectionRegistry>,
-    /// Map name for this observer instance (set per-RecordStore).
     map_name: String,
-    /// Partition ID for this observer instance.
-    #[allow(dead_code)]
-    partition_id: u32,
+    connection_id: ConnectionId,
+    query_id: String,
+    buffer: Arc<DeltaBuffer>,
+    armed: bool,
 }
 
-impl QueryMutationObserver {
-    /// Creates a new observer for a specific map and partition.
-    #[must_use]
-    pub fn new(
-        registry: Arc<QueryRegistry>,
-        connection_registry: Arc<ConnectionRegistry>,
-        map_name: String,
-        partition_id: u32,
-    ) -> Self {
-        Self {
-            registry,
-            connection_registry,
-            map_name,
-            partition_id,
-        }
-    }
-
-    /// Evaluates a single key against a subscription's query predicate.
-    fn matches_query(sub: &QuerySubscription, data: &rmpv::Value) -> bool {
-        if let Some(pred) = &sub.query.predicate {
-            evaluate_predicate(pred, &EvalContext::data_only(data))
-        } else if let Some(wh) = &sub.query.r#where {
-            evaluate_where(wh, data)
-        } else {
-            // No filter: match all
-            true
-        }
-    }
-
-    /// Sends a `QUERY_UPDATE` to a subscriber's connection.
-    fn send_update(
-        &self,
-        sub: &QuerySubscription,
-        key: &str,
-        value: rmpv::Value,
-        change_type: ChangeEventType,
-    ) {
-        let payload = QueryUpdatePayload {
-            query_id: sub.query_id.clone(),
-            key: key.to_string(),
-            value,
-            change_type,
-        };
-        let msg = Message::QueryUpdate { payload };
-        if let Ok(bytes) = rmp_serde::to_vec_named(&msg) {
-            if let Some(handle) = self.connection_registry.get(sub.connection_id) {
-                let _ = handle.try_send_broadcast(OutboundMessage::Binary(bytes));
-            }
-        }
-    }
-
-    /// Common logic for `on_put` and `on_update`: re-evaluates a key against
-    /// standing queries and sends appropriate change events.
-    ///
-    /// While the subscription's `DeltaBuffer` is active (during a snapshot scan),
-    /// mutations are routed into the buffer for later drain rather than sent
-    /// directly to the subscriber. This closes the registration-gap race: a write
-    /// that arrives after the subscription was registered but before the snapshot
-    /// is sent is captured and replayed (if post-fence) or suppressed (if pre-fence)
-    /// during `deactivate_and_drain`. After drain, subsequent mutations bypass the
-    /// buffer and apply to the window + send directly.
-    fn evaluate_change(&self, key: &str, record: &Record, is_backup: bool) {
-        if is_backup {
-            return;
-        }
-
-        let subs = self.registry.get_subscriptions_for_map(&self.map_name);
-        if subs.is_empty() {
-            return;
-        }
-
-        // Extract value + HLC timestamp from the record. Skip non-LWW records (not
-        // supported in query evaluation — OrMap/OrTombstones are outside query scope).
-        let (rmpv_value, record_timestamp) = match &record.value {
-            RecordValue::Lww {
-                value, timestamp, ..
-            } => (value_to_rmpv(value), timestamp.clone()),
-            _ => return,
-        };
-
-        for sub in &subs {
-            let matches_now = Self::matches_query(sub, &rmpv_value);
-
-            // Route into the buffer when the scan window is open. `route` returns
-            // whether the buffer OWNED this mutation (active) under the SAME lock that
-            // records it — so a concurrent drain cannot slip between the active-check
-            // and the insert and cause a post-fence entry to be both drain-replayed and
-            // delivered live (a duplicate delta). When owned, the drain replays it; we
-            // must not also apply it here. When not owned (inactive), fall through to
-            // the normal live window + send path.
-            let captured = sub.delta_buffer.route(
-                key,
-                rmpv_value.clone(),
-                record_timestamp.clone(),
-                matches_now,
+impl Drop for SubscribeGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // Seal first and release the buffer lock before the registry lock
+            // (lock order: buffer before registry, never the other way round).
+            self.buffer.seal();
+            self.registry.remove_if_same(
+                &self.map_name,
+                self.connection_id,
+                &self.query_id,
+                &self.buffer,
             );
-            if captured {
-                continue;
-            }
+        }
+    }
+}
 
-            // Route the mutation through the single window algorithm. It returns the
-            // complete delta set the subscriber must receive — predicate ENTER/UPDATE/LEAVE
-            // for unbounded subscriptions, plus top-N displacement LEAVEs and promotion
-            // ENTERs when the query has a limit. There is no second predicate-only path:
-            // membership is owned by the window, and previous_result_keys is kept in sync
-            // with the deltas the window emits.
-            let deltas = sub
-                .live_window
-                .apply_mutation(key, Some(&rmpv_value), matches_now);
-
-            for delta in deltas {
-                match delta.event {
-                    ChangeEventType::ENTER | ChangeEventType::UPDATE => {
-                        sub.previous_result_keys.insert(delta.key.clone());
-                    }
-                    ChangeEventType::LEAVE => {
-                        sub.previous_result_keys.remove(&delta.key);
-                    }
+/// Folds the writes captured during a subscribe's scan into its snapshot
+/// rows: they go through the window in one batch, which leaves it as the
+/// live path would applying them one by one, and the deltas edit `results` — ENTER and UPDATE upsert the projected value
+/// by key (an existing key keeps its position, a new key is appended), LEAVE
+/// removes the key. A captured value expired at `now` (TG-TTL-001) is folded as
+/// "no row", as the scan would have left it out. The rows' order is then the
+/// caller's to restore.
+fn fold_captured(
+    results: &mut Vec<QueryResultEntry>,
+    sub: &QuerySubscription,
+    entries: &[(String, DeltaEntry)],
+    now: u64,
+) {
+    let mut slots: Vec<Option<QueryResultEntry>> = results.drain(..).map(Some).collect();
+    let mut index: HashMap<String, usize> = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(i, slot)| slot.as_ref().map(|e| (e.key.clone(), i)))
+        .collect();
+    let mutations = entries.iter().map(|(key, entry)| {
+        let live_value = entry.record.as_ref().and_then(|record| {
+            record
+                .value
+                .as_ref()
+                .filter(|_| lww_is_live(&record.timestamp, record.ttl_ms, now))
+        });
+        (
+            key.as_str(),
+            live_value,
+            live_value.is_some() && entry.matches,
+        )
+    });
+    for delta in sub.apply_and_project(mutations) {
+        match delta.event {
+            ChangeEventType::ENTER | ChangeEventType::UPDATE => {
+                let row = QueryResultEntry {
+                    key: delta.key,
+                    value: delta.value,
+                };
+                if let Some(&i) = index.get(&row.key) {
+                    slots[i] = Some(row);
+                } else {
+                    index.insert(row.key.clone(), slots.len());
+                    slots.push(Some(row));
                 }
-                self.send_update(sub, &delta.key, delta.value, delta.event);
+            }
+            ChangeEventType::LEAVE => {
+                if let Some(&i) = index.get(&delta.key) {
+                    slots[i] = None;
+                }
+            }
+        }
+    }
+    results.extend(slots.into_iter().flatten());
+}
+
+/// Why a live subscribe answered with `QUERY_SNAPSHOT_OVERFLOW`.
+#[derive(Clone, Copy)]
+enum OverflowReason {
+    /// More distinct keys were written during the scan than the buffer holds.
+    Buffer,
+    /// The connection's outbound queue had no free slot for the snapshot.
+    Channel,
+}
+
+impl OverflowReason {
+    /// The `reason` label of `topgun_query_snapshot_overflow_total`.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Buffer => "buffer",
+            Self::Channel => "channel",
+        }
+    }
+
+    /// The overflow frame's error text.
+    fn error(self) -> &'static str {
+        match self {
+            Self::Buffer => {
+                "Too many concurrent writes during snapshot; \
+                 please resubscribe to get a fresh snapshot."
+            }
+            Self::Channel => {
+                "The connection's outbound queue was full; \
+                 please resubscribe to get a fresh snapshot."
             }
         }
     }
 }
 
-impl MutationObserver for QueryMutationObserver {
-    fn on_put(
-        &self,
-        key: &str,
-        record: &Record,
-        _old_value: Option<&RecordValue>,
-        is_backup: bool,
-    ) {
-        self.evaluate_change(key, record, is_backup);
-    }
+/// The frame a subscriber is sent for `snapshot` with the `entries` captured
+/// during its scan folded in. Runs under the snapshot buffer's lock.
+fn folded_snapshot_frame(
+    mut snapshot: QueryRespPayload,
+    page_cursor: &PageCursor,
+    sub: &QuerySubscription,
+    entries: &[(String, DeltaEntry)],
+    now: u64,
+) -> Result<Vec<u8>, rmp_serde::encode::Error> {
+    fold_captured(&mut snapshot.results, sub, entries, now);
+    // Also when no row of the page changed: a capture past the page means
+    // more rows follow it.
+    page_cursor.repaginate(&mut snapshot, &sub.live_window);
+    rmp_serde::to_vec_named(&Message::QueryResp(QueryRespMessage { payload: snapshot }))
+}
 
-    fn on_update(
-        &self,
-        key: &str,
-        record: &Record,
-        _old_value: &RecordValue,
-        _new_value: &RecordValue,
-        is_backup: bool,
-    ) {
-        self.evaluate_change(key, record, is_backup);
-    }
+/// What a snapshot page's `next_cursor` is built from, kept so that a fold
+/// that changes the page can rebuild it.
+struct PageCursor {
+    limit: Option<u32>,
+    template: Vec<SortValue>,
+    predicate_hash: u64,
+    sort_hash: u64,
+    now_ms: i64,
+}
 
-    fn on_remove(&self, key: &str, record: &Record, is_backup: bool) {
-        if is_backup {
-            return;
+impl PageCursor {
+    /// The cursor after `last`, the page's last row in the query's order, when
+    /// more rows follow a page of a sorted, limited query.
+    fn next(&self, has_more: Option<bool>, last: Option<&QueryResultEntry>) -> Option<String> {
+        if has_more != Some(true) || self.limit.is_none() || self.template.is_empty() {
+            return None;
         }
-        let subs = self.registry.get_subscriptions_for_map(&self.map_name);
+        last.map(|last| {
+            build_next_cursor(
+                &last.key,
+                &last.value,
+                &self.template,
+                self.predicate_hash,
+                self.sort_hash,
+                self.now_ms,
+            )
+        })
+    }
 
-        // Extract the removed record's timestamp for buffer routing (used to fence
-        // against removes that pre-date the snapshot). Fall back to epoch-zero when
-        // the record has no LWW timestamp (OrMap/OrTombstones): the drain's fence
-        // comparison will always discard it (epoch-zero ≤ any real fence).
-        let record_timestamp = match &record.value {
-            RecordValue::Lww { timestamp, .. } => timestamp.clone(),
-            _ => topgun_core::hlc::Timestamp {
-                millis: 0,
-                counter: 0,
-                node_id: String::new(),
-            },
-        };
-
-        for sub in &subs {
-            // Route the remove into the buffer while it is active, so the drain can
-            // replay it correctly. Nil value + matches=false encodes "key was removed".
-            // `route` returns whether the buffer owned it (active) atomically with the
-            // record, so the drain-vs-live duplicate window is closed.
-            let captured =
-                sub.delta_buffer
-                    .route(key, rmpv::Value::Nil, record_timestamp.clone(), false);
-            if captured {
-                continue;
-            }
-
-            // A delete routes through the same window algorithm as a mutation: removing a
-            // key can both emit a LEAVE for that key and promote a previously-displaced row
-            // into the top-N window (an ENTER). The window owns membership; we mirror its
-            // deltas into previous_result_keys so on_clear/on_reset stay correct.
-            let deltas = sub.live_window.apply_mutation(key, None, false);
-            for delta in deltas {
-                match delta.event {
-                    ChangeEventType::ENTER | ChangeEventType::UPDATE => {
-                        sub.previous_result_keys.insert(delta.key.clone());
-                    }
-                    ChangeEventType::LEAVE => {
-                        sub.previous_result_keys.remove(&delta.key);
-                    }
-                }
-                self.send_update(sub, &delta.key, delta.value, delta.event);
-            }
+    /// Restores a folded page: its rows in the window's order (of the
+    /// unprojected values), `has_more` raised when the window holds rows past
+    /// the page, and the cursor after its new last row, so paging on from it
+    /// skips no row. `has_more` is never lowered: rows past the page removed
+    /// during the scan are not seen without the store.
+    fn repaginate(&self, page: &mut QueryRespPayload, window: &LiveWindow) {
+        let ranks = window.ranks();
+        page.results
+            .sort_by_key(|row| ranks.get(&row.key).copied().unwrap_or(usize::MAX));
+        if window.holds_past_limit() {
+            page.has_more = Some(true);
         }
-    }
-
-    fn on_evict(&self, _key: &str, _record: &Record, _is_backup: bool) {
-        // No-op for query purposes
-    }
-
-    fn on_load(&self, _key: &str, _record: &Record, _is_backup: bool) {
-        // No-op for query purposes
-    }
-
-    fn on_replication_put(&self, _key: &str, _record: &Record, _populate_index: bool) {
-        // No-op for query purposes
-    }
-
-    fn on_clear(&self) {
-        let subs = self.registry.get_subscriptions_for_map(&self.map_name);
-        for sub in &subs {
-            // Send LEAVE for every key in previous_result_keys
-            for key_ref in sub.previous_result_keys.iter() {
-                let key = key_ref.key().clone();
-                self.send_update(sub, &key, rmpv::Value::Nil, ChangeEventType::LEAVE);
-            }
-            sub.previous_result_keys.clear();
-        }
-    }
-
-    fn on_reset(&self) {
-        let subs = self.registry.get_subscriptions_for_map(&self.map_name);
-        for sub in &subs {
-            for key_ref in sub.previous_result_keys.iter() {
-                let key = key_ref.key().clone();
-                self.send_update(sub, &key, rmpv::Value::Nil, ChangeEventType::LEAVE);
-            }
-            sub.previous_result_keys.clear();
-        }
-    }
-
-    fn on_destroy(&self, _is_shutdown: bool) {
-        // No-op for query purposes
+        page.next_cursor = self.next(page.has_more, page.results.last());
     }
 }
 
@@ -474,9 +544,7 @@ impl MutationObserver for QueryMutationObserver {
 pub struct QueryService {
     query_registry: Arc<QueryRegistry>,
     record_store_factory: Arc<RecordStoreFactory>,
-    /// Retained so `unregister_by_connection` can release standing query
-    /// subscriptions when a client disconnects, and so the drain path can
-    /// deliver overflow signals directly to the subscriber's connection.
+    /// The connections a live subscribe enqueues its snapshot on.
     connection_registry: Arc<ConnectionRegistry>,
     /// Maximum records returned in a single `QUERY_RESP`. Queries matching more
     /// records are clamped to this limit with `has_more: true`.
@@ -498,18 +566,14 @@ pub struct QueryService {
     /// the DAG. Set via `with_linear_engine_for_tests()` only where a unit test
     /// must exercise the linear path.
     linear_engine_for_tests: bool,
-    /// Shared server-side Hybrid Logical Clock.
-    ///
-    /// Used to capture a fence timestamp (`hlc.now()`) immediately after
-    /// registration so that the delta-buffer drain can distinguish writes
-    /// that pre-date the snapshot (discarded) from writes that post-date it
-    /// (replayed via the live `send_update` path).
-    ///
-    /// `None` in test call sites that do not exercise the fence/drain lifecycle.
-    hlc: Option<Arc<Mutex<HLC>>>,
     #[cfg(test)]
-    /// The one hold a test may arm between a live subscribe's snapshot and its drain.
-    drain_hold: DrainHold,
+    /// The hold a test may arm right after a live subscribe registers, before
+    /// its scan.
+    register_hold: DrainHold,
+    #[cfg(test)]
+    /// The hold a test may arm between the end of a live subscribe's scan and
+    /// the seeding of its window, with its buffer active.
+    scan_hold: DrainHold,
 }
 
 /// `QUERY_RESP.code` of a refused live subscription that carries a non-empty
@@ -599,21 +663,11 @@ impl QueryService {
             sql_query_backend,
             coordinator: None,
             linear_engine_for_tests: false,
-            hlc: None,
             #[cfg(test)]
-            drain_hold: DrainHold::default(),
+            register_hold: DrainHold::default(),
+            #[cfg(test)]
+            scan_hold: DrainHold::default(),
         }
-    }
-
-    /// Attaches a shared HLC for fence-timestamp capture during snapshot scans.
-    ///
-    /// Required for the register-first → fence → drain lifecycle in production.
-    /// Test call sites that do not exercise the fence/drain path may omit this
-    /// (the fence falls back to wall-clock millis when `hlc` is `None`).
-    #[must_use]
-    pub fn with_hlc(mut self, hlc: Arc<Mutex<HLC>>) -> Self {
-        self.hlc = Some(hlc);
-        self
     }
 
     /// Attaches a `ClusterQueryCoordinator` to enable GROUP BY (DAG) queries.
@@ -733,21 +787,30 @@ impl Service<Operation> for Arc<QueryService> {
 impl QueryService {
     /// Handles a `QuerySubscribe` operation.
     ///
-    /// Lifecycle (register-first → fence → snapshot → seed → `QueryResp` → drain):
     /// A live request (no `snapshot_only`) that groups or aggregates is refused
-    /// first with `QUERY_LIVE_AGGREGATE_UNSUPPORTED`. A `snapshot_only` request runs
-    /// step 4, the clamping and projection of step 5, and step 6: it builds no
-    /// window or buffer, registers nothing, takes no fence, seeds neither the
-    /// `LiveWindow` nor the previous result keys, and drains nothing.
+    /// first with `QUERY_LIVE_AGGREGATE_UNSUPPORTED`, before anything is
+    /// registered. A `snapshot_only` request runs the scan, the clamp and the
+    /// projection and returns its `QUERY_RESP`: it builds no window or buffer
+    /// and registers nothing.
     ///
-    /// 1. Build an empty `LiveWindow` + inactive `DeltaBuffer`.
-    /// 2. Register the subscription (`DashMap` sync — no `.await` before fence).
-    /// 3. Activate the buffer, then capture `fence = hlc.now()`.
-    /// 4. Stream the snapshot (DAG scan — no per-query Merkle on full-scan path).
-    /// 5. Apply clamping, field projection; seed the `LiveWindow` + prev-keys.
-    /// 6. Send `QueryResp`.
-    /// 7. `deactivate_and_drain` the buffer: replay post-fence entries through the
-    ///    live `send_update` path; on overflow send `QUERY_SNAPSHOT_OVERFLOW`.
+    /// A live subscribe (TG-LIVE-001):
+    /// 1. Builds an empty `LiveWindow` and a `DeltaBuffer`, activates the buffer
+    ///    and only then registers the subscription, so every fan-out that finds
+    ///    the registration finds a capturing buffer. A guard armed right after
+    ///    `register` removes the registration if the handler ends before step 5.
+    /// 2. Scans the map (DAG scan — no per-query Merkle on the full-scan path)
+    ///    and clamps to `max_query_records`.
+    /// 3. Seeds the window from the snapshot rows, projects them, and
+    ///    serializes the scan snapshot.
+    /// 4. Closes the buffer under its lock: checks that this registration is
+    ///    still the registered one, reserves a slot on the connection, folds the
+    ///    captured writes into the snapshot and sends it through the slot. A
+    ///    write routed meanwhile waits on the lock and is sent live after the
+    ///    snapshot. Returns `Empty`: the snapshot is already enqueued.
+    /// 5. On a buffer overflow or a full channel, seals the buffer, removes this
+    ///    registration and returns `[scan snapshot, QUERY_SNAPSHOT_OVERFLOW]` on
+    ///    the response path; on a closed connection, or a registration that is
+    ///    gone, sends nothing.
     #[allow(clippy::too_many_lines)]
     async fn handle_query_subscribe(
         &self,
@@ -797,26 +860,32 @@ impl QueryService {
         // SIZE/RESIDENCY-gated reject, not as a blanket reject of the sort clause. The
         // `QUERY_UNBOUNDED_SORT` code is retained for that gated reject.
 
-        // A one-shot request needs no window, buffer, registration or fence: nothing
-        // is registered for it, so no live update can follow its snapshot, and a
+        // A cursor is decoded once, before anything is registered; one that does
+        // not decode is refused, as the scan refuses it for a one-shot request.
+        let input_cursor = match query.cursor.as_deref() {
+            None => None,
+            Some(cursor) => Some(decode_cursor(cursor).ok_or_else(|| {
+                OperationError::Internal(anyhow::anyhow!("query cursor: failed to decode cursor"))
+            })?),
+        };
+
+        // A one-shot request needs no window, buffer or registration: nothing is
+        // registered for it, so no live update can follow its snapshot, and a
         // subscription already registered under the same id is left untouched.
         let live = if snapshot_only {
             None
         } else {
-            // Build an empty window and an inactive buffer BEFORE registration so the
-            // observer can immediately start routing into the buffer once we activate it.
-            let live_window = Arc::new(LiveWindow::new(
-                query.sort.clone().unwrap_or_default(),
-                query.limit,
-            ));
-            // Buffer capacity: 4096 distinct concurrent writes during a scan is a generous
-            // bound; overflow falls back to the client-resubscribe signal (R5).
-            let delta_buffer = Arc::new(DeltaBuffer::new(4096));
-
-            // --- STEP 1: register the subscription (DashMap, sync — no .await) ---
-            // The registration must happen BEFORE the fence so any write that lands after
-            // register goes through the observer and, once the buffer is active, into the buffer.
-            let subscription = QuerySubscription {
+            let mut live_window =
+                LiveWindow::new(query.sort.clone().unwrap_or_default(), query.limit);
+            if let Some(cursor) = &input_cursor {
+                live_window = live_window.after_cursor(cursor.clone());
+            }
+            let live_window = Arc::new(live_window);
+            let delta_buffer = Arc::new(DeltaBuffer::new(SNAPSHOT_BUFFER_CAPACITY));
+            // Active before it is registered: a fan-out that finds the registration
+            // must find a capturing buffer, or its update could precede the snapshot.
+            delta_buffer.activate();
+            self.query_registry.register(QuerySubscription {
                 query_id: query_id.clone(),
                 connection_id,
                 map_name: map_name.clone(),
@@ -825,39 +894,27 @@ impl QueryService {
                 live_window: Arc::clone(&live_window),
                 fields: fields.clone(),
                 delta_buffer: Arc::clone(&delta_buffer),
+            });
+            let guard = SubscribeGuard {
+                registry: Arc::clone(&self.query_registry),
+                map_name: map_name.clone(),
+                connection_id,
+                query_id: query_id.clone(),
+                buffer: Arc::clone(&delta_buffer),
+                armed: true,
             };
-            self.query_registry.register(subscription);
-
-            // --- STEP 2: activate buffer, capture fence ---
-            // Activate first; the fence timestamp is captured right after so any write
-            // that beats the activate still goes into the buffer (route is a no-op when
-            // inactive, so a write before activate is already visible in the scan).
-            delta_buffer.activate();
-            let fence = self.hlc.as_ref().map_or_else(
-                || {
-                    let wall_ms: u64 = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-                        .unwrap_or(0);
-                    topgun_core::hlc::Timestamp {
-                        millis: wall_ms,
-                        counter: 0,
-                        node_id: String::new(),
-                    }
-                },
-                |h| h.lock().now(),
-            );
-            Some((live_window, delta_buffer, fence))
+            #[cfg(test)]
+            self.register_hold.pass(&query_id).await;
+            Some((live_window, delta_buffer, guard))
         };
 
-        // --- STEP 3: stream the snapshot (no per-query Merkle on the full-scan path) ---
+        // Stream the snapshot (no per-query Merkle on the full-scan path).
         // Per-query Merkle is retired for full-scans (SPEC-322c SYNC/QUERY separation).
         // The map-level Merkle tree-walk SYNC is a separate track.
 
         // Capture cursor-emission inputs before `query` is moved into QuerySubscription.
         let (predicate_hash, sort_hash) = cursor_query_hashes(&query);
         let query_limit = query.limit;
-        let input_cursor = query.cursor.as_deref().and_then(decode_cursor);
         let sort_values_template: Vec<SortValue> = query
             .sort
             .as_ref()
@@ -970,12 +1027,19 @@ impl QueryService {
             None
         };
 
-        // --- STEP 4: seed the window + prev-keys from the snapshot page ---
-        // Seed before field projection so sort-field values are present for ordering.
+        #[cfg(test)]
+        if live.is_some() {
+            self.scan_hold.pass(&query_id).await;
+        }
+
+        // Seed the window from the snapshot page, before field projection so
+        // sort-field values are present for ordering.
         if let Some((live_window, _, _)) = &live {
-            for entry in &results {
-                let _ = live_window.apply_mutation(&entry.key, Some(&entry.value), true);
-            }
+            let _ = live_window.apply_batch(
+                results
+                    .iter()
+                    .map(|entry| (entry.key.as_str(), Some(&entry.value), true)),
+            );
         }
 
         // Apply field projection.
@@ -985,43 +1049,20 @@ impl QueryService {
             }
         }
 
-        // Sync prev-keys with the seeded window.
-        if live.is_some() {
-            // Look up the registered subscription to update its prev-keys. The
-            // subscription was registered above and is still live.
-            if let Some(sub) =
-                self.query_registry
-                    .get_subscription(&map_name, connection_id, &query_id)
-            {
-                for entry in &results {
-                    sub.previous_result_keys.insert(entry.key.clone());
-                }
-            }
-        }
-
         // Cursor emission.
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0);
 
-        let next_cursor = if has_more == Some(true)
-            && query_limit.is_some()
-            && !sort_values_template.is_empty()
-        {
-            results.last().map(|last| {
-                build_next_cursor(
-                    &last.key,
-                    &last.value,
-                    &sort_values_template,
-                    predicate_hash,
-                    sort_hash,
-                    now_ms,
-                )
-            })
-        } else {
-            None
+        let page_cursor = PageCursor {
+            limit: query_limit,
+            template: sort_values_template,
+            predicate_hash,
+            sort_hash,
+            now_ms,
         };
+        let next_cursor = page_cursor.next(has_more, results.last());
 
         let cursor_status = Some(classify_cursor_status(
             input_cursor.as_ref(),
@@ -1030,106 +1071,134 @@ impl QueryService {
             sort_hash,
         ));
 
-        // --- STEP 5: send QueryResp (snapshot strictly before drain) ---
-        let resp = Message::QueryResp(QueryRespMessage {
-            payload: QueryRespPayload {
-                query_id: query_id.clone(),
-                results,
-                next_cursor,
-                has_more,
-                cursor_status,
-                // Per-query Merkle is retired for full-scans; root hash is omitted.
-                merkle_root_hash: None,
-                ..Default::default()
-            },
-        });
-        let resp_msg = OperationResponse::Message(Box::new(resp));
-
-        // --- STEP 6: deactivate and drain the buffer ---
-        // Drain under the buffer's single lock: entries with ts > fence are
-        // replayed through the live window + send_update path; entries ≤ fence
-        // were already in the snapshot. On overflow, send a QUERY_SNAPSHOT_OVERFLOW
-        // signal so the client knows to resubscribe.
-        let Some((_, delta_buffer, fence)) = live else {
-            return Ok(resp_msg);
+        let snapshot = QueryRespPayload {
+            query_id: query_id.clone(),
+            results,
+            next_cursor,
+            has_more,
+            cursor_status,
+            // Per-query Merkle is retired for full-scans; root hash is omitted.
+            merkle_root_hash: None,
+            ..Default::default()
         };
-        #[cfg(test)]
-        self.drain_hold.pass(&query_id).await;
-        match delta_buffer.deactivate_and_drain(&fence) {
-            Ok(post_fence_entries) => {
-                if let Some(sub) =
-                    self.query_registry
-                        .get_subscription(&map_name, connection_id, &query_id)
-                {
-                    for (key, entry) in post_fence_entries {
-                        // Run post-fence buffered mutations through the live window so
-                        // membership is consistent with what the subscriber will observe.
-                        let deltas =
-                            sub.live_window
-                                .apply_mutation(&key, Some(&entry.value), entry.matches);
-                        for delta in deltas {
-                            match delta.event {
-                                ChangeEventType::ENTER | ChangeEventType::UPDATE => {
-                                    sub.previous_result_keys.insert(delta.key.clone());
-                                }
-                                ChangeEventType::LEAVE => {
-                                    sub.previous_result_keys.remove(&delta.key);
-                                }
-                            }
-                            self.send_update_sub(&sub, &delta.key, delta.value, delta.event);
-                        }
-                    }
-                }
-            }
-            Err(()) => {
-                // Buffer overflowed during the scan — too many concurrent writes.
-                // Signal the client to resubscribe from a fresh snapshot.
-                if let Some(handle) = self.connection_registry.get(connection_id) {
-                    let overflow_resp = Message::QueryResp(QueryRespMessage {
-                        payload: QueryRespPayload {
-                            query_id: query_id.clone(),
-                            error: Some(
-                                "Too many concurrent writes during snapshot; \
-                                 please resubscribe to get a fresh snapshot."
-                                    .to_string(),
-                            ),
-                            code: Some(QUERY_SNAPSHOT_OVERFLOW.to_string()),
-                            ..Default::default()
-                        },
-                    });
-                    if let Ok(bytes) = rmp_serde::to_vec_named(&overflow_resp) {
-                        let _ = handle.try_send_broadcast(OutboundMessage::Binary(bytes));
-                    }
-                }
-            }
-        }
 
-        Ok(resp_msg)
+        let Some((_, delta_buffer, mut guard)) = live else {
+            return Ok(OperationResponse::Message(Box::new(Message::QueryResp(
+                QueryRespMessage { payload: snapshot },
+            ))));
+        };
+
+        self.deliver_live_snapshot(snapshot, &page_cursor, &delta_buffer, &mut guard)
     }
 
-    /// Sends a `QUERY_UPDATE` to a subscriber's connection.
-    ///
-    /// Like the observer's `send_update`, but takes an `Arc<QuerySubscription>` directly
-    /// so the drain path can reuse the same lookup the observer uses.
-    fn send_update_sub(
+    /// Delivers a live subscribe's snapshot (TG-LIVE-001): closes the buffer
+    /// and, under its lock, either enqueues the snapshot with the captured
+    /// writes folded in, or refuses the registration. Disarms the guard once
+    /// the registration is delivered or removed.
+    fn deliver_live_snapshot(
         &self,
-        sub: &QuerySubscription,
-        key: &str,
-        value: rmpv::Value,
-        change_type: ChangeEventType,
-    ) {
-        let payload = topgun_core::messages::client_events::QueryUpdatePayload {
-            query_id: sub.query_id.clone(),
-            key: key.to_string(),
-            value,
-            change_type,
+        snapshot: QueryRespPayload,
+        page_cursor: &PageCursor,
+        delta_buffer: &Arc<DeltaBuffer>,
+        guard: &mut SubscribeGuard,
+    ) -> Result<OperationResponse, OperationError> {
+        let map_name = guard.map_name.as_str();
+        let connection_id = guard.connection_id;
+        let query_id = guard.query_id.as_str();
+
+        // Serialized outside the lock: when nothing was captured, these bytes are
+        // what is sent, so no serialization runs under the lock.
+        let scan_msg = Message::QueryResp(QueryRespMessage { payload: snapshot });
+        let scan_bytes = rmp_serde::to_vec_named(&scan_msg)
+            .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
+        let Message::QueryResp(QueryRespMessage { payload: snapshot }) = scan_msg else {
+            return Err(OperationError::Internal(anyhow::anyhow!(
+                "a live snapshot is a QUERY_RESP"
+            )));
         };
-        let msg = Message::QueryUpdate { payload };
-        if let Ok(bytes) = rmp_serde::to_vec_named(&msg) {
-            if let Some(handle) = self.connection_registry.get(sub.connection_id) {
-                let _ = handle.try_send_broadcast(OutboundMessage::Binary(bytes));
-            }
+
+        let mut outcome: Result<OperationResponse, OperationError> = Ok(OperationResponse::Empty);
+        let mut overflow_reason: Option<OverflowReason> = None;
+        let remove = || {
+            self.query_registry
+                .remove_if_same(map_name, connection_id, query_id, delta_buffer);
+        };
+        let overflow = |snapshot: QueryRespPayload, reason: OverflowReason| {
+            OperationResponse::Messages(vec![
+                Message::QueryResp(QueryRespMessage { payload: snapshot }),
+                Message::QueryResp(QueryRespMessage {
+                    payload: QueryRespPayload {
+                        query_id: query_id.to_string(),
+                        error: Some(reason.error().to_string()),
+                        code: Some(QUERY_SNAPSHOT_OVERFLOW.to_string()),
+                        ..Default::default()
+                    },
+                }),
+            ])
+        };
+
+        // Nothing below awaits: every writer of this map waits on the buffer lock.
+        delta_buffer.close(|captured| {
+            // An unsubscribe or a disconnect removed this registration during the
+            // scan (or a resubscribe replaced it): send nothing and remove nothing.
+            let Some(sub) = self
+                .query_registry
+                .get_subscription(map_name, connection_id, query_id)
+                .filter(|sub| Arc::ptr_eq(&sub.delta_buffer, delta_buffer))
+            else {
+                return Closing::Sealed;
+            };
+            let entries = match captured {
+                Captured::Overflowed => {
+                    remove();
+                    overflow_reason = Some(OverflowReason::Buffer);
+                    outcome = Ok(overflow(snapshot, OverflowReason::Buffer));
+                    return Closing::Sealed;
+                }
+                Captured::Entries(entries) => entries,
+            };
+            let Some(handle) = self.connection_registry.get(connection_id) else {
+                remove();
+                return Closing::Sealed;
+            };
+            // Reserved before the fold, so a full or closed channel skips a fold
+            // whose output would be discarded.
+            let permit = match handle.tx.try_reserve() {
+                Ok(permit) => permit,
+                Err(TrySendError::Full(())) => {
+                    remove();
+                    overflow_reason = Some(OverflowReason::Channel);
+                    outcome = Ok(overflow(snapshot, OverflowReason::Channel));
+                    return Closing::Sealed;
+                }
+                Err(TrySendError::Closed(())) => {
+                    remove();
+                    return Closing::Sealed;
+                }
+            };
+            let bytes = if entries.is_empty() {
+                scan_bytes
+            } else {
+                let now = self.record_store_factory.now_ms();
+                match folded_snapshot_frame(snapshot, page_cursor, &sub, &entries, now) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        remove();
+                        outcome = Err(OperationError::Internal(anyhow::anyhow!("{e}")));
+                        return Closing::Sealed;
+                    }
+                }
+            };
+            permit.send(OutboundMessage::Binary(bytes));
+            Closing::Live
+        });
+        guard.armed = false;
+
+        if let Some(reason) = overflow_reason {
+            metrics::counter!("topgun_query_snapshot_overflow_total", "reason" => reason.label())
+                .increment(1);
         }
+        outcome
     }
 
     /// Handles a `QueryUnsubscribe` operation: removes the calling
@@ -1639,12 +1708,12 @@ type DrainHoldGate = (
 );
 
 #[cfg(test)]
-/// At most one armed hold, for one `query_id`, between a live subscribe's
-/// snapshot and its drain, so a test can fill the still-active delta buffer
+/// At most one armed hold, for one `query_id`, at one point of a live
+/// subscribe, so a test can write while the snapshot buffer is active,
 /// deterministically. It belongs to one service, so tests running side by side
 /// in one process cannot consume each other's hold. A hold must stay far below
 /// the pipeline's operation timeout (30 s by default), which would cancel the
-/// handler with the buffer still active and the subscription registered.
+/// handler.
 #[derive(Default)]
 struct DrainHold(std::sync::Mutex<Option<(String, DrainHoldGate)>>);
 
@@ -1673,7 +1742,7 @@ impl DrainHold {
 }
 
 #[cfg(test)]
-/// The test's side of the drain hold. Dropping it releases the held subscribe,
+/// The test's side of a hold. Dropping it releases the held subscribe,
 /// so a failing test never leaves a task held.
 struct DrainHoldHandle {
     reached: Option<tokio::sync::oneshot::Receiver<()>>,
@@ -1688,7 +1757,7 @@ impl DrainHoldHandle {
         let reached = self.reached.take().expect("wait_reached called once");
         tokio::time::timeout(std::time::Duration::from_secs(2), reached)
             .await
-            .expect("the subscribe never reached the drain hold")
+            .expect("the subscribe never reached the hold")
             .expect("hold dropped before it was reached");
     }
 
@@ -1702,13 +1771,23 @@ impl DrainHoldHandle {
 #[cfg(test)]
 impl QueryService {
     /// Arms the hold for the next live subscribe of `query_id` on this service:
-    /// it stops after its snapshot response is built and before its delta
-    /// buffer is drained, with the buffer active.
-    fn test_hold_before_drain(&self, query_id: &str) -> DrainHoldHandle {
+    /// it stops between the end of its scan (after the `max_query_records`
+    /// clamp) and the seeding of its window, with the buffer active, the scan
+    /// rows fixed and the window still empty.
+    fn test_hold_after_scan(&self, query_id: &str) -> DrainHoldHandle {
+        Self::arm_hold(&self.scan_hold, query_id)
+    }
+
+    /// Arms the hold for the next live subscribe of `query_id` on this service:
+    /// it stops right after `register`, before the scan, with the buffer active.
+    fn test_hold_after_register(&self, query_id: &str) -> DrainHoldHandle {
+        Self::arm_hold(&self.register_hold, query_id)
+    }
+
+    fn arm_hold(hold: &DrainHold, query_id: &str) -> DrainHoldHandle {
         let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        *self
-            .drain_hold
+        *hold
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -1745,7 +1824,7 @@ mod tests {
     use crate::service::operation::{service_names, OperationContext};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
-    use crate::storage::record::{Record, RecordMetadata, RecordValue};
+    use crate::storage::record::RecordValue;
     use crate::storage::RecordStoreFactory;
 
     fn make_timestamp() -> Timestamp {
@@ -1760,17 +1839,6 @@ mod tests {
         let mut ctx = OperationContext::new(1, service_names::QUERY, make_timestamp(), 5000);
         ctx.connection_id = conn_id;
         ctx
-    }
-
-    fn make_record(value: Value) -> Record {
-        Record {
-            value: RecordValue::Lww {
-                value,
-                timestamp: make_timestamp(),
-                ttl_ms: None,
-            },
-            metadata: RecordMetadata::new(1_700_000_000_000, 64),
-        }
     }
 
     fn make_value_map(pairs: Vec<(&str, Value)>) -> Value {
@@ -1815,6 +1883,29 @@ mod tests {
     /// capacity 64 (generous for any in-test write count).
     fn inactive_buffer() -> Arc<DeltaBuffer> {
         Arc::new(DeltaBuffer::new(64))
+    }
+
+    /// The snapshot a live subscribe enqueued on its connection. The handler
+    /// returns `Empty` (TG-LIVE-001): the `QUERY_RESP` is on the receiver, and
+    /// no `QUERY_UPDATE` of the query precedes it.
+    fn live_snapshot(
+        resp: &OperationResponse,
+        rx: &mut tokio::sync::mpsc::Receiver<OutboundMessage>,
+    ) -> QueryRespMessage {
+        assert!(
+            matches!(resp, OperationResponse::Empty),
+            "a live subscribe enqueues its snapshot itself"
+        );
+        while let Ok(OutboundMessage::Binary(bytes)) = rx.try_recv() {
+            match rmp_serde::from_slice::<Message>(&bytes).expect("decodes") {
+                Message::QueryResp(resp) => return resp,
+                Message::QueryUpdate { payload } => {
+                    panic!("a QUERY_UPDATE precedes the snapshot: {payload:?}")
+                }
+                _ => {}
+            }
+        }
+        panic!("no QUERY_RESP was enqueued")
     }
 
     // ---- QueryRegistry tests ----
@@ -1935,347 +2026,6 @@ mod tests {
 
         let subs = registry.get_subscriptions_for_map("nonexistent");
         assert!(subs.is_empty());
-    }
-
-    // ---- QueryMutationObserver tests ----
-
-    #[test]
-    fn observer_skips_backup_partitions() {
-        let registry = Arc::new(QueryRegistry::new());
-        let conn_registry = Arc::new(ConnectionRegistry::new());
-        let observer =
-            QueryMutationObserver::new(registry.clone(), conn_registry, "users".to_string(), 0);
-
-        // Register a subscription
-        let prev_keys = DashSet::new();
-        registry.register(QuerySubscription {
-            query_id: "q-1".to_string(),
-            connection_id: ConnectionId(1),
-            map_name: "users".to_string(),
-            live_window: seeded_window(&Query::default(), &[]),
-            query: Query::default(),
-            previous_result_keys: prev_keys,
-            fields: None,
-            delta_buffer: inactive_buffer(),
-        });
-
-        let record = make_record(make_value_map(vec![(
-            "name",
-            Value::String("Alice".to_string()),
-        )]));
-
-        // on_put with is_backup=true should be a no-op
-        observer.on_put("key1", &record, None, true);
-
-        // The subscription's previous_result_keys should still be empty
-        let subs = registry.get_subscriptions_for_map("users");
-        assert!(subs[0].previous_result_keys.is_empty());
-    }
-
-    #[test]
-    fn observer_enter_on_new_match() {
-        let registry = Arc::new(QueryRegistry::new());
-        let conn_registry = Arc::new(ConnectionRegistry::new());
-        let config = test_config();
-        let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
-        let conn_id = handle.id;
-
-        let observer =
-            QueryMutationObserver::new(registry.clone(), conn_registry, "users".to_string(), 0);
-
-        // Register subscription with no predicate (match all)
-        registry.register(QuerySubscription {
-            query_id: "q-1".to_string(),
-            connection_id: conn_id,
-            map_name: "users".to_string(),
-            live_window: seeded_window(&Query::default(), &[]),
-            query: Query::default(),
-            previous_result_keys: DashSet::new(),
-            fields: None,
-            delta_buffer: inactive_buffer(),
-        });
-
-        let record = make_record(make_value_map(vec![(
-            "name",
-            Value::String("Alice".to_string()),
-        )]));
-        observer.on_put("key1", &record, None, false);
-
-        // Should have received an ENTER event
-        let msg = rx.try_recv().expect("should have received a message");
-        match msg {
-            OutboundMessage::Binary(bytes) => {
-                let decoded: Message = rmp_serde::from_slice(&bytes).expect("decode");
-                match decoded {
-                    Message::QueryUpdate { payload } => {
-                        assert_eq!(payload.query_id, "q-1");
-                        assert_eq!(payload.key, "key1");
-                        assert_eq!(payload.change_type, ChangeEventType::ENTER);
-                    }
-                    _ => panic!("expected QueryUpdate message"),
-                }
-            }
-            OutboundMessage::Close(_) => panic!("expected Binary message"),
-        }
-
-        // Key should now be in previous_result_keys
-        let subs = registry.get_subscriptions_for_map("users");
-        assert!(subs[0].previous_result_keys.contains("key1"));
-    }
-
-    #[test]
-    fn observer_update_on_existing_match() {
-        let registry = Arc::new(QueryRegistry::new());
-        let conn_registry = Arc::new(ConnectionRegistry::new());
-        let config = test_config();
-        let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
-        let conn_id = handle.id;
-
-        let observer =
-            QueryMutationObserver::new(registry.clone(), conn_registry, "users".to_string(), 0);
-
-        // Register subscription with key already in previous_result_keys
-        let prev_keys = DashSet::new();
-        prev_keys.insert("key1".to_string());
-        let query = Query::default(); // match all
-        registry.register(QuerySubscription {
-            query_id: "q-1".to_string(),
-            connection_id: conn_id,
-            map_name: "users".to_string(),
-            live_window: seeded_window(&query, &["key1"]),
-            query,
-            previous_result_keys: prev_keys,
-            fields: None,
-            delta_buffer: inactive_buffer(),
-        });
-
-        let old_value = RecordValue::Lww {
-            value: make_value_map(vec![("name", Value::String("Alice".to_string()))]),
-            timestamp: make_timestamp(),
-            ttl_ms: None,
-        };
-        let new_value = RecordValue::Lww {
-            value: make_value_map(vec![("name", Value::String("Alice Updated".to_string()))]),
-            timestamp: make_timestamp(),
-            ttl_ms: None,
-        };
-        let record = Record {
-            value: new_value.clone(),
-            metadata: RecordMetadata::new(1_700_000_000_000, 64),
-        };
-
-        observer.on_update("key1", &record, &old_value, &new_value, false);
-
-        let msg = rx.try_recv().expect("should have received a message");
-        match msg {
-            OutboundMessage::Binary(bytes) => {
-                let decoded: Message = rmp_serde::from_slice(&bytes).expect("decode");
-                match decoded {
-                    Message::QueryUpdate { payload } => {
-                        assert_eq!(payload.change_type, ChangeEventType::UPDATE);
-                        assert_eq!(payload.key, "key1");
-                    }
-                    _ => panic!("expected QueryUpdate"),
-                }
-            }
-            OutboundMessage::Close(_) => panic!("expected Binary"),
-        }
-    }
-
-    #[test]
-    fn observer_leave_on_no_longer_matching() {
-        let registry = Arc::new(QueryRegistry::new());
-        let conn_registry = Arc::new(ConnectionRegistry::new());
-        let config = test_config();
-        let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
-        let conn_id = handle.id;
-
-        let observer =
-            QueryMutationObserver::new(registry.clone(), conn_registry, "users".to_string(), 0);
-
-        // Subscription requires age >= 18
-        let prev_keys = DashSet::new();
-        prev_keys.insert("key1".to_string());
-        let query = Query {
-            predicate: Some(PredicateNode {
-                op: PredicateOp::Gte,
-                attribute: Some("age".to_string()),
-                value: Some(rmpv::Value::Integer(18.into())),
-                ..Default::default()
-            }),
-            ..Query::default()
-        };
-        registry.register(QuerySubscription {
-            query_id: "q-1".to_string(),
-            connection_id: conn_id,
-            map_name: "users".to_string(),
-            live_window: seeded_window(&query, &["key1"]),
-            query,
-            previous_result_keys: prev_keys,
-            fields: None,
-            delta_buffer: inactive_buffer(),
-        });
-
-        // Update to age=10 (no longer matches)
-        let record = make_record(make_value_map(vec![("age", Value::Int(10))]));
-        observer.on_put("key1", &record, None, false);
-
-        let msg = rx.try_recv().expect("should have received a message");
-        match msg {
-            OutboundMessage::Binary(bytes) => {
-                let decoded: Message = rmp_serde::from_slice(&bytes).expect("decode");
-                match decoded {
-                    Message::QueryUpdate { payload } => {
-                        assert_eq!(payload.change_type, ChangeEventType::LEAVE);
-                        assert_eq!(payload.key, "key1");
-                    }
-                    _ => panic!("expected QueryUpdate"),
-                }
-            }
-            OutboundMessage::Close(_) => panic!("expected Binary"),
-        }
-
-        // Key should have been removed from previous_result_keys
-        let subs = registry.get_subscriptions_for_map("users");
-        assert!(!subs[0].previous_result_keys.contains("key1"));
-    }
-
-    #[test]
-    fn observer_leave_on_remove() {
-        let registry = Arc::new(QueryRegistry::new());
-        let conn_registry = Arc::new(ConnectionRegistry::new());
-        let config = test_config();
-        let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
-        let conn_id = handle.id;
-
-        let observer =
-            QueryMutationObserver::new(registry.clone(), conn_registry, "users".to_string(), 0);
-
-        let prev_keys = DashSet::new();
-        prev_keys.insert("key1".to_string());
-        let query = Query::default();
-        registry.register(QuerySubscription {
-            query_id: "q-1".to_string(),
-            connection_id: conn_id,
-            map_name: "users".to_string(),
-            live_window: seeded_window(&query, &["key1"]),
-            query,
-            previous_result_keys: prev_keys,
-            fields: None,
-            delta_buffer: inactive_buffer(),
-        });
-
-        let record = make_record(make_value_map(vec![(
-            "name",
-            Value::String("Alice".to_string()),
-        )]));
-        observer.on_remove("key1", &record, false);
-
-        let msg = rx.try_recv().expect("should have received a message");
-        match msg {
-            OutboundMessage::Binary(bytes) => {
-                let decoded: Message = rmp_serde::from_slice(&bytes).expect("decode");
-                match decoded {
-                    Message::QueryUpdate { payload } => {
-                        assert_eq!(payload.change_type, ChangeEventType::LEAVE);
-                    }
-                    _ => panic!("expected QueryUpdate"),
-                }
-            }
-            OutboundMessage::Close(_) => panic!("expected Binary"),
-        }
-    }
-
-    #[test]
-    fn observer_on_clear_sends_leave_for_all_previous_keys() {
-        let registry = Arc::new(QueryRegistry::new());
-        let conn_registry = Arc::new(ConnectionRegistry::new());
-        let config = test_config();
-        let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
-        let conn_id = handle.id;
-
-        let observer =
-            QueryMutationObserver::new(registry.clone(), conn_registry, "users".to_string(), 0);
-
-        let prev_keys = DashSet::new();
-        prev_keys.insert("k1".to_string());
-        prev_keys.insert("k2".to_string());
-        let query = Query::default();
-        registry.register(QuerySubscription {
-            query_id: "q-1".to_string(),
-            connection_id: conn_id,
-            map_name: "users".to_string(),
-            live_window: seeded_window(&query, &["k1", "k2"]),
-            query,
-            previous_result_keys: prev_keys,
-            fields: None,
-            delta_buffer: inactive_buffer(),
-        });
-
-        observer.on_clear();
-
-        // Should receive 2 LEAVE messages
-        let mut leave_count = 0;
-        while let Ok(msg) = rx.try_recv() {
-            match msg {
-                OutboundMessage::Binary(bytes) => {
-                    let decoded: Message = rmp_serde::from_slice(&bytes).expect("decode");
-                    match decoded {
-                        Message::QueryUpdate { payload } => {
-                            assert_eq!(payload.change_type, ChangeEventType::LEAVE);
-                            assert_eq!(payload.value, rmpv::Value::Nil);
-                            leave_count += 1;
-                        }
-                        _ => panic!("expected QueryUpdate"),
-                    }
-                }
-                OutboundMessage::Close(_) => panic!("expected Binary"),
-            }
-        }
-        assert_eq!(leave_count, 2);
-
-        // previous_result_keys should be cleared
-        let subs = registry.get_subscriptions_for_map("users");
-        assert!(subs[0].previous_result_keys.is_empty());
-    }
-
-    #[test]
-    fn observer_noop_no_matching_key_not_in_previous() {
-        let registry = Arc::new(QueryRegistry::new());
-        let conn_registry = Arc::new(ConnectionRegistry::new());
-        let config = test_config();
-        let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
-        let conn_id = handle.id;
-
-        let observer =
-            QueryMutationObserver::new(registry.clone(), conn_registry, "users".to_string(), 0);
-
-        // Subscription requires age >= 18; key1 not in previous
-        registry.register(QuerySubscription {
-            query_id: "q-1".to_string(),
-            connection_id: conn_id,
-            map_name: "users".to_string(),
-            live_window: seeded_window(&Query::default(), &[]),
-            query: Query {
-                predicate: Some(PredicateNode {
-                    op: PredicateOp::Gte,
-                    attribute: Some("age".to_string()),
-                    value: Some(rmpv::Value::Integer(18.into())),
-                    ..Default::default()
-                }),
-                ..Query::default()
-            },
-            previous_result_keys: DashSet::new(),
-            fields: None,
-            delta_buffer: inactive_buffer(),
-        });
-
-        // Put a record that does NOT match (age=10)
-        let record = make_record(make_value_map(vec![("age", Value::Int(10))]));
-        observer.on_put("key1", &record, None, false);
-
-        // No message should be sent
-        assert!(rx.try_recv().is_err());
     }
 
     // ---- QueryService tests ----
@@ -2400,7 +2150,7 @@ mod tests {
         let factory = make_factory();
         let conn_registry = Arc::new(ConnectionRegistry::new());
         let config = test_config();
-        let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+        let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
         let conn_id = handle.id;
 
         let svc = Arc::new(QueryService::new(
@@ -2424,18 +2174,9 @@ mod tests {
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
-        let result = svc.oneshot(op).await.unwrap();
-
-        match result {
-            OperationResponse::Message(msg) => match *msg {
-                Message::QueryResp(resp) => {
-                    assert_eq!(resp.payload.query_id, "q-1");
-                    assert!(resp.payload.results.is_empty());
-                }
-                _ => panic!("expected QueryResp"),
-            },
-            _ => panic!("expected Message response"),
-        }
+        let resp = live_snapshot(&svc.oneshot(op).await.unwrap(), &mut rx);
+        assert_eq!(resp.payload.query_id, "q-1");
+        assert!(resp.payload.results.is_empty());
 
         // Subscription should be registered
         assert_eq!(registry.subscription_count(), 1);
@@ -2492,7 +2233,7 @@ mod tests {
 
         let conn_registry = Arc::new(ConnectionRegistry::new());
         let config = test_config();
-        let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+        let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
         let conn_id = handle.id;
 
         // No coordinator → single-node `run_dag_local` is the engine.
@@ -2531,13 +2272,7 @@ mod tests {
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
-        let resp = match svc.oneshot(op).await.unwrap() {
-            OperationResponse::Message(msg) => match *msg {
-                Message::QueryResp(resp) => resp,
-                _ => panic!("expected QueryResp"),
-            },
-            _ => panic!("expected Message response"),
-        };
+        let resp = live_snapshot(&svc.oneshot(op).await.unwrap(), &mut rx);
 
         let results = resp.payload.results;
         assert_eq!(results.len(), 5);
@@ -2607,7 +2342,7 @@ mod tests {
 
         let conn_registry = Arc::new(ConnectionRegistry::new());
         let config = test_config();
-        let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+        let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
         let conn_id = handle.id;
 
         let svc = Arc::new(QueryService::new(
@@ -2631,13 +2366,7 @@ mod tests {
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
-        let resp = match svc.oneshot(op).await.unwrap() {
-            OperationResponse::Message(msg) => match *msg {
-                Message::QueryResp(resp) => resp,
-                _ => panic!("expected QueryResp"),
-            },
-            _ => panic!("expected Message response"),
-        };
+        let resp = live_snapshot(&svc.oneshot(op).await.unwrap(), &mut rx);
 
         // (1) COMPLETENESS — the TODO-530 invariant (holds for both designs).
         assert_eq!(
@@ -2701,7 +2430,7 @@ mod tests {
 
         let conn_registry = Arc::new(ConnectionRegistry::new());
         let config = test_config();
-        let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+        let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
         let conn_id = handle.id;
 
         let svc = Arc::new(QueryService::new(
@@ -2731,13 +2460,7 @@ mod tests {
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
-        let resp = match svc.oneshot(op).await.unwrap() {
-            OperationResponse::Message(msg) => match *msg {
-                Message::QueryResp(resp) => resp,
-                _ => panic!("expected QueryResp"),
-            },
-            _ => panic!("expected Message response"),
-        };
+        let resp = live_snapshot(&svc.oneshot(op).await.unwrap(), &mut rx);
 
         // (1) PAGE CORRECTNESS — exactly LIMIT rows, the first LIMIT keys ascending.
         let keys: Vec<String> = resp.payload.results.iter().map(|e| e.key.clone()).collect();
@@ -2794,7 +2517,7 @@ mod tests {
 
         let conn_registry = Arc::new(ConnectionRegistry::new());
         let config = test_config();
-        let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+        let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &config);
         let conn_id = handle.id;
 
         let svc = Arc::new(
@@ -2828,17 +2551,12 @@ mod tests {
                 snapshot_only: false,
             },
         };
-        let resp = match svc
-            .oneshot(Operation::QuerySubscribe { ctx, payload })
-            .await
-            .unwrap()
-        {
-            OperationResponse::Message(msg) => match *msg {
-                Message::QueryResp(resp) => resp,
-                _ => panic!("expected QueryResp"),
-            },
-            _ => panic!("expected Message response"),
-        };
+        let resp = live_snapshot(
+            &svc.oneshot(Operation::QuerySubscribe { ctx, payload })
+                .await
+                .unwrap(),
+            &mut rx,
+        );
 
         assert_eq!(resp.payload.results.len(), 1);
         assert_eq!(resp.payload.results[0].key, "p-old");
@@ -2989,11 +2707,18 @@ mod tests {
 
     type TestConnection = (ConnectionId, tokio::sync::mpsc::Receiver<OutboundMessage>);
 
+    /// Delivers writes of `users` through the production delivery function,
+    /// over the registries a test's query service uses.
+    struct UsersWriter {
+        registry: Arc<QueryRegistry>,
+        connections: Arc<ConnectionRegistry>,
+    }
+
     /// A query service over a fresh registry with two client connections, and
-    /// an observer of `users` that feeds that registry.
+    /// a writer of `users` that delivers into that registry.
     fn two_connection_query_service() -> (
         Arc<QueryService>,
-        QueryMutationObserver,
+        UsersWriter,
         TestConnection,
         TestConnection,
     ) {
@@ -3010,8 +2735,11 @@ mod tests {
             #[cfg(feature = "datafusion")]
             None,
         ));
-        let observer = QueryMutationObserver::new(registry, conn_registry, "users".to_string(), 0);
-        (svc, observer, (a.id, rx_a), (b.id, rx_b))
+        let writer = UsersWriter {
+            registry,
+            connections: conn_registry,
+        };
+        (svc, writer, (a.id, rx_a), (b.id, rx_b))
     }
 
     fn query_unsubscribe(connection: ConnectionId, query_id: &str) -> Operation {
@@ -3025,9 +2753,28 @@ mod tests {
         }
     }
 
-    fn write_user(observer: &QueryMutationObserver, key: &str) {
-        let record = make_record(make_value_map(vec![("n", Value::Int(1))]));
-        observer.on_put(key, &record, None, false);
+    /// An LWW record holding `value`, as a write event carries it.
+    fn lww_record(value: rmpv::Value) -> LWWRecord<rmpv::Value> {
+        LWWRecord {
+            value: Some(value),
+            timestamp: make_timestamp(),
+            ttl_ms: None,
+        }
+    }
+
+    fn write_user(writer: &UsersWriter, key: &str) {
+        let record = lww_record(rmpv::Value::Map(vec![(
+            rmpv::Value::from("n"),
+            rmpv::Value::from(1),
+        )]));
+        writer.registry.deliver_mutation(
+            &writer.connections,
+            "users",
+            key,
+            Some(&record),
+            None,
+            || 0,
+        );
     }
 
     fn update(query_id: &str, key: &str) -> Vec<(String, String)> {
@@ -3038,14 +2785,14 @@ mod tests {
     /// subscription delivering.
     #[tokio::test]
     async fn a_connection_cannot_remove_another_connections_query_subscription() {
-        let (svc, observer, (a, mut rx_a), (b, mut rx_b)) = two_connection_query_service();
+        let (svc, writer, (a, mut rx_a), (b, mut rx_b)) = two_connection_query_service();
         subscribe_all_users(&svc, a, "q-a").await;
 
         svc.clone()
             .oneshot(query_unsubscribe(b, "q-a"))
             .await
             .unwrap();
-        write_user(&observer, "k1");
+        write_user(&writer, "k1");
 
         assert_eq!(received_updates(&mut rx_a), update("q-a", "k1"));
         assert!(received_updates(&mut rx_b).is_empty());
@@ -3056,11 +2803,11 @@ mod tests {
     /// unsubscribe stops only its own delivery.
     #[tokio::test]
     async fn connections_choosing_the_same_query_id_keep_separate_subscriptions() {
-        let (svc, observer, (a, mut rx_a), (b, mut rx_b)) = two_connection_query_service();
+        let (svc, writer, (a, mut rx_a), (b, mut rx_b)) = two_connection_query_service();
         subscribe_all_users(&svc, a, "shared").await;
         subscribe_all_users(&svc, b, "shared").await;
 
-        write_user(&observer, "k1");
+        write_user(&writer, "k1");
         assert_eq!(received_updates(&mut rx_a), update("shared", "k1"));
         assert_eq!(received_updates(&mut rx_b), update("shared", "k1"));
 
@@ -3068,7 +2815,7 @@ mod tests {
             .oneshot(query_unsubscribe(a, "shared"))
             .await
             .unwrap();
-        write_user(&observer, "k2");
+        write_user(&writer, "k2");
         assert!(received_updates(&mut rx_a).is_empty());
         assert_eq!(received_updates(&mut rx_b), update("shared", "k2"));
     }
@@ -3485,8 +3232,11 @@ mod tests {
         }
     }
 
+    /// Subscribes `fx`'s connection to `orders`. A live subscribe's snapshot is
+    /// read from the connection; a one-shot or refused request is answered on
+    /// the response path and enqueues no frame.
     async fn subscribe_orders(
-        fx: &AggFixture,
+        fx: &mut AggFixture,
         query_id: &str,
         query: Query,
         snapshot_only: bool,
@@ -3504,11 +3254,17 @@ mod tests {
             },
         };
         match fx.svc.clone().oneshot(op).await.unwrap() {
-            OperationResponse::Message(msg) => match *msg {
-                Message::QueryResp(resp) => resp.payload,
-                other => panic!("expected QueryResp, got {other:?}"),
-            },
-            _ => panic!("expected Message response"),
+            OperationResponse::Message(msg) => {
+                assert!(
+                    fx.rx.try_recv().is_err(),
+                    "a one-shot or refused request enqueues no frame"
+                );
+                match *msg {
+                    Message::QueryResp(resp) => resp.payload,
+                    other => panic!("expected QueryResp, got {other:?}"),
+                }
+            }
+            live => live_snapshot(&live, &mut fx.rx).payload,
         }
     }
 
@@ -3518,20 +3274,15 @@ mod tests {
         assert!(resp.error.is_some(), "a refusal names its reason");
     }
 
-    /// Writes a matching `orders` record through the observer and asserts that
-    /// no frame reaches the connection.
+    /// Delivers a matching `orders` write through the production delivery
+    /// function and asserts that no frame reaches the connection.
     fn assert_write_sends_nothing(fx: &mut AggFixture) {
-        let observer = QueryMutationObserver::new(
-            fx.registry.clone(),
-            fx.conn_registry.clone(),
-            "orders".to_string(),
-            0,
-        );
-        let record = make_record(make_value_map(vec![
-            ("category", Value::String("a".to_string())),
-            ("price", Value::Int(5)),
+        let record = lww_record(rmpv::Value::Map(vec![
+            (rmpv::Value::from("category"), rmpv::Value::from("a")),
+            (rmpv::Value::from("price"), rmpv::Value::from(5)),
         ]));
-        observer.on_put("o4", &record, None, false);
+        fx.registry
+            .deliver_mutation(&fx.conn_registry, "orders", "o4", Some(&record), None, || 0);
         assert!(fx.rx.try_recv().is_err(), "no frame for a refused query");
     }
 
@@ -3559,7 +3310,7 @@ mod tests {
     #[tokio::test]
     async fn live_group_by_subscription_is_refused_and_registers_nothing() {
         let mut fx = agg_fixture().await;
-        let resp = subscribe_orders(&fx, "g-1", group_by_category(), false).await;
+        let resp = subscribe_orders(&mut fx, "g-1", group_by_category(), false).await;
         assert_live_aggregate_refused(&resp);
         assert_eq!(fx.registry.subscription_count(), 0);
         assert_write_sends_nothing(&mut fx);
@@ -3576,7 +3327,7 @@ mod tests {
             }]),
             ..Query::default()
         };
-        let resp = subscribe_orders(&fx, "g-2", query, false).await;
+        let resp = subscribe_orders(&mut fx, "g-2", query, false).await;
         assert_live_aggregate_refused(&resp);
         assert_eq!(fx.registry.subscription_count(), 0);
         assert_write_sends_nothing(&mut fx);
@@ -3584,13 +3335,13 @@ mod tests {
 
     #[tokio::test]
     async fn empty_group_by_and_aggregations_stay_live() {
-        let fx = agg_fixture().await;
+        let mut fx = agg_fixture().await;
         let query = Query {
             group_by: Some(vec![]),
             aggregations: Some(vec![]),
             ..Query::default()
         };
-        let resp = subscribe_orders(&fx, "g-3", query, false).await;
+        let resp = subscribe_orders(&mut fx, "g-3", query, false).await;
         assert_eq!(resp.code, None);
         assert_eq!(resp.results.len(), 3, "raw records");
         assert_eq!(fx.registry.subscription_count(), 1);
@@ -3598,15 +3349,15 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_only_serves_grouped_rows_and_registers_nothing() {
-        let fx = agg_fixture().await;
-        let resp = subscribe_orders(&fx, "g-4", group_by_category(), true).await;
+        let mut fx = agg_fixture().await;
+        let resp = subscribe_orders(&mut fx, "g-4", group_by_category(), true).await;
         assert_eq!(resp.code, None);
         assert_eq!(resp.results.len(), 2, "two groups: {:?}", resp.results);
         assert_eq!(group_count(&resp, "a"), 2);
         assert_eq!(group_count(&resp, "b"), 1);
         assert_eq!(fx.registry.subscription_count(), 0);
 
-        let resp = subscribe_orders(&fx, "g-5", Query::default(), true).await;
+        let resp = subscribe_orders(&mut fx, "g-5", Query::default(), true).await;
         assert_eq!(resp.code, None);
         assert_eq!(resp.results.len(), 3);
         assert_eq!(fx.registry.subscription_count(), 0);
@@ -3614,12 +3365,12 @@ mod tests {
 
     #[tokio::test]
     async fn refused_live_aggregate_keeps_an_existing_subscription_of_the_same_id() {
-        let fx = agg_fixture().await;
-        let resp = subscribe_orders(&fx, "q1", category_is("a"), false).await;
+        let mut fx = agg_fixture().await;
+        let resp = subscribe_orders(&mut fx, "q1", category_is("a"), false).await;
         assert_eq!(resp.code, None);
         assert_eq!(fx.registry.subscription_count(), 1);
 
-        let resp = subscribe_orders(&fx, "q1", group_by_category(), false).await;
+        let resp = subscribe_orders(&mut fx, "q1", group_by_category(), false).await;
         assert_live_aggregate_refused(&resp);
         assert_eq!(fx.registry.subscription_count(), 1);
         let sub = fx
@@ -3631,21 +3382,19 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_only_leaves_a_live_subscription_of_the_same_id_untouched() {
-        let fx = agg_fixture().await;
-        subscribe_orders(&fx, "q1", category_is("a"), false).await;
-        let keys_of = |sub: &QuerySubscription| {
-            let mut k: Vec<String> = sub.previous_result_keys.iter().map(|k| k.clone()).collect();
-            k.sort();
-            k
-        };
+        let mut fx = agg_fixture().await;
+        let live = subscribe_orders(&mut fx, "q1", category_is("a"), false).await;
+        let mut live_keys: Vec<&str> = live.results.iter().map(|e| e.key.as_str()).collect();
+        live_keys.sort_unstable();
+        assert_eq!(live_keys, vec!["o1", "o2"]);
         let before = fx
             .registry
             .get_subscription("orders", fx.conn_id, "q1")
             .expect("registered");
-        assert_eq!(keys_of(&before), vec!["o1", "o2"]);
 
-        // Same map, and the snapshot holds `o3`, a key q1 does not hold.
-        let resp = subscribe_orders(&fx, "q1", category_is("b"), true).await;
+        // Same map, and the snapshot holds `o3`, a key q1 does not hold. The
+        // helper asserts that no frame follows the live snapshot for it.
+        let resp = subscribe_orders(&mut fx, "q1", category_is("b"), true).await;
         let keys: Vec<&str> = resp.results.iter().map(|e| e.key.as_str()).collect();
         assert_eq!(keys, vec!["o3"], "the snapshot is the new query's");
 
@@ -3654,8 +3403,8 @@ mod tests {
             .registry
             .get_subscription("orders", fx.conn_id, "q1")
             .expect("still registered");
+        assert!(Arc::ptr_eq(&before, &after), "the same registration");
         assert_eq!(after.query, category_is("a"));
-        assert_eq!(keys_of(&after), vec!["o1", "o2"]);
     }
 
     // ---------------------------------------------------------------------------
@@ -4614,6 +4363,7 @@ mod tests {
     async fn run_query_page(
         svc: &Arc<QueryService>,
         conn: ConnectionId,
+        rx: &mut tokio::sync::mpsc::Receiver<OutboundMessage>,
         query: Query,
     ) -> (Vec<(String, rmpv::Value)>, Option<bool>, Option<String>) {
         let payload = QuerySubMessage {
@@ -4629,25 +4379,18 @@ mod tests {
             ctx: make_ctx(Some(conn)),
             payload,
         };
-        match Arc::clone(svc).oneshot(op).await.unwrap() {
-            OperationResponse::Message(msg) => match *msg {
-                Message::QueryResp(resp) => {
-                    let mut results: Vec<(String, rmpv::Value)> = resp
-                        .payload
-                        .results
-                        .into_iter()
-                        .map(|e| (e.key, e.value))
-                        .collect();
-                    if resp.payload.next_cursor.is_none() && resp.payload.has_more != Some(true) {
-                        // An unsorted, unbounded result has no defined order.
-                        results.sort_by(|a, b| a.0.cmp(&b.0));
-                    }
-                    (results, resp.payload.has_more, resp.payload.next_cursor)
-                }
-                other => panic!("expected QueryResp, got {other:?}"),
-            },
-            other => panic!("expected Message, got {other:?}"),
+        let resp = live_snapshot(&Arc::clone(svc).oneshot(op).await.unwrap(), rx);
+        let mut results: Vec<(String, rmpv::Value)> = resp
+            .payload
+            .results
+            .into_iter()
+            .map(|e| (e.key, e.value))
+            .collect();
+        if resp.payload.next_cursor.is_none() && resp.payload.has_more != Some(true) {
+            // An unsorted, unbounded result has no defined order.
+            results.sort_by(|a, b| a.0.cmp(&b.0));
         }
+        (results, resp.payload.has_more, resp.payload.next_cursor)
     }
 
     /// Regression guard: the production DAG path gives the same scalar query
@@ -4690,7 +4433,7 @@ mod tests {
         );
 
         let conn_registry = Arc::new(ConnectionRegistry::new());
-        let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &test_config());
+        let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &test_config());
         let make = |with: bool| {
             Arc::new(QueryService::new(
                 Arc::new(QueryRegistry::new()),
@@ -4705,8 +4448,8 @@ mod tests {
         let (plain, indexed) = (make(false), make(true));
 
         for query in scalar_equivalence_queries() {
-            let a = run_query_page(&plain, handle.id, query.clone()).await;
-            let b = run_query_page(&indexed, handle.id, query.clone()).await;
+            let a = run_query_page(&plain, handle.id, &mut rx, query.clone()).await;
+            let b = run_query_page(&indexed, handle.id, &mut rx, query.clone()).await;
             assert_eq!(a.0, b.0, "results differ for {query:?}");
             assert_eq!(a.1, b.1, "has_more differs for {query:?}");
             assert!(!a.0.is_empty() || query.predicate.is_some());
@@ -4718,144 +4461,1217 @@ mod tests {
             limit: Some(4),
             ..Query::default()
         };
-        let (_, _, cursor) = run_query_page(&plain, handle.id, first.clone()).await;
+        let (_, _, cursor) = run_query_page(&plain, handle.id, &mut rx, first.clone()).await;
         let cursor = cursor.expect("a limited first page carries a cursor");
         let second = Query {
             cursor: Some(cursor),
             ..first
         };
-        let a = run_query_page(&plain, handle.id, second.clone()).await;
-        let b = run_query_page(&indexed, handle.id, second).await;
+        let a = run_query_page(&plain, handle.id, &mut rx, second.clone()).await;
+        let b = run_query_page(&indexed, handle.id, &mut rx, second).await;
         assert_eq!(a.0, b.0, "second page differs");
         assert_eq!(a.1, b.1);
         assert!(!a.0.is_empty());
     }
 
-    /// The server contract the client's overflow handling relies on. A live
-    /// subscribe whose delta buffer overflows between its snapshot and its drain
-    /// (i) enqueues the `QUERY_SNAPSHOT_OVERFLOW` frame on the connection BEFORE
-    /// the handler returns its snapshot, (ii) still returns the snapshot, (iii)
-    /// stays registered, and (iv) a resubscribe with the same id replaces it.
-    ///
-    /// Why the order of (i)/(ii) is pinned: a client older than error routing
-    /// applies the overflow frame as an empty result and wipes its rows; today
-    /// the snapshot that follows puts them back. Reversing the order would make
-    /// that wipe stick. A server change that sends the snapshot first must flip
-    /// (i)/(ii) here and state that cost for old clients.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn overflow_frame_precedes_the_snapshot_and_the_subscription_stays() {
-        const QUERY_ID: &str = "pin-overflow";
-        let map_name = "pin-map";
-        let registry = Arc::new(QueryRegistry::new());
-        let factory = make_factory();
-        for i in 0..3 {
-            let key = format!("seed-{i}");
-            factory
-                .get_or_create(map_name, topgun_core::hash_to_partition(&key))
-                .put(
-                    &KeyWriteToken::for_test(map_name, &key),
-                    &key,
-                    RecordValue::Lww {
-                        value: Value::Int(i),
-                        timestamp: make_timestamp(),
-                        ttl_ms: None,
-                    },
-                    crate::storage::record_store::CallerProvenance::Client,
-                )
-                .await
-                .expect("seed put");
-        }
+    // ---------------------------------------------------------------------------
+    // Live subscribe snapshot (TG-LIVE-001): writes through `CrdtService` over the
+    // registries the query service uses, frames read from the connections.
+    // ---------------------------------------------------------------------------
 
-        let conn_registry = Arc::new(ConnectionRegistry::new());
-        let (handle, mut rx) = conn_registry.register(ConnectionKind::Client, &test_config());
-        let conn_id = handle.id;
+    use crate::service::domain::crdt::CrdtService;
+    use crate::service::domain::schema::SchemaService;
+    use crate::service::security::{SecurityConfig, WriteAdmission};
+    use crate::storage::expiry::ManualClock;
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use topgun_core::messages::base::ClientOp;
+    use topgun_core::messages::ClientOpMessage;
+    use topgun_core::ORMapRecord;
+
+    const LIVE_MAP: &str = "live";
+    const LIVE_ID: &str = "q-live";
+
+    type Rx = tokio::sync::mpsc::Receiver<OutboundMessage>;
+
+    /// A query service and a CRDT service over one query registry and one
+    /// connection registry, with a subscriber `s` and a writer `w`.
+    struct Live {
+        svc: Arc<QueryService>,
+        crdt: Arc<CrdtService>,
+        registry: Arc<QueryRegistry>,
+        conns: Arc<ConnectionRegistry>,
+        factory: Arc<RecordStoreFactory>,
+        s: ConnectionId,
+        s_rx: Rx,
+        w: ConnectionId,
+        _w_rx: Rx,
+    }
+
+    fn live_over(factory: Arc<RecordStoreFactory>, s_capacity: usize) -> Live {
+        let registry = Arc::new(QueryRegistry::new());
+        let conns = Arc::new(ConnectionRegistry::new());
+        let s_config = ConnectionConfig {
+            outbound_channel_capacity: s_capacity,
+            ..test_config()
+        };
+        let (s, s_rx) = conns.register(ConnectionKind::Client, &s_config);
+        let (w, w_rx) = conns.register(ConnectionKind::Client, &test_config());
         let svc = Arc::new(QueryService::new(
-            registry.clone(),
-            factory,
-            conn_registry,
+            Arc::clone(&registry),
+            Arc::clone(&factory),
+            Arc::clone(&conns),
             10_000,
             None,
             #[cfg(feature = "datafusion")]
             None,
         ));
-        let subscribe = || Operation::QuerySubscribe {
-            ctx: make_ctx(Some(conn_id)),
-            payload: QuerySubMessage {
-                payload: QuerySubPayload {
-                    query_id: QUERY_ID.to_string(),
-                    map_name: map_name.to_string(),
-                    query: Query::default(),
-                    fields: None,
-                    snapshot_only: false,
-                },
-            },
-        };
-        let snapshot_of = |response: OperationResponse| match response {
-            OperationResponse::Message(msg) => match *msg {
-                Message::QueryResp(resp) => resp.payload,
-                other => panic!("expected QueryResp, got {other:?}"),
-            },
-            _ => panic!("expected a Message response"),
-        };
+        let hlc = Arc::new(parking_lot::Mutex::new(topgun_core::HLC::new(
+            "test-node".to_string(),
+            Box::new(topgun_core::SystemClock),
+        )));
+        let crdt = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            Arc::clone(&conns),
+            Arc::new(WriteAdmission::new(
+                Arc::new(SecurityConfig::default()),
+                hlc,
+            )),
+            Arc::clone(&registry),
+            Arc::new(SchemaService::new()),
+        ));
+        Live {
+            svc,
+            crdt,
+            registry,
+            conns,
+            factory,
+            s: s.id,
+            s_rx,
+            w: w.id,
+            _w_rx: w_rx,
+        }
+    }
 
-        let mut hold = svc.test_hold_before_drain(QUERY_ID);
-        let task = tokio::spawn(Arc::clone(&svc).oneshot(subscribe()));
+    fn live() -> Live {
+        live_over(make_factory(), test_config().outbound_channel_capacity)
+    }
+
+    /// `{"v": n}`.
+    fn v(n: i64) -> rmpv::Value {
+        rmpv::Value::Map(vec![(rmpv::Value::from("v"), rmpv::Value::from(n))])
+    }
+
+    fn put(key: &str, value: rmpv::Value) -> ClientOp {
+        ClientOp {
+            map_name: LIVE_MAP.to_string(),
+            key: key.to_string(),
+            record: Some(Some(LWWRecord {
+                value: Some(value),
+                timestamp: make_timestamp(),
+                ttl_ms: None,
+            })),
+            ..ClientOp::default()
+        }
+    }
+
+    fn remove(key: &str) -> ClientOp {
+        ClientOp {
+            map_name: LIVE_MAP.to_string(),
+            key: key.to_string(),
+            record: Some(None),
+            ..ClientOp::default()
+        }
+    }
+
+    fn or_add(key: &str, value: rmpv::Value) -> ClientOp {
+        ClientOp {
+            map_name: LIVE_MAP.to_string(),
+            key: key.to_string(),
+            or_record: Some(Some(ORMapRecord {
+                value,
+                timestamp: make_timestamp(),
+                tag: "client-tag".to_string(),
+                ttl_ms: None,
+            })),
+            ..ClientOp::default()
+        }
+    }
+
+    fn or_remove(key: &str, tag: String) -> ClientOp {
+        ClientOp {
+            map_name: LIVE_MAP.to_string(),
+            key: key.to_string(),
+            or_tag: Some(Some(tag)),
+            ..ClientOp::default()
+        }
+    }
+
+    impl Live {
+        /// Applies `op` as a client op of `conn` (its stamp is minted by the
+        /// server, and `conn` is the excluded writer).
+        async fn client(&self, conn: ConnectionId, op: ClientOp) {
+            let mut ctx = OperationContext::new(1, service_names::CRDT, make_timestamp(), 5000);
+            ctx.connection_id = Some(conn);
+            ctx.partition_id = Some(topgun_core::hash_to_partition(&op.key));
+            Arc::clone(&self.crdt)
+                .oneshot(Operation::ClientOp {
+                    ctx,
+                    payload: ClientOpMessage { payload: op },
+                })
+                .await
+                .expect("client op applies");
+        }
+
+        /// Applies a trusted LWW put that keeps `stamp` (`StampPolicy::Verbatim`).
+        async fn trusted_put(&self, key: &str, value: rmpv::Value, stamp: Timestamp) {
+            self.trusted_record(key, value, stamp, None).await;
+        }
+
+        /// Applies a trusted LWW put that keeps `stamp` and `ttl_ms`.
+        async fn trusted_record(
+            &self,
+            key: &str,
+            value: rmpv::Value,
+            stamp: Timestamp,
+            ttl_ms: Option<u64>,
+        ) {
+            let mut ctx = OperationContext::new(1, service_names::CRDT, make_timestamp(), 5000);
+            ctx.caller_origin = crate::service::operation::CallerOrigin::System;
+            ctx.partition_id = Some(topgun_core::hash_to_partition(key));
+            let mut op = put(key, value);
+            op.record = Some(Some(LWWRecord {
+                value: op.record.flatten().and_then(|r| r.value),
+                timestamp: stamp,
+                ttl_ms,
+            }));
+            Arc::clone(&self.crdt)
+                .oneshot(Operation::ClientOp {
+                    ctx,
+                    payload: ClientOpMessage { payload: op },
+                })
+                .await
+                .expect("trusted op applies");
+        }
+
+        /// The stored record of `key`.
+        async fn stored(&self, key: &str) -> Option<RecordValue> {
+            self.factory
+                .get_or_create(LIVE_MAP, topgun_core::hash_to_partition(key))
+                .get(key, false)
+                .await
+                .expect("read")
+                .map(|r| r.value)
+        }
+
+        fn subscribe_op(
+            &self,
+            query_id: &str,
+            map: &str,
+            fields: Option<Vec<String>>,
+        ) -> Operation {
+            Operation::QuerySubscribe {
+                ctx: make_ctx(Some(self.s)),
+                payload: QuerySubMessage {
+                    payload: QuerySubPayload {
+                        query_id: query_id.to_string(),
+                        map_name: map.to_string(),
+                        query: Query::default(),
+                        fields,
+                        snapshot_only: false,
+                    },
+                },
+            }
+        }
+
+        fn spawn_subscribe(
+            &self,
+            fields: Option<Vec<String>>,
+        ) -> tokio::task::JoinHandle<Result<OperationResponse, OperationError>> {
+            tokio::spawn(
+                Arc::clone(&self.svc).oneshot(self.subscribe_op(LIVE_ID, LIVE_MAP, fields)),
+            )
+        }
+
+        /// Spawns a live subscribe of `query` on the live map.
+        fn spawn_subscribe_query(
+            &self,
+            query: Query,
+        ) -> tokio::task::JoinHandle<Result<OperationResponse, OperationError>> {
+            let mut op = self.subscribe_op(LIVE_ID, LIVE_MAP, None);
+            if let Operation::QuerySubscribe { payload, .. } = &mut op {
+                payload.payload.query = query;
+            }
+            tokio::spawn(Arc::clone(&self.svc).oneshot(op))
+        }
+
+        /// What a fresh one-shot query of `query` answers now.
+        async fn fresh(&self, query: Query) -> QueryRespPayload {
+            let mut op = self.subscribe_op("fresh", LIVE_MAP, None);
+            if let Operation::QuerySubscribe { payload, .. } = &mut op {
+                payload.payload.query = query;
+                payload.payload.snapshot_only = true;
+            }
+            let OperationResponse::Message(msg) =
+                Arc::clone(&self.svc).oneshot(op).await.expect("one-shot")
+            else {
+                panic!("a one-shot answers on the response path");
+            };
+            let Message::QueryResp(resp) = *msg else {
+                panic!("a QUERY_RESP");
+            };
+            resp.payload
+        }
+
+        /// The rows a fresh one-shot query of `query` returns now.
+        async fn fresh_rows(&self, query: Query) -> BTreeMap<String, rmpv::Value> {
+            let results = self.fresh(query).await.results;
+            results.into_iter().map(|e| (e.key, e.value)).collect()
+        }
+
+        fn buffer(&self) -> Arc<DeltaBuffer> {
+            let sub = self
+                .registry
+                .get_subscription(LIVE_MAP, self.s, LIVE_ID)
+                .expect("registered");
+            Arc::clone(&sub.delta_buffer)
+        }
+    }
+
+    /// Every `QUERY_RESP` and `QUERY_UPDATE` of `query_id` waiting on `rx`, in
+    /// order (`SERVER_EVENT`s and other queries' frames are skipped).
+    fn query_frames(rx: &mut Rx, query_id: &str) -> Vec<Message> {
+        let mut frames = Vec::new();
+        while let Ok(OutboundMessage::Binary(bytes)) = rx.try_recv() {
+            let msg: Message = rmp_serde::from_slice(&bytes).expect("decodes");
+            let id = match &msg {
+                Message::QueryResp(resp) => resp.payload.query_id.as_str(),
+                Message::QueryUpdate { payload } => payload.query_id.as_str(),
+                _ => continue,
+            };
+            if id == query_id {
+                frames.push(msg);
+            }
+        }
+        frames
+    }
+
+    /// The snapshot rows of the first frame, which must be the `QUERY_RESP`
+    /// (no `QUERY_UPDATE` of the query precedes it), and the frames after it.
+    fn snapshot_first(frames: Vec<Message>) -> (BTreeMap<String, rmpv::Value>, Vec<Message>) {
+        let mut frames = frames.into_iter();
+        match frames.next() {
+            Some(Message::QueryResp(resp)) => {
+                assert_eq!(resp.payload.code, None, "a delivered snapshot");
+                let rows = resp
+                    .payload
+                    .results
+                    .into_iter()
+                    .map(|e| (e.key, e.value))
+                    .collect();
+                (rows, frames.collect())
+            }
+            other => panic!("the first frame of the query is not its snapshot: {other:?}"),
+        }
+    }
+
+    /// Releases the held subscribe and returns its response.
+    async fn release(
+        mut hold: DrainHoldHandle,
+        task: tokio::task::JoinHandle<Result<OperationResponse, OperationError>>,
+    ) -> OperationResponse {
+        hold.release();
+        task.await.expect("join").expect("subscribe")
+    }
+
+    fn stored_value(record: Option<RecordValue>) -> rmpv::Value {
+        match record {
+            Some(RecordValue::Lww { value, .. }) => value_to_rmpv(&value),
+            other => panic!("expected an LWW record, got {other:?}"),
+        }
+    }
+
+    /// A write made during the scan is in the snapshot, whatever its stamp, and
+    /// the last arrival of a key is folded; no update precedes the snapshot, and
+    /// a later write arrives as an update after it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_during_the_scan_is_in_the_snapshot_and_no_update_precedes_it() {
+        let mut fx = live();
+        fx.client(fx.w, put("k1", v(1))).await;
+        fx.client(fx.w, put("k2", v(1))).await;
+        let hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe(None);
+        let mut hold = hold;
         hold.wait_reached().await;
 
-        // Held after the scan with the buffer active: 4097 distinct keys overflow it.
-        let sub = registry
-            .get_subscription(map_name, conn_id, QUERY_ID)
-            .expect("the subscription is registered before the hold");
-        for i in 0..=4096 {
-            sub.delta_buffer
-                .route(&format!("w-{i}"), rmpv::Value::Nil, make_timestamp(), true);
-        }
-        assert!(rx.try_recv().is_err(), "nothing is sent before the drain");
-        hold.release();
-        let returned = snapshot_of(task.await.expect("join").expect("subscribe"));
+        fx.client(fx.w, put("k1", v(2))).await;
+        fx.client(fx.w, put("k3", v(1))).await;
+        let wall = make_timestamp().millis;
+        let high = Timestamp {
+            millis: wall + 10_000_000_000_000,
+            counter: 0,
+            node_id: "peer".to_string(),
+        };
+        let low = Timestamp {
+            millis: 1,
+            counter: 0,
+            node_id: "peer".to_string(),
+        };
+        fx.trusted_put("k2", v(20), high).await;
+        fx.trusted_put("k2", v(21), low).await;
+        let k2_stored = stored_value(fx.stored("k2").await);
 
-        // (i) the overflow frame was already on the connection when the handler returned.
-        let Ok(OutboundMessage::Binary(bytes)) = rx.try_recv() else {
-            panic!("expected the overflow frame, enqueued as a Binary frame");
-        };
-        let frame = rmp_serde::from_slice::<Message>(&bytes).expect("decode");
-        let Message::QueryResp(overflow) = frame else {
-            panic!("expected a QueryResp overflow frame, got {frame:?}");
-        };
-        assert_eq!(overflow.payload.query_id, QUERY_ID);
+        let returned = release(hold, task).await;
+        assert!(matches!(returned, OperationResponse::Empty));
+        let (rows, after) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert!(after.is_empty(), "nothing follows yet: {after:?}");
+        assert_eq!(rows.get("k1"), Some(&v(2)));
+        assert_eq!(rows.get("k3"), Some(&v(1)));
+        assert_eq!(rows.get("k2"), Some(&k2_stored), "k2 is the store's value");
+
+        fx.client(fx.w, put("k1", v(3))).await;
+        let frames = query_frames(&mut fx.s_rx, LIVE_ID);
+        assert!(
+            matches!(&frames[..], [Message::QueryUpdate { payload }] if payload.key == "k1" && payload.value == v(3)),
+            "a later write is a live update: {frames:?}"
+        );
+    }
+
+    /// A folded ENTER carries only the projected fields.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_fold_projects_a_projected_subscription() {
+        let mut fx = live();
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe(Some(vec!["v".to_string()]));
+        hold.wait_reached().await;
+        let full = rmpv::Value::Map(vec![
+            (rmpv::Value::from("v"), rmpv::Value::from(7)),
+            (rmpv::Value::from("secret"), rmpv::Value::from("x")),
+        ]);
+        fx.client(fx.w, put("kp", full)).await;
+        release(hold, task).await;
+        let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.get("kp"), Some(&v(7)), "only the projected field");
+    }
+
+    /// An overflow answers with the scan snapshot, then the overflow frame, on
+    /// the response path; the subscription is removed, a subscription of the
+    /// same id on another map stays, and a resubscribe holds what a fresh
+    /// one-shot scan holds. It is not compared with the store: overflowing
+    /// needs more distinct keys than the local DAG scan returns rows, and
+    /// that scan stops at 4096 rows (TODO-1001).
+    #[test]
+    fn an_overflow_sends_the_snapshot_then_the_overflow_and_drops_the_subscription() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let render = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                // Each write also sends S a SERVER_EVENT: 8192 slots keep the
+                // slow-consumer threshold from cancelling it.
+                let mut fx = live_over(make_factory(), 8192);
+                for i in 0..3 {
+                    fx.client(fx.w, put(&format!("seed-{i}"), v(i))).await;
+                }
+                Arc::clone(&fx.svc)
+                    .oneshot(fx.subscribe_op(LIVE_ID, "other", None))
+                    .await
+                    .expect("other map");
+                let _ = query_frames(&mut fx.s_rx, LIVE_ID);
+
+                let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+                let task = fx.spawn_subscribe(None);
+                hold.wait_reached().await;
+                for i in 0..=4096 {
+                    fx.client(fx.w, put(&format!("w-{i}"), v(i))).await;
+                }
+                let returned = release(hold, task).await;
+
+                let OperationResponse::Messages(frames) = returned else {
+                    panic!("expected [snapshot, overflow], got {returned:?}");
+                };
+                let [Message::QueryResp(snapshot), Message::QueryResp(overflow)] = &frames[..]
+                else {
+                    panic!("expected [snapshot, overflow], got {frames:?}");
+                };
+                assert_eq!(snapshot.payload.code, None);
+                let mut keys: Vec<&str> = snapshot
+                    .payload
+                    .results
+                    .iter()
+                    .map(|e| e.key.as_str())
+                    .collect();
+                keys.sort_unstable();
+                assert_eq!(keys, vec!["seed-0", "seed-1", "seed-2"], "the scan rows");
+                assert_eq!(overflow.payload.query_id, LIVE_ID);
+                assert_eq!(
+                    overflow.payload.code.as_deref(),
+                    Some(QUERY_SNAPSHOT_OVERFLOW)
+                );
+                assert!(overflow
+                    .payload
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.starts_with("Too many")));
+                assert!(overflow.payload.results.is_empty());
+
+                assert!(
+                    query_frames(&mut fx.s_rx, LIVE_ID).is_empty(),
+                    "nothing of the query was enqueued"
+                );
+                assert!(fx
+                    .registry
+                    .get_subscription(LIVE_MAP, fx.s, LIVE_ID)
+                    .is_none());
+                assert!(
+                    fx.registry
+                        .get_subscription("other", fx.s, LIVE_ID)
+                        .is_some(),
+                    "the same id on another map stays"
+                );
+                fx.client(fx.w, put("late", v(1))).await;
+                assert!(query_frames(&mut fx.s_rx, LIVE_ID).is_empty());
+
+                let again = Arc::clone(&fx.svc)
+                    .oneshot(fx.subscribe_op(LIVE_ID, LIVE_MAP, None))
+                    .await
+                    .expect("resubscribe");
+                assert!(matches!(again, OperationResponse::Empty));
+                let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+                let fresh = fx.fresh_rows(Query::default()).await;
+                assert_eq!(rows, fresh, "the resubscribe holds what a fresh scan holds");
+                assert_eq!(fx.registry.get_subscriptions_for_map(LIVE_MAP).len(), 1);
+            });
+        });
         assert_eq!(
-            overflow.payload.code.as_deref(),
-            Some(QUERY_SNAPSHOT_OVERFLOW)
+            rendered_counter(
+                &render.render(),
+                "topgun_query_snapshot_overflow_total{reason=\"buffer\"}"
+            ),
+            1
         );
-        assert!(overflow.payload.error.is_some());
-        assert!(overflow.payload.results.is_empty());
-        assert!(rx.try_recv().is_err(), "the overflow frame is the only one");
+    }
 
-        // (ii) the returned response is the snapshot, with the seeded rows.
-        assert_eq!(returned.code, None);
-        assert_eq!(returned.error, None);
-        let mut keys: Vec<String> = returned.results.iter().map(|e| e.key.clone()).collect();
-        keys.sort();
-        assert_eq!(keys, vec!["seed-0", "seed-1", "seed-2"]);
+    /// The value of the counter line `series` (name and labels) in a render.
+    fn rendered_counter(rendered: &str, series: &str) -> u64 {
+        rendered
+            .lines()
+            .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+            .unwrap_or_else(|| panic!("{series} is absent from the render:\n{rendered}"))
+            .trim()
+            .parse()
+            .expect("an integer")
+    }
 
-        // (iii) the subscription is still registered.
-        assert!(registry
-            .get_subscription(map_name, conn_id, QUERY_ID)
-            .is_some());
-
-        // (iv) a resubscribe with the same id (the hold fired once) returns a
-        // snapshot and leaves exactly one registration for (connection, id).
-        let again = snapshot_of(
-            Arc::clone(&svc)
-                .oneshot(subscribe())
-                .await
-                .expect("resubscribe"),
+    /// A full outbound channel answers with the snapshot and the overflow on
+    /// the response path and removes the registration.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_full_outbound_channel_answers_with_the_snapshot_and_the_overflow() {
+        let fx = live_over(make_factory(), 2);
+        let handle = fx.conns.get(fx.s).expect("s");
+        assert!(handle.try_send(OutboundMessage::Binary(vec![1])));
+        assert!(handle.try_send(OutboundMessage::Binary(vec![2])));
+        let returned = Arc::clone(&fx.svc)
+            .oneshot(fx.subscribe_op(LIVE_ID, LIVE_MAP, None))
+            .await
+            .expect("subscribe");
+        let OperationResponse::Messages(frames) = returned else {
+            panic!("expected [snapshot, overflow], got {returned:?}");
+        };
+        assert!(
+            matches!(&frames[..], [Message::QueryResp(s), Message::QueryResp(o)]
+            if s.payload.code.is_none()
+                && o.payload.code.as_deref() == Some(QUERY_SNAPSHOT_OVERFLOW)
+                && o.payload.error.as_ref().is_some_and(|e| e.starts_with("The connection's outbound queue was full")))
         );
-        assert_eq!(again.code, None);
-        assert_eq!(again.results.len(), 3);
-        assert_eq!(registry.subscription_count(), 1);
-        assert!(registry
-            .get_subscription(map_name, conn_id, QUERY_ID)
-            .is_some());
+        assert_eq!(fx.registry.subscription_count(), 0);
+    }
+
+    /// A disconnect during the scan frees the buffer and leaves no registration.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_disconnect_during_the_scan_frees_the_buffer() {
+        let fx = live();
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe(None);
+        hold.wait_reached().await;
+        let weak = Arc::downgrade(&fx.buffer());
+        let Live {
+            svc: _svc,
+            registry,
+            conns,
+            s,
+            s_rx,
+            ..
+        } = fx;
+        drop(s_rx);
+        conns.remove(s);
+        registry.unregister_by_connection(s);
+        let returned = release(hold, task).await;
+        assert!(matches!(returned, OperationResponse::Empty));
+        assert!(weak.upgrade().is_none(), "the buffer is freed");
+        assert_eq!(registry.subscription_count(), 0);
+        assert!(!registry.subscriptions.contains_key(LIVE_MAP));
+    }
+
+    /// An unsubscribe during the scan, then a resubscribe of the same id that
+    /// completes before the scan does: the held subscribe sends nothing, the
+    /// resubscribe's registration stays, and the held buffer is freed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unsubscribe_during_the_scan_sends_nothing_and_frees_the_buffer() {
+        let mut fx = live();
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe(None);
+        hold.wait_reached().await;
+        let weak = Arc::downgrade(&fx.buffer());
+        Arc::clone(&fx.svc)
+            .oneshot(query_unsubscribe(fx.s, LIVE_ID))
+            .await
+            .expect("unsubscribe");
+        let again = Arc::clone(&fx.svc)
+            .oneshot(fx.subscribe_op(LIVE_ID, LIVE_MAP, None))
+            .await
+            .expect("resubscribe");
+        assert!(matches!(again, OperationResponse::Empty));
+        assert_eq!(query_frames(&mut fx.s_rx, LIVE_ID).len(), 1);
+        let returned = release(hold, task).await;
+        assert!(matches!(returned, OperationResponse::Empty));
+        assert!(
+            query_frames(&mut fx.s_rx, LIVE_ID).is_empty(),
+            "the held subscribe sends no QUERY_RESP"
+        );
+        assert!(
+            fx.registry
+                .get_subscription(LIVE_MAP, fx.s, LIVE_ID)
+                .is_some(),
+            "the resubscribe's registration stays"
+        );
+        assert!(weak.upgrade().is_none(), "the buffer is freed");
+    }
+
+    /// A subscribe cancelled during its scan leaves no registration.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_subscribe_leaves_no_registration() {
+        let mut fx = live();
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe(None);
+        hold.wait_reached().await;
+        let weak = Arc::downgrade(&fx.buffer());
+        task.abort();
+        let joined = task.await;
+        assert!(joined.is_err_and(|e| e.is_cancelled()));
+        drop(hold);
+        assert_eq!(fx.registry.subscription_count(), 0);
+        fx.client(fx.w, put("k", v(1))).await;
+        assert!(query_frames(&mut fx.s_rx, LIVE_ID).is_empty());
+        assert!(weak.upgrade().is_none(), "the buffer is freed");
+    }
+
+    /// An LWW remove during the scan leaves the snapshot.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_lww_remove_during_the_scan_leaves_the_snapshot() {
+        let mut fx = live();
+        fx.client(fx.w, put("ka", v(1))).await;
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe(None);
+        hold.wait_reached().await;
+        fx.client(fx.w, remove("ka")).await;
+        release(hold, task).await;
+        let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert!(!rows.contains_key("ka"), "{rows:?}");
+    }
+
+    /// An OR op that turns a scanned LWW key into an OR slot during the scan
+    /// leaves the snapshot: an OR slot is never a row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_or_op_on_a_scanned_lww_key_during_the_scan_leaves_the_snapshot() {
+        let mut fx = live();
+        fx.client(fx.w, put("kb", v(1))).await;
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe(None);
+        hold.wait_reached().await;
+        fx.client(fx.w, or_add("kb", v(2))).await;
+        release(hold, task).await;
+        let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert!(!rows.contains_key("kb"), "{rows:?}");
+    }
+
+    /// OR ops on new keys during the scan add no row and send no update.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn or_ops_on_a_new_key_during_the_scan_add_no_row() {
+        let mut fx = live();
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe(None);
+        hold.wait_reached().await;
+        fx.client(fx.w, or_add("o1", v(1))).await;
+        let tag = match fx.stored("o1").await {
+            Some(RecordValue::OrMap { records, .. }) => records[0].tag.clone(),
+            other => panic!("expected an OR slot, got {other:?}"),
+        };
+        fx.client(fx.w, or_remove("o1", tag)).await;
+        fx.client(fx.w, or_add("o2", v(2))).await;
+        release(hold, task).await;
+        let (rows, after) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert!(
+            !rows.contains_key("o1") && !rows.contains_key("o2"),
+            "{rows:?}"
+        );
+        assert!(after.is_empty(), "no QUERY_UPDATE: {after:?}");
+    }
+
+    /// The subscriber's own write during the scan is in the snapshot; its
+    /// later own write is not echoed live.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_subscribers_own_write_during_the_scan_is_in_the_snapshot() {
+        let mut fx = live();
+        fx.client(fx.w, put("kc", v(1))).await;
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe(None);
+        hold.wait_reached().await;
+        fx.client(fx.w, put("kc", v(2))).await;
+        fx.client(fx.s, put("kc", v(3))).await;
+        release(hold, task).await;
+        let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.get("kc"), Some(&v(3)));
+        fx.client(fx.s, put("kc", v(4))).await;
+        assert!(query_frames(&mut fx.s_rx, LIVE_ID).is_empty(), "no echo");
+    }
+
+    /// A write right after `register`, before the scan, is captured: no update
+    /// precedes the snapshot.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_right_after_register_is_captured() {
+        let mut fx = live();
+        let mut hold = fx.svc.test_hold_after_register(LIVE_ID);
+        let task = fx.spawn_subscribe(None);
+        hold.wait_reached().await;
+        fx.client(fx.w, put("kd", v(1))).await;
+        release(hold, task).await;
+        let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.get("kd"), Some(&v(1)));
+    }
+
+    /// A captured value that expires before the fold is not folded (TG-TTL-001).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_value_that_expires_before_the_fold_is_not_folded() {
+        let wall = make_timestamp().millis;
+        let clock = Arc::new(ManualClock::new(wall));
+        let factory = Arc::new(
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            )
+            .with_clock(Arc::clone(&clock) as _),
+        );
+        let mut fx = live_over(factory, test_config().outbound_channel_capacity);
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe(None);
+        hold.wait_reached().await;
+        let mut op = put("ke", v(1));
+        if let Some(Some(record)) = op.record.as_mut() {
+            record.ttl_ms = Some(1000);
+        }
+        fx.client(fx.w, op).await;
+        let Some(RecordValue::Lww {
+            timestamp, ttl_ms, ..
+        }) = fx.stored("ke").await
+        else {
+            panic!("ke is stored");
+        };
+        assert_eq!(ttl_ms, Some(1000));
+        clock.set(timestamp.millis + 1001);
+        release(hold, task).await;
+        let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert!(!rows.contains_key("ke"), "{rows:?}");
+    }
+
+    /// The first `limit` rows by `v`.
+    fn by_v(limit: u32) -> Query {
+        use topgun_core::messages::base::{SortDirection, SortField};
+        Query {
+            sort: Some(vec![SortField {
+                field: "v".to_string(),
+                direction: SortDirection::Asc,
+            }]),
+            limit: Some(limit),
+            ..Query::default()
+        }
+    }
+
+    /// Applies the `QUERY_UPDATE`s among `frames` to `rows` as the client does.
+    fn apply_updates(rows: &mut BTreeMap<String, rmpv::Value>, frames: Vec<Message>) {
+        for frame in frames {
+            if let Message::QueryUpdate { payload } = frame {
+                match payload.change_type {
+                    ChangeEventType::ENTER | ChangeEventType::UPDATE => {
+                        rows.insert(payload.key, payload.value);
+                    }
+                    ChangeEventType::LEAVE => {
+                        rows.remove(&payload.key);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Writes `a`..`d` = 1..4 and returns [`by_v`]`(2)` from the cursor a
+    /// one-shot of its first page hands out: the page `c`, `d`.
+    async fn second_page(fx: &Live) -> Query {
+        for (key, n) in [("a", 1), ("b", 2), ("c", 3), ("d", 4)] {
+            fx.client(fx.w, put(key, v(n))).await;
+        }
+        let mut query = by_v(2);
+        query.cursor = fx.fresh(by_v(2)).await.next_cursor;
+        assert!(query.cursor.is_some(), "the first page hands out a cursor");
+        query
+    }
+
+    /// A captured put that enters a full page pushes its last row out: the
+    /// snapshot says more rows follow and hands out the cursor a fresh one-shot
+    /// query hands out, so paging on skips no row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_captured_put_into_a_full_page_moves_its_cursor() {
+        let mut fx = live();
+        for (key, n) in [("a", 1), ("b", 2), ("c", 3)] {
+            fx.client(fx.w, put(key, v(n))).await;
+        }
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe_query(by_v(3));
+        hold.wait_reached().await;
+        fx.client(fx.w, put("x", v(0))).await;
+        release(hold, task).await;
+        let Some(Message::QueryResp(snapshot)) =
+            query_frames(&mut fx.s_rx, LIVE_ID).into_iter().next()
+        else {
+            panic!("a snapshot");
+        };
+        let fresh = fx.fresh(by_v(3)).await;
+        let keys = |page: &QueryRespPayload| {
+            page.results
+                .iter()
+                .map(|e| e.key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&snapshot.payload), ["x", "a", "b"]);
+        assert_eq!(keys(&snapshot.payload), keys(&fresh));
+        assert_eq!(snapshot.payload.has_more, Some(true));
+        assert_eq!(fresh.has_more, Some(true));
+        let position = |cursor: Option<&String>| {
+            let cursor = decode_cursor(cursor.expect("a next cursor")).expect("decodes");
+            (
+                cursor.last_key,
+                format!("{:?}", cursor.sort_values),
+                cursor.predicate_hash,
+                cursor.sort_hash,
+            )
+        };
+        assert_eq!(
+            position(snapshot.payload.next_cursor.as_ref()),
+            position(fresh.next_cursor.as_ref())
+        );
+    }
+
+    /// A live write of a record already expired on the store clock
+    /// (TG-TTL-001) is not sent, as a fresh one-shot query leaves it out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_live_write_of_an_expired_record_is_not_sent() {
+        let mut fx = live();
+        let subscribed = fx.spawn_subscribe(None).await;
+        assert!(matches!(subscribed, Ok(Ok(OperationResponse::Empty))));
+        let (mut rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        // Stamped in 2023 with a one-second TTL: expired on the system clock.
+        fx.trusted_record("x", v(1), make_timestamp(), Some(1000))
+            .await;
+        apply_updates(&mut rows, query_frames(&mut fx.s_rx, LIVE_ID));
+        assert!(rows.is_empty(), "{rows:?}");
+        assert_eq!(rows, fx.fresh_rows(Query::default()).await);
+    }
+
+    /// A captured put past a full page changes none of its rows, but more rows
+    /// now follow it: the snapshot says so and hands out the cursor a fresh
+    /// one-shot query hands out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_captured_put_past_a_full_page_raises_has_more() {
+        let mut fx = live();
+        for (key, n) in [("a", 1), ("b", 2), ("c", 3)] {
+            fx.client(fx.w, put(key, v(n))).await;
+        }
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe_query(by_v(3));
+        hold.wait_reached().await;
+        fx.client(fx.w, put("d", v(4))).await;
+        release(hold, task).await;
+        let Some(Message::QueryResp(snapshot)) =
+            query_frames(&mut fx.s_rx, LIVE_ID).into_iter().next()
+        else {
+            panic!("a snapshot");
+        };
+        let fresh = fx.fresh(by_v(3)).await;
+        assert_eq!(snapshot.payload.has_more, Some(true));
+        assert_eq!(fresh.has_more, Some(true));
+        let last_key = |cursor: Option<&String>| {
+            decode_cursor(cursor.expect("a next cursor"))
+                .expect("decodes")
+                .last_key
+        };
+        assert_eq!(
+            last_key(snapshot.payload.next_cursor.as_ref()),
+            last_key(fresh.next_cursor.as_ref())
+        );
+    }
+
+    /// A write that sorts before the page's cursor takes no slot of the page:
+    /// the page keeps its rows, and a later write after the cursor enters it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_before_the_cursor_takes_no_slot_of_the_page() {
+        let mut fx = live();
+        let mut query = second_page(&fx).await;
+        query.limit = Some(3);
+        let subscribed = fx.spawn_subscribe_query(query.clone()).await;
+        assert!(matches!(subscribed, Ok(Ok(OperationResponse::Empty))));
+        let (mut rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["c", "d"]);
+        fx.client(fx.w, put("x", v(0))).await;
+        fx.client(fx.w, put("y", v(5))).await;
+        apply_updates(&mut rows, query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["c", "d", "y"]);
+        assert_eq!(rows, fx.fresh_rows(query).await);
+    }
+
+    /// On a full page, a write before the cursor pushes no row of the page
+    /// out: the page keeps its rows, as a fresh one-shot query shows.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_before_the_cursor_pushes_no_row_off_a_full_page() {
+        let mut fx = live();
+        let query = second_page(&fx).await;
+        let subscribed = fx.spawn_subscribe_query(query.clone()).await;
+        assert!(matches!(subscribed, Ok(Ok(OperationResponse::Empty))));
+        let (mut rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["c", "d"]);
+        fx.client(fx.w, put("x", v(0))).await;
+        apply_updates(&mut rows, query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["c", "d"]);
+        assert_eq!(rows, fx.fresh_rows(query).await);
+    }
+
+    /// A live LEAVE of a projected subscription carries no value, whether the
+    /// row was removed or pushed out of the window.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_projected_live_leave_carries_no_value() {
+        let mut fx = live();
+        for (key, n) in [("a", 1), ("b", 2)] {
+            fx.client(fx.w, put(key, v(n))).await;
+        }
+        let mut op = fx.subscribe_op(LIVE_ID, LIVE_MAP, Some(vec!["v".to_string()]));
+        if let Operation::QuerySubscribe { payload, .. } = &mut op {
+            payload.payload.query = by_v(2);
+        }
+        let subscribed = Arc::clone(&fx.svc).oneshot(op).await;
+        assert!(matches!(subscribed, Ok(OperationResponse::Empty)));
+        let _ = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        fx.client(fx.w, put("x", v(0))).await;
+        fx.client(fx.w, remove("a")).await;
+        let leaves: Vec<(String, rmpv::Value)> = query_frames(&mut fx.s_rx, LIVE_ID)
+            .into_iter()
+            .filter_map(|frame| match frame {
+                Message::QueryUpdate { payload }
+                    if payload.change_type == ChangeEventType::LEAVE =>
+                {
+                    Some((payload.key, payload.value))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            leaves,
+            [
+                ("b".to_string(), rmpv::Value::Nil),
+                ("a".to_string(), rmpv::Value::Nil)
+            ]
+        );
+    }
+
+    /// A live subscribe whose cursor does not decode is refused before
+    /// anything is registered, as a one-shot query with it is.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cursor_that_does_not_decode_is_refused_at_subscribe() {
+        let fx = live();
+        let mut query = by_v(2);
+        query.cursor = Some("not a cursor".to_string());
+        let returned = fx.spawn_subscribe_query(query.clone()).await.expect("join");
+        assert!(returned.is_err(), "{returned:?}");
+        assert_eq!(fx.registry.subscription_count(), 0);
+        let mut op = fx.subscribe_op("fresh", LIVE_MAP, None);
+        if let Operation::QuerySubscribe { payload, .. } = &mut op {
+            payload.payload.query = query;
+            payload.payload.snapshot_only = true;
+        }
+        assert!(Arc::clone(&fx.svc).oneshot(op).await.is_err());
+    }
+
+    /// A live update that moves a row of the page before its cursor takes the
+    /// row off the subscriber.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_live_update_to_before_the_cursor_leaves_the_page() {
+        let mut fx = live();
+        let query = second_page(&fx).await;
+        let subscribed = fx.spawn_subscribe_query(query.clone()).await;
+        assert!(matches!(subscribed, Ok(Ok(OperationResponse::Empty))));
+        let (mut rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["c", "d"]);
+        fx.client(fx.w, put("c", v(0))).await;
+        apply_updates(&mut rows, query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["d"]);
+        assert_eq!(rows, fx.fresh_rows(query).await);
+    }
+
+    /// A captured update that moves a row of the page before its cursor takes
+    /// the row out of the snapshot.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_captured_update_to_before_the_cursor_leaves_the_snapshot() {
+        let mut fx = live();
+        let query = second_page(&fx).await;
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe_query(query.clone());
+        hold.wait_reached().await;
+        fx.client(fx.w, put("c", v(0))).await;
+        release(hold, task).await;
+        let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["d"]);
+        assert_eq!(rows, fx.fresh_rows(query).await);
+    }
+
+    /// Subscribes to [`by_v`]`(3)` over `a`=1, `b`=2, `c`=3, makes the `captured`
+    /// writes during the scan, and returns the snapshot rows and the rows of a
+    /// fresh one-shot query made after it.
+    async fn top3_fold(
+        captured: Vec<ClientOp>,
+    ) -> (BTreeMap<String, rmpv::Value>, BTreeMap<String, rmpv::Value>) {
+        let mut fx = live();
+        for (key, n) in [("a", 1), ("b", 2), ("c", 3)] {
+            fx.client(fx.w, put(key, v(n))).await;
+        }
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe_query(by_v(3));
+        hold.wait_reached().await;
+        for op in captured {
+            fx.client(fx.w, op).await;
+        }
+        release(hold, task).await;
+        let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        (rows, fx.fresh_rows(by_v(3)).await)
+    }
+
+    /// A captured remove of a row in the window takes it out of the snapshot.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_captured_remove_of_a_windowed_row_leaves_the_snapshot() {
+        let (rows, fresh) = top3_fold(vec![remove("b")]).await;
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["a", "c"]);
+        assert_eq!(rows, fresh);
+    }
+
+    /// A captured put that enters the window pushes its last row out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_captured_put_that_enters_the_window_pushes_the_last_row_out() {
+        let (rows, fresh) = top3_fold(vec![put("x", v(0))]).await;
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["a", "b", "x"]);
+        assert_eq!(rows, fresh);
+    }
+
+    /// A captured put that sorts a windowed row past the limit takes it out,
+    /// and the row it had pushed out comes back.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_captured_put_that_leaves_the_window_promotes_the_retained_row() {
+        let (rows, fresh) = top3_fold(vec![put("x", v(0)), put("a", v(9))]).await;
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["b", "c", "x"]);
+        assert_eq!(rows, fresh);
+    }
+
+    /// A captured put into the window that expires before the fold is left
+    /// out, and the row it would have pushed out stays (TG-TTL-001).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_captured_put_into_the_window_that_expires_before_the_fold_is_left_out() {
+        let clock = Arc::new(ManualClock::new(make_timestamp().millis));
+        let factory = Arc::new(
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            )
+            .with_clock(Arc::clone(&clock) as _),
+        );
+        let mut fx = live_over(factory, test_config().outbound_channel_capacity);
+        for (key, n) in [("a", 1), ("b", 2), ("c", 3)] {
+            fx.client(fx.w, put(key, v(n))).await;
+        }
+        let mut hold = fx.svc.test_hold_after_scan(LIVE_ID);
+        let task = fx.spawn_subscribe_query(by_v(3));
+        hold.wait_reached().await;
+        let mut op = put("x", v(0));
+        if let Some(Some(record)) = op.record.as_mut() {
+            record.ttl_ms = Some(1000);
+        }
+        fx.client(fx.w, op).await;
+        let Some(RecordValue::Lww { timestamp, .. }) = fx.stored("x").await else {
+            panic!("x is stored");
+        };
+        clock.set(timestamp.millis + 1001);
+        release(hold, task).await;
+        let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
+        assert_eq!(rows.keys().collect::<Vec<_>>(), ["a", "b", "c"]);
+        assert_eq!(rows, fx.fresh_rows(by_v(3)).await);
+    }
+
+    /// `remove_if_same` releases the outer read guard before it drops an empty
+    /// map entry (it would deadlock otherwise), drops that entry, and never
+    /// removes a newer registration of the same id.
+    #[test]
+    fn remove_if_same_drops_the_outer_entry_and_returns() {
+        let registry = Arc::new(QueryRegistry::new());
+        let register = |buffer: &Arc<DeltaBuffer>| {
+            registry.register(QuerySubscription {
+                query_id: "q".to_string(),
+                connection_id: ConnectionId(1),
+                map_name: "m".to_string(),
+                query: Query::default(),
+                previous_result_keys: DashSet::new(),
+                live_window: Arc::new(LiveWindow::new(vec![], None)),
+                fields: None,
+                delta_buffer: Arc::clone(buffer),
+            });
+        };
+        let old = Arc::new(DeltaBuffer::new(1));
+        register(&old);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (thread_registry, thread_buffer) = (Arc::clone(&registry), Arc::clone(&old));
+        std::thread::spawn(move || {
+            let removed = thread_registry.remove_if_same("m", ConnectionId(1), "q", &thread_buffer);
+            let _ = tx.send(removed);
+        });
+        let removed = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("remove_if_same returned (no deadlock)");
+        assert!(removed);
+        assert!(
+            !registry.subscriptions.contains_key("m"),
+            "the empty entry is dropped"
+        );
+
+        let new = Arc::new(DeltaBuffer::new(1));
+        register(&new);
+        assert!(!registry.remove_if_same("m", ConnectionId(1), "q", &old));
+        let kept = registry
+            .get_subscription("m", ConnectionId(1), "q")
+            .expect("the newer registration stays");
+        assert!(Arc::ptr_eq(&kept.delta_buffer, &new));
+    }
+
+    /// Report-only: the whole time the snapshot buffer's lock is held to close
+    /// it with 4096 captured writes (a third updates, a third new keys, a third
+    /// removes) over a 10 000-row projected, sorted, limited snapshot: the fold,
+    /// the page's cursor, the encoding and the send on a reserved slot, by the
+    /// code the subscribe runs.
+    #[test]
+    #[ignore = "measurement; run with --ignored --nocapture"]
+    fn fold_lock_hold_of_4096_entries_over_10000_rows() {
+        use topgun_core::messages::base::{SortDirection, SortField};
+        const ROWS: i64 = 10_000;
+        let row = |n: i64| {
+            rmpv::Value::Map(vec![
+                (rmpv::Value::from("v"), rmpv::Value::from(n)),
+                (
+                    rmpv::Value::from("pad"),
+                    rmpv::Value::from("0123456789abcdef"),
+                ),
+            ])
+        };
+        let mut runs = Vec::new();
+        for _ in 0..5 {
+            let query = Query {
+                sort: Some(vec![SortField {
+                    field: "v".to_string(),
+                    direction: SortDirection::Asc,
+                }]),
+                limit: Some(10_000),
+                ..Query::default()
+            };
+            let sub = QuerySubscription {
+                query_id: "m".to_string(),
+                connection_id: ConnectionId(1),
+                map_name: "m".to_string(),
+                live_window: Arc::new(LiveWindow::new(
+                    query.sort.clone().unwrap_or_default(),
+                    query.limit,
+                )),
+                query,
+                previous_result_keys: DashSet::new(),
+                fields: Some(vec!["v".to_string()]),
+                delta_buffer: Arc::new(DeltaBuffer::new(SNAPSHOT_BUFFER_CAPACITY)),
+            };
+            let rows: Vec<(String, rmpv::Value)> =
+                (0..ROWS).map(|n| (format!("r{n:05}"), row(n))).collect();
+            let _ = sub
+                .live_window
+                .apply_batch(rows.iter().map(|(k, v)| (k.as_str(), Some(v), true)));
+            let results = rows
+                .iter()
+                .map(|(key, value)| QueryResultEntry {
+                    key: key.clone(),
+                    value: project_fields(&["v".to_string()], value),
+                })
+                .collect();
+            let snapshot = QueryRespPayload {
+                query_id: "m".to_string(),
+                results,
+                ..Default::default()
+            };
+            sub.delta_buffer.activate();
+            for i in 0..4096_i64 {
+                let (key, record) = match i % 3 {
+                    0 => (format!("r{:05}", i * 2), Some(lww_record(row(ROWS + i)))),
+                    1 => (format!("n{i:05}"), Some(lww_record(row(-i)))),
+                    _ => (format!("r{:05}", i * 2 + 1), None),
+                };
+                assert!(sub
+                    .delta_buffer
+                    .route(&key, record.as_ref(), record.is_some()));
+            }
+            let page_cursor = PageCursor {
+                limit: Some(10_000),
+                template: vec![SortValue {
+                    field: "v".to_string(),
+                    value: serde_json::Value::Null,
+                    direction: SortDirection::Asc,
+                }],
+                predicate_hash: 0,
+                sort_hash: 0,
+                now_ms: 0,
+            };
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            let start = std::time::Instant::now();
+            sub.delta_buffer.close(|captured| {
+                let Captured::Entries(entries) = captured else {
+                    panic!("no overflow");
+                };
+                let permit = tx.try_reserve().expect("a free slot");
+                let frame =
+                    folded_snapshot_frame(snapshot, &page_cursor, &sub, &entries, u64::MAX / 2);
+                permit.send(OutboundMessage::Binary(frame.expect("encodes")));
+                Closing::Live
+            });
+            runs.push(start.elapsed());
+            assert!(rx.try_recv().is_ok());
+        }
+        for (i, run) in runs.iter().enumerate() {
+            println!("close_lock_hold run {i}: {:.3} ms", run.as_secs_f64() * 1e3);
+        }
+        runs.sort();
+        println!(
+            "close_lock_hold median: {:.3} ms",
+            runs[runs.len() / 2].as_secs_f64() * 1e3
+        );
     }
 }
