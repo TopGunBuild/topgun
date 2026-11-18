@@ -5370,10 +5370,7 @@ mod tests {
 
     /// `sort: [v asc]`, with `limit`.
     fn sort_v(limit: Option<u32>) -> Query {
-        Query {
-            limit,
-            ..by_v(0)
-        }
+        Query { limit, ..by_v(0) }
     }
 
     /// The page `svc` answers to `query` under `query_id`: a one-shot answers
@@ -5429,7 +5426,12 @@ mod tests {
         let keys: std::collections::BTreeSet<&str> =
             page.results.iter().map(|e| e.key.as_str()).collect();
         let every: Vec<String> = (0..n).map(row_key).collect();
-        if keys != every.iter().map(String::as_str).collect::<std::collections::BTreeSet<_>>() {
+        if keys
+            != every
+                .iter()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>()
+        {
             defects.push(format!(
                 "the key set is not every key ({} distinct)",
                 keys.len()
@@ -5599,7 +5601,9 @@ mod tests {
                     .map(|e| e.key.clone())
                     .collect();
                 if keys != every {
-                    failures.push(format!("{case}: the pages are not every row once, in order"));
+                    failures.push(format!(
+                        "{case}: the pages are not every row once, in order"
+                    ));
                 }
             }
         }
@@ -5619,7 +5623,10 @@ mod tests {
                 keys.len()
             ));
         }
-        if !keys.iter().all(|k| every.binary_search(&(*k).to_string()).is_ok()) {
+        if !keys
+            .iter()
+            .all(|k| every.binary_search(&(*k).to_string()).is_ok())
+        {
             failures.push(format!("{case}: a key not in the map"));
         }
         if page.has_more != Some(true) {
@@ -5661,7 +5668,10 @@ mod tests {
                 keys.len()
             ));
         }
-        if !keys.iter().all(|k| every.binary_search(&(*k).to_string()).is_ok()) {
+        if !keys
+            .iter()
+            .all(|k| every.binary_search(&(*k).to_string()).is_ok())
+        {
             failures.push("(a): a key not in the map".to_string());
         }
         if page.has_more != Some(true) {
@@ -5684,8 +5694,7 @@ mod tests {
         if let Some(cursor) = first.next_cursor {
             query.cursor = Some(cursor);
             let second = ask(&clamped, fx.s, &mut fx.s_rx, "b2", query, true).await;
-            let second_keys: Vec<String> =
-                second.results.iter().map(|e| e.key.clone()).collect();
+            let second_keys: Vec<String> = second.results.iter().map(|e| e.key.clone()).collect();
             if second_keys != every[5000..] {
                 failures.push(format!(
                     "(b): page 2 is not k05000..k09999 ({} rows)",
@@ -5712,8 +5721,11 @@ mod tests {
         let svc = Arc::clone(&fx.svc);
         let snapshot = ask(&svc, fx.s, &mut fx.s_rx, LIVE_ID, Query::default(), false).await;
         for i in 0..=4096 {
-            fx.client(fx.w, put(&row_key(i), v(i64::try_from(i).unwrap() + 10_000)))
-                .await;
+            fx.client(
+                fx.w,
+                put(&row_key(i), v(i64::try_from(i).unwrap() + 10_000)),
+            )
+            .await;
         }
         let updates: Vec<ChangeEventType> = query_frames(&mut fx.s_rx, LIVE_ID)
             .into_iter()
