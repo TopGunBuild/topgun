@@ -357,7 +357,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   a distinctness-only variant of this test reports the same break as ~705 distinct values out of 2000.
   Mutation-verified in both directions (green with `fetch_add`, red without). The seed:
   `store_mode_tests.rs::a11_the_sequence_seed_is_above_the_engine_watermark_of_a_fully_collected_partition`
-  (watermarks); the seed above stored record versions is enforced under `TG-WAL-015`.
+  (watermarks); the seed above stored record versions,
+  `store_mode_tests.rs::v10_a_write_after_a_restart_takes_a_sequence_above_every_stored_version`
+  (`TG-WAL-015`).
 - **Violation consequence:** sequence reuse or non-monotone assignment breaks the prefix-complete
   watermark; a write sequenced at or below a stored record version is discarded by its own replay
   after a crash (`TG-WAL-015`) — an acked write lost.
@@ -637,8 +639,31 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   replay, each stale case named, `equal_version_add_does_not_reorder`, and the property over
   random op sequences, flush points, watermark pins and crash points); the harness defect modes
   `wal_harness::cases::ac4_5_replay_clobber_caught_by_value_equality_oracle` and
-  `ac1_ac6_stale_remove_clobber_caught_by_o1_oracle` (gate off, caught by their oracles); the
-  over-the-wire rollback refusal, `tests/integration-rust/version-rollback.test.ts`.
+  `ac1_ac6_stale_remove_clobber_caught_by_o1_oracle` (gate off, caught by their oracles), and
+  `ac12_out_of_stamp_order_writes_recover_to_the_last_arrival`; the seed,
+  `wal/store_mode_tests.rs::v10_a_write_after_a_restart_takes_a_sequence_above_every_stored_version`;
+  per-key prefix completeness, `store_mode_tests.rs` —
+  `v11_a_refused_or_add_holds_the_later_or_remove_of_its_key_and_both_apply_at_the_next_boot`,
+  `v11_a_store_after_a_refused_frame_commits_and_its_version_covers_that_frame`,
+  `v11a_an_or_delta_after_a_written_store_of_its_held_key_applies_at_the_same_boot_as_on_main`,
+  `v11b_a_later_delta_failing_on_its_own_keeps_the_key_held_past_the_written_store`,
+  `v11c_a_refused_store_of_a_held_key_holds_the_delta_prepared_after_it`,
+  `v11d_a_store_the_gate_discards_releases_nothing_and_the_next_delta_stays_held`,
+  `v11e_a_store_refused_after_a_delta_does_not_hold_that_delta_on_the_second_preparation` (the
+  hold is decided by the unresolved frames of the key below the frame),
+  `v12_a_frame_failed_in_prepare_holds_the_later_delta_of_its_key` and
+  `v13_a_frame_failed_at_boot_is_discarded_once_a_live_write_of_its_key_is_flushed_above_it`;
+  the flush order, `write_behind_batch_tests.rs::b20_a_key_commits_in_wal_order_across_passes_and_a_coalesced_survivor_stores_its_own_wal_sequence`;
+  reclamation, `wal/durable_collect_tests.rs` —
+  `ac14_rows_above_the_durable_watermark_stay_and_the_tick_after_it_passes_them_drops_them`,
+  `ac14_a_commit_rewriting_a_row_above_the_watermark_between_the_snapshot_and_the_lock_keeps_it`,
+  `ac14_no_lock_hold_deletes_more_than_1000_rows`, `ac14_a_tick_whose_watermark_read_fails_drops_nothing`,
+  `ac14_a_failed_reclaim_warns_and_the_tick_still_unlinks_what_the_watermarks_cover` and
+  `ac14_a_reclaim_between_two_replay_batches_leaves_the_recovery_result_identical`; real crashes,
+  `wal/batched_replay_tests.rs::c90_crash_loop` (SIGKILL loop under `per_op` and `batched`: every
+  frame left above the watermark replays again with no row changed, `max_version` never decreases,
+  no sequence at or below it is handed out);
+  the over-the-wire rollback refusal, `tests/integration-rust/version-rollback.test.ts`.
 - **Violation consequence:** after a crash, a stale or repeated frame overwrites newer stored
   state — an acknowledged write lost, a removed value back, an OR tag reordered or revived; a
   write made after a restart sequenced at or below a stored version and discarded by its own
