@@ -51,15 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Read from source, not tested: a client older than this release applies the overflow frame as
     an empty result, so it shows no rows and gets no changes until it subscribes again.
   - Performance, measured on a Mac (M1 Max) with the in-process load harness, fire-and-wait,
-    50 connections, 10 s, three alternating runs each, medians: 8 806 ops/s and p99 19.4 ms against
-    8 440 ops/s and p99 20.5 ms on main before this change. The harness opens no subscription, so
+    50 connections, 10 s, three alternating runs each, medians: 9 018 ops/s and p99 9.61 ms against
+    9 021 ops/s and p99 9.74 ms on main before this change. The harness opens no subscription, so
     this shows only that writes with no live query did not slow down.
   - The snapshot's captured writes are applied to the query's sorted window in one pass, and so is
     the first load of the window from the scan, each sorting the window once instead of once per
     row. Measured in-process: closing a snapshot with 4096 captured writes over a sorted
     10 000-row window — folding them, rebuilding the page's cursor, encoding and sending it, all
-    under the lock every writer of that map waits on — takes 19.9 ms (median of five); loading a
-    10 000-row window from a scan takes 13.7 ms, against 11.3 s on main before this change.
+    under the lock every writer of that map waits on — takes 16.0 ms (median of five); loading a
+    10 000-row window from a scan takes 13.8 ms, against 11.3 s on main before this change.
 
 - **Changed (breaking for an undocumented option): a live query refuses `groupBy` and
   `aggregations`.** A live query receives per-record changes, which mixed raw records into its
