@@ -20564,4 +20564,260 @@ mod write_path_measure {
                 );
             });
     }
+
+    /// The RocksDB engine of a store in `dir`, sized as a default node.
+    #[cfg(feature = "rocksdb")]
+    fn rocks_store(
+        dir: &std::path::Path,
+    ) -> Arc<EngineMapDataStore<crate::storage::datastores::rocks_engine::RocksKvEngine>> {
+        use crate::storage::datastores::rocks_engine::{OpenMode, RocksConfig, RocksKvEngine};
+        let engine = RocksKvEngine::open(
+            dir,
+            OpenMode::CreateNew,
+            &RocksConfig::production(256 * 1024 * 1024, -1),
+        )
+        .unwrap();
+        Arc::new(EngineMapDataStore::open(Arc::new(engine)).unwrap())
+    }
+
+    /// Wall time of `WalRecovery::run` over `RM_FRAMES` frames (default
+    /// 100 000) above the watermark of a fresh RocksDB store, written to
+    /// `RM_KEYS` keys (default 25 000) of one map in turn, with rising
+    /// timestamps; with `RM_REMOVES=1` every eighth frame removes its key.
+    /// The frames are the same on every build. Prints one `RM_MEASURE` line.
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    #[allow(clippy::cast_precision_loss)]
+    fn recovery_of_n_frames() {
+        use crate::storage::wal::{WalEntry, WalOp, WalStorePayload};
+        use topgun_core::{fnv1a_hash, PARTITION_COUNT};
+        let env_u64 = |name: &str, default: u64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let frames = env_u64("RM_FRAMES", 100_000);
+        let keys = env_u64("RM_KEYS", 25_000);
+        let removes = env_u64("RM_REMOVES", 0) == 1;
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let root = tempfile::tempdir().unwrap();
+                let wal_dir = root.path().join("wal");
+                let data = root.path().join("engine.rocksdb");
+                {
+                    let store: Arc<dyn MapDataStore> = rocks_store(&data);
+                    let wal =
+                        WalWriter::open_over_store(wal_dir.clone(), WalFsyncPolicy::None, store)
+                            .unwrap();
+                    for seq in 1..=frames {
+                        let key = format!("k{}", seq % keys);
+                        let op = if removes && seq % 8 == 0 {
+                            WalOp::Remove
+                        } else {
+                            WalOp::Store {
+                                value: WalStorePayload::Record(RecordValue::Lww {
+                                    value: Value::String(format!("v{seq}")),
+                                    timestamp: Timestamp {
+                                        millis: seq,
+                                        counter: 0,
+                                        node_id: "n".to_string(),
+                                    },
+                                    ttl_ms: None,
+                                }),
+                            }
+                        };
+                        let entry = WalEntry {
+                            map: "m".to_string(),
+                            key: key.clone(),
+                            op,
+                            timestamp: Some(Timestamp {
+                                millis: seq,
+                                counter: 0,
+                                node_id: "n".to_string(),
+                            }),
+                            sequence: seq,
+                        };
+                        let partition = fnv1a_hash(&format!("m:{key}")) % PARTITION_COUNT;
+                        wal.append(partition, &entry).await.unwrap();
+                    }
+                    super::release_wal(wal).await;
+                }
+                let store: Arc<dyn MapDataStore> = rocks_store(&data);
+                let wal = WalWriter::open_over_store(
+                    wal_dir.clone(),
+                    WalFsyncPolicy::None,
+                    Arc::clone(&store),
+                )
+                .unwrap();
+                let started = Instant::now();
+                WalRecovery::new(Arc::clone(&wal), Vec::new())
+                    .run(Arc::clone(&store))
+                    .await
+                    .unwrap();
+                let elapsed = started.elapsed();
+                println!(
+                    "RM_MEASURE frames={frames} keys={keys} removes={removes} recovery_ms={:.1} \
+                     frames_per_s={:.0}",
+                    elapsed.as_secs_f64() * 1000.0,
+                    frames as f64 / elapsed.as_secs_f64()
+                );
+            });
+    }
+
+    /// Duration of the record-version reclaim of each of `RV_TICKS` ticks
+    /// (default 60) over a RocksDB store, while one WAL partition's watermark
+    /// is held, and of the tick that releases it. Each tick commits
+    /// `RV_WRITES` writes (default 10 000; every fourth a remove), half of
+    /// them to new keys of the held partition and half spread over the
+    /// others, each stored ahead of its partition's watermark so it leaves a
+    /// version row; the watermarks of the other partitions then pass the
+    /// tick's writes and the reclaim runs. The held partition's rows pile up
+    /// among the point tombstones the earlier reclaims left, and the release
+    /// reclaims them all. Prints one `RV_MEASURE` line.
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    fn reclaim_tick_with_a_held_partition() {
+        use crate::storage::map_data_store::{FlushCommit, PutValue, StoreWrite};
+        use topgun_core::{fnv1a_hash, PARTITION_COUNT};
+        let env_u64 = |name: &str, default: u64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let ticks = env_u64("RV_TICKS", 60);
+        let writes = env_u64("RV_WRITES", 10_000);
+        const HELD: u32 = 7;
+        let partition = |key: &str| fnv1a_hash(&format!("m:{key}")) % PARTITION_COUNT;
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let root = tempfile::tempdir().unwrap();
+                let store = rocks_store(&root.path().join("engine.rocksdb"));
+                let value = RecordValue::Lww {
+                    value: Value::String("v".to_string()),
+                    timestamp: Timestamp {
+                        millis: 1,
+                        counter: 0,
+                        node_id: "n".to_string(),
+                    },
+                    ttl_ms: None,
+                };
+                let (mut held_keys, mut other_keys) = (Vec::new(), Vec::new());
+                let mut i = 0u64;
+                while (held_keys.len() as u64) < ticks * writes / 2
+                    || (other_keys.len() as u64) < ticks * writes / 2
+                {
+                    let key = format!("k{i}");
+                    if partition(&key) == HELD {
+                        held_keys.push(key);
+                    } else {
+                        other_keys.push(key);
+                    }
+                    i += 1;
+                }
+                let mut watermarks = vec![0u64; PARTITION_COUNT as usize];
+                let mut seq = 0u64;
+                let mut tick_ms = Vec::new();
+                for tick in 0..ticks {
+                    let half = (writes / 2) as usize;
+                    let start = tick as usize * half;
+                    let keys: Vec<&String> = held_keys[start..start + half]
+                        .iter()
+                        .chain(&other_keys[start..start + half])
+                        .collect();
+                    let mut top = vec![0u64; PARTITION_COUNT as usize];
+                    let batch: Vec<StoreWrite<'_>> = keys
+                        .iter()
+                        .enumerate()
+                        .map(|(n, key)| {
+                            seq += 1;
+                            top[partition(key) as usize] = seq;
+                            if n % 4 == 3 {
+                                StoreWrite::Remove {
+                                    map: "m",
+                                    key,
+                                    store_time: 0,
+                                    seq,
+                                }
+                            } else {
+                                StoreWrite::Put {
+                                    map: "m",
+                                    key,
+                                    value: PutValue::Value(&value),
+                                    store_time: 0,
+                                    seq,
+                                }
+                            }
+                        })
+                        .collect();
+                    // Every write is ahead of its partition's watermark, which
+                    // this commit leaves where it was.
+                    store
+                        .commit(&FlushCommit {
+                            writes: batch,
+                            applied: Vec::new(),
+                        })
+                        .await
+                        .unwrap();
+                    for (p, high) in top.iter().enumerate() {
+                        if p as u32 != HELD && *high > 0 {
+                            watermarks[p] = *high;
+                        }
+                    }
+                    store
+                        .commit(&FlushCommit {
+                            writes: Vec::new(),
+                            applied: watermarks
+                                .iter()
+                                .enumerate()
+                                .filter(|(p, w)| *p as u32 != HELD && **w > 0)
+                                .map(|(p, w)| (p as u32, *w))
+                                .collect(),
+                        })
+                        .await
+                        .unwrap();
+                    let started = Instant::now();
+                    store.reclaim_record_versions(&watermarks).unwrap();
+                    tick_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+                }
+                watermarks[HELD as usize] = seq;
+                store
+                    .commit(&FlushCommit {
+                        writes: Vec::new(),
+                        applied: vec![(HELD, seq)],
+                    })
+                    .await
+                    .unwrap();
+                let started = Instant::now();
+                let released = store.reclaim_record_versions(&watermarks).unwrap();
+                let release_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let started = Instant::now();
+                let after = store.reclaim_record_versions(&watermarks).unwrap();
+                let after_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let mut sorted = tick_ms.clone();
+                sorted.sort_by(f64::total_cmp);
+                let p99 = sorted[(sorted.len() * 99 / 100).min(sorted.len() - 1)];
+                println!(
+                    "RV_MEASURE ticks={ticks} writes_per_tick={writes} held_tick_max_ms={:.1} \
+                     held_tick_p99_ms={p99:.1} held_tick_first_ms={:.1} held_tick_last_ms={:.1} \
+                     release_rows={released} release_ms={release_ms:.1} next_tick_rows={after} \
+                     next_tick_ms={after_ms:.1} seq={seq}",
+                    sorted[sorted.len() - 1],
+                    tick_ms[0],
+                    tick_ms[tick_ms.len() - 1],
+                );
+            });
+    }
 }
