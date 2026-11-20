@@ -8411,7 +8411,7 @@ mod tests {
 
         // A misspelled disarm, and a value some env systems deliver with its
         // quotes still attached -- the two shapes that actually reach operators.
-        let cfgs = tracing::subscriber::with_default(subscriber, || {
+        let cfgs = crate::storage::wal::with_thread_subscriber(subscriber, || {
             ["flase", "\"false\""].map(|raw| {
                 WriteBehindConfig::from_source(config_source(&[("TOPGUN_OR_DELTA_WAL", raw)]))
             })
@@ -13639,7 +13639,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscriber =
             tracing_subscriber::registry().with(ScheduleEventCapture(Arc::clone(&events)));
-        tracing::subscriber::with_default(subscriber, || {
+        crate::storage::wal::with_thread_subscriber(subscriber, || {
             paused_runtime().block_on(scenario);
         });
         let events = events.lock().unwrap().clone();
@@ -13911,7 +13911,7 @@ mod tests {
                 .with_writer(move || writer.clone())
                 .with_ansi(false)
                 .finish();
-            tracing::subscriber::with_default(subscriber, || {
+            crate::storage::wal::with_thread_subscriber(subscriber, || {
                 let _ = WriteBehindConfig::from_source(config_source(vars));
             });
             let text = String::from_utf8(captured.lock().unwrap().clone()).expect("utf-8 log");
@@ -15507,7 +15507,7 @@ mod tests {
                 .with_writer(move || writer.clone())
                 .with_ansi(false)
                 .finish();
-            let bytes = tracing::subscriber::with_default(subscriber, || {
+            let bytes = crate::storage::wal::with_thread_subscriber(subscriber, || {
                 WriteBehindConfig::from_source(|key| {
                     (key == VAR).then(|| raw.map(str::to_string)).flatten()
                 })
@@ -16746,7 +16746,7 @@ mod background_task_panic_tests {
 
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&events)));
-        let output = tracing::subscriber::with_default(subscriber, || {
+        let output = crate::storage::wal::with_thread_subscriber(subscriber, || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -19245,7 +19245,7 @@ mod store_broken_tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&events)));
         let output = metrics::with_local_recorder(recorder, || {
-            tracing::subscriber::with_default(subscriber, || {
+            crate::storage::wal::with_thread_subscriber(subscriber, || {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()

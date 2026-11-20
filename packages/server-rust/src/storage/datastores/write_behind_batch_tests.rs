@@ -1068,16 +1068,9 @@ fn b05_a_store_that_refuses_every_commit_starts_a_hold_after_three_calls() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     let events = Arc::new(Mutex::new(Vec::new()));
-    // While exactly one dispatcher is alive, `tracing` computes a callsite's
-    // interest from the default dispatcher of whichever thread hits it first:
-    // a parallel test's thread, which has none, then caches the warning as
-    // never wanted, and this thread's capture misses it. A second dispatcher,
-    // alive for the whole test and created before the capture, makes every
-    // interest computation ask all live dispatchers, the capture included.
-    let _second_dispatcher = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&events)));
     let (at_hold, over_a_minute) = metrics::with_local_recorder(&recorder, || {
-        tracing::subscriber::with_default(subscriber, || {
+        crate::storage::wal::with_thread_subscriber(subscriber, || {
             paused_runtime().block_on(async {
                 let dir = tempfile::tempdir().expect("tempdir");
                 let node = Node::open(dir.path());

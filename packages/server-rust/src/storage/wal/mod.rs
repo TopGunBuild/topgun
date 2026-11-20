@@ -7118,6 +7118,29 @@ mod tests {
     }
 }
 
+/// Runs `body` with `subscriber` as this thread's default and returns what it
+/// returned. Every test that captures events goes through here.
+///
+/// While exactly one dispatcher is alive, `tracing` computes a callsite's
+/// interest from the default dispatcher of whichever thread hits it first: a
+/// parallel test's thread, which has none, then caches the event as never
+/// wanted, and this thread's capture misses it. A second dispatcher, alive
+/// for the whole body and created before the capture, makes every interest
+/// computation ask all live dispatchers, the capture included; reading every
+/// interest again once both are alive undoes a computation another thread
+/// began before them.
+#[cfg(test)]
+pub(crate) fn with_thread_subscriber<T>(
+    subscriber: impl tracing::Subscriber + Send + Sync + 'static,
+    body: impl FnOnce() -> T,
+) -> T {
+    let _second_dispatcher = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        body()
+    })
+}
+
 #[cfg(test)]
 #[path = "store_mode_tests.rs"]
 mod store_mode_tests;

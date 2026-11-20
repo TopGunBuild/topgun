@@ -1058,12 +1058,13 @@ fn with_captured_warns(body: impl std::future::Future<Output = ()>) -> Vec<Strin
     use tracing_subscriber::layer::SubscriberExt as _;
     let capture = WarnCapture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
-    let _guard = tracing::subscriber::set_default(subscriber);
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime")
-        .block_on(body);
+    super::with_thread_subscriber(subscriber, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(body)
+    });
     let warns = capture.0.lock().clone();
     warns
 }

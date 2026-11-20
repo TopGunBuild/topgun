@@ -2153,7 +2153,7 @@ fn run_captured<T>(body: impl std::future::Future<Output = T>) -> (T, Vec<Captur
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&events)));
-    let output = tracing::subscriber::with_default(subscriber, || block_on(body));
+    let output = super::with_thread_subscriber(subscriber, || block_on(body));
     let events = events.lock().clone();
     (output, events)
 }
