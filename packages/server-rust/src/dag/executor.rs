@@ -1,9 +1,10 @@
 //! DAG execution engine and inbox/outbox buffer implementations.
 //!
 //! `VecDequeInbox` and `VecDequeOutbox` are the concrete buffer types used by
-//! `DagExecutor` to pass items between processors. Bounded capacity enforces
-//! backpressure: when a downstream inbox is full, `offer` returns `false` and
-//! the upstream processor pauses.
+//! `DagExecutor` to pass items between processors. They have no bound: a stage
+//! that emits all its rows at once (`complete` of sort, collector, aggregate,
+//! combine) already holds those rows in memory, so a bound would only drop
+//! rows. The processors apply no backpressure.
 //!
 //! `DagExecutor` drives the full processor graph to completion with cooperative
 //! scheduling, routing logic for all `RoutingPolicy` variants, and timeout
@@ -18,41 +19,36 @@ use anyhow::{anyhow, Result};
 use crate::dag::types::{Dag, Inbox, Outbox, ProcessorContext, RoutingPolicy};
 use crate::storage::factory::RecordStoreFactory;
 
-/// Default maximum number of items a single inbox or outbox bucket can hold.
-/// Chosen to bound per-processor memory usage while providing sufficient
-/// buffering for bursty producers.
-pub const DEFAULT_QUEUE_CAPACITY: usize = 4096;
+/// The allocation each vertex's inbox and outbox bucket starts with: the
+/// streaming stages move at most one 1024-row batch per round, and a queue that
+/// needs more grows.
+const INITIAL_QUEUE_ALLOCATION: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // VecDequeInbox
 // ---------------------------------------------------------------------------
 
-/// Bounded single-ordinal inbox backed by a `VecDeque<rmpv::Value>`.
+/// Unbounded single-ordinal inbox backed by a `VecDeque<rmpv::Value>`.
 ///
 /// Upstream routing logic calls [`push`] to enqueue items. Processors read
 /// via the [`Inbox`] trait methods.
 pub struct VecDequeInbox {
     queue: VecDeque<rmpv::Value>,
-    capacity: usize,
 }
 
 impl VecDequeInbox {
-    /// Create a new inbox with the given capacity.
+    /// Create a new inbox; `capacity` is only its initial allocation (at most
+    /// 1024 items), not a bound.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
             queue: VecDeque::with_capacity(capacity.min(1024)),
-            capacity,
         }
     }
 
-    /// Enqueue an item. Returns `false` if the inbox is at capacity (backpressure).
-    pub fn push(&mut self, item: rmpv::Value) -> bool {
-        if self.queue.len() >= self.capacity {
-            return false;
-        }
+    /// Enqueue an item. The inbox has no bound and never refuses an item.
+    pub fn push(&mut self, item: rmpv::Value) {
         self.queue.push_back(item);
-        true
     }
 }
 
@@ -84,16 +80,16 @@ impl Inbox for VecDequeInbox {
 // VecDequeOutbox
 // ---------------------------------------------------------------------------
 
-/// Bounded multi-ordinal outbox backed by one `VecDeque<rmpv::Value>` per output
-/// ordinal. The executor drains each bucket into the corresponding downstream
-/// processor's inbox after each `process()` call.
+/// Unbounded multi-ordinal outbox backed by one `VecDeque<rmpv::Value>` per
+/// output ordinal. The executor drains each bucket into the corresponding
+/// downstream processor's inbox after each `process()` call.
 pub struct VecDequeOutbox {
     buckets: Vec<VecDeque<rmpv::Value>>,
-    capacity: usize,
 }
 
 impl VecDequeOutbox {
-    /// Create a new outbox with `bucket_count` output ordinals, each bounded by `capacity`.
+    /// Create a new outbox with `bucket_count` output ordinals; `capacity` is
+    /// only each bucket's initial allocation (at most 1024 items), not a bound.
     #[must_use]
     pub fn new(bucket_count: u32, capacity: usize) -> Self {
         let count = bucket_count as usize;
@@ -101,7 +97,6 @@ impl VecDequeOutbox {
             buckets: (0..count)
                 .map(|_| VecDeque::with_capacity(capacity.min(1024)))
                 .collect(),
-            capacity,
         }
     }
 
@@ -124,18 +119,11 @@ impl Outbox for VecDequeOutbox {
         if idx >= self.buckets.len() {
             return false;
         }
-        if self.buckets[idx].len() >= self.capacity {
-            // Backpressure: bucket is full.
-            return false;
-        }
         self.buckets[idx].push_back(item);
         true
     }
 
     fn offer_to_all(&mut self, item: rmpv::Value) -> bool {
-        if self.buckets.iter().any(|b| b.len() >= self.capacity) {
-            return false;
-        }
         // Clone to all except the last bucket; move into the last.
         let last = self.buckets.len().saturating_sub(1);
         for (i, bucket) in self.buckets.iter_mut().enumerate() {
@@ -145,12 +133,8 @@ impl Outbox for VecDequeOutbox {
             }
             bucket.push_back(item.clone());
         }
-        true
-    }
-
-    fn has_capacity(&self, ordinal: u32) -> bool {
-        let idx = ordinal as usize;
-        idx < self.buckets.len() && self.buckets[idx].len() < self.capacity
+        // Reached only with no bucket: the item went nowhere.
+        false
     }
 
     fn bucket_count(&self) -> u32 {
@@ -266,8 +250,8 @@ impl DagExecutor {
 
             processor.init(&ctx)?;
 
-            let inbox = VecDequeInbox::new(DEFAULT_QUEUE_CAPACITY);
-            let outbox = VecDequeOutbox::new(bucket_count, DEFAULT_QUEUE_CAPACITY);
+            let inbox = VecDequeInbox::new(INITIAL_QUEUE_ALLOCATION);
+            let outbox = VecDequeOutbox::new(bucket_count, INITIAL_QUEUE_ALLOCATION);
 
             // Detect if this is a sink (no outgoing edges).
             let is_sink = out_edges.is_empty();
@@ -392,10 +376,8 @@ async fn step_vertex(
                 proc.complete(&mut state.outbox)?
             } else {
                 let mut p = proc;
-                let mut outbox = std::mem::replace(
-                    &mut state.outbox,
-                    VecDequeOutbox::new(1, DEFAULT_QUEUE_CAPACITY),
-                );
+                // An empty placeholder, overwritten when the blocking call returns.
+                let mut outbox = std::mem::replace(&mut state.outbox, VecDequeOutbox::new(1, 0));
                 let result = tokio::task::spawn_blocking(move || {
                     p.complete(&mut outbox).map(|done| (done, outbox, p))
                 })
@@ -420,12 +402,9 @@ async fn step_vertex(
                 proc.process(0, &mut state.inbox, &mut state.outbox)?
             } else {
                 let mut p = proc;
-                let mut inbox =
-                    std::mem::replace(&mut state.inbox, VecDequeInbox::new(DEFAULT_QUEUE_CAPACITY));
-                let mut outbox = std::mem::replace(
-                    &mut state.outbox,
-                    VecDequeOutbox::new(1, DEFAULT_QUEUE_CAPACITY),
-                );
+                // Empty placeholders, overwritten when the blocking call returns.
+                let mut inbox = std::mem::replace(&mut state.inbox, VecDequeInbox::new(0));
+                let mut outbox = std::mem::replace(&mut state.outbox, VecDequeOutbox::new(1, 0));
                 let result = tokio::task::spawn_blocking(move || {
                     p.process(0, &mut inbox, &mut outbox)
                         .map(|done| (done, inbox, outbox, p))
@@ -596,7 +575,7 @@ mod tests {
     fn inbox_push_and_poll() {
         let mut inbox = VecDequeInbox::new(4);
         assert!(inbox.is_empty());
-        assert!(inbox.push(rmpv::Value::Integer(1.into())));
+        inbox.push(rmpv::Value::Integer(1.into()));
         assert!(!inbox.is_empty());
         assert_eq!(inbox.len(), 1);
         let item = inbox.poll().unwrap();
@@ -604,14 +583,19 @@ mod tests {
         assert!(inbox.is_empty());
     }
 
+    /// The inbox takes every item pushed, far past its initial allocation,
+    /// and hands them back in order.
     #[test]
-    fn inbox_backpressure_at_capacity() {
-        let mut inbox = VecDequeInbox::new(2);
-        assert!(inbox.push(rmpv::Value::Integer(1.into())));
-        assert!(inbox.push(rmpv::Value::Integer(2.into())));
-        // At capacity — next push should fail.
-        assert!(!inbox.push(rmpv::Value::Integer(3.into())));
-        assert_eq!(inbox.len(), 2);
+    fn inbox_takes_every_item() {
+        let mut inbox = VecDequeInbox::new(4);
+        for i in 0..10_000_i64 {
+            inbox.push(rmpv::Value::Integer(i.into()));
+        }
+        assert_eq!(inbox.len(), 10_000);
+        for i in 0..10_000_i64 {
+            assert_eq!(inbox.poll(), Some(rmpv::Value::Integer(i.into())));
+        }
+        assert!(inbox.is_empty());
     }
 
     #[test]
@@ -651,22 +635,37 @@ mod tests {
         assert_eq!(drained1, vec![rmpv::Value::Integer(2.into())]);
     }
 
+    /// A bucket accepts every item offered, far past its initial allocation,
+    /// and drains them all in order.
     #[test]
-    fn outbox_backpressure() {
-        let mut outbox = VecDequeOutbox::new(1, 2);
-        assert!(outbox.offer(0, rmpv::Value::Integer(1.into())));
-        assert!(outbox.offer(0, rmpv::Value::Integer(2.into())));
-        // At capacity — next offer should fail.
-        assert!(!outbox.offer(0, rmpv::Value::Integer(3.into())));
+    fn outbox_takes_every_item() {
+        let mut outbox = VecDequeOutbox::new(1, 4);
+        for i in 0..10_000_i64 {
+            assert!(outbox.offer(0, rmpv::Value::Integer(i.into())));
+        }
+        let drained: Vec<_> = outbox.drain_bucket(0).collect();
+        let expected: Vec<_> = (0..10_000_i64)
+            .map(|i| rmpv::Value::Integer(i.into()))
+            .collect();
+        assert_eq!(drained, expected);
+    }
+
+    /// `offer_to_all` past 4096 items puts every item in every bucket.
+    #[test]
+    fn outbox_offer_to_all_takes_every_item() {
+        let mut outbox = VecDequeOutbox::new(2, 4);
+        for i in 0..4097_i64 {
+            assert!(outbox.offer_to_all(rmpv::Value::Integer(i.into())));
+        }
+        for ordinal in 0..2 {
+            assert_eq!(outbox.drain_bucket(ordinal).count(), 4097);
+        }
     }
 
     #[test]
-    fn outbox_has_capacity() {
-        let mut outbox = VecDequeOutbox::new(1, 2);
-        assert!(outbox.has_capacity(0));
-        outbox.offer(0, rmpv::Value::Integer(1.into()));
-        outbox.offer(0, rmpv::Value::Integer(2.into()));
-        assert!(!outbox.has_capacity(0));
+    fn outbox_offer_to_all_without_buckets_refuses() {
+        let mut outbox = VecDequeOutbox::new(0, 4);
+        assert!(!outbox.offer_to_all(rmpv::Value::Boolean(true)));
     }
 
     #[test]
@@ -693,7 +692,6 @@ mod tests {
         outbox.offer(0, rmpv::Value::Integer(42.into()));
         let _ = outbox.drain_bucket(0).collect::<Vec<_>>();
         // After drain, bucket should be empty.
-        assert!(!outbox.has_capacity(0) || outbox.has_capacity(0)); // bucket exists
         let second_drain: Vec<_> = outbox.drain_bucket(0).collect();
         assert!(second_drain.is_empty());
     }
@@ -842,6 +840,36 @@ mod tests {
         let results = executor.execute().await.expect("pipeline should succeed");
 
         assert_eq!(results.len(), 10, "all 10 items should be collected");
+    }
+
+    /// A run over 10 000 items, the source emitting 1024 per round, returns
+    /// every item in order: no queue between the vertices drops one.
+    #[tokio::test]
+    async fn an_executor_run_returns_every_item() {
+        let items: Vec<rmpv::Value> = (0i64..10_000)
+            .map(|i| rmpv::Value::Integer(i.into()))
+            .collect();
+        let mut dag = Dag::new();
+        dag.new_vertex(Vertex {
+            name: "source".to_string(),
+            local_parallelism: 1,
+            processor_supplier: Box::new(StaticSourceSupplier {
+                items: items.clone(),
+            }),
+            preferred_partitions: None,
+        });
+        dag.new_vertex(Vertex {
+            name: "collector".to_string(),
+            local_parallelism: 1,
+            processor_supplier: Box::new(CollectorProcessorSupplier),
+            preferred_partitions: None,
+        });
+        dag.edge(make_edge("source", "collector"));
+
+        let executor = DagExecutor::new(dag, make_test_context(make_test_factory()), 5000);
+        let results = executor.execute().await.expect("pipeline should succeed");
+
+        assert_eq!(results, items, "every item, in order");
     }
 
     /// AC #1: source -> filter -> collector pipeline filters correctly.
@@ -1026,39 +1054,6 @@ mod tests {
 
         // With a single collector, broadcast = push-all.
         assert_eq!(results.len(), 2);
-    }
-
-    /// AC #3: Backpressure — VecDequeOutbox.offer returns false when bucket is at capacity.
-    ///
-    /// This tests the backpressure mechanism directly at the buffer level. When a downstream
-    /// inbox is full, the upstream outbox bucket fills up and `offer` returns `false`,
-    /// signalling the upstream processor to pause.
-    #[test]
-    fn backpressure_outbox_full_offer_returns_false() {
-        let capacity = 4;
-        let mut outbox = VecDequeOutbox::new(1, capacity);
-
-        // Fill to capacity.
-        for i in 0..capacity {
-            #[allow(clippy::cast_possible_wrap)]
-            let accepted = outbox.offer(0, rmpv::Value::Integer((i as i64).into()));
-            assert!(
-                accepted,
-                "offer {i} should be accepted while under capacity"
-            );
-        }
-
-        // Next offer should be rejected (backpressure).
-        let rejected = outbox.offer(0, rmpv::Value::Integer(99.into()));
-        assert!(
-            !rejected,
-            "offer past capacity should return false (backpressure)"
-        );
-
-        // After draining, capacity is restored.
-        let _drained: Vec<_> = outbox.drain_bucket(0).collect();
-        let accepted_after_drain = outbox.offer(0, rmpv::Value::Integer(100.into()));
-        assert!(accepted_after_drain, "offer should succeed after drain");
     }
 
     /// AC #2: GROUP BY aggregation pipeline (source -> aggregate -> collector).

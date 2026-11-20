@@ -9,7 +9,7 @@ an explicit `NAKED` marker; the gate is "the NAKED count never grows silently", 
 Conventions: IDs are `TG-<DOMAIN>-<NNN>` (domains: WAL, WB write-behind, OR, LWW, MRK merkle,
 EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch, ENG byte engine, AUTHZ
 authorization, ENC encryption at rest, READ whole-map reads, IDX scalar indexes, VEC vector indexes,
-TTL record expiry, LIVE live queries). Cite the ID verbatim in code comments and test names. Statuses:
+TTL record expiry, LIVE live queries, QRY queries). Cite the ID verbatim in code comments and test names. Statuses:
 `decided` (holds by design) · `open (SPEC/TODO-nnn)` (not yet true / not yet wired) ·
 `aspirational`. Precedent: omnigraph `docs/invariants.md` (structure) — improved here with the
 CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
@@ -3383,7 +3383,7 @@ weaker than a test.
 | Enforcer | What it covers | Where it runs |
 |----------|----------------|---------------|
 | `a_write_during_the_scan_is_in_the_snapshot_and_no_update_precedes_it` | (a), (b): a write made during the scan is in the snapshot, the snapshot is enqueued on the connection and no update of the query precedes it. Shown red on five trees: the write not routed into the buffer; captured but not folded; a wall-clock fence instead of the capture; only a strictly newer stamp folded; the snapshot returned on the response path instead of enqueued | CI (`cargo test`) |
-| `an_overflow_sends_the_snapshot_then_the_overflow_and_drops_the_subscription` | (c), the buffer bound: 4097 distinct keys written during the scan answer with the snapshot followed by `QUERY_SNAPSHOT_OVERFLOW`, drop that registration and keep the same id on another map; a resubscribe holds what a fresh one-shot scan holds. Shown red on the tree that keeps the registration on overflow, on the one that sends the overflow before the snapshot, and on the one that unregisters the id on every map | CI (`cargo test`) |
+| `an_overflow_sends_the_snapshot_then_the_overflow_and_drops_the_subscription` | (c), the buffer bound: 4097 distinct keys written during the scan answer with the snapshot followed by `QUERY_SNAPSHOT_OVERFLOW`, drop that registration and keep the same id on another map; a resubscribe holds every row of the map (4101 rows). Shown red on the tree that keeps the registration on overflow, on the one that sends the overflow before the snapshot, and on the one that unregisters the id on every map | CI (`cargo test`) |
 | `a_full_outbound_channel_answers_with_the_snapshot_and_the_overflow` | (c), the channel: a connection with no free slot gets the snapshot and the overflow on the response path. Shown red on the tree that sends the snapshot without reserving a slot | CI (`cargo test`) |
 | `a_cancelled_subscribe_leaves_no_registration` | (d), cancellation: a subscribe aborted during its scan leaves no registration and its buffer is freed. Shown red on the tree without the subscribe guard | CI (`cargo test`) |
 | `an_unsubscribe_during_the_scan_sends_nothing_and_frees_the_buffer` | (d), unsubscribe: an unsubscribe during the scan, then a resubscribe of the same id, leave the held subscribe sending nothing and the newer registration in place. Shown red on the tree whose close does not check that the registration holds its own buffer | CI (`cargo test`) |
@@ -3403,6 +3403,42 @@ weaker than a test.
 | `remove_if_same_drops_the_outer_entry_and_returns` | `remove_if_same` removes only its own registration, drops the emptied outer entry and returns without deadlock. Shown red on three trees: the outer guard held across the outer remove; no outer remove; no buffer identity check | CI (`cargo test`) |
 | `the_bound_counts_distinct_keys_of_any_event_kind` (`delta_buffer.rs`) | (c), the bound counts distinct keys of any kind of event. Shown red on the tree that counts every route | CI (`cargo test`) |
 | `sim_live_subscribe_converges_under_concurrent_writes` | not an enforcer: a fault-scenario smoke (partition and heal of the other nodes) that checks the replayed frames end at the stored rows; nothing in it makes a write land during the scan | CI (`pnpm test:sim`) |
+
+### TG-QRY-001: A query returns every matching row up to max_query_records, and says has_more when it clamps
+
+- **Scope:** a query served by one node through `QueryService::handle_query_subscribe` and
+  `run_dag_local`: one-shot and live snapshot, sorted and unsorted, and one-shot GROUP BY.
+- **Statement:** with no limit, all `N` matching rows when `N <= max_query_records`, with
+  `has_more` absent; else `max_query_records` of them with `has_more: true`. With a sort and
+  a limit `L`, `min(N, L, max_query_records)` rows, with `has_more: true` and a `next_cursor` when
+  more rows match. Over a map not written between the pages, paging on with the cursor within its
+  TTL gives every row exactly once. With a limit and no sort, `min(N, L, max_query_records)` rows,
+  with `has_more: true` when more rows match. A one-shot GROUP BY returns every group, up to
+  `max_query_records`. A live subscription's window is seeded with every row of its snapshot.
+  The mechanism: no queue of the DAG executor refuses an item; a stage that emits all its rows at
+  once already holds them in memory.
+- **Not claimed:**
+  - Multi-node queries (TODO-1007).
+  - A cursor for a clamped query with no limit or no sort (TODO-1006).
+  - A row bound inside the DAG: the clamp cuts after the whole result is converted (TODO-1008).
+  - A limited window refilling from the store (TODO-1005).
+  - A bound on query memory.
+  - Exactly-once paging under concurrent writes between pages: a row moved across the cursor is
+    skipped or repeated.
+  - A cursor past its TTL (`CURSOR_TTL_MS`): the next page is empty with `cursor_status` Expired.
+- **Maintaining code:** `dag/executor.rs` (`VecDequeInbox`, `VecDequeOutbox`, `route_items`),
+  `dag/types.rs` (`Outbox`), `service/domain/query.rs` (`handle_query_subscribe`: the limit
+  sentinel and the `max_query_records` clamp). Citations are line-number-free.
+- **Enforcing test:** `tg_qry_001_every_row_at_4096`, `tg_qry_001_every_row_at_4097`,
+  `tg_qry_001_every_row_at_10000`, `tg_qry_001_a_group_by_returns_every_group`,
+  `tg_qry_001_a_cursor_pages_through_every_row`, `tg_qry_001_the_clamp_says_has_more`,
+  `tg_qry_001_the_live_window_holds_every_row`, `tg_qry_001_a_captured_write_repaginates_a_large_page`,
+  `an_overflow_sends_the_snapshot_then_the_overflow_and_drops_the_subscription` (`query.rs`) and
+  `an_executor_run_returns_every_item` (`executor.rs`).
+- **Violation consequence:** a query or live subscription silently returns fewer rows than match
+  it, with no `has_more`, and the live window starts without the missing rows.
+- **Discovered by:** TODO-1001; fixed by SPEC-420.
+- **Status:** decided, **enforced**.
 
 ### TG-RATE-001: The cost a frame presents to its connection's limiter is not less than the number of client operations it hands to dispatch
 

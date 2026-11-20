@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed: a query no longer stops at 4096 rows.** A query or live subscription with no limit, or with
+  a limit of 4096 or more, that matched more than 4096 rows returned at most 4096 of them and no
+  `has_more`; a smaller limit was not affected. A `groupBy` query over more than 4096 groups returned
+  4096 of them. It now returns every matching row up to `max_query_records`
+  (10 000 by default). Above that it returns `max_query_records` rows with `has_more: true`, as before.
 - **Fixed: `topgun_subscribe` applies its `filter`.** The MCP change feed applied no field
   condition from `filter` and reported changes to every record of the map; it now applies `filter`
   as field equality, as `topgun_query` does: a write of a record that does not match is not

@@ -1120,6 +1120,86 @@ mod tests {
         }
     }
 
+    /// The combine keeps every group, however many there are: 4097 groups,
+    /// each split over two of three nodes' partials, merge into 4097 rows,
+    /// each with the sum of its partial counts.
+    #[tokio::test]
+    async fn combine_group_by_results_keeps_every_group() {
+        const GROUPS: usize = 4097;
+        let partial = |key: &str, count: u64| -> rmpv::Value {
+            rmpv::Value::Map(vec![
+                (
+                    rmpv::Value::String("__key".into()),
+                    rmpv::Value::String(key.into()),
+                ),
+                (
+                    rmpv::Value::String("__count".into()),
+                    rmpv::Value::Integer(count.into()),
+                ),
+                (rmpv::Value::String("__sum".into()), rmpv::Value::F64(0.0)),
+                (rmpv::Value::String("__min".into()), rmpv::Value::Nil),
+                (rmpv::Value::String("__max".into()), rmpv::Value::Nil),
+            ])
+        };
+        let field = |item: &rmpv::Value, name: &str| -> rmpv::Value {
+            let rmpv::Value::Map(pairs) = item else {
+                panic!("a merged row is a map: {item:?}");
+            };
+            pairs
+                .iter()
+                .find(|(k, _)| k.as_str() == Some(name))
+                .map_or_else(|| panic!("{name} missing in {item:?}"), |(_, v)| v.clone())
+        };
+
+        // Group i has a partial of count 1 on node i % 3 and one of count 2 on
+        // node (i + 1) % 3.
+        let mut nodes: Vec<Vec<rmpv::Value>> = vec![Vec::new(), Vec::new(), Vec::new()];
+        for i in 0..GROUPS {
+            let key = format!("g{i:05}");
+            nodes[i % 3].push(partial(&key, 1));
+            nodes[(i + 1) % 3].push(partial(&key, 2));
+        }
+
+        let cluster = Arc::new(MockClusterService::new(&["node-1"]));
+        let coordinator = ClusterQueryCoordinator::new(
+            cluster as Arc<dyn ClusterService>,
+            make_connection_registry(),
+            make_record_store_factory(),
+            "coordinator-test".to_string(),
+            make_test_config(5000),
+            make_completion_registry(),
+        );
+        let descriptor = crate::dag::types::DagPlanDescriptor {
+            vertices: vec![],
+            edges: vec![],
+        };
+        let merged = coordinator
+            .combine_group_by_results(nodes, &Query::default(), &descriptor)
+            .expect("combine should succeed");
+
+        assert_eq!(merged.rows.len(), GROUPS, "one merged row per group");
+        let keys: std::collections::BTreeSet<String> = merged
+            .rows
+            .iter()
+            .map(|row| {
+                field(row, "__key")
+                    .as_str()
+                    .expect("a string key")
+                    .to_string()
+            })
+            .collect();
+        let expected: std::collections::BTreeSet<String> =
+            (0..GROUPS).map(|i| format!("g{i:05}")).collect();
+        assert_eq!(keys, expected, "every group, once");
+        for row in &merged.rows {
+            assert_eq!(
+                field(row, "__count").as_u64(),
+                Some(3),
+                "a group's count is the sum of its partials: {row:?}"
+            );
+        }
+    }
+
     // ---------------------------------------------------------------------------
     // AC #3: Timeout — returns error when no node resolves
     // ---------------------------------------------------------------------------

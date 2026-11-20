@@ -192,12 +192,12 @@ pub trait Inbox: Send {
 
 /// Write-side buffer for processor output.
 pub trait Outbox: Send {
-    /// Offer an item to a specific ordinal. Returns `false` if backpressure applies.
+    /// Append an item to `ordinal`'s bucket. Returns `false` only when there is
+    /// no bucket `ordinal`; a bucket is never full.
     fn offer(&mut self, ordinal: u32, item: rmpv::Value) -> bool;
-    /// Offer an item to all ordinals.
+    /// Append an item to every bucket. Returns `false` only when there is no
+    /// bucket.
     fn offer_to_all(&mut self, item: rmpv::Value) -> bool;
-    /// Check whether the given ordinal has capacity.
-    fn has_capacity(&self, ordinal: u32) -> bool;
     /// Number of output ordinals.
     fn bucket_count(&self) -> u32;
 }
