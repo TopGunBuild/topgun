@@ -20683,10 +20683,15 @@ mod write_path_measure {
     #[cfg(feature = "rocksdb")]
     #[test]
     #[ignore = "measurement, run by hand"]
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::too_many_lines
+    )]
     fn reclaim_tick_with_a_held_partition() {
         use crate::storage::map_data_store::{FlushCommit, PutValue, StoreWrite};
         use topgun_core::{fnv1a_hash, PARTITION_COUNT};
+        const HELD: u32 = 7;
         let env_u64 = |name: &str, default: u64| {
             std::env::var(name)
                 .ok()
@@ -20695,7 +20700,6 @@ mod write_path_measure {
         };
         let ticks = env_u64("RV_TICKS", 60);
         let writes = env_u64("RV_WRITES", 10_000);
-        const HELD: u32 = 7;
         let partition = |key: &str| fnv1a_hash(&format!("m:{key}")) % PARTITION_COUNT;
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)

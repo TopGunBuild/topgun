@@ -1063,7 +1063,7 @@ fn with_captured_warns(body: impl std::future::Future<Output = ()>) -> Vec<Strin
             .enable_all()
             .build()
             .expect("runtime")
-            .block_on(body)
+            .block_on(body);
     });
     let warns = capture.0.lock().clone();
     warns
