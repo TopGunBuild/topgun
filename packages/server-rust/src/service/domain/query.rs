@@ -5453,7 +5453,8 @@ mod tests {
     }
 
     /// Every query shape and mode over `n` rows returns all `n` rows, and
-    /// says no more follow.
+    /// says no more follow; a sorted page of 4096 returns the first rows and
+    /// says, with a cursor, whether more follow.
     async fn every_row_at(n: usize) {
         let mut fx = live();
         seed_rows(&fx, n).await;
@@ -5471,6 +5472,31 @@ mod tests {
                 for defect in whole_result_defects(&page, n, sorted) {
                     failures.push(format!("{case}: {defect}"));
                 }
+            }
+        }
+        let page_len = n.min(4096);
+        let more = n > 4096;
+        for snapshot_only in [true, false] {
+            let case = format!("n={n} sorted limit=4096 one_shot={snapshot_only}");
+            let svc = Arc::clone(&fx.svc);
+            let page = ask(
+                &svc,
+                fx.s,
+                &mut fx.s_rx,
+                &case,
+                sort_v(Some(4096)),
+                snapshot_only,
+            )
+            .await;
+            let keys: Vec<String> = page.results.iter().map(|e| e.key.clone()).collect();
+            if keys != (0..page_len).map(row_key).collect::<Vec<_>>() {
+                failures.push(format!("{case}: not the first {page_len} rows in order"));
+            }
+            if page.has_more != more.then_some(true) {
+                failures.push(format!("{case}: has_more {:?}", page.has_more));
+            }
+            if page.next_cursor.is_some() != more {
+                failures.push(format!("{case}: next_cursor {:?}", page.next_cursor));
             }
         }
         assert!(failures.is_empty(), "failing cases: {failures:#?}");
@@ -5720,6 +5746,7 @@ mod tests {
         seed_rows(&fx, 10_000).await;
         let svc = Arc::clone(&fx.svc);
         let snapshot = ask(&svc, fx.s, &mut fx.s_rx, LIVE_ID, Query::default(), false).await;
+        assert_eq!(snapshot.results.len(), 10_000, "the snapshot");
         for i in 0..=4096 {
             fx.client(
                 fx.w,
@@ -5740,7 +5767,6 @@ mod tests {
             .filter(|t| !matches!(t, ChangeEventType::UPDATE))
             .count();
         assert_eq!(enters, 0, "every write updates a row of the window");
-        assert_eq!(snapshot.results.len(), 10_000, "the snapshot");
     }
 
     /// A write captured during the scan of a 5000-row page over 10 000 rows
