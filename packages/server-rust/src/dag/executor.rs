@@ -133,7 +133,8 @@ impl Outbox for VecDequeOutbox {
             }
             bucket.push_back(item.clone());
         }
-        true
+        // Reached only with no bucket: the item went nowhere.
+        false
     }
 
     fn bucket_count(&self) -> u32 {
@@ -659,6 +660,12 @@ mod tests {
         for ordinal in 0..2 {
             assert_eq!(outbox.drain_bucket(ordinal).count(), 4097);
         }
+    }
+
+    #[test]
+    fn outbox_offer_to_all_without_buckets_refuses() {
+        let mut outbox = VecDequeOutbox::new(0, 4);
+        assert!(!outbox.offer_to_all(rmpv::Value::Boolean(true)));
     }
 
     #[test]

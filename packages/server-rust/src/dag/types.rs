@@ -195,7 +195,8 @@ pub trait Outbox: Send {
     /// Append an item to `ordinal`'s bucket. Returns `false` only when there is
     /// no bucket `ordinal`; a bucket is never full.
     fn offer(&mut self, ordinal: u32, item: rmpv::Value) -> bool;
-    /// Append an item to every bucket. Never refuses an item.
+    /// Append an item to every bucket. Returns `false` only when there is no
+    /// bucket.
     fn offer_to_all(&mut self, item: rmpv::Value) -> bool;
     /// Number of output ordinals.
     fn bucket_count(&self) -> u32;
