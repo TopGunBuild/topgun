@@ -3409,7 +3409,7 @@ weaker than a test.
 - **Scope:** a query served by one node through `QueryService::handle_query_subscribe` and
   `run_dag_local`: one-shot and live snapshot, sorted and unsorted, and one-shot GROUP BY.
 - **Statement:** with no limit, all `N` matching rows when `N <= max_query_records`, with
-  `has_more` absent; else the first `max_query_records` rows with `has_more: true`. With a sort and
+  `has_more` absent; else `max_query_records` of them with `has_more: true`. With a sort and
   a limit `L`, `min(N, L, max_query_records)` rows, with `has_more: true` and a `next_cursor` when
   more rows match. Over a map not written between the pages, paging on with the cursor within its
   TTL gives every row exactly once. With a limit and no sort, `min(N, L, max_query_records)` rows,
