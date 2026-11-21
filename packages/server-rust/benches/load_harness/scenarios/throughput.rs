@@ -29,7 +29,7 @@ pub struct ThroughputConfig {
     /// Milliseconds to sleep between batches per connection.
     pub send_interval_ms: u64,
     /// When true, send batches without waiting for ACK (fire-and-forget).
-    /// A separate task per connection drains ACKs and records latency.
+    /// Each connection still reads and discards what the server sends.
     pub fire_and_forget: bool,
     /// The TTL every sent record asks for, as a client sets it (`--ttl-ms`).
     pub ttl_ms: Option<u64>,
@@ -326,41 +326,53 @@ async fn run_fire_and_forget(
     let mut seq: u64 = 0;
     let mut send_errors: u64 = 0;
 
-    // Send-only: push batches as fast as possible without waiting for ACK.
-    // This measures how fast the client can push data into the server pipeline.
-    while tokio::time::Instant::now() < deadline {
-        let bytes = build_batch(conn_idx, seq, batch_size, ttl_ms);
+    // Push batches as fast as possible without waiting for each ACK, but read and
+    // discard what the server sends: a client that never reads fills its receive
+    // buffer with ACKs, the server blocks writing to it and stops reading, and the
+    // next send waits for ever. The deadline bounds a send the server never takes.
+    let drain = async {
+        while let Ok(Ok(_)) = tokio::time::timeout_at(deadline, pool.recv_from(conn_idx)).await {}
+    };
+    let send = async {
+        while tokio::time::Instant::now() < deadline {
+            let bytes = build_batch(conn_idx, seq, batch_size, ttl_ms);
 
-        if let Err(e) = pool.send_to(conn_idx, &bytes).await {
-            send_errors += 1;
-            if send_errors > MAX_CONSECUTIVE_ERRORS {
-                tracing::warn!(
-                    "conn-{conn_idx}: giving up after {send_errors} consecutive errors: {e}"
-                );
+            let Ok(sent) = tokio::time::timeout_at(deadline, pool.send_to(conn_idx, &bytes)).await
+            else {
                 break;
+            };
+            if let Err(e) = sent {
+                send_errors += 1;
+                if send_errors > MAX_CONSECUTIVE_ERRORS {
+                    tracing::warn!(
+                        "conn-{conn_idx}: giving up after {send_errors} consecutive errors: {e}"
+                    );
+                    break;
+                }
+                // Exponential backoff capped at ~6.4 ms (100us << 6).
+                // Gives macOS time to drain the socket send buffer on ENOBUFS.
+                tokio::time::sleep(Duration::from_micros(100 << send_errors.min(6))).await;
+                continue;
             }
-            // Exponential backoff capped at ~6.4 ms (100us << 6).
-            // Gives macOS time to drain the socket send buffer on ENOBUFS.
-            tokio::time::sleep(Duration::from_micros(100 << send_errors.min(6))).await;
-            continue;
-        }
-        // Log recovery so validation runs have evidence the retry loop fired.
-        if send_errors > 0 {
-            tracing::debug!(
-                "conn-{conn_idx}: recovered from {send_errors} consecutive send errors"
-            );
-        }
-        send_errors = 0;
+            // Log recovery so validation runs have evidence the retry loop fired.
+            if send_errors > 0 {
+                tracing::debug!(
+                    "conn-{conn_idx}: recovered from {send_errors} consecutive send errors"
+                );
+            }
+            send_errors = 0;
 
-        seq += batch_size as u64;
-        total_sent += batch_size as u64;
-        if send_interval_ms > 0 {
-            tokio::time::sleep(Duration::from_millis(send_interval_ms)).await;
+            seq += batch_size as u64;
+            total_sent += batch_size as u64;
+            if send_interval_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(send_interval_ms)).await;
+            }
         }
-    }
+    };
+    tokio::join!(drain, send);
 
-    // Skip ACK drain — just report what we sent. ACK counting is meaningless
-    // in fire-and-forget mode since the server may still be processing.
+    // ACKs are read but not counted: at the deadline the server may still be
+    // processing, so this mode reports what was sent.
     let acked_count = total_sent; // Report all sent as "acked" to pass assertion
 
     (total_sent, acked_count, send_errors)
