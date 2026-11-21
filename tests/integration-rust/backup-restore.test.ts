@@ -5,7 +5,12 @@
  * is not copied: the server writes it again beside the data directory it
  * opens. The control arm copies the data directory alone after an unclean stop
  * and must lose writes: it is what shows the WAL directory is part of the
- * backup.
+ * backup. The control and its twin hold the write-behind flush, so at the kill
+ * every acknowledged write is in the WAL directory and none is in the data
+ * directory: the control, with the data directory alone, loses every one of
+ * them, and the twin, identical but for the copied WAL directory, brings every
+ * one back. The unheld SIGKILL arm covers a kill at production defaults, where
+ * a pass may have stored some writes and the rest are replayed from the WAL.
  */
 
 import * as fs from 'fs';
@@ -29,13 +34,26 @@ const OR_COUNT = 20;
 const ACK_WAIT_MS = 10_000;
 const STOP_WAIT_MS = 60_000;
 
+// Under kill -9 the flush interval is set far beyond the test's duration, so
+// every acknowledged write exists only as a WAL frame at the kill: the flush
+// task waits one interval before its first pass and nothing else wakes it, so
+// no pass runs while server A lives. The stalled-watermark bound is left at its
+// default: server A lives a few seconds, far below it.
+const HELD_FLUSH_INTERVAL_MS = '3600000';
+// The startup WARN an interval of 500 ms or more logs: it shows the hold was read.
+const HELD_FLUSH_WARN = 'the write-behind flush interval is at least 500 ms';
+
 function binary(): string {
   const p = process.env.RUST_SERVER_BINARY;
   if (!p) throw new Error('RUST_SERVER_BINARY must point at a release build of topgun-server');
   return p;
 }
 
-function start(dir: string, label: string): Promise<SpawnedBinary> {
+function start(
+  dir: string,
+  label: string,
+  extraEnv?: Record<string, string>,
+): Promise<SpawnedBinary> {
   return spawnBinary({
     binaryPath: binary(),
     label,
@@ -44,6 +62,7 @@ function start(dir: string, label: string): Promise<SpawnedBinary> {
       STORAGE_BACKEND: 'redb',
       TOPGUN_REDB_PATH: path.join(dir, 'topgun.redb'),
       TOPGUN_WAL_DIR: path.join(dir, 'topgun-wal'),
+      ...extraEnv,
     },
   });
 }
@@ -115,15 +134,39 @@ interface ArmResult {
   lost: string[];
 }
 
-async function arm(run: string, stop: 'SIGTERM' | 'SIGKILL', copyWal: boolean): Promise<ArmResult> {
+/** Every key path, in the order `missing()` reports them. */
+function allKeys(): string[] {
+  return Array.from({ length: LWW_COUNT + OR_COUNT }, (_, i) =>
+    i < LWW_COUNT ? `${LWW_MAP}/k${i}` : `${OR_MAP}/k${i}`,
+  );
+}
+
+async function arm(
+  run: string,
+  stop: 'SIGTERM' | 'SIGKILL',
+  { copyWal, holdFlush }: { copyWal: boolean; holdFlush: boolean },
+): Promise<ArmResult> {
   const dir1 = fs.mkdtempSync(path.join(os.tmpdir(), `topgun-backup-${run}-a-`));
   const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), `topgun-backup-${run}-b-`));
   let a: SpawnedBinary | null = null;
   let b: SpawnedBinary | null = null;
   try {
-    a = await start(dir1, `${run} A`);
+    // RUST_LOG is pinned so a developer shell that filters out WARN cannot hide the hold's proof.
+    a = await start(
+      dir1,
+      `${run} A`,
+      holdFlush
+        ? { TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS: HELD_FLUSH_INTERVAL_MS, RUST_LOG: 'info' }
+        : undefined,
+    );
     const acked = await writeAll(a.port!, run);
     const exit = await a.stop(stop, STOP_WAIT_MS);
+    if (holdFlush && !a.stdout().includes(HELD_FLUSH_WARN)) {
+      throw new Error(
+        `the hold did not take effect: server A did not log "${HELD_FLUSH_WARN}" ` +
+          '(TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS renamed or not read)',
+      );
+    }
     fs.cpSync(path.join(dir1, 'topgun-data'), path.join(dir2, 'topgun-data'), { recursive: true });
     if (copyWal) {
       fs.cpSync(path.join(dir1, 'topgun-wal'), path.join(dir2, 'topgun-wal'), { recursive: true });
@@ -141,26 +184,29 @@ async function arm(run: string, stop: 'SIGTERM' | 'SIGKILL', copyWal: boolean): 
 
 describe('Integration: backup by stopping the server and copying the data directory and the WAL directory', () => {
   test('SIGTERM, data directory + WAL copied: every acknowledged write is back', async () => {
-    const r = await arm('term', 'SIGTERM', true);
+    const r = await arm('term', 'SIGTERM', { copyWal: true, holdFlush: false });
     process.stderr.write(`[backup] term: ${JSON.stringify(r)}\n`);
     expect(r).toEqual({ acked: LWW_COUNT + OR_COUNT, stopCode: 0, stopSignal: null, lost: [] });
   }, 240_000);
 
   test('SIGKILL, data directory + WAL copied: every acknowledged write is back', async () => {
-    const r = await arm('killwal', 'SIGKILL', true);
+    const r = await arm('killwal', 'SIGKILL', { copyWal: true, holdFlush: false });
     process.stderr.write(`[backup] killwal: ${JSON.stringify(r)}\n`);
     expect(r.acked).toBe(LWW_COUNT + OR_COUNT);
     expect(r.lost).toEqual([]);
   }, 240_000);
 
-  test('control: SIGKILL, data directory alone: acknowledged writes are missing', async () => {
-    const r = await arm('killfile', 'SIGKILL', false);
+  test('SIGKILL, flush held, data directory + WAL copied: every acknowledged write is back', async () => {
+    const r = await arm('killwalheld', 'SIGKILL', { copyWal: true, holdFlush: true });
+    process.stderr.write(`[backup] killwalheld: ${JSON.stringify(r)}\n`);
+    expect(r.acked).toBe(LWW_COUNT + OR_COUNT);
+    expect(r.lost).toEqual([]);
+  }, 240_000);
+
+  test('control: SIGKILL, data directory alone: every acknowledged write is missing', async () => {
+    const r = await arm('killfile', 'SIGKILL', { copyWal: false, holdFlush: true });
     process.stderr.write(`[backup] killfile: ${JSON.stringify(r)}\n`);
     expect(r.acked).toBe(LWW_COUNT + OR_COUNT);
-    if (r.lost.length === 0) {
-      throw new Error(
-        'the data-directory-only arm lost nothing: it no longer shows that the WAL directory is part of the backup',
-      );
-    }
+    expect(r.lost).toEqual(allKeys());
   }, 240_000);
 });
