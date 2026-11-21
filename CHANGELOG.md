@@ -218,7 +218,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     ends below one (a `batched` power loss). Version rows hold record keys and sequences and are
     not sealed under encryption at rest.
   - **Rolling back.** Every earlier binary that opens the RocksDB store refuses a data directory
-    this binary has stored a record in, at its store open — before it opens the WAL and before it listens — and exits 1:
+    in which this binary has made a write through the WAL (every client write), at its store open — before it opens the WAL and before it listens — and exits 1:
     `Error: store open: refusing to start: store format: refusing to open: a key in the reserved keyspace 0x12`.
     It changes no record or metadata row and no WAL file. A data directory this binary only opened, with no write, holds no
     `0x12` row and is served by the earlier binary. There is no tool that removes version rows;
@@ -234,10 +234,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     fails to prepare, TODO-823) is not applied again once a live write of its key has been
     stored above it: the node served the key without that frame and the live write was made over
     that state. The non-subsuming frames of a key that follow such a failed frame, with no written
-    `Store` or `Remove` of the key above it before them, share that outcome: they are left
-    unapplied at that boot with their failed predecessor, served without, and lost for good once
-    a live write of the key is stored above them. A frame that follows a written `Store` or
-    `Remove` of its key above the failed one is applied at that boot.
+    `Store` or `Remove` of the key above the latest failed frame of the key before them, share
+    that outcome: they are left unapplied at that boot with their failed predecessor, served
+    without, and lost for good once a live write of the key is stored above them. A frame that
+    follows a written `Store` or `Remove` of its key above every failed frame of the key before it
+    is applied at that boot.
 
 - **Changed (on-disk format): the server stores its data in RocksDB.** The data directory now
   holds `engine.rocksdb/`, and the server moves an existing `engine.redb` there by itself, once,
