@@ -206,12 +206,12 @@ describe('SPEC-343 SyncEngine map-name folds', () => {
 
       syncEngine = new SyncEngine(makeConfig(storage));
       syncEngine.setAuthToken('test-token');
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       const ws = MockWebSocket.getLastInstance()!;
       ws.sentMessages = [];
       ws.simulateMessage({ type: 'AUTH_ACK' });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       const opBatch = ws.sentMessages.find((m) => m.type === 'OP_BATCH');
       expect(opBatch).toBeDefined();
