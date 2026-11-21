@@ -161,12 +161,12 @@ describe('restoring pending operations by map name', () => {
   async function restoreAndConnect(): Promise<void> {
     syncEngine = new SyncEngine(makeConfig(storage));
     syncEngine.setAuthToken('test-token');
-    await jest.runAllTimersAsync();
+    await jest.advanceTimersByTimeAsync(1_000);
 
     ws = MockWebSocket.getLastInstance()!;
     ws.sentMessages = [];
     ws.simulateMessage({ type: 'AUTH_ACK' });
-    await jest.runAllTimersAsync();
+    await jest.advanceTimersByTimeAsync(1_000);
   }
 
   const opLogNames = (): string[] =>
@@ -216,7 +216,7 @@ describe('restoring pending operations by map name', () => {
         },
       });
       // The durable delete and the op-log splice run on a promise chain.
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
       await (syncEngine as any).opRetirementChain;
     }
 

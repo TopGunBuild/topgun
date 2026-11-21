@@ -388,6 +388,12 @@ describe('Integration: an acknowledgement that names no batch the client sent', 
    * The part every SDK scenario shares once its trigger frame has left: wait
    * for the stray answer where one is expected, record what the client then
    * holds, end the frame loss, make one more write and read the server.
+   *
+   * The lost write is not carried by that next write: the client counts the
+   * withheld batch as sent, so it sends the lost op again only when its resend
+   * timer fires, 10 s after that send. The server is therefore read until it
+   * holds `lostKey`, in 1 s steps for up to 25 s; a client that never re-sends
+   * the write still fails the assertion on the server's value.
    */
   async function observeAfterTrigger(
     observed: ScenarioObservations,
@@ -396,6 +402,7 @@ describe('Integration: an acknowledgement that names no batch the client sent', 
     markOpsSynced: jest.SpyInstance,
     port: number,
     mapName: string,
+    lostKey: string,
     nextKey: string,
     nextValue: string,
   ): Promise<void> {
@@ -413,6 +420,10 @@ describe('Integration: an acknowledgement that names no batch the client sent', 
     observed.nextWrite = await client.confirmWrite(mapName, nextKey, SIGNAL_TIMEOUT_MS);
 
     observed.serverValues = await readServerMap(port, mapName);
+    for (let waited = 0; waited < 25 && !observed.serverValues.has(lostKey); waited++) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      observed.serverValues = await readServerMap(port, mapName);
+    }
     observed.batchLastIds = lastIdsOfRecordedBatches();
     observed.acksWithoutLevel = acks.items.filter(hasNoLevel);
   }
@@ -547,6 +558,7 @@ describe('Integration: an acknowledgement that names no batch the client sent', 
         markOpsSynced,
         server.port,
         MAP,
+        K_LOST,
         K_NEXT,
         V_NEXT,
       );
@@ -730,6 +742,7 @@ describe('Integration: an acknowledgement that names no batch the client sent', 
         markOpsSynced,
         server.port,
         MAP,
+        K_LOST,
         K_NEXT,
         V_NEXT,
       );

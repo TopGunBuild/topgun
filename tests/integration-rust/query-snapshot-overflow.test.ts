@@ -13,10 +13,9 @@
  *
  * Two clients: S, the TopGun client, subscribes; W, a protocol-level
  * connection of its own, writes. W seeds map `m` with 50 rows first. W sends
- * each batch as one OP_BATCH and waits for its OP_ACK: the TopGun client sends
- * its whole unacknowledged op log again on every write, so a burst written
- * through it would reach the server, and S as SERVER_EVENTs, about n²/2 times
- * instead of n.
+ * each batch as one OP_BATCH and waits for its OP_ACK, so the test decides
+ * exactly which writes reach the server, and S as SERVER_EVENTs, before each
+ * step.
  *
  * - Case B (fold). S subscribes `qB` (no predicate, limit or sort, so every key
  *   of `m` is on its page) and is held. W updates `s-0` and writes 10 new keys.

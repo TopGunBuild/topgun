@@ -2792,10 +2792,11 @@ weaker than a test.
   numeric prefix and never "everything pending". An ack that is not applied is not a verdict on
   the op log at all: no op is marked synced, no durable row is deleted, and the matched record is
   kept. (c) *Client.* A sent-batch record is given up only when its last op can no longer be sent
-  again. A record evicted under the size bound keeps its key with an empty set, which acknowledges
-  nothing. Either way a later, wider batch ending in the same op is intersected with the earlier
-  record instead of being recorded afresh, so a late ack of the earlier batch cannot retire an op
-  that batch never carried.
+  again. A record always contains its own key; members other than the key are removed only when
+  they can no longer be sent or a newer record holds them, which narrows what an ack retires and
+  never widens it; there is no eviction. A later, wider batch ending in the same op is intersected
+  with the earlier record instead of being recorded afresh, so a late ack of the earlier batch
+  cannot retire an op that batch never carried.
 - **Stated residue — the id-less `"unknown"`.** When the answered message offers no op id to name,
   the ack still goes out, with the literal `"unknown"` in `lastId`: a client that sends id-less
   ops has no other acknowledgement to wait for, and the string names no operation. The SDK always
@@ -2811,7 +2812,7 @@ weaker than a test.
   handlers, the only domain code that answers with an `OP_ACK` message, and only for a message
   that carried ops (`service/domain/crdt.rs`); the sent-batch registry — recorded when a batch is
   handed to the transport, or reported per frame by a provider that splits a flush across nodes —
-  together with the ack handler's decision and the registry's prune and eviction
+  together with the ack handler's decision and the registry's prune
   (`packages/client/src/SyncEngine.ts`); and the pool's rule that only a node's current socket
   speaks for it, so a dropped socket cannot deliver a frame under the node's new connection
   (`packages/client/src/cluster/ConnectionPool.ts`). Citations are kept line-number-free on
@@ -2829,6 +2830,11 @@ weaker than a test.
   `a refused op that is still in the op log keeps its sent-batch entry, so a late ack cannot retire an op its batch never carried`
   and
   `an ack that matches a refused op's entry does not free the key while the op can still be sent`,
+  and in `packages/client/src/__tests__/SyncEngine.inflight.test.ts` by
+  `case 7: 300 unanswered writes are all retired by their acks, in send order and in reverse`,
+  `case 8: an op whose ack is ignored is re-sent alone at 10 s under its own key and retired`,
+  `case 9: overlapping entries keep the registry within 2P entries and 4P ids` and
+  `case 22: a sendable key held as a member of a newer entry keeps its key, and is retired`;
   and the pool rule by
   `a frame from a socket the pool has dropped is not delivered under the node's new connection`
   (`packages/client/src/__tests__/ConnectionPool.test.ts`). `check-invariants.sh` greps only

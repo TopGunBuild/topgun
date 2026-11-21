@@ -311,11 +311,36 @@ export class SyncEngine {
   private static readonly REJECTED_OPS_REGISTRY_LIMIT = 1000;
 
   /**
-   * How many sent batches may hold a non-empty id set at once. The sets are
-   * where the memory is: with nothing answered, every flush re-sends the whole
-   * pending set, so batch n holds n ids.
+   * How long after a send an op that got no verdict is sent again on the same
+   * connection: 10 s after its first send, then 20 s, 40 s and every 60 s. No
+   * frame names the batch an ERROR answers, and an ack can be lost or ignored
+   * (TG-SYNC-004), so the elapsed time is the only signal that a send went
+   * unanswered. The backoff bounds what a slow but live server receives again.
    */
-  private static readonly IN_FLIGHT_BATCH_LIMIT = 256;
+  private static readonly RESEND_DELAYS_MS = [10_000, 20_000, 40_000, 60_000];
+
+  /**
+   * When each op was last handed to the transport, on which connection, and how
+   * many times on that connection before. Kept beside the op, not on it: the op
+   * object is the wire payload and the stored row, so a field there would travel
+   * and could be persisted. An entry dies with its op object.
+   */
+  private onWireMarks = new WeakMap<
+    OpLogEntry,
+    { generation: number; sentAt: number; attempt: number }
+  >();
+  /** Ops this engine has handed to a transport; only their ids may raise maxAcceptedId. */
+  private handedOff = new WeakSet<OpLogEntry>();
+  /** The one resend timer, and the monotonic time it is due at. */
+  private resendTimer: ReturnType<typeof setTimeout> | null = null;
+  private resendDueAt = Infinity;
+  /** Registry size after the last prune; a flush prunes once it has more than doubled. */
+  private inFlightBatchesAfterPrune = 0;
+  /**
+   * The largest op id any ack has accepted among ops this engine handed to a
+   * transport; it lets the durable prefix reach ops retired by earlier acks.
+   */
+  private maxAcceptedId = -1;
 
   private opLog: OpLogEntry[] = [];
   /**
@@ -339,9 +364,11 @@ export class SyncEngine {
    * session. Keeping it costs no safety: a batch re-sent under an id already
    * registered is recorded as the intersection with what is stored.
    *
-   * An entry whose set is EMPTY is a key the bound evicted. It acknowledges
-   * nothing, and it stays so that a later batch recorded under the same id
-   * cannot make it acknowledge again.
+   * Every entry contains its own key. Members other than the key are removed
+   * only by the prune, when they can no longer be sent or a newer entry holds
+   * them, which narrows what an ack retires and never widens it. There is no
+   * eviction: the registry is bounded by the pending op log (at most two entries
+   * and four ids per pending op after a prune).
    */
   private inFlightBatches: Map<string, Set<string>> = new Map();
   /** Latch: a provider that sends batches without reporting them is named once per engine. */
@@ -1019,6 +1046,10 @@ export class SyncEngine {
     if (this.opLog.length > 0) {
       logger.info({ count: this.opLog.length }, 'Loaded pending operations from local storage');
     }
+
+    // The connection may have authenticated before the restore finished, and its
+    // flush then found nothing to send.
+    if (this.isAuthenticated()) this.syncPendingOperations();
   }
 
   private async saveOpLog(): Promise<void> {
@@ -1442,30 +1473,102 @@ export class SyncEngine {
     }
   }
 
+  /** An op is on the wire when it was handed to this connection and is not yet due again. */
+  private isOnWire(op: OpLogEntry, now: number): boolean {
+    const mark = this.onWireMarks.get(op);
+    return (
+      mark !== undefined &&
+      mark.generation === this.connectionGeneration &&
+      now < mark.sentAt + SyncEngine.resendDelay(mark.attempt)
+    );
+  }
+
+  private static resendDelay(attempt: number): number {
+    const delays = SyncEngine.RESEND_DELAYS_MS;
+    return delays[Math.min(attempt, delays.length - 1)];
+  }
+
+  /**
+   * Sends every pending op that is not on the wire of this connection, once.
+   *
+   * The ops go out in one frame per sent-batch entry plus one fresh frame. An op
+   * goes in the frame of its own entry if it is a key; else in the frame of the
+   * newest entry that holds it and whose key is sent too; else in the fresh
+   * frame. Ops keep op-log order, so an entry's frame ends in its key and is a
+   * subset of the entry, and the fresh frame ends in an op that has no entry:
+   * either way the frame is recorded whole, and its ack retires every op it
+   * carried. One cumulative frame would be recorded as its intersection with an
+   * existing entry and retire one op per round.
+   */
   private syncPendingOperations(): void {
-    const pending = this.opLog.filter((op) => !op.synced);
+    try {
+      this.sendPendingFrames();
+    } finally {
+      // After the last frame's reports are recorded, never between two frames
+      // of one flush: a prune there could narrow an entry a later frame of the
+      // same flush is recorded under, below what that frame carried.
+      if (this.inFlightBatches.size > 2 * this.inFlightBatchesAfterPrune + 64) {
+        this.pruneInFlightBatches();
+      }
+      this.armResendTimer();
+    }
+  }
+
+  private sendPendingFrames(): void {
+    const now = performance.now();
+    const pending = this.opLog.filter((op) => !op.synced && !this.isOnWire(op, now));
     if (pending.length === 0) return;
 
     logger.info({ count: pending.length }, 'Syncing pending operations');
+
+    const selected = new Set(pending.map((op) => op.id));
+    // Member id -> the newest entry holding it whose key is sent in this flush.
+    const holder = new Map<string, string>();
+    for (const [key, batch] of this.inFlightBatches) {
+      if (!selected.has(key)) continue;
+      for (const id of batch) holder.set(id, key);
+    }
+    const FRESH = '';
+    const frames = new Map<string, OpLogEntry[]>();
+    for (const op of pending) {
+      const frameKey = this.inFlightBatches.has(op.id) ? op.id : (holder.get(op.id) ?? FRESH);
+      const frame = frames.get(frameKey) ?? [];
+      frame.push(op);
+      // Deleting and re-inserting keeps the Map in op-log order of each frame's last op.
+      frames.delete(frameKey);
+      frames.set(frameKey, frame);
+    }
+    const sendable = new Map(this.opLog.map((op) => [op.id, op]));
 
     // Delegate to connection provider's sendBatch when available (cluster mode).
     // This allows ClusterClient to group operations by target partition owner
     // and send separate OP_BATCH messages per node.
     const connectionProvider = this.webSocketManager.getConnectionProvider();
     if (connectionProvider.sendBatch) {
-      // The provider splits the flush into one frame per target node, so only it
-      // knows which ids travelled together; it reports each frame as it sends it.
+      // The provider splits a frame into one frame per target node, so only it
+      // knows which ids travelled together; it reports each frame as it sends
+      // it. It is called once per planned frame, so it never merges two.
       let batchesReported = false;
-      const results = connectionProvider.sendBatch(
-        pending.map((op) => ({ key: op.key, message: op })),
-        (opIds) => {
-          batchesReported = true;
-          this.recordSentBatch(opIds);
-        },
-      );
-      const failedKeys = [...results.entries()]
-        .filter(([, success]) => !success)
-        .map(([key]) => key);
+      let anySent = false;
+      const failedKeys: string[] = [];
+      for (const frame of frames.values()) {
+        const results = connectionProvider.sendBatch(
+          frame.map((op) => ({ key: op.key, message: op })),
+          (opIds) => {
+            batchesReported = true;
+            this.recordSentBatch(opIds, sendable);
+          },
+        );
+        for (const op of frame) {
+          if (results.get(op.key) === true) {
+            anySent = true;
+            this.handedOff.add(op);
+          }
+        }
+        for (const [key, success] of results) {
+          if (!success) failedKeys.push(key);
+        }
+      }
       if (failedKeys.length > 0) {
         logger.warn(
           { failedKeys, count: failedKeys.length },
@@ -1473,11 +1576,10 @@ export class SyncEngine {
         );
       }
       // A provider that sends without reporting never loses a write, but no ack
-      // without `results` can retire its ops: every flush re-sends the whole
-      // pending set and backpressure eventually pins. The only other trace would
-      // be a debug line per ignored ack, so it is said once, at a level that is
-      // read.
-      const anySent = [...results.values()].some((success) => success === true);
+      // without `results` can retire its ops, and nothing marks them as on the
+      // wire: every flush re-sends the whole pending set and backpressure
+      // eventually pins. The only other trace would be a debug line per ignored
+      // ack, so it is said once, at a level that is read.
       if (anySent && !batchesReported && !this.unreportedBatchesWarned) {
         this.unreportedBatchesWarned = true;
         logger.warn(
@@ -1488,38 +1590,116 @@ export class SyncEngine {
       return;
     }
 
-    // Fallback: send all ops in a single OP_BATCH (single-server mode)
-    const sent = this.sendMessage({
-      type: 'OP_BATCH',
-      payload: {
-        ops: pending,
-      },
-    });
-    // Recorded only for a frame the transport accepted: a batch that never left
-    // can have no answer, and an entry for it would let an unrelated frame with
-    // the same id retire its ops.
-    if (sent) {
-      this.recordSentBatch(pending.map((op) => op.id));
+    // Single-server mode: one OP_BATCH per planned frame.
+    for (const frame of frames.values()) {
+      const sent = this.sendMessage({
+        type: 'OP_BATCH',
+        payload: {
+          ops: frame,
+        },
+      });
+      // Recorded only for a frame the transport accepted: a batch that never left
+      // can have no answer, and an entry for it would let an unrelated frame with
+      // the same id retire its ops. Its ops stay unmarked and go out again with
+      // the next flush.
+      if (sent) {
+        this.recordSentBatch(
+          frame.map((op) => op.id),
+          sendable,
+        );
+      }
     }
   }
 
   /**
-   * Record a batch that was handed to the transport, so that a later OP_ACK
-   * without `results` can be attributed to it (TG-SYNC-004).
+   * Arms the resend timer for the earliest time a pending op is due again, or
+   * clears it when none is. An op not on the wire while authenticated (its
+   * hand-off failed) counts as due 10 s from now, so a transport that keeps
+   * refusing is retried at that pace rather than in a loop. An armed timer due
+   * no later is kept: its fire evaluates again, and keeping it stops an op that
+   * is not on the wire from pushing its own retry back on every evaluation.
    */
-  private recordSentBatch(opIds: string[]): void {
+  private armResendTimer(): void {
+    const now = performance.now();
+    const authenticated = this.isAuthenticated();
+    // Every due time set from now on is at least 10 s away, and every earlier
+    // one was evaluated when it was set, so a timer due within 10 s cannot be
+    // moved earlier. Skipping the scan then keeps a burst of writes, each
+    // evaluating while no ack can arrive, from costing O(n²).
+    if (
+      authenticated &&
+      !this.closed &&
+      this.resendTimer &&
+      this.opLog.length > 0 &&
+      this.resendDueAt <= now + SyncEngine.RESEND_DELAYS_MS[0]
+    ) {
+      return;
+    }
+    let due = Infinity;
+    if (!this.closed) {
+      for (const op of this.opLog) {
+        if (op.synced) continue;
+        const mark = this.onWireMarks.get(op);
+        if (this.isOnWire(op, now) && mark) {
+          due = Math.min(due, mark.sentAt + SyncEngine.resendDelay(mark.attempt));
+        } else if (authenticated) {
+          due = Math.min(due, now + SyncEngine.RESEND_DELAYS_MS[0]);
+        }
+      }
+    }
+    if (due === Infinity) {
+      this.clearResendTimer();
+      return;
+    }
+    if (this.resendTimer && this.resendDueAt <= due) return;
+    this.clearResendTimer();
+    this.resendDueAt = due;
+    this.resendTimer = unrefTimer(
+      setTimeout(() => {
+        this.resendTimer = null;
+        this.resendDueAt = Infinity;
+        // Unauthenticated, the next authentication flushes, and arms again.
+        if (this.isAuthenticated()) this.syncPendingOperations();
+      }, due - now),
+    );
+  }
+
+  private clearResendTimer(): void {
+    if (this.resendTimer) clearTimeout(this.resendTimer);
+    this.resendTimer = null;
+    this.resendDueAt = Infinity;
+  }
+
+  /**
+   * Record a batch that was handed to the transport, so that a later OP_ACK
+   * without `results` can be attributed to it (TG-SYNC-004), and mark its ops as
+   * on the wire of this connection.
+   */
+  private recordSentBatch(
+    opIds: string[],
+    ops: Map<string, OpLogEntry> = new Map(this.opLog.map((op) => [op.id, op])),
+  ): void {
     if (!Array.isArray(opIds) || opIds.length === 0) return;
+    const now = performance.now();
+    for (const id of opIds) {
+      const op = ops.get(id);
+      if (!op) continue;
+      this.handedOff.add(op);
+      const mark = this.onWireMarks.get(op);
+      const attempt =
+        mark !== undefined && mark.generation === this.connectionGeneration ? mark.attempt + 1 : 0;
+      this.onWireMarks.set(op, { generation: this.connectionGeneration, sentAt: now, attempt });
+    }
+
     const lastId = opIds[opIds.length - 1];
     // An ack is matched by exact string equality on its `lastId`, so a batch
     // whose last op has no string id could never be matched anyway.
     if (typeof lastId !== 'string') return;
 
-    // Two batches under one last id happen whenever a flush re-sends before the
-    // first is answered (a reconnect, or per-node frames in a cluster), and the
+    // Two batches under one last id happen when a provider reports frames that
+    // share a last op (a cluster splits a frame per node and re-sends), and the
     // ack does not say which of them it answers. Only an id present in EVERY
-    // candidate is covered whichever one that is, hence the intersection. For
-    // an evicted key the stored set is empty and so is the result: recording
-    // again must not make it acknowledge.
+    // candidate is covered whichever one that is, hence the intersection.
     const sent = new Set(opIds);
     const stored = this.inFlightBatches.get(lastId);
     let ids = sent;
@@ -1529,64 +1709,44 @@ export class SyncEngine {
         if (sent.has(id)) ids.add(id);
       }
       // Re-inserted, not updated in place, so the entry moves to the newest
-      // position: a key that is re-sent on every flush is never the oldest.
+      // position, which is what "a newer entry holds it" in the prune reads.
       this.inFlightBatches.delete(lastId);
     }
     this.inFlightBatches.set(lastId, ids);
-
-    if (this.countNonEmptyInFlightBatches() <= SyncEngine.IN_FLIGHT_BATCH_LIMIT) return;
-
-    // Over the bound. Entries none of whose ops can still be sent go first: when
-    // no ack is ever applied (every write refused, or dropped by backpressure)
-    // this is the only point that removes them, and emptying their sets instead
-    // would keep their keys for good. An entry whose op is refused but still in
-    // the op log is NOT one of them: that op is re-sent until its durable delete
-    // succeeds, so its key may be recorded again and has to stay to be
-    // intersected with.
-    this.pruneInFlightBatches();
-
-    let excess = this.countNonEmptyInFlightBatches() - SyncEngine.IN_FLIGHT_BATCH_LIMIT;
-    if (excess <= 0) return;
-    // Evict the oldest by emptying its set and KEEPING its key. A deleted key
-    // could be recorded afresh by a later, different batch ending in the same op
-    // (a cluster re-routes ops between nodes), and the late ack of the evicted
-    // batch would then retire ops that batch never carried. The ops of an
-    // evicted batch retire through a newer batch that carries them.
-    for (const [key, batch] of this.inFlightBatches) {
-      if (batch.size === 0) continue;
-      this.inFlightBatches.set(key, new Set());
-      if (--excess === 0) break;
-    }
-  }
-
-  private countNonEmptyInFlightBatches(): number {
-    let count = 0;
-    for (const batch of this.inFlightBatches.values()) {
-      if (batch.size > 0) count++;
-    }
-    return count;
   }
 
   /**
-   * Delete every sent-batch entry none of whose ops can still be sent: they were
-   * acknowledged or left the op log, so the entry has nothing left to retire and
-   * its key can never be recorded again. For an evicted key (empty set) the test
-   * is on the op the key itself names.
+   * Narrow the sent-batch registry to what can still be retired, then delete
+   * every entry with nothing left.
    *
-   * The test is "still in the op log and not synced", which is exactly the set
-   * the next flush sends, and deliberately NOT "pending". A permanently refused
-   * op stays in the op log, flagged, for as long as its durable delete has not
-   * gone through, and it is re-sent meanwhile, so it can again be the last op of
-   * a frame. Were its entry deleted here, that later and wider frame would be
-   * recorded afresh instead of intersected with the earlier one, and the late
-   * ack of the earlier frame would retire ops that frame never carried
-   * (TG-SYNC-004). Holding an entry longer than needed costs a slot; dropping it
-   * early costs a write.
+   * First, from every entry, each member other than its key is removed when it
+   * cannot be sent any more or a newer entry holds it too: an ack of the newer
+   * frame is what retires it now, and an older frame's ack would have retired
+   * it as well, so the removal only narrows. A key is never removed from its own
+   * entry: a later frame recorded under that id is intersected with the entry,
+   * and without the key that intersection would be empty and the op could never
+   * be retired by an ack without `results`.
+   *
+   * Then every entry none of whose ops can still be sent is deleted. The test is
+   * "still in the op log and not synced", which is exactly the set a flush may
+   * send, and deliberately NOT "pending". A permanently refused op stays in the
+   * op log, flagged, for as long as its durable delete has not gone through, and
+   * it is re-sent meanwhile, so it can again be the last op of a frame. Were its
+   * entry deleted here, that later and wider frame would be recorded afresh
+   * instead of intersected with the earlier one, and the late ack of the earlier
+   * frame would retire ops that frame never carried (TG-SYNC-004).
    */
   private pruneInFlightBatches(): void {
     const sendableIds = new Set<string>();
     for (const op of this.opLog) {
       if (op.synced !== true) sendableIds.add(op.id);
+    }
+    const heldByNewer = new Set<string>();
+    for (const [key, batch] of [...this.inFlightBatches].reverse()) {
+      for (const id of batch) {
+        if (id !== key && (!sendableIds.has(id) || heldByNewer.has(id))) batch.delete(id);
+      }
+      for (const id of batch) heldByNewer.add(id);
     }
     for (const [key, batch] of this.inFlightBatches) {
       if (sendableIds.has(key)) continue;
@@ -1599,6 +1759,7 @@ export class SyncEngine {
       }
       if (!holdsSendable) this.inFlightBatches.delete(key);
     }
+    this.inFlightBatchesAfterPrune = this.inFlightBatches.size;
   }
 
   private async startMerkleSync(): Promise<void> {
@@ -1999,6 +2160,15 @@ export class SyncEngine {
   }
 
   private handleOpAck(message: OpAckMessage): void {
+    try {
+      this.applyOpAck(message);
+    } finally {
+      // Applied or not, an ack can leave the earliest due op changed or gone.
+      this.armResendTimer();
+    }
+  }
+
+  private applyOpAck(message: OpAckMessage): void {
     const { lastId, achievedLevel, results } = message.payload;
     logger.info({ lastId, achievedLevel, hasResults: !!results }, 'Received ACK for ops');
 
@@ -2069,6 +2239,9 @@ export class SyncEngine {
           const acceptedIdNum = parseInt(result.opId, 10);
           if (!isNaN(acceptedIdNum)) {
             acceptedIdNums.push(acceptedIdNum);
+            if (op && this.handedOff.has(op)) {
+              this.maxAcceptedId = Math.max(this.maxAcceptedId, acceptedIdNum);
+            }
           }
         }
         // Resolve pending Write Concern promise if exists (delegates to WriteConcernManager)
@@ -2109,55 +2282,53 @@ export class SyncEngine {
         return;
       }
 
-      // An empty set is an evicted key: the ack marks nothing and the key stays,
-      // so that the same id recorded again still acknowledges nothing.
-      if (batch.size > 0) {
-        for (const op of this.opLog) {
-          // Sticky terminal state (TG-SYNC-002): a refused op is never
-          // re-described as accepted, and never raises the durable prefix.
-          if (!batch.has(op.id) || op.rejected === true || this.rejectedOps.has(op.id)) continue;
-          if (!op.synced) {
-            op.synced = true;
-            ackedCount++;
-            // Per-record sync-state tracker — emit only on the actual flip.
-            this.recordSyncStateTracker.onAcknowledge(op);
-          }
-          // Only an op actually marked here counts as accepted by this ack. An
-          // id of the batch whose op was refused or has left the op log must not
-          // carry the durable prefix up to itself.
-          const opIdNum = parseInt(op.id, 10);
-          if (!isNaN(opIdNum)) {
-            acceptedIdNums.push(opIdNum);
-          }
+      for (const op of this.opLog) {
+        // Sticky terminal state (TG-SYNC-002): a refused op is never
+        // re-described as accepted, and never raises the durable prefix.
+        if (!batch.has(op.id) || op.rejected === true || this.rejectedOps.has(op.id)) continue;
+        if (!op.synced) {
+          op.synced = true;
+          ackedCount++;
+          // Per-record sync-state tracker — emit only on the actual flip.
+          this.recordSyncStateTracker.onAcknowledge(op);
         }
-        // Used up by the ack it matched, unless the op its key names can still
-        // be sent. One invariant holds at every point that removes a key (here,
-        // the prune, the eviction): a key leaves the registry only when its op
-        // can no longer be the last op of a frame. The one op that survives its
-        // own batch's ack unsynced is a refused op whose durable delete has not
-        // gone through: it stays in the op log and every flush sends it again.
-        // Were its key freed here, a later and wider frame ending in it would be
-        // recorded afresh instead of intersected with this entry, and the ack of
-        // another earlier frame under the same id would retire ops that frame
-        // never carried (TG-SYNC-004). The entry is kept exactly as it is, not
-        // emptied: nothing it holds can be retired by mistake, and the prune
-        // drops it once the op has left the op log.
-        const keyCanBeSentAgain = this.opLog.some((op) => op.id === lastId && op.synced !== true);
-        if (!keyCanBeSentAgain) {
-          this.inFlightBatches.delete(lastId);
+        // Only an op actually marked here counts as accepted by this ack. An
+        // id of the batch whose op was refused or has left the op log must not
+        // carry the durable prefix up to itself.
+        const opIdNum = parseInt(op.id, 10);
+        if (!isNaN(opIdNum)) {
+          acceptedIdNums.push(opIdNum);
+          if (this.handedOff.has(op)) this.maxAcceptedId = Math.max(this.maxAcceptedId, opIdNum);
         }
+      }
+      // Used up by the ack it matched, unless the op its key names can still
+      // be sent. One invariant holds at every point that removes a key (here
+      // and the prune): a key leaves the registry only when its op can no
+      // longer be the last op of a frame. The one op that survives its
+      // own batch's ack unsynced is a refused op whose durable delete has not
+      // gone through: it stays in the op log and the resend timer sends it again.
+      // Were its key freed here, a later and wider frame ending in it would be
+      // recorded afresh instead of intersected with this entry, and the ack of
+      // another earlier frame under the same id would retire ops that frame
+      // never carried (TG-SYNC-004). The entry is kept exactly as it is, not
+      // emptied: nothing it holds can be retired by mistake, and the prune
+      // drops it once the op has left the op log.
+      const keyCanBeSentAgain = this.opLog.some((op) => op.id === lastId && op.synced !== true);
+      if (!keyCanBeSentAgain) {
+        this.inFlightBatches.delete(lastId);
       }
     }
 
-    // The durable mark DELETES every row at or below the id it is given, so the
-    // prefix is the largest accepted id STRICTLY BELOW two bounds, not the
-    // largest accepted id outright: the smallest id this exchange did not accept,
-    // and the smallest id still pending in the op log. The second bound is what
-    // an ack for one batch needs when a smaller op travelled in another frame
-    // (another node's batch, or a later flush) and has no verdict yet. Rows it
-    // leaves behind for ops already retired in memory are deleted by the next ack
-    // whose prefix reaches them; kept rows are re-sent after a restart, deleted
-    // ones are gone.
+    // The durable mark DELETES every row at or below the id it is given, so it
+    // stays STRICTLY BELOW two bounds: the smallest id this exchange did not
+    // accept, and the smallest id still pending in the op log. The second bound
+    // is what an ack for one batch needs when a smaller op travelled in another
+    // frame (another node's batch, or a later flush) and has no verdict yet.
+    // Below those bounds the mark goes up to the largest id ANY ack has accepted,
+    // not only this one: single-op frames are acked out of order, and a mark
+    // reaching only this ack's ids would leave the rows of ops retired by earlier
+    // acks in storage, to be re-sent after a restart. It never passes the largest
+    // accepted id, so a write still being committed is never reached.
     let pendingFloor = Infinity;
     for (const op of this.opLog) {
       if (op.synced === true || op.rejected === true) continue;
@@ -2165,10 +2336,8 @@ export class SyncEngine {
       if (!isNaN(opIdNum) && opIdNum < pendingFloor) pendingFloor = opIdNum;
     }
     const prefixBound = Math.min(minUnacceptedId, pendingFloor);
-    for (const acceptedIdNum of acceptedIdNums) {
-      if (acceptedIdNum < prefixBound && acceptedIdNum > maxSyncedId) {
-        maxSyncedId = acceptedIdNum;
-      }
+    if (acceptedIdNums.some((acceptedIdNum) => acceptedIdNum < prefixBound)) {
+      maxSyncedId = Math.min(this.maxAcceptedId, prefixBound - 1);
     }
 
     // Shared tail — both paths run it, neither duplicates or bypasses it. An
@@ -2177,7 +2346,7 @@ export class SyncEngine {
     // restart), op-log compaction and the backpressure release, and none of that
     // is visible to a pending-count assertion, because a synced-but-unspliced op
     // already counts as zero pending.
-    if (maxSyncedId !== -1) {
+    if (maxSyncedId >= 0) {
       this.markOpsSyncedDurably(maxSyncedId);
     }
 
@@ -2935,6 +3104,8 @@ export class SyncEngine {
     // closures alive for no reason.
     this.writeRejectionEmitter.clear();
 
+    this.clearResendTimer();
+
     // The one place the sent-batch registry is emptied. Neither a lost
     // connection nor a new authentication does it: an ack for a batch sent
     // before either can still arrive and has to find its entry.
@@ -3543,11 +3714,10 @@ export class SyncEngine {
    * violation, oversized value, ...).
    *
    * A refusal the server marks `permanent` is terminal, and the op is retired:
-   * retrying it can never succeed, so leaving it pending would re-send it on
-   * every flush forever while `confirmWrite` reported a timeout. A refusal that
-   * is not permanent is deliberately left alone — the op stays pending and a
-   * later flush retries it, which is the correct handling of a transient
-   * failure.
+   * retrying it can never succeed, so leaving it pending would re-send it
+   * forever while `confirmWrite` reported a timeout. A refusal that is not
+   * permanent is deliberately left alone — the op stays pending and the resend
+   * timer sends it again, which is the correct handling of a transient failure.
    */
   private handleOpRejected(message: OpRejectedMessage): void {
     const { opId, reason, code, permanent } = message.payload;
@@ -3649,9 +3819,10 @@ export class SyncEngine {
         }
         this.backpressureController.checkLowWaterMark();
       } catch (err) {
-        // Keep the op in memory, still flagged, and do NOT splice. It is re-sent
-        // on a later flush, refused again and retired again — a loop bounded by
-        // one attempt per flush that heals as soon as storage accepts the delete.
+        // Keep the op in memory, still flagged, and do NOT splice. The resend
+        // timer sends it again, it is refused again and retired again — a loop
+        // bounded by the resend schedule that heals as soon as storage accepts
+        // the delete.
         logger.error(
           { err, opId },
           'Failed to durably delete a refused op — keeping it in memory, marked rejected',

@@ -1,5 +1,7 @@
 import { HLC, serialize, deserialize } from '@topgunbuild/core';
 import { HttpSyncProvider } from '../connection/HttpSyncProvider';
+import { SyncEngine, SyncEngineConfig } from '../SyncEngine';
+import type { IStorageAdapter } from '../IStorageAdapter';
 // A msgpack frame as the provider emits it: a tagged message with a payload.
 interface WireFrame {
   type: string;
@@ -487,5 +489,172 @@ describe('HttpSyncProvider', () => {
     const parsed = deserialize<any>(new Uint8Array(lastCallBody));
     expect(parsed.operations).toBeDefined();
     expect(parsed.operations.length).toBe(1);
+  });
+
+  describe('a results-less ack of a whole request is delivered per engine frame', () => {
+    const op = (id: string) => ({
+      id,
+      mapName: 'users',
+      key: `user-${id}`,
+      record: { value: { id }, timestamp: hlc.now() },
+    });
+    const sendFrame = (...ids: string[]) =>
+      provider.send(serialize({ type: 'OP_BATCH', payload: { ops: ids.map(op) } }));
+
+    /** Every frame the provider emitted towards the engine. */
+    const listen = () => {
+      const frames: WireFrame[] = [];
+      provider.on('message', (_nodeId: string, data: ArrayBuffer | Uint8Array) => {
+        frames.push(
+          deserialize<WireFrame>(data instanceof ArrayBuffer ? new Uint8Array(data) : data),
+        );
+      });
+      return frames;
+    };
+
+    /** The op ids of each request that carried operations, in request order. */
+    const requestOps = () =>
+      mockFetch.mock.calls
+        .map(([, init]) => deserialize<any>(new Uint8Array(init.body)).operations)
+        .filter((ops: unknown) => Array.isArray(ops))
+        .map((ops: Array<{ id: string }>) => ops.map((o) => o.id));
+
+    /** Answers a request that carries operations with `answer(ids)`, any other with nothing. */
+    const respond = (answer: (ids: string[]) => any) =>
+      mockFetch.mockImplementation(async (_url: string, init: { body: ArrayBuffer }) => {
+        const ops = deserialize<any>(new Uint8Array(init.body)).operations;
+        if (!Array.isArray(ops)) return createMockResponse(defaultSyncResponse());
+        return createMockResponse(
+          defaultSyncResponse(answer(ops.map((o: { id: string }) => o.id))),
+        );
+      });
+
+    const acks = (frames: WireFrame[]) =>
+      frames.filter((f) => f.type === 'OP_ACK').map((f) => f.payload);
+
+    it('(a) splits the ack into one OP_ACK per queued frame, in order, after any OP_REJECTED', async () => {
+      await provider.connect();
+      const frames = listen();
+      respond((ids) => ({
+        errors: [{ code: 403, message: 'blocked', context: '2' }],
+        ack: { lastId: ids[ids.length - 1] },
+      }));
+
+      sendFrame('1', '2');
+      sendFrame('3');
+      sendFrame('4', '5', '6');
+      await new Promise((r) => setTimeout(r, 150));
+
+      expect(requestOps()).toEqual([['1', '2', '3', '4', '5', '6']]);
+      expect(acks(frames)).toEqual([{ lastId: '2' }, { lastId: '3' }, { lastId: '6' }]);
+      expect(frames.map((f) => f.type)).toEqual(['OP_REJECTED', 'OP_ACK', 'OP_ACK', 'OP_ACK']);
+    });
+
+    it('(d) keeps every other field of the ack on each frame ack', async () => {
+      await provider.connect();
+      const frames = listen();
+      respond((ids) => ({
+        ack: { lastId: ids[ids.length - 1], achievedLevel: 'APPLIED', extra: 7 },
+      }));
+
+      sendFrame('1');
+      sendFrame('2', '3');
+      await new Promise((r) => setTimeout(r, 150));
+
+      expect(acks(frames)).toEqual([
+        { lastId: '1', achievedLevel: 'APPLIED', extra: 7 },
+        { lastId: '3', achievedLevel: 'APPLIED', extra: 7 },
+      ]);
+    });
+
+    it('(b) forwards any other ack unchanged, as one frame', async () => {
+      await provider.connect();
+      const frames = listen();
+
+      respond(() => ({ ack: { lastId: 'unknown' } }));
+      sendFrame('1');
+      sendFrame('2');
+      await new Promise((r) => setTimeout(r, 150));
+      expect(acks(frames)).toEqual([{ lastId: 'unknown' }]);
+
+      frames.length = 0;
+      const results = [
+        { opId: '3', success: true },
+        { opId: '4', success: true },
+      ];
+      respond(() => ({ ack: { lastId: '4', results } }));
+      sendFrame('3');
+      sendFrame('4');
+      await new Promise((r) => setTimeout(r, 150));
+      expect(acks(frames)).toEqual([{ lastId: '4', results }]);
+    });
+
+    it('(c) a failed request re-queues its frames in front, and the next ack still splits per frame', async () => {
+      await provider.connect();
+      const frames = listen();
+      mockFetch.mockRejectedValueOnce(new Error('Network error'));
+
+      sendFrame('1');
+      sendFrame('2', '3');
+      await new Promise((r) => setTimeout(r, 150));
+      expect(acks(frames)).toEqual([]);
+
+      respond((ids) => ({ ack: { lastId: ids[ids.length - 1] } }));
+      sendFrame('4');
+      await new Promise((r) => setTimeout(r, 150));
+
+      expect(requestOps()).toEqual([
+        ['1', '2', '3'],
+        ['1', '2', '3', '4'],
+      ]);
+      expect(acks(frames)).toEqual([{ lastId: '1' }, { lastId: '3' }, { lastId: '4' }]);
+    });
+  });
+
+  it('the ops of a failed poll reach the next successful one, though the engine does not send them again', async () => {
+    // After a failed poll the engine is disconnected and, since the provider's
+    // recovery is only `reconnected`, not authenticated again: it sends nothing.
+    // The provider's re-queue is what delivers the failed request's ops.
+    const requests: string[][] = [];
+    let failNextWithOps = true;
+    mockFetch.mockImplementation(async (_url: string, init: { body: ArrayBuffer }) => {
+      const ops = (deserialize<any>(new Uint8Array(init.body)).operations ?? []).map(
+        (o: { id: string }) => String(o.id),
+      );
+      if (ops.length > 0) requests.push(ops);
+      if (ops.length > 0 && failNextWithOps) {
+        failNextWithOps = false;
+        throw new Error('Network error');
+      }
+      return createMockResponse(defaultSyncResponse());
+    });
+    const storage = {
+      getMeta: async (key: string) => (key === '__sys__:ormapBackfillDone' ? true : undefined),
+      setMeta: jest.fn().mockResolvedValue(undefined),
+      appendOpLog: jest.fn().mockResolvedValue(1),
+      getPendingOps: jest.fn().mockResolvedValue([]),
+      getAllKeys: jest.fn().mockResolvedValue([]),
+      getAllMetaKeys: jest.fn().mockResolvedValue([]),
+    } as unknown as IStorageAdapter;
+    const engine = new SyncEngine({
+      nodeId: 'test-node',
+      connectionProvider: provider as unknown as SyncEngineConfig['connectionProvider'],
+      storageAdapter: storage,
+      heartbeat: { enabled: false },
+    });
+    try {
+      // The auth-optional grace (500 ms) authenticates the engine.
+      await new Promise((r) => setTimeout(r, 800));
+      const timestamp = hlc.now();
+      await engine.recordOperation('users', 'PUT', 'user-1', {
+        record: { value: { name: 'Alice' }, timestamp },
+        timestamp,
+      });
+      await new Promise((r) => setTimeout(r, 500));
+
+      expect(requests).toEqual([['1'], ['1']]);
+    } finally {
+      engine.close();
+    }
   });
 });

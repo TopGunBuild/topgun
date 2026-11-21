@@ -223,7 +223,7 @@ describe('SyncEngine write-rejection surface', () => {
   async function bootWith(ops: ReturnType<typeof pendingOp>[]) {
     mockStorage.getPendingOps.mockResolvedValue(ops as unknown as StoredOpLogEntry[]);
     syncEngine = new SyncEngine(config);
-    await jest.runAllTimersAsync();
+    await jest.advanceTimersByTimeAsync(1_000);
     return MockWebSocket.getLastInstance()!;
   }
 
@@ -233,7 +233,7 @@ describe('SyncEngine write-rejection surface', () => {
     syncEngine!.onWriteRejected((r) => seen.push(r));
 
     ws.simulateMessage(refusal('7'));
-    await jest.runAllTimersAsync();
+    await jest.advanceTimersByTimeAsync(1_000);
 
     expect(seen).toHaveLength(1);
     expect(seen[0]).toMatchObject({
@@ -256,7 +256,7 @@ describe('SyncEngine write-rejection surface', () => {
 
     ws.simulateMessage(refusal('7'));
     ws.simulateMessage(refusal('7'));
-    await jest.runAllTimersAsync();
+    await jest.advanceTimersByTimeAsync(1_000);
 
     expect(seen).toHaveLength(1);
   });
@@ -267,7 +267,7 @@ describe('SyncEngine write-rejection surface', () => {
     syncEngine!.onWriteRejected((r) => seen.push(r));
 
     ws.simulateMessage(refusal('7', 403, false));
-    await jest.runAllTimersAsync();
+    await jest.advanceTimersByTimeAsync(1_000);
 
     expect(seen).toEqual([]);
   });
@@ -298,7 +298,7 @@ describe('SyncEngine write-rejection surface', () => {
     expect(tracker.get('users', 'user7')).not.toBe('conflicted');
 
     ws.simulateMessage(refusal('7'));
-    await jest.runAllTimersAsync();
+    await jest.advanceTimersByTimeAsync(1_000);
 
     expect(tracker.get('users', 'user7')).toBe('conflicted');
   });
@@ -324,7 +324,7 @@ describe('SyncEngine write-rejection surface', () => {
     syncEngine!.onWriteRejected((r) => seen.push(r));
 
     ws.simulateMessage(refusal('7'));
-    await jest.runAllTimersAsync();
+    await jest.advanceTimersByTimeAsync(1_000);
 
     expect(seen).toHaveLength(1);
     // The op was still retired despite the throwing listener.
@@ -342,10 +342,10 @@ describe('SyncEngine write-rejection surface', () => {
     const off = syncEngine!.onWriteRejected((r) => seen.push(r));
 
     ws.simulateMessage(refusal('7'));
-    await jest.runAllTimersAsync();
+    await jest.advanceTimersByTimeAsync(1_000);
     off();
     ws.simulateMessage(refusal('8'));
-    await jest.runAllTimersAsync();
+    await jest.advanceTimersByTimeAsync(1_000);
 
     expect(seen.map((r) => r.id)).toEqual(['7']);
   });

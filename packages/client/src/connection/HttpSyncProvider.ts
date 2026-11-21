@@ -89,9 +89,14 @@ export class HttpSyncProvider implements IConnectionProvider {
   private listeners: Map<ConnectionProviderEvent, Set<ConnectionEventHandler>> = new Map();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
-  /** Queued operations to send on next poll */
+  /**
+   * Queued operations to send on next poll, one array per OP_BATCH (or CLIENT_OP)
+   * the engine handed over. The boundaries are kept because the server answers a
+   * whole request with one ack naming its last op, while the engine matches an
+   * ack to the frame it sent; see the ack translation in doSyncRequest.
+   */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- operation shapes vary by type (PUT, REMOVE, OR_ADD, etc.); serialized to msgpack before sending
-  private pendingOperations: any[] = [];
+  private pendingFrames: any[][] = [];
   /** Queued one-shot queries to send on next poll */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query payload shape varies per query type; deserialized and dispatched at the handler layer
   private pendingQueries: any[] = [];
@@ -198,14 +203,14 @@ export class HttpSyncProvider implements IConnectionProvider {
 
       switch (message.type) {
         case 'OP_BATCH':
-          if (message.payload?.ops) {
-            this.pendingOperations.push(...message.payload.ops);
+          if (message.payload?.ops?.length > 0) {
+            this.pendingFrames.push(message.payload.ops);
           }
           break;
 
         case 'CLIENT_OP':
           if (message.payload) {
-            this.pendingOperations.push(message.payload);
+            this.pendingFrames.push([message.payload]);
           }
           break;
 
@@ -258,7 +263,7 @@ export class HttpSyncProvider implements IConnectionProvider {
    */
   async close(): Promise<void> {
     this.stopPolling();
-    this.pendingOperations = [];
+    this.pendingFrames = [];
     this.pendingQueries = [];
     this.connected = false;
     logger.info({ url: this.url }, 'HttpSyncProvider closed');
@@ -286,7 +291,8 @@ export class HttpSyncProvider implements IConnectionProvider {
     }));
 
     // Drain queued operations and queries
-    const operations = this.pendingOperations.splice(0);
+    const frames = this.pendingFrames.splice(0);
+    const operations = frames.flat();
     const queries = this.pendingQueries.splice(0);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- request body is a dynamic object assembled from optional fields; serialized to msgpack before sending
@@ -399,14 +405,33 @@ export class HttpSyncProvider implements IConnectionProvider {
         }
       }
 
-      // Process operation acknowledgments
-      if (syncResponse.ack) {
+      // Process operation acknowledgments. A results-less ack naming the request's
+      // last op says the server accepted every op of the request (TG-SYNC-001), so
+      // it is true of each engine frame the request carried, and is delivered as
+      // one ack per frame: the engine retires an op only through an ack whose
+      // lastId is the last op of a frame it sent; every other field of the ack is
+      // kept on each of them. Any other ack is passed on as is.
+      const ack = syncResponse.ack;
+      if (
+        ack &&
+        !ack.results &&
+        typeof ack.lastId === 'string' &&
+        ack.lastId === operations[operations.length - 1]?.id
+      ) {
+        for (const frame of frames) {
+          this.emit(
+            'message',
+            'http',
+            serialize({ type: 'OP_ACK', payload: { ...ack, lastId: frame[frame.length - 1]?.id } }),
+          );
+        }
+      } else if (ack) {
         this.emit(
           'message',
           'http',
           serialize({
             type: 'OP_ACK',
-            payload: syncResponse.ack,
+            payload: ack,
           }),
         );
       }
@@ -474,9 +499,7 @@ export class HttpSyncProvider implements IConnectionProvider {
       }
 
       // Re-queue operations that weren't sent
-      if (operations.length > 0) {
-        this.pendingOperations.unshift(...operations);
-      }
+      this.pendingFrames.unshift(...frames);
       if (queries.length > 0) {
         this.pendingQueries.unshift(...queries);
       }
