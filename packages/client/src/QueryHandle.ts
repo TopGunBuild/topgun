@@ -1,5 +1,7 @@
+import { SortedMap } from '@topgunbuild/core';
 import { SyncEngine } from './SyncEngine';
-import { ChangeTracker, ChangeEvent } from './ChangeTracker';
+import type { ChangeEvent } from './ChangeTracker';
+import { deepEqual } from './utils/deepEqual';
 import { logger } from './utils/logger';
 import type { Aggregation, PredicateNode } from '@topgunbuild/core';
 import type { RecordSyncState } from './RecordSyncState';
@@ -46,6 +48,81 @@ function copyPlain<T>(value: T): T {
   return value;
 }
 
+/** Where a row sits in the result order: its sort-field values, then its key. */
+interface SortKey {
+  values: unknown[];
+  key: string;
+}
+
+/** One row of the result set: its value, the row object handed out, its place in the order. */
+interface Entry<T> {
+  value: T;
+  row: QueryResultItem<T>;
+  sortKey: SortKey;
+}
+
+/**
+ * Rank of a sort value, as the server's sort key ranks it: booleans, then
+ * numbers, then strings, then everything else (null, absent, objects, arrays,
+ * dates), which compare equal among themselves.
+ */
+function sortRank(value: unknown): number {
+  switch (typeof value) {
+    case 'boolean':
+      return 0;
+    case 'number':
+    case 'bigint':
+      return 1;
+    case 'string':
+      return 2;
+    default:
+      return 3;
+  }
+}
+
+/**
+ * Code-point order, the byte order of UTF-8 the server compares strings in.
+ * UTF-16 code-unit order differs from it only where a surrogate meets a code
+ * unit in U+E000..U+FFFF, so those are remapped before comparing.
+ */
+function compareCodePoints(a: string, b: string): number {
+  if (a === b) return 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    let x = a.charCodeAt(i);
+    let y = b.charCodeAt(i);
+    if (x !== y) {
+      if (x >= 0xd800 && y >= 0xd800) {
+        x = x <= 0xdfff ? x + 0x2000 : x - 0x800;
+        y = y <= 0xdfff ? y + 0x2000 : y - 0x800;
+      }
+      return x < y ? -1 : 1;
+    }
+  }
+  return a.length < b.length ? -1 : 1;
+}
+
+function compareSortValues(a: unknown, b: unknown): number {
+  const ra = sortRank(a);
+  const rb = sortRank(b);
+  if (ra !== rb) return ra - rb;
+  switch (ra) {
+    case 0:
+      return a === b ? 0 : a ? 1 : -1;
+    case 1: {
+      // NaN sorts after every other number and equals NaN, so the order stays total.
+      const aNaN = typeof a === 'number' && Number.isNaN(a);
+      const bNaN = typeof b === 'number' && Number.isNaN(b);
+      if (aNaN || bNaN) return aNaN === bNaN ? 0 : aNaN ? 1 : -1;
+      return (a as number) < (b as number) ? -1 : (a as number) > (b as number) ? 1 : 0;
+    }
+    case 2:
+      return compareCodePoints(a as string, b as string);
+    default:
+      return 0;
+  }
+}
+
 /** Cursor status for debugging */
 export type CursorStatus = 'valid' | 'expired' | 'invalid' | 'none';
 
@@ -89,7 +166,11 @@ export class QueryHandle<T> {
   private mapName: string;
   private filter: QueryFilter;
   private listeners: Set<SubscribeCallback<T>> = new Set();
-  private currentResults: Map<string, T> = new Map();
+  private rows: Map<string, Entry<T>> = new Map();
+  // Rows in the server's sort-key order, so a live update moves one row in
+  // O(log N) instead of re-sorting the whole result set.
+  private order: SortedMap<SortKey, Entry<T>>;
+  private sortFields: [string, 'asc' | 'desc'][];
 
   // Intent flag distinguishing a live-window handle (render-time top-N clamp
   // applies) from a page-accumulation handle. Once loadMore() runs, the handle
@@ -99,21 +180,30 @@ export class QueryHandle<T> {
 
   // Cached sorted-results snapshot for synchronous external-store reads
   // (useSyncExternalStore.getSnapshot). Rebuilt lazily only when the result
-  // set actually changes (the dirty flag flips on every notify()). Returning a
-  // referentially-stable array between mutations is what keeps React's
-  // useSyncExternalStore from looping; building a fresh array on every read
-  // would.
-  private resultsSnapshot: (T & { _key: string })[] = [];
+  // set actually changes. Returning a referentially-stable array between
+  // mutations is what keeps React's useSyncExternalStore from looping;
+  // building a fresh array on every read would.
+  private resultsSnapshot: QueryResultItem<T>[] = [];
   private resultsSnapshotDirty: boolean = true;
   // True once the handle has produced ANY result emission (local or server) —
   // lets a synchronous consumer derive `loading` without waiting for the first
   // async notify.
   private hasEmitted: boolean = false;
 
-  // Change tracking for delta notifications
-  private changeTracker = new ChangeTracker<T>();
+  // Change tracking for delta notifications. pendingChanges is the pull queue,
+  // read synchronously; deliveryBatch holds what onDelta listeners have not
+  // been given yet.
   private pendingChanges: ChangeEvent<T>[] = [];
+  private deliveryBatch: ChangeEvent<T>[] = [];
   private changeListeners: Set<(changes: ChangeEvent<T>[]) => void> = new Set();
+  // Set by resetChangeTracker: the next change computation reports every row as added.
+  private reportAllAsAdd: boolean = false;
+
+  // A burst of live updates is delivered once per timer turn, so a subscriber
+  // holding N rows pays one O(N) emission per turn rather than one per update.
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private emitOwed: boolean = false;
+  private flushing: boolean = false;
 
   // Pagination info
   private _paginationInfo: PaginationInfo = { hasMore: false, cursorStatus: 'none' };
@@ -163,6 +253,8 @@ export class QueryHandle<T> {
     this.syncEngine = syncEngine;
     this.mapName = mapName;
     this.fields = this.filter.fields;
+    this.sortFields = Object.entries(this.filter.sort ?? {});
+    this.order = new SortedMap<SortKey, Entry<T>>(this.compareSortKeys);
   }
 
   public subscribe(callback: SubscribeCallback<T>): () => void {
@@ -174,8 +266,8 @@ export class QueryHandle<T> {
     } else {
       // Immediately invoke with cached results, carrying the current settled
       // state so a late subscriber sees the same { settled } it would have on
-      // the next notify().
-      callback(this.getSortedResults(), { settled: this.settled });
+      // the next emission.
+      callback(this.getSnapshot().slice(), { settled: this.settled });
     }
 
     // [FIX]: Attempt to load local results immediately if available
@@ -183,10 +275,10 @@ export class QueryHandle<T> {
     // we still show something.
     this.loadInitialLocalData()
       .then((data) => {
-        // If we haven't received server results yet (currentResults empty),
+        // If we haven't received server results yet (no rows),
         // and we have local data OR it's just the initial load, we should notify.
         // Even if data is empty, we might want to tell the subscriber "nothing here yet".
-        if (this.currentResults.size === 0) {
+        if (this.rows.size === 0) {
           this.onResult(data, 'local');
         }
       })
@@ -365,7 +457,7 @@ export class QueryHandle<T> {
         mapName: this.mapName,
         itemCount: items.length,
         source,
-        currentResultsCount: this.currentResults.size,
+        currentResultsCount: this.rows.size,
         settled: this.settled,
       },
       'QueryHandle onResult',
@@ -375,6 +467,8 @@ export class QueryHandle<T> {
     // empty result, which legitimately means "the server has no rows for this
     // query". Driven ONLY from the server source so the local pre-load artifact
     // (loadInitialLocalData) can never settle or clear data prematurely.
+    // Settling first is safe: awaiters resume in a microtask, after the
+    // synchronous emission below.
     if (source === 'server') {
       this.markSettled();
     }
@@ -384,59 +478,43 @@ export class QueryHandle<T> {
       this.merkleRootHash = merkleRootHash;
     }
 
+    const timestamp = Date.now();
+    const changes: ChangeEvent<T>[] = [];
+    for (const item of items) {
+      const change = this.applyValue(item.key, item.value, timestamp);
+      if (change) changes.push(change);
+    }
+    // Remove only keys that are not in the new results, after the adds and
+    // updates, so the merge never shows an emptied set in between.
     const newKeys = new Set(items.map((i) => i.key));
-
-    // Remove only keys that are not in the new results
-    const removedKeys: string[] = [];
-    for (const key of this.currentResults.keys()) {
+    for (const key of this.rows.keys()) {
       if (!newKeys.has(key)) {
-        removedKeys.push(key);
-        this.currentResults.delete(key);
+        const change = this.applyRemove(key, timestamp);
+        if (change) changes.push(change);
       }
     }
-    if (removedKeys.length > 0) {
-      logger.debug(
-        {
-          mapName: this.mapName,
-          removedCount: removedKeys.length,
-          removedKeys,
-        },
-        'QueryHandle removed keys',
-      );
-    }
+    this.recordChanges(changes, timestamp);
 
-    // Add/update new results
-    for (const item of items) {
-      this.currentResults.set(item.key, item.value);
-    }
-    logger.debug(
-      {
-        mapName: this.mapName,
-        resultCount: this.currentResults.size,
-      },
-      'QueryHandle after merge',
-    );
-
-    // Compute changes for delta tracking
-    this.computeAndNotifyChanges(Date.now());
-
-    this.notify();
+    // A snapshot is delivered before onResult returns (whenSettled awaiters must
+    // see its rows), always — "settled with zero rows" is an emission too.
+    this.emitOwed = true;
+    this.flush();
   }
 
   /**
-   * Called by SyncEngine when server sends a live update
+   * Called by SyncEngine when server sends a live update. Costs O(log N); the
+   * emission follows on the next timer turn, together with every other update
+   * of this turn.
    */
   public onUpdate(key: string, value: T | null) {
-    if (value === null) {
-      this.currentResults.delete(key);
-    } else {
-      this.currentResults.set(key, value);
+    const timestamp = Date.now();
+    const change =
+      value === null ? this.applyRemove(key, timestamp) : this.applyValue(key, value, timestamp);
+    // Emit when the rows changed even if nothing was recorded: after
+    // resetChangeTracker, removing the last row records no add.
+    if (this.recordChanges(change ? [change] : [], timestamp) || change !== null) {
+      this.scheduleFlush();
     }
-
-    // Compute changes for delta tracking
-    this.computeAndNotifyChanges(Date.now());
-
-    this.notify();
   }
 
   /**
@@ -498,16 +576,121 @@ export class QueryHandle<T> {
    * Use when query filter changes or on reconnect.
    */
   public resetChangeTracker(): void {
-    this.changeTracker.reset();
+    // Deliver what onDelta listeners are owed first: a dropped remove would
+    // leave a removed key in a consumer's own copy, which the full add that
+    // follows cannot take out.
+    this.flush();
+    this.reportAllAsAdd = true;
     this.pendingChanges = [];
   }
 
-  private computeAndNotifyChanges(timestamp: number): void {
-    const changes = this.changeTracker.computeChanges(this.currentResults, timestamp);
+  /** The order of two rows: field by field as the server's sort key, then the key. */
+  private readonly compareSortKeys = (a: SortKey, b: SortKey): number => {
+    for (let i = 0; i < this.sortFields.length; i++) {
+      const c = compareSortValues(a.values[i], b.values[i]);
+      if (c !== 0) return this.sortFields[i][1] === 'desc' ? -c : c;
+    }
+    return compareCodePoints(a.key, b.key);
+  };
 
-    if (changes.length > 0) {
-      this.pendingChanges.push(...changes);
-      this.notifyChangeListeners(changes);
+  private sortKeyOf(key: string, value: T): SortKey {
+    const fields =
+      value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : undefined;
+    return { values: this.sortFields.map(([field]) => fields?.[field]), key };
+  }
+
+  /** Sets one row; returns its change, or null when the value is deep-equal to the stored one. */
+  private applyValue(key: string, value: T, timestamp: number): ChangeEvent<T> | null {
+    const entry = this.rows.get(key);
+    if (entry !== undefined && deepEqual(entry.value, value)) return null;
+    // Built once per value and handed out by every emission until the value changes.
+    const row = { ...(value as object), _key: key } as QueryResultItem<T>;
+    if (entry === undefined) {
+      const added: Entry<T> = { value, row, sortKey: this.sortKeyOf(key, value) };
+      this.rows.set(key, added);
+      this.order.set(added.sortKey, added);
+      this.resultsSnapshotDirty = true;
+      return { type: 'add', key, value, timestamp };
+    }
+    const previousValue = entry.value;
+    const sortKey = this.sortKeyOf(key, value);
+    if (this.compareSortKeys(entry.sortKey, sortKey) !== 0) {
+      this.order.delete(entry.sortKey);
+      entry.sortKey = sortKey;
+      this.order.set(sortKey, entry);
+    }
+    entry.value = value;
+    entry.row = row;
+    this.resultsSnapshotDirty = true;
+    return { type: 'update', key, value, previousValue, timestamp };
+  }
+
+  /** Removes one row; returns its change, or null when the key is not held. */
+  private applyRemove(key: string, timestamp: number): ChangeEvent<T> | null {
+    const entry = this.rows.get(key);
+    if (entry === undefined) return null;
+    this.rows.delete(key);
+    this.order.delete(entry.sortKey);
+    this.resultsSnapshotDirty = true;
+    return { type: 'remove', key, previousValue: entry.value, timestamp };
+  }
+
+  /**
+   * Queues the changes of one computation for the pull API and for onDelta.
+   * After resetChangeTracker, the computation reports every row held as added
+   * instead. Returns whether anything was recorded.
+   */
+  private recordChanges(changes: ChangeEvent<T>[], timestamp: number): boolean {
+    if (this.reportAllAsAdd) {
+      this.reportAllAsAdd = false;
+      changes = [];
+      for (const [key, entry] of this.rows) {
+        changes.push({ type: 'add', key, value: entry.value, timestamp });
+      }
+    }
+    for (const change of changes) {
+      this.pendingChanges.push(change);
+      this.deliveryBatch.push(change);
+    }
+    return changes.length > 0;
+  }
+
+  private scheduleFlush(): void {
+    this.emitOwed = true;
+    // A running flush delivers what its listeners record before it returns.
+    if (this.flushTimer !== null || this.flushing) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      this.flush();
+    }, 0);
+  }
+
+  /**
+   * Delivers the undelivered changes to onDelta listeners, then the rows to
+   * subscribe listeners, then the sync state. A flush reached from a listener
+   * of a running flush only leaves its changes queued: the running one loops
+   * until nothing is owed, so every listener sees the batches in order.
+   */
+  private flush(): void {
+    if (this.flushTimer !== null) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.flushing) return;
+    this.flushing = true;
+    try {
+      while (this.deliveryBatch.length > 0 || this.emitOwed) {
+        const batch = this.deliveryBatch;
+        this.deliveryBatch = [];
+        this.emitOwed = false;
+        if (batch.length > 0) this.notifyChangeListeners(batch);
+        this.emitResults();
+        // Result-set membership may have changed (keys added/removed). Re-evaluate
+        // the filtered sync-state snapshot — only emits when content differs.
+        this.notifySyncStateListenersIfChanged();
+      }
+    } finally {
+      this.flushing = false;
     }
   }
 
@@ -521,81 +704,57 @@ export class QueryHandle<T> {
     }
   }
 
-  private notify() {
-    // The result set changed — invalidate the cached snapshot so the next
-    // getSnapshot() rebuilds it, and record that we have emitted at least once.
-    this.resultsSnapshotDirty = true;
+  private emitResults(): void {
     this.hasEmitted = true;
-    const results = this.getSortedResults();
+    if (this.listeners.size === 0) return;
+    const results = this.getSnapshot();
     // Snapshot the latch once per emission so every subscriber in this pass
     // observes the same settled value.
     const meta: SubscribeMeta = { settled: this.settled };
     for (const listener of this.listeners) {
       // Isolate each subscriber: a throwing subscriber must not block delivery
-      // to later subscribers or propagate back into onResult/onUpdate.
+      // to later subscribers or propagate back into onResult/onUpdate. Each
+      // gets its own array, so one that sorts or pushes in place cannot change
+      // getSnapshot() or what the others receive.
       try {
-        listener(results, meta);
+        listener(results.slice(), meta);
       } catch (e) {
         logger.error({ err: e }, 'QueryHandle result listener error');
       }
     }
-    // Result-set membership may have changed (keys added/removed). Re-evaluate
-    // the filtered sync-state snapshot — only emits when content differs.
-    this.notifySyncStateListenersIfChanged();
-  }
-
-  private getSortedResults(): (T & { _key: string })[] {
-    // Include _key in each result for client-side matching/lookup
-    const results = Array.from(this.currentResults.entries()).map(
-      ([key, value]) => ({ ...(value as object), _key: key }) as T & { _key: string },
-    );
-
-    if (this.filter.sort) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- sort comparator parameters typed as any to allow dynamic field access by runtime string key
-      results.sort((a: any, b: any) => {
-        for (const [field, direction] of Object.entries(this.filter.sort!)) {
-          const valA = a[field];
-          const valB = b[field];
-
-          if (valA < valB) return direction === 'asc' ? -1 : 1;
-          if (valA > valB) return direction === 'asc' ? 1 : -1;
-        }
-        return 0;
-      });
-    }
-
-    // Render-time top-N window clamp. Keeps the HEAD of the sort-ordered array
-    // (the N rows the active comparator ranks first). This is a non-destructive
-    // view slice — currentResults is never mutated — so it composes with the
-    // server's displacement LEAVE retractions without double-dropping rows and
-    // breaking the net-N invariant. Skipped once the handle is paginated, since
-    // loadMore intentionally accumulates rows beyond `limit`.
-    if (
-      !this._paginated &&
-      Number.isInteger(this.filter.limit) &&
-      (this.filter.limit as number) > 0
-    ) {
-      return results.slice(0, this.filter.limit);
-    }
-
-    return results;
   }
 
   /**
    * Synchronous, referentially-stable snapshot of the current sorted result
    * set. Designed for React 18 `useSyncExternalStore(subscribe, getSnapshot)`:
    * the returned array identity only changes when the result set actually
-   * changes (tracked via the dirty flag flipped in notify()), so a render that
-   * reads this between mutations gets the same array and React does not loop.
+   * changes, so a render that reads this between mutations gets the same array
+   * and React does not loop. It reflects live updates not yet emitted.
+   * The array and its row objects are shared: do not mutate them.
    *
    * Returns whatever the handle currently holds — including any local
    * pre-loaded rows — so the FIRST render after subscribing reflects cached
    * data instead of an empty array. (loadInitialLocalData runs on subscribe;
    * if data is already cached it is reflected on the next getSnapshot.)
    */
-  public getSnapshot(): (T & { _key: string })[] {
+  public getSnapshot(): QueryResultItem<T>[] {
     if (this.resultsSnapshotDirty) {
-      this.resultsSnapshot = this.getSortedResults();
+      // Render-time top-N window clamp: the HEAD of the order. A view only —
+      // rows are never dropped — so it composes with the server's displacement
+      // LEAVE retractions without double-dropping rows. Skipped once the handle
+      // is paginated, since loadMore intentionally accumulates rows beyond `limit`.
+      const limit =
+        !this._paginated && Number.isInteger(this.filter.limit) && (this.filter.limit as number) > 0
+          ? (this.filter.limit as number)
+          : Infinity;
+      const results: QueryResultItem<T>[] = [];
+      if (limit > 0) {
+        for (const entry of this.order.values()) {
+          results.push(entry.row);
+          if (results.length >= limit) break;
+        }
+      }
+      this.resultsSnapshot = results;
       this.resultsSnapshotDirty = false;
     }
     return this.resultsSnapshot;
@@ -642,12 +801,19 @@ export class QueryHandle<T> {
   private mergePageResults(items: { key: string; value: T }[]): void {
     // Entering page-accumulation mode permanently disables the live-window
     // top-N clamp so accumulated pages beyond `limit` remain visible.
-    this._paginated = true;
-    for (const item of items) {
-      this.currentResults.set(item.key, item.value);
+    if (!this._paginated) {
+      this._paginated = true;
+      this.resultsSnapshotDirty = true;
     }
-    this.computeAndNotifyChanges(Date.now());
-    this.notify();
+    const timestamp = Date.now();
+    const changes: ChangeEvent<T>[] = [];
+    for (const item of items) {
+      const change = this.applyValue(item.key, item.value, timestamp);
+      if (change) changes.push(change);
+    }
+    this.recordChanges(changes, timestamp);
+    this.emitOwed = true;
+    this.flush();
   }
 
   /**
@@ -687,7 +853,7 @@ export class QueryHandle<T> {
       unsub = tempHandle.subscribe((results) => {
         pageItems.length = 0;
         for (const item of results) {
-          // Destructure the synthetic _key field added by getSortedResults.
+          // Destructure the synthetic _key field every emitted row carries.
           const { _key, ...rest } = item as T & { _key: string };
           pageItems.push({ key: _key, value: rest as T });
         }
@@ -809,8 +975,8 @@ export class QueryHandle<T> {
   }
 
   /**
-   * Called by onResult / onUpdate to re-evaluate the filtered snapshot when
-   * the result set itself changes (keys added/removed). If the filtered
+   * Called by every flush to re-evaluate the filtered snapshot when the result
+   * set itself changes (keys added/removed). If the filtered
    * snapshot's content differs from the cached one, emit to listeners.
    */
   private notifySyncStateListenersIfChanged(): void {
@@ -852,7 +1018,7 @@ export class QueryHandle<T> {
   private computeFilteredSyncState(): ReadonlyMap<string, RecordSyncState> {
     const tracker = this.syncEngine.getRecordSyncStateTracker();
     const out = new Map<string, RecordSyncState>();
-    for (const key of this.currentResults.keys()) {
+    for (const key of this.rows.keys()) {
       out.set(key, tracker.get(this.mapName, key));
     }
     return out;

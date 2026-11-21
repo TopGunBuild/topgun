@@ -1140,6 +1140,8 @@ describe('MCP Tools', () => {
       )![1];
 
       handles[0].onUpdate('b', { n: 2 });
+      // Live updates reach onDelta on the next timer turn.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       handles[0].setServerError(overflow());
       const polled = await handleSubscribe({ action: 'poll', subscriptionId }, ctx);
       expect(polled.isError).toBe(true);

@@ -10,6 +10,9 @@ const mockSyncEngine = {
   runLocalQuery: jest.fn().mockResolvedValue([]),
 } as unknown as SyncEngine;
 
+// Live updates are emitted on the next timer turn.
+const nextTurn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
 describe('QueryHandle', () => {
   test('should sort results on client side', () => {
     const handle = new QueryHandle<any>(mockSyncEngine, 'items', {
@@ -41,7 +44,7 @@ describe('QueryHandle', () => {
     expect(lastCall[2]._key).toBe('A');
   });
 
-  test('should maintain sort order on updates', () => {
+  test('should maintain sort order on updates', async () => {
     const handle = new QueryHandle<any>(mockSyncEngine, 'items', {
       sort: { score: 'desc' },
     });
@@ -60,6 +63,7 @@ describe('QueryHandle', () => {
 
     // Update A to be 40 (should move to top)
     handle.onUpdate('A', { id: 'A', score: 40 });
+    await nextTurn();
 
     const lastCall = callback.mock.calls[callback.mock.calls.length - 1][0];
     expect(lastCall[0].score).toBe(40); // A
@@ -277,7 +281,7 @@ describe('QueryHandle', () => {
       expect(seen[seen.length - 1].settled).toBe(true);
     });
 
-    test('settled stays false across multiple local-only frames', () => {
+    test('settled stays false across multiple local-only frames', async () => {
       const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
 
       const settledValues: Array<boolean | undefined> = [];
@@ -285,6 +289,7 @@ describe('QueryHandle', () => {
 
       handle.onResult([{ key: 'A', value: { name: 'A' } }], 'local');
       handle.onUpdate('A', { name: 'A2' });
+      await nextTurn();
 
       expect(settledValues.every((v) => v === false)).toBe(true);
     });
@@ -505,12 +510,12 @@ describe('QueryHandle', () => {
       expect(lastCall[0]._key).toBe('a');
     });
 
-    test('a throwing subscriber does not propagate out of onUpdate', () => {
+    test('a throwing subscriber does not propagate out of onUpdate', async () => {
       const handle = new QueryHandle<any>(mockSyncEngine, 'items', {});
 
       // First subscriber throws; subscribing it first avoids the immediate
       // cached-result invocation (only later subscribers get that), so the
-      // throw is exercised exclusively through the notify() path on onUpdate.
+      // throw is exercised exclusively through the emission that follows onUpdate.
       const throwingSubscriber = jest.fn(() => {
         throw new Error('subscriber boom');
       });
@@ -520,6 +525,7 @@ describe('QueryHandle', () => {
       expect(() => {
         handle.onUpdate('a', { name: 'Alice Updated' });
       }).not.toThrow();
+      await nextTurn();
       expect(throwingSubscriber).toHaveBeenCalled();
     });
   });
@@ -549,7 +555,7 @@ describe('QueryHandle', () => {
         unsubscribe();
       });
 
-      test('should unsubscribe from change events', () => {
+      test('should unsubscribe from change events', async () => {
         const changeListener = jest.fn();
         const unsubscribe = handle.onDelta(changeListener);
 
@@ -562,6 +568,7 @@ describe('QueryHandle', () => {
 
         // Second update - should not trigger listener
         handle.onUpdate('a', { name: 'Alice Updated' });
+        await nextTurn();
         expect(changeListener).toHaveBeenCalledTimes(1);
       });
 

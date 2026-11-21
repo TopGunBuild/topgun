@@ -4,7 +4,7 @@
  * A live `limit:N` subscription must clamp its rendered result set to N rows,
  * agreeing with the server's authoritative top-N window. The clamp is a
  * render-time slice of the sorted projection — it must NOT evict rows from the
- * in-memory `currentResults`, so it composes with the server's displacement
+ * rows the handle holds, so it composes with the server's displacement
  * LEAVE retractions without double-dropping to N-1. The clamp is disengaged
  * once the handle enters page-accumulation mode (loadMore), so intentionally
  * accumulated multi-page results are never truncated to one page.
@@ -30,9 +30,12 @@ const makeMockEngine = () =>
     }),
   }) as unknown as SyncEngine;
 
+// Live updates are emitted on the next timer turn.
+const nextTurn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
 describe('QueryHandle live-window top-N clamp', () => {
   // AC1 — clamp boundary conditions.
-  describe('AC1: getSortedResults clamps to a positive-integer limit only', () => {
+  describe('AC1: the emitted rows are clamped to a positive-integer limit only', () => {
     const seed = (handle: QueryHandle<{ n: number }>): any[] => {
       let last: any[] = [];
       handle.subscribe((r) => (last = r));
@@ -99,7 +102,7 @@ describe('QueryHandle live-window top-N clamp', () => {
   });
 
   // AC2 — inverted C-LIVEQ: a third live ENTER stays clamped at 2.
-  test('AC2: live limit:2 holding a,b stays clamped to [a,b] after onUpdate(c)', () => {
+  test('AC2: live limit:2 holding a,b stays clamped to [a,b] after onUpdate(c)', async () => {
     const handle = new QueryHandle<{ n: number }>(makeMockEngine(), 'm', {
       limit: 2,
       sort: { n: 'asc' },
@@ -121,13 +124,14 @@ describe('QueryHandle live-window top-N clamp', () => {
     // would grow to 3 (the audit's negative control). With the clamp it stays
     // exactly the two lowest-n rows; c (highest n) is excluded under asc sort.
     handle.onUpdate('c', { n: 3 });
+    await nextTurn();
     expect(last).toHaveLength(2);
     expect(last.map((r) => r._key)).toEqual(['a', 'b']);
     expect(last.map((r) => r._key)).not.toContain('c');
   });
 
   // AC3 — an ENTER beyond the window plus a displacement LEAVE nets to N, not N-1.
-  test('AC3: ENTER of a new lowest then displacement LEAVE nets to exactly 2 (no double-drop)', () => {
+  test('AC3: ENTER of a new lowest then displacement LEAVE nets to exactly 2 (no double-drop)', async () => {
     const handle = new QueryHandle<{ n: number }>(makeMockEngine(), 'm', {
       limit: 2,
       sort: { n: 'asc' },
@@ -144,8 +148,9 @@ describe('QueryHandle live-window top-N clamp', () => {
     );
 
     // New lowest row enters — in-memory set is now {c:0, a:1, b:2}; the rendered
-    // window clamps to [c, a]. b is displaced but still held in currentResults.
+    // window clamps to [c, a]. b is displaced but still held by the handle.
     handle.onUpdate('c', { n: 0 });
+    await nextTurn();
     expect(last.map((r) => r._key)).toEqual(['c', 'a']);
 
     // Server then sends the displacement LEAVE for the now-out-of-window b.
@@ -153,13 +158,14 @@ describe('QueryHandle live-window top-N clamp', () => {
     // 2 rows — NOT 1. A destructive clamp would have already dropped b and this
     // LEAVE would over-prune to a single row.
     handle.onUpdate('b', null);
+    await nextTurn();
     expect(last).toHaveLength(2);
     expect(last.map((r) => r._key)).toEqual(['c', 'a']);
   });
 
-  // AC4 — behavioral proof the clamp does not evict from currentResults: a
+  // AC4 — behavioral proof the clamp does not evict from the handle's rows: a
   // later in-window LEAVE promotes the previously-excluded row back into view.
-  test('AC4: excluded row is retained in memory and promoted back after an in-window LEAVE', () => {
+  test('AC4: excluded row is retained in memory and promoted back after an in-window LEAVE', async () => {
     const handle = new QueryHandle<{ n: number }>(makeMockEngine(), 'm', {
       limit: 2,
       sort: { n: 'asc' },
@@ -175,20 +181,22 @@ describe('QueryHandle live-window top-N clamp', () => {
       'server',
     );
 
-    // c is excluded by the clamp (highest n) but must remain in currentResults.
+    // c is excluded by the clamp (highest n) but must remain held.
     handle.onUpdate('c', { n: 3 });
+    await nextTurn();
     expect(last.map((r) => r._key)).toEqual(['a', 'b']);
 
     // A LEAVE of the in-window row a frees a slot. If c had been evicted the
     // rendered set would now be just [b]; instead c is promoted into the window,
-    // proving the clamp never removed it from currentResults.
+    // proving the clamp never removed it from the handle's rows.
     handle.onUpdate('a', null);
+    await nextTurn();
     expect(last).toHaveLength(2);
     expect(last.map((r) => r._key)).toEqual(['b', 'c']);
   });
 
   // AC6 — no-limit regression: a query without a limit returns all rows.
-  test('AC6: a query with no limit returns all rows (no regression)', () => {
+  test('AC6: a query with no limit returns all rows (no regression)', async () => {
     const handle = new QueryHandle<{ n: number }>(makeMockEngine(), 'm', {
       sort: { n: 'asc' },
     });
@@ -208,6 +216,7 @@ describe('QueryHandle live-window top-N clamp', () => {
 
     // Live ENTERs keep growing the set — no clamp engages.
     handle.onUpdate('d', { n: 4 });
+    await nextTurn();
     expect(last).toHaveLength(4);
   });
 

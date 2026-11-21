@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed: a live query's client-side cost per update no longer grows with the number of rows.** A
+  burst of 1 000 live updates over a 5 000-row sorted query, delivered in one macrotask, blocked the
+  event loop for at most 7.4 ms, against 14 101 ms for the previous code in the same test (an Apple
+  M1 Max, Node 22). Each update now costs O(log N); the rows are rebuilt at most once per timer turn.
+- **Changed: when live query updates are delivered, and how rows are ordered.**
+  - Live updates are delivered once per timer turn: one `subscribe` call and one `onDelta` array
+    holding every change of the turn in arrival order. A server snapshot and a `loadMore()` page are
+    still delivered before the call returns. The pull methods (`consumeChanges()` and the others)
+    still see a change at once.
+  - A `subscribe` listener receives its own array; the row objects are shared between deliveries and
+    with `getSnapshot()` and must not be mutated.
+  - Rows of a query without `sort` are ordered by key, the order the live window and an unfiltered
+    query with `limit` use; a page without `limit`, or with a filter, has no server order.
+  - Rows of a sorted query follow the server's sort-key order (booleans, numbers, strings, then
+    `null` and missing values; `desc` reverses a field; ties by key), which the server's page and
+    its live updates share for finite numbers, strings, `null` and missing values under ascending
+    sort, and for finite numbers and strings under descending sort. `Date`, object and array sort
+    values now rank as missing on the client, as on the server, so a query sorted on a `Date` field
+    becomes key-ordered (TODO-1012).
+
 - **Fixed: a query no longer stops at 4096 rows.** A query or live subscription with no limit, or with
   a limit of 4096 or more, that matched more than 4096 rows returned at most 4096 of them and no
   `has_more`; a smaller limit was not affected. A `groupBy` query over more than 4096 groups returned
