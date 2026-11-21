@@ -253,7 +253,7 @@ A server error never replaces the rows a handle shows: the last good rows stay, 
 
 `QueryError.code` is one of:
 
-- `QUERY_SNAPSHOT_OVERFLOW` — the server could not keep every change made while it built the live query's snapshot. The handle resubscribes on its own, at most three times per subscription (after about 250 ms, 1 s and 4 s, each scaled by a random factor between 0.5 and 1), and the error is raised only when a fourth overflow follows. The rows shown may then miss changes. A reconnect, or a new `subscribe` after every listener has left, clears this error and starts again.
+- `QUERY_SNAPSHOT_OVERFLOW` — the server could not keep every change made while it built the live query's snapshot. The handle resubscribes on its own, at most three times per subscription (after about 250 ms, 1 s and 4 s, each scaled by a random factor between 0.5 and 1), and the error is raised only when a fourth overflow follows. The rows shown may then miss changes. The server has removed that subscription, so no live change arrives for it. A reconnect, or a new `subscribe` after every listener has left, clears this error and starts again.
 - `QUERY_LIVE_AGGREGATE_UNSUPPORTED` — the server refused the live query. The error stays across reconnects until the server answers the query cleanly.
 - `QUERY_FAILED` — an error code this client does not know; the server's own code is at the start of the message.
 

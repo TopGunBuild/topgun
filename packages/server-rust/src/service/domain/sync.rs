@@ -2996,7 +2996,6 @@ mod tests {
                 connection_id: handle.id,
                 map_name: map_name.to_string(),
                 query: Query::default(),
-                previous_result_keys: dashmap::DashSet::new(),
                 live_window: Arc::new(crate::query::window::LiveWindow::new(vec![], None)),
                 fields: None,
                 delta_buffer: Arc::new(DeltaBuffer::new(64)),

@@ -1818,7 +1818,6 @@ mod tests {
     use crate::service::domain::search::{
         HybridSearchSubscription, SearchSubscription, SubscriptionRegistry,
     };
-    use dashmap::DashSet;
     use std::collections::BTreeSet;
     use topgun_core::messages::base::Query;
     use topgun_core::messages::search::SearchOptions;
@@ -1922,7 +1921,6 @@ mod tests {
             connection_id: conn,
             map_name: "users".to_string(),
             query,
-            previous_result_keys: DashSet::new(),
             live_window,
             fields: None,
             delta_buffer: Arc::new(DeltaBuffer::new(64)),

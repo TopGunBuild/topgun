@@ -2701,7 +2701,7 @@ mod tests {
     // registered on the node, a `QuerySubscribe` op is driven through the
     // production handler (which seeds the subscription's `LiveWindow` from the
     // real DAG page), and subsequent `cluster.write()` calls fire
-    // `CrdtService::broadcast_query_updates`, which derives ENTER/UPDATE/LEAVE
+    // `QueryRegistry::deliver_mutation`, which derives ENTER/UPDATE/LEAVE
     // via `live_window.apply_mutation` and pushes real `QUERY_UPDATE` frames onto
     // the connection's outbound channel. The tests decode those frames off the
     // wire and replay membership — no source inspection.
@@ -2710,7 +2710,7 @@ mod tests {
     /// Registers a client connection on `node` and drives a real
     /// `QuerySubscribe` op through the production handler, seeding the
     /// subscription's `LiveWindow` from the DAG page. Returns the outbound
-    /// receiver — the SAME channel `broadcast_query_updates` sends
+    /// receiver — the SAME channel `QueryRegistry::deliver_mutation` sends
     /// `QUERY_UPDATE` frames on — so the caller can drain live deltas.
     async fn subscribe_and_observe(
         node: &mut SimNode,
@@ -2895,7 +2895,7 @@ mod tests {
 
     /// Drives a REMOVE `ClientOp` (`record: Some(None)`) through the node's
     /// `CrdtService`, mirroring `SimCluster::write` but for a delete. The delete
-    /// reaches `broadcast_query_updates` with `new_rmpv_value == None`, which the
+    /// reaches `QueryRegistry::deliver_mutation` with `new_record == None`, which the
     /// live window models as a row leaving (freeing a slot for promotion).
     async fn delete_record(node: &SimNode, map: &str, key: &str) {
         let partition_id = topgun_core::hash_to_partition(key);

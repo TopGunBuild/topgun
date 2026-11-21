@@ -230,11 +230,11 @@ pnpm --filter @topgunbuild/core test:coverage
 pnpm test:integration-rust
 ```
 
-The default run leaves out nine files that need a server binary a clean checkout does not have, and prints which ones and why (the list is `tests/integration-rust/opt-in-suites.js`). Each has its own script, and fails rather than skips when what it needs is not given:
+The default run leaves out ten files that need a server binary a clean checkout does not have, and prints which ones and why (the list is `tests/integration-rust/opt-in-suites.js`). Each has its own script, and fails rather than skips when what it needs is not given:
 
 ```bash
 pnpm test:integration-rust:two-binary   # map-name-upgrade, map-name-rollback, watermark-rollback, encryption-rollback, engine-upgrade, engine-rollback, engine-migration-resume
-pnpm test:integration-rust:liveness     # store-refusal-liveness, flush-task-panic: FAULT_SERVER_BINARY, FAULT_SERVER_COMMIT
+pnpm test:integration-rust:liveness     # store-refusal-liveness, flush-task-panic, query-snapshot-overflow: FAULT_SERVER_BINARY, FAULT_SERVER_COMMIT
 ```
 
 The two-binary files need the older binary by path, each with its commit, and `NEW_SERVER_COMMIT` for the newer one: `map-name-upgrade` a `07d009f0` build (`OLD_SERVER_BINARY`, `OLD_SERVER_COMMIT`), `map-name-rollback` a `b346e277` build (`FORMAT_OLD_SERVER_BINARY`, `FORMAT_OLD_SERVER_COMMIT`), `watermark-rollback` a `6a030bb6` build (`WATERMARK_OLD_SERVER_BINARY`, `WATERMARK_OLD_SERVER_COMMIT`), `encryption-rollback` a `727db547` build (`ENC_OLD_SERVER_BINARY`, `ENC_OLD_SERVER_COMMIT`), and `engine-upgrade`, `engine-rollback` and `engine-migration-resume` a `7692c380` build (`ENGINE_OLD_SERVER_BINARY`, `ENGINE_OLD_SERVER_COMMIT`). `store-broken` is not opt-in: it runs in the default run.

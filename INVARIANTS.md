@@ -3339,7 +3339,9 @@ weaker than a test.
   - The order of `SERVER_EVENT` relative to `QUERY_RESP` (TODO-995); the subscriber-path throughput (TODO-996); clients
     older than error routing (TODO-997); window membership after the subscriber's own writes on
     the live path (TODO-999).
-  - The overflow against a running server: shown in-process only.
+  - The overflow against a running server is shown by `query-snapshot-overflow.test.ts`; its
+    resubscribed rows equal every key of the map only because the local scan returns more than
+    4096 rows (TODO-1001).
 - **Maintaining code:** `service/domain/query.rs` — `QueryRegistry::deliver_mutation`,
   `QueryRegistry::remove_if_same`, `QuerySubscription::apply_and_project`,
   `handle_query_subscribe` and `deliver_live_snapshot`, the subscribe guard and the fold;
@@ -3372,7 +3374,11 @@ weaker than a test.
   `a_batch_shows_the_page_of_the_values_its_keys_end_with` (`window.rs`). Each but the disconnect
   test was shown red on the mutant the table below names. The simulation smoke
   `sim_live_subscribe_converges_under_concurrent_writes` is not an enforcer: nothing in it makes a
-  write land during the scan.
+  write land during the scan. Against a running server (a `fault-injection` build that holds a
+  live subscribe after its scan): `tests/integration-rust/query-snapshot-overflow.test.ts`, in the
+  liveness suite. Its fold case was shown red with the buffer bypassed (`route` skipped, so the
+  held writes went out as `QUERY_UPDATE`s before the snapshot), and its overflow case with the
+  overflow frame sent before the snapshot.
 - **Violation consequence:** a write made while a live query's first result was built is missing
   from it and never reaches the client as a change, so the subscriber holds a stale row for as
   long as the key is not written again; or a change reaches the client before the result it

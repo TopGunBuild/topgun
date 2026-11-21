@@ -50,7 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     while one snapshot is built (a key written several times, by any kind of write, counts once),
     or when the connection's outbound queue has no room for the snapshot. It follows the snapshot,
     the server drops that subscription, and the client's resubscribe brings the rows back. Shown
-    in-process, not against a running server.
+    on a real server by `query-snapshot-overflow.test.ts`: after 4097 new keys written while one
+    snapshot was built, the client received the snapshot, then the overflow, resubscribed once and
+    ended with every key of the map, without losing a row it showed and without a reconnect.
   - New counter `topgun_query_snapshot_overflow_total{reason}`, `reason` = `buffer` or `channel`;
     it appears with the first overflow.
   - Read from source, not tested: a client older than this release applies the overflow frame as
