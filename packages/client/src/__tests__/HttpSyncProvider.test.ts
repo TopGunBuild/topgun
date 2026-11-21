@@ -1,5 +1,7 @@
 import { HLC, serialize, deserialize } from '@topgunbuild/core';
 import { HttpSyncProvider } from '../connection/HttpSyncProvider';
+import { SyncEngine, SyncEngineConfig } from '../SyncEngine';
+import type { IStorageAdapter } from '../IStorageAdapter';
 // A msgpack frame as the provider emits it: a tagged message with a payload.
 interface WireFrame {
   type: string;
@@ -607,5 +609,52 @@ describe('HttpSyncProvider', () => {
       ]);
       expect(acks(frames)).toEqual([{ lastId: '1' }, { lastId: '3' }, { lastId: '4' }]);
     });
+  });
+
+  it('the ops of a failed poll reach the next successful one, though the engine does not send them again', async () => {
+    // After a failed poll the engine is disconnected and, since the provider's
+    // recovery is only `reconnected`, not authenticated again: it sends nothing.
+    // The provider's re-queue is what delivers the failed request's ops.
+    const requests: string[][] = [];
+    let failNextWithOps = true;
+    mockFetch.mockImplementation(async (_url: string, init: { body: ArrayBuffer }) => {
+      const ops = (deserialize<any>(new Uint8Array(init.body)).operations ?? []).map(
+        (o: { id: string }) => String(o.id),
+      );
+      if (ops.length > 0) requests.push(ops);
+      if (ops.length > 0 && failNextWithOps) {
+        failNextWithOps = false;
+        throw new Error('Network error');
+      }
+      return createMockResponse(defaultSyncResponse());
+    });
+    const storage = {
+      getMeta: async (key: string) => (key === '__sys__:ormapBackfillDone' ? true : undefined),
+      setMeta: jest.fn().mockResolvedValue(undefined),
+      appendOpLog: jest.fn().mockResolvedValue(1),
+      getPendingOps: jest.fn().mockResolvedValue([]),
+      getAllKeys: jest.fn().mockResolvedValue([]),
+      getAllMetaKeys: jest.fn().mockResolvedValue([]),
+    } as unknown as IStorageAdapter;
+    const engine = new SyncEngine({
+      nodeId: 'test-node',
+      connectionProvider: provider as unknown as SyncEngineConfig['connectionProvider'],
+      storageAdapter: storage,
+      heartbeat: { enabled: false },
+    });
+    try {
+      // The auth-optional grace (500 ms) authenticates the engine.
+      await new Promise((r) => setTimeout(r, 800));
+      const timestamp = hlc.now();
+      await engine.recordOperation('users', 'PUT', 'user-1', {
+        record: { value: { name: 'Alice' }, timestamp },
+        timestamp,
+      });
+      await new Promise((r) => setTimeout(r, 500));
+
+      expect(requests).toEqual([['1'], ['1']]);
+    } finally {
+      engine.close();
+    }
   });
 });
