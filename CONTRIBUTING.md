@@ -230,7 +230,7 @@ pnpm --filter @topgunbuild/core test:coverage
 pnpm test:integration-rust
 ```
 
-The default run leaves out nine files that need a server binary a clean checkout does not have, and prints which ones and why (the list is `tests/integration-rust/opt-in-suites.js`). Each has its own script, and fails rather than skips when what it needs is not given:
+The default run leaves out ten files that need a server binary a clean checkout does not have, and prints which ones and why (the list is `tests/integration-rust/opt-in-suites.js`). Each has its own script, and fails rather than skips when what it needs is not given:
 
 ```bash
 pnpm test:integration-rust:two-binary   # map-name-upgrade, map-name-rollback, watermark-rollback, encryption-rollback, engine-upgrade, engine-rollback, engine-migration-resume
