@@ -4539,7 +4539,6 @@ mod tests {
 
     use crate::query::delta_buffer::DeltaBuffer;
     use crate::service::domain::query::QuerySubscription;
-    use dashmap::DashSet;
     use topgun_core::messages::base::Query;
 
     /// Helper: build a CrdtService with shared registries for broadcast testing.
@@ -4585,7 +4584,6 @@ mod tests {
                 group_by: None,
                 aggregations: None,
             },
-            previous_result_keys: DashSet::new(),
             live_window: Arc::new(crate::query::window::LiveWindow::new(vec![], None)),
             fields: None,
             delta_buffer: Arc::new(DeltaBuffer::new(64)),
@@ -4657,7 +4655,6 @@ mod tests {
                 group_by: None,
                 aggregations: None,
             },
-            previous_result_keys: DashSet::new(),
             live_window: Arc::new(crate::query::window::LiveWindow::new(vec![], None)),
             fields: None,
             delta_buffer: Arc::new(DeltaBuffer::new(64)),
@@ -5067,7 +5064,6 @@ mod tests {
                 group_by: None,
                 aggregations: None,
             },
-            previous_result_keys: DashSet::new(),
             live_window: Arc::new(crate::query::window::LiveWindow::new(vec![], None)),
             fields: Some(vec!["name".to_string()]),
             delta_buffer: Arc::new(DeltaBuffer::new(64)),
@@ -10308,7 +10304,6 @@ mod tests {
                 group_by: None,
                 aggregations: None,
             },
-            previous_result_keys: DashSet::new(),
             live_window: Arc::new(crate::query::window::LiveWindow::new(vec![], None)),
             fields: None,
             delta_buffer: Arc::new(DeltaBuffer::new(64)),

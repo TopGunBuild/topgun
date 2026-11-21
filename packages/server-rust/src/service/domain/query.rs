@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use tokio::sync::mpsc::error::TrySendError;
 use topgun_core::LWWRecord;
 use tower::Service;
@@ -75,9 +75,6 @@ pub struct QuerySubscription {
     pub map_name: String,
     /// The query parameters (filter, sort, pagination).
     pub query: Query,
-    /// Nothing reads or writes this set: window membership lives in
-    /// `live_window`. It is still declared because test constructors name it.
-    pub previous_result_keys: DashSet<String>,
     /// Sorted top-N window maintaining live membership for this subscription.
     ///
     /// Interior-mutable (its state lives behind a `Mutex`), so mutations route through
@@ -890,7 +887,6 @@ impl QueryService {
                 connection_id,
                 map_name: map_name.clone(),
                 query: query.clone(),
-                previous_result_keys: DashSet::new(),
                 live_window: Arc::clone(&live_window),
                 fields: fields.clone(),
                 delta_buffer: Arc::clone(&delta_buffer),
@@ -1809,7 +1805,6 @@ mod tests {
     use crate::storage::key_writer::KeyWriteToken;
     use std::collections::BTreeMap;
 
-    use dashmap::DashSet;
     use topgun_core::hlc::Timestamp;
     use topgun_core::messages::base::{PredicateNode, PredicateOp, Query};
     use topgun_core::messages::query::{
@@ -1862,10 +1857,9 @@ mod tests {
     }
 
     /// Builds a `live_window` for a test subscription whose membership matches the supplied
-    /// pre-existing keys. Tests simulate "this key was already in the result set" by
-    /// pre-populating `previous_result_keys`; the window must start with the same membership
-    /// or the observer (which now derives ENTER/UPDATE/LEAVE from the window) would emit
-    /// ENTER where the test expects UPDATE/LEAVE. Placeholder values are sufficient because
+    /// pre-existing keys, so a test can say "this key was already in the result set": live
+    /// delivery derives ENTER/UPDATE/LEAVE from the window, and an empty window would make it
+    /// emit ENTER where the test expects UPDATE/LEAVE. Placeholder values are sufficient because
     /// these tests use unbounded (`limit = None`) queries where membership is presence-only.
     fn seeded_window(query: &Query, present_keys: &[&str]) -> Arc<LiveWindow> {
         let window = Arc::new(LiveWindow::new(
@@ -1921,7 +1915,6 @@ mod tests {
             map_name: "users".to_string(),
             live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
-            previous_result_keys: DashSet::new(),
             fields: None,
             delta_buffer: inactive_buffer(),
         };
@@ -1938,7 +1931,6 @@ mod tests {
             map_name: "users".to_string(),
             live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
-            previous_result_keys: DashSet::new(),
             fields: None,
             delta_buffer: inactive_buffer(),
         });
@@ -1963,7 +1955,6 @@ mod tests {
             map_name: "users".to_string(),
             live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
-            previous_result_keys: DashSet::new(),
             fields: None,
             delta_buffer: inactive_buffer(),
         });
@@ -1973,7 +1964,6 @@ mod tests {
             map_name: "users".to_string(),
             live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
-            previous_result_keys: DashSet::new(),
             fields: None,
             delta_buffer: inactive_buffer(),
         });
@@ -1983,7 +1973,6 @@ mod tests {
             map_name: "orders".to_string(),
             live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
-            previous_result_keys: DashSet::new(),
             fields: None,
             delta_buffer: inactive_buffer(),
         });
@@ -2005,7 +1994,6 @@ mod tests {
             map_name: "users".to_string(),
             live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
-            previous_result_keys: DashSet::new(),
             fields: None,
             delta_buffer: inactive_buffer(),
         });
@@ -2015,7 +2003,6 @@ mod tests {
             map_name: "orders".to_string(),
             live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
-            previous_result_keys: DashSet::new(),
             fields: None,
             delta_buffer: inactive_buffer(),
         });
@@ -2850,7 +2837,6 @@ mod tests {
                 group_by: None,
                 aggregations: None,
             },
-            previous_result_keys: DashSet::new(),
             fields: None,
             delta_buffer: inactive_buffer(),
         });
@@ -2869,7 +2855,6 @@ mod tests {
                 group_by: None,
                 aggregations: None,
             },
-            previous_result_keys: DashSet::new(),
             fields: None,
             delta_buffer: inactive_buffer(),
         });
@@ -2901,7 +2886,6 @@ mod tests {
                 group_by: None,
                 aggregations: None,
             },
-            previous_result_keys: DashSet::new(),
             fields: None,
             delta_buffer: inactive_buffer(),
         });
@@ -2919,7 +2903,6 @@ mod tests {
                 group_by: None,
                 aggregations: None,
             },
-            previous_result_keys: DashSet::new(),
             fields: None,
             delta_buffer: inactive_buffer(),
         });
@@ -3041,7 +3024,6 @@ mod tests {
             map_name: "users".to_string(),
             live_window: seeded_window(&Query::default(), &[]),
             query: Query::default(),
-            previous_result_keys: DashSet::new(),
             fields: Some(vec!["name".to_string()]),
             delta_buffer: inactive_buffer(),
         });
@@ -6017,7 +5999,6 @@ mod tests {
                 connection_id: ConnectionId(1),
                 map_name: "m".to_string(),
                 query: Query::default(),
-                previous_result_keys: DashSet::new(),
                 live_window: Arc::new(LiveWindow::new(vec![], None)),
                 fields: None,
                 delta_buffer: Arc::clone(buffer),
@@ -6088,7 +6069,6 @@ mod tests {
                     query.limit,
                 )),
                 query,
-                previous_result_keys: DashSet::new(),
                 fields: Some(vec!["v".to_string()]),
                 delta_buffer: Arc::new(DeltaBuffer::new(SNAPSHOT_BUFFER_CAPACITY)),
             };
