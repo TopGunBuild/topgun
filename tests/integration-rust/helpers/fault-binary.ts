@@ -26,7 +26,7 @@ export interface FaultBinary {
 
 /** Reads the two variables that name the seam binary, and throws — never skips — when either is unusable. */
 export function requireFaultBinary(): FaultBinary {
-  const hint = `Build the server with the store-refusal seam (\`${FAULT_BUILD_COMMAND}\`) and export FAULT_SERVER_BINARY (its path) and FAULT_SERVER_COMMIT (the commit it was built from).`;
+  const hint = `Build the server with the fault-injection seams (\`${FAULT_BUILD_COMMAND}\`) and export FAULT_SERVER_BINARY (its path) and FAULT_SERVER_COMMIT (the commit it was built from).`;
   const binary = process.env.FAULT_SERVER_BINARY;
   if (!binary) throw new Error(`FAULT_SERVER_BINARY is not set. ${hint}`);
   const commit = process.env.FAULT_SERVER_COMMIT;
