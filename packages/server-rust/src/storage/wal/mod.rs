@@ -390,19 +390,16 @@ pub struct WalEntry {
     pub key: String,
     /// The operation to replay on recovery.
     pub op: WalOp,
-    /// HLC timestamp from the originating write. It is the idempotency key for
-    /// `WalOp::Store` `Lww` frames ONLY: during recovery a replayed Store whose
-    /// timestamp is older than the current durable value is a no-op (TG-WAL-006).
-    /// `WalOp::Remove` frames carry `None` — a Remove replays UNCONDITIONALLY,
-    /// exactly as the live remove path deletes unconditionally (no timestamp
-    /// compare), so recovery never consults a Remove's timestamp (TG-WAL-009). A
-    /// Remove gate would be unsound: live-remove has no such condition, and under
-    /// prefix-complete in-order replay a stale Remove can never be juxtaposed over
-    /// a strictly-newer re-creation (proof recorded in INVARIANTS.md TG-WAL-009).
+    /// HLC timestamp from the originating write; a legacy `WalOp::Store`
+    /// frame's bare value is stamped with it on replay. `WalOp::Remove` frames
+    /// carry `None`. Recovery orders and gates frames by `sequence`, never by
+    /// this stamp (`TG-WAL-015`): a caller's or a client's stamp need not
+    /// follow the key's arrival order.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub timestamp: Option<Timestamp>,
     /// Monotonically increasing counter assigned at append time. Establishes
-    /// total ordering within a partition WAL file for ordered replay.
+    /// total ordering within a partition WAL file for ordered replay, and is
+    /// the record version a replayed or flushed write stores (`TG-WAL-015`).
     pub sequence: u64,
 }
 
@@ -674,6 +671,10 @@ pub struct WalWriter {
     /// synced before collection or a hint uses it, is the durable copy
     /// (`TG-WAL-003`).
     durable: Box<[AtomicU64]>,
+    /// The store's `max_version` as the open read it, before recovery: at or
+    /// above every record version the store holds, so the live counter is
+    /// seeded above it (`TG-WAL-015`).
+    max_version_at_open: u64,
     /// The collection tick's state.
     collection: Collection,
     /// The sealed stream segments on disk, by `stream_seq`, each with the
@@ -894,6 +895,7 @@ impl WalWriter {
             );
         }
 
+        let max_version = watermarks.max_version;
         let collected_present = Self::wal_collected_exists(&wal_dir)?;
         let effective = if watermarks.imported {
             watermarks.by_partition
@@ -952,6 +954,7 @@ impl WalWriter {
             Arc::downgrade(&store),
             store.wal_keyring(),
             durable,
+            max_version,
             collected.into_boxed_slice(),
             stream,
         )?;
@@ -1215,12 +1218,16 @@ impl WalWriter {
     }
 
     /// Constructs the writer and starts its log writer and syncer.
+    // One call site, `open_over_store`, which holds every input already
+    // checked; a parameter struct would only restate them.
+    #[allow(clippy::too_many_arguments)]
     fn build(
         wal_dir: PathBuf,
         policy: WalFsyncPolicy,
         store: std::sync::Weak<dyn MapDataStore>,
         keyring: Option<Arc<Keyring>>,
         durable: Box<[AtomicU64]>,
+        max_version_at_open: u64,
         collected: Box<[u64]>,
         stream: BTreeMap<u64, Arc<StreamSegment>>,
     ) -> anyhow::Result<Arc<Self>> {
@@ -1245,6 +1252,7 @@ impl WalWriter {
             store,
             keyring,
             durable,
+            max_version_at_open,
             collection: Collection {
                 collected: AsyncMutex::new(collected),
                 closed: AtomicBool::new(false),
@@ -2570,24 +2578,58 @@ impl WalWriter {
         // durable one then means the store lost a row it acknowledged, which
         // is worth the counter and the log line.
         let durable_now = self.durable_now();
-        let Some(from_store) = Self::tick_watermarks(store).await else {
+        let Some(from_store) = Self::tick_watermarks(Arc::clone(&store)).await else {
             return true;
         };
         self.rotate_if_due().await;
         self.collect_covered(&mut collected, &durable_now, &from_store)
             .await;
+        Self::reclaim_record_versions(store, from_store).await;
         true
     }
 
-    /// Highest sequence this WAL has ever durably observed across **all**
-    /// partitions: the max over every applied watermark AND every log's max
-    /// sequence, stream segments included. The watermarks are the store's rows as this WAL holds them —
-    /// the sidecars were deleted at the open.
+    /// Drops the record versions at or below the watermarks the store has
+    /// just made durable (`TG-WAL-015`): no frame there is replayed any more,
+    /// so no replay decision reads them. Only the durable watermarks are safe
+    /// to drop against — a watermark that a crash could revert would re-expose
+    /// frames a dropped row guarded.
     ///
-    /// Seeds the live counter to `this + 1` so post-restart writes never reuse a
-    /// number at or below a watermark — the recovery filter `e.sequence >
-    /// applied_seq` silently drops such writes, so this is the sole guard for
-    /// post-restart acked-write durability.
+    /// Runs on the blocking pool, as the call reads and deletes in the engine.
+    /// A failure logs and drops nothing: the next tick tries again, and the
+    /// collection of this tick is already done.
+    async fn reclaim_record_versions(store: Arc<dyn MapDataStore>, durable: Vec<u64>) {
+        let answer =
+            tokio::task::spawn_blocking(move || store.reclaim_record_versions(&durable)).await;
+        let error = match answer {
+            Ok(Ok(_)) => return,
+            Ok(Err(e)) => format!("{e:#}"),
+            Err(join) => format!("the store call did not complete: {join}"),
+        };
+        tracing::warn!(
+            target: "topgun_server::storage::wal_watermark",
+            error,
+            "record version reclamation failed; the next collection tick retries it"
+        );
+    }
+
+    /// Highest sequence this node has ever durably used across **all**
+    /// partitions: the max over every applied watermark, the store's
+    /// `max_version` as the open read it, and every log's max sequence,
+    /// stream segments included. The watermarks are the store's rows as this
+    /// WAL holds them — the sidecars were deleted at the open.
+    ///
+    /// Seeds the live counter to `this + 1` so a post-restart write never
+    /// takes a number at or below a watermark — the recovery filter
+    /// `e.sequence > applied_seq` would drop it — nor at or below a stored
+    /// record version, which the replay gate would discard it under
+    /// (`TG-WAL-015`). So this is the guard of post-restart acked-write
+    /// durability.
+    ///
+    /// `max_version` counts because a version row can lie above every
+    /// retained frame: a flushed write's frame cut by a `batched` power loss
+    /// or a cut to the last fsync, or a WAL directory older than the data
+    /// directory. The value read at the open suffices: a row recovery writes
+    /// carries a retained frame's sequence, which the log fold covers.
     ///
     /// Must be called **after** `WalRecovery::run` so it observes the watermarks
     /// that recovery's `mark_applied` advanced. Returns `0` for a fresh node
@@ -2608,7 +2650,8 @@ impl WalWriter {
             .iter()
             .map(|slot| slot.load(Ordering::Acquire))
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(self.max_version_at_open);
         for partition in WalRecovery::discover_partitions(&self.wal_dir)? {
             global = global.max(self.max_log_sequence(partition).await?);
         }
@@ -2667,10 +2710,25 @@ enum ReplayWrite {
 
 /// The values a replay batch has prepared and not yet committed, by
 /// `(map, key)`; `None` is a key the batch removes.
+///
+/// It holds no record version: the gate reads the version from the store
+/// only. A version the overlay could hold is never decisive, because a batch
+/// is ascending per key, so a later frame of a key is above every earlier
+/// admitted frame of it.
 #[derive(Default)]
 struct ReplayOverlay {
     values: HashMap<(String, String), Option<RecordValue>>,
+    /// Per key, the sequence of the last subsuming frame (a `WalOp::Store`
+    /// or a `WalOp::Remove`) this part admitted as a write: the frame a held
+    /// key's later non-subsuming frames may fold onto (`TG-WAL-015`).
+    subsuming: HashMap<(String, String), u64>,
 }
+
+/// The held keys of one partition's replay, by `(map, key)`, each with the
+/// sequences of its frames that are unresolved in this run: failed in
+/// prepare, refused by the store, or held themselves (`TG-WAL-015`). The
+/// highest of them is the key's `F(K)`.
+type HeldKeys = HashMap<(String, String), BTreeSet<u64>>;
 
 /// One frame of a replay batch, once prepared.
 enum Prepared {
@@ -2695,6 +2753,8 @@ struct ReplayProgress {
     row: u64,
     /// The store reported itself broken.
     broken: bool,
+    /// The keys whose version must not advance past an unresolved frame.
+    held: HeldKeys,
 }
 
 /// What the replay of one partition did.
@@ -2710,22 +2770,22 @@ struct PartitionReplay {
 /// Replays all un-applied WAL entries through an inner `MapDataStore` on startup.
 ///
 /// Called **before** the WebSocket listener accepts connections so clients never
-/// observe stale in-flight state. Idempotency is delegated entirely to the inner
-/// store's LWW merge: a replayed entry whose HLC timestamp is older than the
-/// current stored value is a no-op, so running recovery twice is safe.
+/// observe stale in-flight state. Idempotency rests on the record versions the
+/// store keeps (`TG-WAL-015`): a frame at or below its key's stored version
+/// writes nothing, so running recovery twice changes no row.
 pub struct WalRecovery {
     wal: Arc<WalWriter>,
     /// Partition IDs to recover. If empty, all log files in `wal_dir` are used.
     partitions: Vec<u32>,
-    /// Whether the `RecordValue::Lww` merge-idempotency gate in `prepare_entry` is
-    /// active. Always `true` in production; the harness flips it off to reproduce
-    /// the pre-`TG-WAL-006` blind clobber.
+    /// Whether the record-version gate in `prepare_entry` is active
+    /// (`TG-WAL-015`). Always `true` in production; the harness flips it off
+    /// to reproduce a blind replay that clobbers a newer stored value.
     replay_merge_gate: bool,
     /// Whether `run` re-replays each partition's oldest un-applied frame once more
     /// after the in-order pass — a harness seam that manufactures the "older frame
     /// re-applied over a newer durable value" condition, which generated ops
     /// cannot: in-order replay always ends on the newest frame. The seam exists to
-    /// exercise the merge gate. `#[cfg(test)]`-only: it does not exist in a
+    /// exercise the version gate. `#[cfg(test)]`-only: it does not exist in a
     /// production build.
     #[cfg(test)]
     re_replay_oldest_frame: bool,
@@ -2770,8 +2830,8 @@ impl WalRecovery {
         self.test_batch_limits = Some((frames.max(1), bytes));
     }
 
-    /// Test-only: disable (or re-enable) the `RecordValue::Lww` merge gate in
-    /// `prepare_entry`. Disabling it reproduces the pre-`TG-WAL-006` blind replay.
+    /// Test-only: disable (or re-enable) the record-version gate in
+    /// `prepare_entry`. Disabling it reproduces a blind replay.
     #[cfg(test)]
     pub(crate) fn test_set_replay_merge_gate(&mut self, enabled: bool) {
         self.replay_merge_gate = enabled;
@@ -2825,10 +2885,10 @@ impl WalRecovery {
         inner_store: &Arc<dyn MapDataStore>,
         entry: &WalEntry,
         now: i64,
-        merge_gate: bool,
+        version_gate: bool,
     ) -> anyhow::Result<()> {
         let overlay = ReplayOverlay::default();
-        match Self::prepare_entry(inner_store, &overlay, entry, merge_gate).await? {
+        match Self::prepare_entry(inner_store, &overlay, entry, version_gate).await? {
             None => Ok(()),
             Some(ReplayWrite::Put { value }) => {
                 inner_store.add(&entry.map, &entry.key, &value, now).await
@@ -2851,40 +2911,27 @@ impl WalRecovery {
     /// own frame. Frames above the frontier stay in the replay window and are
     /// re-applied on a later boot.
     ///
-    /// That re-application is idempotent for `RecordValue::Lww` (TG-WAL-006):
-    /// `prepare_entry` reads the current durable value and discards a frame whose HLC
-    /// timestamp is strictly older, so a stale replayed frame can no longer clobber a
-    /// newer durable value written outside the window (e.g. a frameless write-behind
-    /// flush). Legacy frames keep always-merge replay.
+    /// Replay is idempotent by the record versions the store keeps
+    /// (`TG-WAL-015`): every commit stores, in the record's own batch, the
+    /// version of each record it writes ahead of its partition's applied
+    /// watermark, and `prepare_entry` discards a frame at or below its key's
+    /// version. So a frame replayed twice, or replayed onto a store that
+    /// already holds a later write of its key, changes no row, whatever its
+    /// kind: an LWW or OR `WalOp::Store`, a `WalOp::Remove`, or a
+    /// `WalOp::OrDelta`. A delta's fold through `crdt::apply_or_delta` is thus
+    /// applied only forward, onto the value of the frames below it, and never
+    /// again onto a value that already holds it (`TG-OR-003`). Forward replay
+    /// is the live write: each frame above its key's version is applied in
+    /// sequence order (TG-WAL-011) exactly as it was applied live.
     ///
-    /// OR frames come in TWO kinds, and each is idempotent under a DIFFERENT
-    /// argument — neither argument covers the other kind (`TG-OR-003`):
-    ///
-    /// - **Snapshot frames** — a `WalOp::Store` carrying `RecordValue::OrMap` or
-    ///   `RecordValue::OrTombstones` — are idempotent by pre-existing
-    ///   monotonicity: they are post-RMW full snapshots, monotone in `wal_seq`
-    ///   order, so re-applying one cannot move the slot backwards. Not by this
-    ///   merge, which is Lww-scoped.
-    /// - **`WalOp::OrDelta` frames** are idempotent by SET-ALGEBRA FOLD
-    ///   idempotency through the single live apply seam, `crdt::apply_or_delta`:
-    ///   `Add` is a tombstone-guarded `retain` + `push`, `Remove` dedups the
-    ///   tombstone, and `Prune` is pure tombstone-set subtraction. The property
-    ///   holds for the WHOLE un-applied window replayed in sequence order from
-    ///   the durable-store base, which is exactly what this pass does.
-    ///   Monotonicity is NOT the argument here and cannot be offered as one: a
-    ///   delta carries only its own mutation, so it is monotone in nothing.
-    ///
-    /// `WalOp::Remove` re-replay is idempotent under a DISTINCT invariant
-    /// (`TG-WAL-009`) WITHOUT a gate: a Remove replays UNCONDITIONALLY, identical to
-    /// the live remove path (blind delete). Because this pass is prefix-complete and
-    /// strictly in-order, a stale Remove at sequence N is replayed only when N sits
-    /// above the applied watermark, which forces every higher-sequence frame —
-    /// including any strictly-newer re-creation — above the watermark too, so the
-    /// re-creation replays AFTER the Remove and survives; and a re-creation that is
-    /// durable-but-unframed necessarily sits below the watermark (older than the
-    /// replayed Remove), so deleting it is live-correct. The out-of-order
-    /// stale-Remove-over-newer-value state is unreachable here and is fabricated
-    /// only by the harness `re_replay_oldest_frame` seam.
+    /// A key's version advances past a sequence only when every unresolved
+    /// frame of that key below it — refused by the store or failed in
+    /// prepare — is applied or covered by a written subsuming frame above it:
+    /// until then the key is held and its later non-subsuming frames are not
+    /// replayed (see `prepare_frame`). A frame left unresolved stays
+    /// replayable at the next start, unless a live write of its key stores a
+    /// higher version first; the gate then discards it, and the store keeps
+    /// what the node served and acknowledged after it.
     ///
     /// A partition whose frontier stops below its highest enumerated frame raises
     /// the abandoned-write alarm here, at boot. Write-behind's watchdog cannot
@@ -2956,10 +3003,9 @@ impl WalRecovery {
 
             // `entries` is strictly ascending by WAL sequence: `unapplied`
             // sorts the partition's frames of both layouts (see its impl), and `replay_partition` replays in
-            // that order. Both the contiguous-frontier watermark logic AND the gate-free
-            // Remove-idempotency non-reachability argument (TG-WAL-009's premise
-            // that a stale Remove is replayed only when every strictly-newer frame
-            // for the key is replayed AFTER it) rely on this ascending order
+            // that order. The contiguous-frontier watermark logic AND forward
+            // replay's equality with the live write (each frame of a key applied
+            // after every lower one, TG-WAL-015) rely on this ascending order
             // (TG-WAL-011).
             tracing::info!(
                 partition = partition_id,
@@ -2986,9 +3032,9 @@ impl WalRecovery {
             // AFTER the in-order pass has left the newest value durable. This
             // manufactures a stale re-replay — an older frame applied over a
             // newer durable value — a condition generated ops cannot manufacture
-            // because in-order replay always ends on the newest frame. With the merge gate
-            // on (production) the re-replayed older frame is discarded; with it off
-            // it clobbers, which the `value_equality` oracle catches.
+            // because in-order replay always ends on the newest frame. With the version
+            // gate on (production) the re-replayed older frame is discarded; with it
+            // off it clobbers, which the `value_equality` oracle catches.
             #[cfg(test)]
             if self.re_replay_oldest_frame {
                 if let Some(oldest) = entries.first() {
@@ -3057,58 +3103,28 @@ impl WalRecovery {
     /// exist once: a store-mode replay batch collects what this returns, and
     /// the one-frame `replay_entry` of the tests writes it at once.
     ///
-    /// Replay goes straight to the store rather than through the CRDT service layer, so
-    /// the merge that upholds re-replay idempotency lives HERE, at the recovery
-    /// boundary, not in the store (`write_one` stays a CRDT-agnostic blind insert).
+    /// Replay goes straight to the store rather than through the CRDT service
+    /// layer, so the gate that upholds re-replay idempotency lives HERE, at the
+    /// recovery boundary; the store keeps the versions but decides nothing.
     ///
-    /// Re-replay of a `RecordValue::Lww` frame is idempotent (TG-WAL-006): before
-    /// applying a modern Lww frame this reads the current durable value and, if the
-    /// incoming frame's HLC timestamp is strictly OLDER than the stored value's,
-    /// discards it (last-write-wins by timestamp). A stale replayed frame therefore
-    /// can no longer clobber a newer durable value written outside the replay window
-    /// (e.g. a frameless write-behind flush). Ties and newer timestamps write
-    /// through unchanged. The read-then-write is not atomic, which is safe because
-    /// recovery runs before the listener accepts connections — there are no
-    /// concurrent writers at boot.
+    /// **The version gate** (`TG-WAL-015`) runs first, for every frame kind:
+    /// the key's record version is read from the store, and a frame whose
+    /// sequence is at or below it is already reflected there and writes
+    /// nothing (`None`). Equal is a discard as much as below: the frame IS
+    /// the stored version, and applying an OR add again would move its tag
+    /// behind later ones. A key with no version row — written by an earlier
+    /// binary, reclaimed at the watermark, or never written — has version 0
+    /// and replays forward. A failed read is a failed prepare, which holds the
+    /// key (see `prepare_frame`). The order is the WAL sequence, not a stamp:
+    /// it is minted under the key's writer, so it is the key's arrival order,
+    /// which a caller's or a client's stamp need not be. `version_gate`
+    /// `false` (a test seam) replays blind.
     ///
-    /// The gate is scoped to modern `WalStorePayload::Record(RecordValue::Lww)`
-    /// frames only:
-    /// - `WalStorePayload::Legacy` frames carry a SYNTHESIZED timestamp (zero-epoch
-    ///   when the WAL recorded none) whose intent is always-merge, so they BYPASS
-    ///   the gate and keep the pre-existing blind replay.
-    /// - `RecordValue::OrMap`/`OrTombstones` frames carried by a `WalOp::Store`
-    ///   BYPASS the gate: their CROSS-NODE convergence is set-union of
-    ///   tags+tombstones, not a scalar timestamp max — replay itself is never a
-    ///   union but an absolute-set REPLACE, since unioning a snapshot onto the
-    ///   durable value would resurrect tombstoned tags. Such a frame is a post-RMW
-    ///   COMPLETE snapshot of the key that is monotone in `wal_seq` order, so
-    ///   in-sequence replay converges to the newest snapshot regardless of
-    ///   re-replay. That argument
-    ///   covers snapshot framing only — a `WalOp::OrDelta` frame is not a snapshot
-    ///   and rests on the separate argument below. OR merge-idempotency as its own
-    ///   property is owned by `TG-OR-003`, not this path.
-    /// - A cross-kind case (stored value is not `Lww` while the incoming frame is)
-    ///   cannot be compared by timestamp, so it also BYPASSES the gate and writes
-    ///   through.
-    ///
-    /// Re-replay of a `WalOp::Remove` frame is idempotent WITHOUT a gate, under a
-    /// DISTINCT invariant (`TG-WAL-009`, Remove-scoped — not the `TG-WAL-006` value
-    /// claim above). A Remove replays UNCONDITIONALLY, identical to the live remove
-    /// path (a blind delete with no timestamp compare): `entry.timestamp` is not
-    /// consulted. This is single-algebra-correct — a gate the live path does not
-    /// have would make `replay(Remove) != live(Remove)` and would itself lose acked
-    /// deletes (a Remove whose sourced value-HLC is strictly older than the LWW
-    /// survivor would be wrongly skipped). No gate is NEEDED either: under
-    /// prefix-complete, in-order replay of the unapplied window, a stale Remove at
-    /// sequence N is replayed only when N is above the watermark, in which case
-    /// every higher-sequence frame — including any strictly-newer re-creation — is
-    /// also above the watermark and replayed AFTER it, so the re-creation survives;
-    /// and the only way a re-creation is durable-but-unframed is that its sequence
-    /// is below the watermark, i.e. OLDER than the replayed Remove, so deleting it
-    /// is live-correct. The `stale-Remove-over-newer-frameless-value` juxtaposition
-    /// is unreachable except by re-applying an already-applied older frame — the
-    /// harness `re_replay_oldest_frame` seam, never a production path (see
-    /// INVARIANTS.md TG-WAL-009 for the full state-machine argument).
+    /// Above the version a frame replays as the live write did. A
+    /// `WalOp::Remove` deletes unconditionally, as the live remove does (it
+    /// compares no stamp, and `entry.timestamp` is not consulted); a stale
+    /// Remove below a later write of the key never reaches the delete, because
+    /// the gate discarded it.
     ///
     /// A `WalOp::OrDelta` frame is FOLDED, not written through. The arm loads the
     /// key's CURRENT value, folds THIS ONE delta onto it via
@@ -3134,8 +3150,17 @@ impl WalRecovery {
         inner_store: &Arc<dyn MapDataStore>,
         overlay: &ReplayOverlay,
         entry: &WalEntry,
-        merge_gate: bool,
+        version_gate: bool,
     ) -> anyhow::Result<Option<ReplayWrite>> {
+        if version_gate {
+            let version = inner_store
+                .load_version(&entry.map, &entry.key)
+                .await
+                .map_err(|e| anyhow::anyhow!("cannot read the record version: {e:#}"))?;
+            if version.is_some_and(|version| entry.sequence <= version.seq) {
+                return Ok(None);
+            }
+        }
         match &entry.op {
             WalOp::Store { value } => {
                 // Reconstruct the exact RecordValue. Current frames carry the full
@@ -3158,33 +3183,6 @@ impl WalRecovery {
                         }
                     }
                 };
-
-                // Merge-idempotency gate (TG-WAL-006), scoped to modern Lww frames.
-                // Only a `Record`-payload `Lww` frame carries a real value timestamp
-                // to compare; if the current value is a strictly-newer Lww value,
-                // this frame is stale (it was superseded by a write outside the
-                // replay window) and must be discarded rather than clobber it.
-                // Legacy frames, OR frames, and a non-Lww current value all fall
-                // through to the blind replay unchanged (see the doc-contract on
-                // `prepare_entry`). `merge_gate` is always `true` in production; the
-                // harness flips it off to reproduce the pre-fix blind clobber.
-                if merge_gate {
-                    if let WalStorePayload::Record(RecordValue::Lww {
-                        timestamp: incoming_ts,
-                        ..
-                    }) = value
-                    {
-                        if let Some(RecordValue::Lww {
-                            timestamp: stored_ts,
-                            ..
-                        }) = overlay.load(inner_store, &entry.map, &entry.key).await?
-                        {
-                            if *incoming_ts < stored_ts {
-                                return Ok(None);
-                            }
-                        }
-                    }
-                }
 
                 // ABSOLUTE SET, in this frame's sequence position — for an OR
                 // value as much as for an LWW one. The write REPLACES the key's
@@ -3223,18 +3221,11 @@ impl WalRecovery {
                 }))
             }
             WalOp::Remove => {
-                // Replay a Remove UNCONDITIONALLY (TG-WAL-009) — identical to the
-                // live remove path, which is a blind delete with no timestamp
-                // compare. `entry.timestamp` is deliberately NOT consulted and
-                // `merge_gate` is ignored for this arm: a gate the live path does not
-                // have would make `replay(Remove) != live(Remove)` and would itself
-                // lose acked deletes (the exact regression an HLC-sourced gate
-                // produced). No gate is needed — under prefix-complete in-order
-                // replay a stale Remove can never be juxtaposed over a strictly-newer
-                // re-creation (see `run`'s doc-contract and INVARIANTS.md TG-WAL-009
-                // for the state-machine argument). The harness reproduces the
-                // synthetic out-of-order clobber via its `re_replay_oldest_frame`
-                // seam, not through this arm.
+                // A blind delete, as the live remove is: no stamp is compared,
+                // since a stamp-sourced compare would skip a Remove whose
+                // sourced stamp is older than the survivor and lose an acked
+                // delete. A stale Remove over a newer write of the key never
+                // gets here: the version gate above discarded it.
                 Ok(Some(ReplayWrite::Remove))
             }
             WalOp::OrDelta { delta } => {
@@ -3279,13 +3270,34 @@ impl WalRecovery {
     /// the store's `add` would. Returns the frame's write and the value the
     /// overlay takes for its key once the frame is admitted (`Some(None)` for
     /// a remove, `None` when the key's value does not change).
+    ///
+    /// A non-subsuming frame of a held key is not prepared at all unless the
+    /// part already wrote a subsuming frame of the key above the key's last
+    /// unresolved frame below it (`TG-WAL-015`). Folded without that frame,
+    /// it would store a version above an unresolved frame whose effect its
+    /// value lacks, and the gate would discard that frame for good at the next
+    /// start. Folded onto the written subsuming frame it is what the live
+    /// write was, because that frame carries the key's whole state. So it
+    /// fails, logged as any failed frame and holding its key in turn. A
+    /// subsuming frame of a held key prepares normally: its state is complete.
+    /// The first preparation and `reprepare` both decide here, so a part
+    /// prepared again after a refusal decides against the refused frames.
     async fn prepare_frame(
         &self,
         inner_store: &Arc<dyn MapDataStore>,
         overlay: &ReplayOverlay,
+        held: &mut HeldKeys,
         partition: u32,
         entry: &WalEntry,
     ) -> (Prepared, Option<Option<RecordValue>>) {
+        if let Some(unresolved) = Self::held_below(held, overlay, entry) {
+            let err = anyhow::anyhow!(
+                "frame {unresolved} of this key is unresolved and no frame written since covers \
+                 it, so this frame is held"
+            );
+            log_unreplayed(held, partition, entry, &err);
+            return (Prepared::Failed, None);
+        }
         let prepared =
             Self::prepare_entry(inner_store, overlay, entry, self.replay_merge_gate).await;
         let encoded = match prepared {
@@ -3297,17 +3309,44 @@ impl WalRecovery {
             Err(err) => Err(err),
         };
         encoded.unwrap_or_else(|err| {
-            log_unreplayed(partition, entry, &err);
+            log_unreplayed(held, partition, entry, &err);
             (Prepared::Failed, None)
         })
     }
 
+    /// The unresolved frame of `entry`'s key that holds `entry`, if any: the
+    /// highest unresolved frame of the key below `entry`, when `entry` does
+    /// not subsume the key and the part wrote no subsuming frame of the key
+    /// above that one.
+    ///
+    /// Only an unresolved frame below `entry` holds it: a frame the store
+    /// refused later in the part leaves the frames before it as complete as
+    /// they were, so they still replay.
+    fn held_below(held: &HeldKeys, overlay: &ReplayOverlay, entry: &WalEntry) -> Option<u64> {
+        if held.is_empty() || entry.op.subsumes_on_coalesce() {
+            return None;
+        }
+        let key = (entry.map.clone(), entry.key.clone());
+        let unresolved = held
+            .get(&key)?
+            .range(..entry.sequence)
+            .next_back()
+            .copied()?;
+        let covered = overlay
+            .subsuming
+            .get(&key)
+            .is_some_and(|&written| written > unresolved);
+        (!covered).then_some(unresolved)
+    }
+
     /// Prepares `frames` again in sequence order over a fresh overlay, so each
     /// reads the store as the writes committed so far left it; a frame whose
-    /// write the store refused stays failed.
+    /// write the store refused stays failed, and every frame its refusal holds
+    /// is held (see `prepare_frame`).
     async fn reprepare(
         &self,
         inner_store: &Arc<dyn MapDataStore>,
+        held: &mut HeldKeys,
         partition: u32,
         frames: &[WalEntry],
         refused: &[bool],
@@ -3320,7 +3359,7 @@ impl WalRecovery {
                 continue;
             }
             let (frame, value) = self
-                .prepare_frame(inner_store, &overlay, partition, entry)
+                .prepare_frame(inner_store, &overlay, held, partition, entry)
                 .await;
             if let Some(value) = value {
                 overlay.note(entry, value);
@@ -3337,18 +3376,21 @@ impl WalRecovery {
     /// values, its first frame whole. Each frame is prepared against the
     /// batch's own-batch overlay, so it reads what an earlier frame of the
     /// batch wrote exactly as per-frame replay reads it from the store — the
-    /// LWW gate (TG-WAL-006), the OR fold (TG-OR-003) and an unconditional
-    /// Remove (TG-WAL-009) see the same values. The batch is one store commit
-    /// holding its writes and, when the contiguous-success frontier moved
-    /// above the row the store holds, the partition's row: the row is never
+    /// OR fold (TG-OR-003) and an unconditional Remove see the same values;
+    /// the version gate reads the store only, which no earlier frame of the
+    /// batch can make decisive (`TG-WAL-015`). The batch is one store commit
+    /// holding its writes, each with its frame's sequence as its version, and,
+    /// when the contiguous-success frontier moved above the row the store
+    /// holds, the partition's row: neither a version nor the row is ever
     /// durable without the writes it covers. Only once that commit returned is
     /// the WAL told the frontier is applied.
     ///
     /// Every frame is checked against `watermark`, the store's row read when
     /// `run` began: a frame at or below it refuses the start, naming it, and is
-    /// never skipped. A frame that fails to prepare writes nothing and stops
-    /// the frontier below it; later frames are still replayed, as per-frame
-    /// replay does. A refused commit is handled by `commit_batch`; only a store
+    /// never skipped. A frame that fails to prepare writes nothing, stops the
+    /// frontier below it and holds its key for the rest of the partition's
+    /// run (see `prepare_frame`); later frames of other keys are still
+    /// replayed. A refused commit is handled by `commit_batch`; only a store
     /// that reports itself broken ends the partition's replay early.
     async fn replay_partition(
         &self,
@@ -3364,6 +3406,7 @@ impl WalRecovery {
             first_failed: None,
             row: watermark,
             broken: false,
+            held: HeldKeys::new(),
         };
         let mut batches = 0;
         let mut next = 0;
@@ -3385,7 +3428,7 @@ impl WalRecovery {
                     );
                 }
                 let (frame, value) = self
-                    .prepare_frame(inner_store, &overlay, partition, entry)
+                    .prepare_frame(inner_store, &overlay, &mut progress.held, partition, entry)
                     .await;
                 let len = frame.encoded_len();
                 if !batch.is_empty() && bytes.saturating_add(len) > max_bytes {
@@ -3419,17 +3462,20 @@ impl WalRecovery {
     /// Commits one replay batch, its row inside.
     ///
     /// A commit refused with [`RecordRefused`] leaves out the refused writes —
-    /// their frames block the frontier — and commits the rest again; a commit
-    /// refused otherwise is halved, each half committed in order, down to
-    /// single frames, at most `2n − 1` commits for a batch of `n`. A frame
-    /// refused alone blocks the frontier and the frames after it are still
-    /// committed, as per-frame replay does; there is no hold to protect at
-    /// start, so no refusal pattern ends the partition. Before a part is
-    /// committed again its frames are prepared again from the store, which by
-    /// then holds every write of this batch committed so far, so a refused
-    /// write is never read by a later frame. A store that reports itself
-    /// broken (`TG-WB-010`) ends the partition's replay: nothing more is
-    /// committed for it.
+    /// their frames block the frontier and hold their keys — and commits the
+    /// rest again; a commit refused otherwise is halved, each half committed
+    /// in order, down to single frames, at most `2n − 1` commits for a batch
+    /// of `n`. A frame refused alone blocks the frontier, holds its key, and
+    /// the frames after it are still committed, as per-frame replay does;
+    /// there is no hold to protect at start, so no refusal pattern ends the
+    /// partition. Before a part is committed again its frames are prepared
+    /// again from the store, which by then holds every write of this batch
+    /// committed so far, so a refused write is never read by a later frame,
+    /// and a later non-subsuming frame of the refused key is held rather than
+    /// folded without it (`TG-WAL-015`). A store that reports itself broken
+    /// (`TG-WB-010`) ends the partition's replay: nothing more is committed
+    /// for it.
+    #[allow(clippy::too_many_lines)]
     async fn commit_batch(
         &self,
         inner_store: &Arc<dyn MapDataStore>,
@@ -3447,8 +3493,14 @@ impl WalRecovery {
             let mut part = match first_attempt.take() {
                 Some(prepared) => prepared,
                 None => {
-                    self.reprepare(inner_store, partition, &frames[lo..hi], &refused[lo..hi])
-                        .await
+                    self.reprepare(
+                        inner_store,
+                        &mut progress.held,
+                        partition,
+                        &frames[lo..hi],
+                        &refused[lo..hi],
+                    )
+                    .await
                 }
             };
             loop {
@@ -3470,6 +3522,7 @@ impl WalRecovery {
                 let err = match inner_store.commit(&commit).await {
                     Ok(()) => {
                         progress.settle(&frames[lo..hi], &part);
+                        progress.release(&frames[lo..hi], &part);
                         if let Some(&(_, row)) = applied.first() {
                             progress.row = row;
                             if let Err(err) = self.wal.mark_applied(partition, row).await {
@@ -3499,7 +3552,7 @@ impl WalRecovery {
                     progress.broken = true;
                     return;
                 }
-                let mut named: Vec<usize> = err
+                let named: Vec<usize> = err
                     .chain()
                     .find_map(|e| e.downcast_ref::<crate::storage::map_data_store::RecordRefused>())
                     .map(|r| {
@@ -3509,26 +3562,24 @@ impl WalRecovery {
                             .collect()
                     })
                     .unwrap_or_default();
-                // Only the first refused write of a key is taken as refused: a
-                // later write of that key was prepared from the refused one,
-                // so it is prepared again without it and committed again.
-                named.sort_unstable();
-                let mut keys = HashSet::new();
-                named.retain(|i| keys.insert((&frames[lo + i].map, &frames[lo + i].key)));
                 if !named.is_empty() {
                     for i in named {
-                        let entry = &frames[lo + i];
-                        log_unreplayed(partition, entry, &err);
+                        log_unreplayed(&mut progress.held, partition, &frames[lo + i], &err);
                         refused[lo + i] = true;
                     }
                     part = self
-                        .reprepare(inner_store, partition, &frames[lo..hi], &refused[lo..hi])
+                        .reprepare(
+                            inner_store,
+                            &mut progress.held,
+                            partition,
+                            &frames[lo..hi],
+                            &refused[lo..hi],
+                        )
                         .await;
                     continue;
                 }
                 if hi - lo == 1 {
-                    let entry = &frames[lo];
-                    log_unreplayed(partition, entry, &err);
+                    log_unreplayed(&mut progress.held, partition, &frames[lo], &err);
                     refused[lo] = true;
                     progress.settle(&frames[lo..hi], &[Prepared::Failed]);
                     break;
@@ -3542,9 +3593,14 @@ impl WalRecovery {
     }
 }
 
-/// Logs a frame whose replay failed: it blocks the frontier and stays
-/// replayable.
-fn log_unreplayed(partition: u32, entry: &WalEntry, err: &anyhow::Error) {
+/// Logs a frame whose replay failed and holds its key (`TG-WAL-015`): it
+/// blocks the frontier and stays replayable, and its key's version may not
+/// advance past it until a subsuming frame above it is written. Every failed
+/// frame passes here — failed in prepare, held, or refused by the store.
+fn log_unreplayed(held: &mut HeldKeys, partition: u32, entry: &WalEntry, err: &anyhow::Error) {
+    held.entry((entry.map.clone(), entry.key.clone()))
+        .or_default()
+        .insert(entry.sequence);
     tracing::warn!(
         partition,
         map = %entry.map,
@@ -3557,7 +3613,8 @@ fn log_unreplayed(partition: u32, entry: &WalEntry, err: &anyhow::Error) {
 }
 
 /// The store writes of a prepared part of a replay batch, and for each write
-/// the index of its frame in the part.
+/// the index of its frame in the part. Each write carries its frame's
+/// sequence, the record version the store keeps with it (`TG-WAL-015`).
 fn batch_writes<'a>(
     frames: &'a [WalEntry],
     prepared: &[Prepared],
@@ -3576,11 +3633,13 @@ fn batch_writes<'a>(
                 key: &entry.key,
                 value: PutValue::Encoded(encoded.clone()),
                 store_time: now,
+                seq: entry.sequence,
             },
             Prepared::Remove => StoreWrite::Remove {
                 map: &entry.map,
                 key: &entry.key,
                 store_time: now,
+                seq: entry.sequence,
             },
             Prepared::Nothing | Prepared::Failed => continue,
         };
@@ -3605,10 +3664,15 @@ impl ReplayOverlay {
         }
     }
 
-    /// Records the value `entry`'s key holds once the batch is committed.
+    /// Records the value `entry`'s key holds once the batch is committed;
+    /// called for a frame admitted as a write only. A subsuming frame's
+    /// sequence is recorded too.
     fn note(&mut self, entry: &WalEntry, value: Option<RecordValue>) {
-        self.values
-            .insert((entry.map.clone(), entry.key.clone()), value);
+        let key = (entry.map.clone(), entry.key.clone());
+        if entry.op.subsumes_on_coalesce() {
+            self.subsuming.insert(key.clone(), entry.sequence);
+        }
+        self.values.insert(key, value);
     }
 }
 
@@ -3637,24 +3701,69 @@ impl ReplayProgress {
         frontier
     }
 
-    /// Takes in the outcome of `frames`, committed or failed.
+    /// Takes in the outcome of `frames`, committed or failed: a resolved frame
+    /// leaves its key's unresolved set.
+    ///
+    /// The frontier is the partition's applied watermark, so it moves only
+    /// over a contiguous run of resolved frames; a key's record version is a
+    /// separate, per-key bound and may stand above the frontier
+    /// (`TG-WAL-015`).
     fn settle(&mut self, frames: &[WalEntry], prepared: &[Prepared]) {
         // Only a success that is still contiguous with the prefix may advance
         // the frontier. Once an entry has failed, later successes are kept —
-        // re-running them next boot is free — but they must NOT license GC of
-        // the frame that failed.
+        // re-running them next boot changes no row — but they must NOT license
+        // GC of the frame that failed.
         //
-        // "Free" rests on a different argument per frame kind: Lww on the
-        // read-compare in `prepare_entry`; a `WalOp::Store` OR snapshot on
-        // monotonicity; and a `WalOp::OrDelta` on set-algebra fold idempotency
-        // through `crdt::apply_or_delta`, over the whole un-applied window
-        // replayed in sequence order from the durable-store base. Monotonicity
-        // does not cover the delta kind.
+        // "Changes no row" is the record version for every frame kind: a
+        // stored later success left its key's version at or above its own
+        // sequence, so the next boot discards it, a `WalOp::OrDelta` included,
+        // whose fold through `crdt::apply_or_delta` is therefore never applied
+        // twice. A frame whose key was held stays unapplied and replays
+        // forward at the next boot.
         for (entry, frame) in frames.iter().zip(prepared) {
             if matches!(frame, Prepared::Failed) {
                 self.first_failed.get_or_insert(entry.sequence);
-            } else if self.first_failed.is_none() {
+                continue;
+            }
+            if self.first_failed.is_none() {
                 self.frontier = entry.sequence;
+            }
+            // A frame that failed earlier in this run and is resolved now (prepared again
+            // after a refusal in its batch) holds its key no longer.
+            let key = (entry.map.clone(), entry.key.clone());
+            if let Some(unresolved) = self.held.get_mut(&key) {
+                unresolved.remove(&entry.sequence);
+                if unresolved.is_empty() {
+                    self.held.remove(&key);
+                }
+            }
+        }
+    }
+
+    /// Releases every held key a committed frame of `frames` subsumes above
+    /// all of its unresolved frames (`TG-WAL-015`). Called once the commit
+    /// returned `Ok`, so a frame that failed while its batch was prepared is
+    /// already counted: a subsuming frame below it releases nothing. A frame
+    /// the gate discarded (`Prepared::Nothing`) wrote nothing and releases
+    /// nothing either.
+    fn release(&mut self, frames: &[WalEntry], prepared: &[Prepared]) {
+        if self.held.is_empty() {
+            return;
+        }
+        for (entry, frame) in frames.iter().zip(prepared) {
+            if !matches!(frame, Prepared::Put { .. } | Prepared::Remove)
+                || !entry.op.subsumes_on_coalesce()
+            {
+                continue;
+            }
+            let key = (entry.map.clone(), entry.key.clone());
+            let covers = self
+                .held
+                .get(&key)
+                .and_then(BTreeSet::last)
+                .is_some_and(|&unresolved| entry.sequence > unresolved);
+            if covers {
+                self.held.remove(&key);
             }
         }
     }
@@ -3666,7 +3775,7 @@ impl ReplayProgress {
 /// replay — a separate fold type would be a second seam over the same algebra.
 /// The receiver is dropped because the fold is a pure function of
 /// `(base, delta)`: `prepare_entry` is an associated function reached as
-/// `WalRecovery::prepare_entry(inner_store, overlay, entry, merge_gate)` and holds no
+/// `WalRecovery::prepare_entry(inner_store, overlay, entry, version_gate)` and holds no
 /// `WalRecovery` value to call a method on.
 ///
 /// The fold owns no algebra of its own. It normalizes the base through the live
@@ -4619,6 +4728,15 @@ mod tests {
 
     #[async_trait]
     impl MapDataStore for ReplayStore {
+        // Keeps no record version, so every frame replays forward.
+        async fn load_version(
+            &self,
+            _map: &str,
+            _key: &str,
+        ) -> anyhow::Result<Option<crate::storage::map_data_store::KeyVersion>> {
+            Ok(None)
+        }
+
         async fn add(
             &self,
             map: &str,
@@ -4803,14 +4921,22 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // TG-WAL-006 — replay merge-idempotency (LWW-scoped) direct unit tests
+    // TG-WAL-015 — the replay version gate, direct unit tests
     // -----------------------------------------------------------------------
 
     /// A load-serving in-memory `MapDataStore`: unlike `ReplayStore` (records-only,
-    /// `load` returns `None`), this serves back what was last written so the
-    /// `replay_entry` merge gate can read the current durable value.
+    /// `load` returns `None`), this serves back what was last written, and
+    /// answers the record versions a test fabricates, so `replay_entry` reads
+    /// the current durable value and its version.
     #[derive(Default)]
     struct MergeProbeStore {
+        /// The record versions a test set, by `(map, key)`. `add`/`remove`
+        /// keep none, as an engine's frameless writes do not.
+        versions: std::sync::Mutex<
+            std::collections::HashMap<(String, String), crate::storage::map_data_store::KeyVersion>,
+        >,
+        /// Makes every version read fail.
+        fail_version_reads: AtomicBool,
         data: tokio::sync::Mutex<
             std::collections::HashMap<(String, String), crate::storage::record::RecordValue>,
         >,
@@ -4819,8 +4945,38 @@ mod tests {
         replay_order: tokio::sync::Mutex<Vec<String>>,
     }
 
+    impl MergeProbeStore {
+        /// Fabricates the version row of `(map, key)`.
+        fn set_version(&self, map: &str, key: &str, seq: u64, removed: bool) {
+            self.versions.lock().unwrap().insert(
+                (map.to_string(), key.to_string()),
+                crate::storage::map_data_store::KeyVersion { seq, removed },
+            );
+        }
+
+        /// Makes every later version read fail (`true`) or answer again.
+        fn fail_version_reads(&self, fail: bool) {
+            self.fail_version_reads.store(fail, Ordering::SeqCst);
+        }
+    }
+
     #[async_trait]
     impl MapDataStore for MergeProbeStore {
+        async fn load_version(
+            &self,
+            map: &str,
+            key: &str,
+        ) -> anyhow::Result<Option<crate::storage::map_data_store::KeyVersion>> {
+            if self.fail_version_reads.load(Ordering::SeqCst) {
+                anyhow::bail!("injected record version read failure");
+            }
+            Ok(self
+                .versions
+                .lock()
+                .unwrap()
+                .get(&(map.to_string(), key.to_string()))
+                .copied())
+        }
         async fn add(
             &self,
             map: &str,
@@ -4965,116 +5121,145 @@ mod tests {
         }
     }
 
-    /// TG-WAL-006: the `RecordValue::Lww` gate in `replay_entry` discards a frame
-    /// OLDER than the current durable value, writes through ties/newer, and — with
-    /// the gate off — reproduces the pre-fix blind clobber. This isolates the GATE
-    /// as the fix (independent of the harness's re-replay seam).
+    /// `entry` at WAL sequence `sequence`.
+    fn at(mut entry: WalEntry, sequence: u64) -> WalEntry {
+        entry.sequence = sequence;
+        entry
+    }
+
+    /// A probe store and the same store as the trait object `replay_entry`
+    /// takes, so a test can fabricate version rows behind the gate's back.
+    fn probe_store() -> (Arc<MergeProbeStore>, Arc<dyn MapDataStore>) {
+        let probe = Arc::new(MergeProbeStore::default());
+        let store: Arc<dyn MapDataStore> = Arc::clone(&probe) as Arc<dyn MapDataStore>;
+        (probe, store)
+    }
+
+    /// TG-WAL-015: the version gate in `replay_entry` discards a frame whose
+    /// sequence is at or below the key's stored version — equal included —
+    /// writes through a frame above it, decides by the sequence and never by
+    /// the stamp, replays a key with no version row forward, and with the gate
+    /// off reproduces the blind clobber.
     #[tokio::test]
-    async fn replay_lww_gate_discards_older_frame_isolated() {
-        let store: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
+    async fn replay_version_gate_discards_a_frame_at_or_below_the_version_isolated() {
+        let (probe, store) = probe_store();
         let newer = RecordValue::Lww {
             value: TgValue::Int(20),
             timestamp: ts(20),
             ttl_ms: None,
         };
-
-        // Gate ON: an older (ts=10) frame over a newer (ts=20) durable value is discarded.
         store.add("m", "k", &newer, 0).await.unwrap();
-        WalRecovery::replay_entry(&store, &lww_frame("k", 10), 0, true)
-            .await
-            .unwrap();
-        assert_eq!(
-            load_millis(&store, "k").await,
-            Some(20),
-            "gate ON must discard the older frame (no clobber)"
-        );
+        probe.set_version("m", "k", 5, false);
 
-        // Gate ON: a newer (ts=30) frame writes through.
-        WalRecovery::replay_entry(&store, &lww_frame("k", 30), 0, true)
-            .await
-            .unwrap();
-        assert_eq!(
-            load_millis(&store, "k").await,
-            Some(30),
-            "gate ON must let a newer frame write through"
-        );
+        // Below and equal: discarded, whatever the frame's stamp.
+        for frame in [at(lww_frame("k", 10), 3), at(lww_frame("k", 30), 5)] {
+            WalRecovery::replay_entry(&store, &frame, 0, true)
+                .await
+                .unwrap();
+            assert_eq!(
+                load_millis(&store, "k").await,
+                Some(20),
+                "a frame at or below the version must be discarded: seq {}",
+                frame.sequence
+            );
+        }
 
-        // Gate ON: an equal-timestamp frame writes through (ties, not strictly older).
-        WalRecovery::replay_entry(&store, &lww_frame("k", 30), 0, true)
-            .await
-            .unwrap();
-        assert_eq!(
-            load_millis(&store, "k").await,
-            Some(30),
-            "ties write through"
-        );
-
-        // Gate OFF: the same older frame clobbers — the pre-fix blind replay.
-        WalRecovery::replay_entry(&store, &lww_frame("k", 10), 0, false)
+        // Above: written through, even with an older stamp — a caller's stamp
+        // need not follow the key's arrival order, the sequence does.
+        WalRecovery::replay_entry(&store, &at(lww_frame("k", 10), 6), 0, true)
             .await
             .unwrap();
         assert_eq!(
             load_millis(&store, "k").await,
             Some(10),
-            "gate OFF reproduces the blind clobber (the defect the fix closes)"
+            "a frame above the version writes through whatever its stamp"
         );
+
+        // No version row: version 0, forward replay.
+        WalRecovery::replay_entry(&store, &at(lww_frame("fresh", 7), 1), 0, true)
+            .await
+            .unwrap();
+        assert_eq!(load_millis(&store, "fresh").await, Some(7));
+
+        // Gate off: the stale frame clobbers — the blind replay the gate closes.
+        store.add("m", "k", &newer, 0).await.unwrap();
+        WalRecovery::replay_entry(&store, &at(lww_frame("k", 10), 3), 0, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_millis(&store, "k").await,
+            Some(10),
+            "gate off reproduces the blind clobber"
+        );
+
+        // A version that cannot be read fails the frame; nothing is written.
+        probe.fail_version_reads(true);
+        store.add("m", "k", &newer, 0).await.unwrap();
+        assert!(
+            WalRecovery::replay_entry(&store, &at(lww_frame("k", 10), 9), 0, true)
+                .await
+                .is_err(),
+            "a failed version read is a failed prepare"
+        );
+        assert_eq!(load_millis(&store, "k").await, Some(20));
     }
 
-    /// TG-WAL-006 scope: `OrMap`/`OrTombstones` frames and cross-kind (non-Lww
-    /// stored) frames BYPASS the Lww read-compare — proven directly, since the
-    /// harness `ModelValue` is LWW-only and cannot drive OR frames. Also proves a
-    /// `Legacy` frame keeps always-merge replay.
+    /// TG-WAL-015 covers every `WalOp::Store` payload alike: an OR snapshot, a
+    /// cross-kind frame and a legacy frame are each discarded at or below the
+    /// key's version and applied as an absolute set above it.
     #[tokio::test]
-    async fn replay_or_crosskind_and_legacy_bypass_lww_gate() {
-        let store: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
+    async fn replay_version_gate_covers_or_crosskind_and_legacy_frames() {
+        let (probe, store) = probe_store();
 
-        // (a) OR-over-OR: with the gate ON, an OR frame blind-overwrites the durable
-        // OR value — the Lww read-compare never intercepts an OR-valued frame.
+        // (a) OR over OR: a stale snapshot does not revert the stored slot; a
+        // forward one replaces it whole (an absolute set, never a union).
         let durable_or = RecordValue::OrMap {
             records: vec![],
             tombstones: vec!["B".to_string()],
         };
         store.add("m", "o", &durable_or, 0).await.unwrap();
+        probe.set_version("m", "o", 4, false);
         let or_frame = RecordValue::OrMap {
             records: vec![],
             tombstones: vec!["A".to_string()],
         };
-        WalRecovery::replay_entry(&store, &record_frame("o", or_frame.clone()), 0, true)
+        WalRecovery::replay_entry(&store, &at(record_frame("o", or_frame.clone()), 4), 0, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load("m", "o").await.unwrap(),
+            Some(durable_or),
+            "a stale OR snapshot must be discarded"
+        );
+        WalRecovery::replay_entry(&store, &at(record_frame("o", or_frame.clone()), 5), 0, true)
             .await
             .unwrap();
         assert_eq!(
             store.load("m", "o").await.unwrap(),
             Some(or_frame),
-            "an OR frame must bypass the Lww gate and blind-overwrite (no timestamp compare)"
+            "a forward OR snapshot replaces the slot"
         );
 
-        // (b) cross-kind: an OLDER Lww frame over a non-Lww (OR) stored value must
-        // write through — the gate's inner `Some(Lww)` match fails on an OR value.
-        WalRecovery::replay_entry(&store, &lww_frame("o", 1), 0, true)
+        // (b) cross-kind: an LWW frame over an OR value is gated by the
+        // sequence alone, as any frame is.
+        WalRecovery::replay_entry(&store, &at(lww_frame("o", 1), 4), 0, true)
             .await
             .unwrap();
-        assert_eq!(
-            load_millis(&store, "o").await,
-            Some(1),
-            "a Lww frame over a non-Lww stored value writes through (cross-kind bypass)"
-        );
+        assert_eq!(load_millis(&store, "o").await, None, "stale: discarded");
+        WalRecovery::replay_entry(&store, &at(lww_frame("o", 1), 6), 0, true)
+            .await
+            .unwrap();
+        assert_eq!(load_millis(&store, "o").await, Some(1), "forward: written");
 
-        // (c) legacy: a `Legacy` payload has no real timestamp (synthesized
-        // zero-epoch) and must always-merge — bypass the gate even over a newer value.
-        let store2: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
-        store2
-            .add(
-                "m",
-                "k",
-                &RecordValue::Lww {
-                    value: TgValue::Int(50),
-                    timestamp: ts(50),
-                    ttl_ms: None,
-                },
-                0,
-            )
-            .await
-            .unwrap();
+        // (c) legacy: a bare value with no stamp is gated the same way, and
+        // forward it is stored under a zero-epoch stamp.
+        let newer = RecordValue::Lww {
+            value: TgValue::Int(50),
+            timestamp: ts(50),
+            ttl_ms: None,
+        };
+        store.add("m", "k", &newer, 0).await.unwrap();
+        probe.set_version("m", "k", 8, false);
         let legacy = WalEntry {
             map: "m".to_string(),
             key: "k".to_string(),
@@ -5082,17 +5267,25 @@ mod tests {
                 value: WalStorePayload::Legacy(TgValue::Int(1)),
             },
             timestamp: None,
-            sequence: 1,
+            sequence: 8,
         };
-        WalRecovery::replay_entry(&store2, &legacy, 0, true)
+        WalRecovery::replay_entry(&store, &legacy, 0, true)
             .await
             .unwrap();
         assert_eq!(
-            store2.load("m", "k").await.unwrap(),
+            store.load("m", "k").await.unwrap(),
+            Some(newer),
+            "a stale legacy frame must be discarded"
+        );
+        WalRecovery::replay_entry(&store, &at(legacy, 9), 0, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load("m", "k").await.unwrap(),
             Some(RecordValue::Lww {
                 value: TgValue::Int(1),
                 // Legacy frames with no WAL timestamp reconstruct a zero-epoch HLC
-                // with an EMPTY node id (see `replay_entry`).
+                // with an EMPTY node id (see `prepare_entry`).
                 timestamp: Timestamp {
                     millis: 0,
                     counter: 0,
@@ -5100,7 +5293,7 @@ mod tests {
                 },
                 ttl_ms: None,
             }),
-            "a legacy frame must always-merge (bypass the gate) even over a newer value"
+            "a forward legacy frame is written under a zero-epoch stamp"
         );
     }
 
@@ -5311,85 +5504,90 @@ mod tests {
         }
     }
 
-    /// TG-WAL-009: `replay_entry` replays a `WalOp::Remove` UNCONDITIONALLY —
-    /// identical to the live remove path (a blind delete). It NEVER consults the
-    /// frame's timestamp and NEVER resurrects a value via a gate. The strictly-older
-    /// case is the discriminator: an HLC-sourced gate (the reverted regression)
-    /// would have SKIPPED a Remove whose sourced HLC is older than the durable
-    /// value, losing the acked delete; unconditional replay deletes it, matching
-    /// live. This isolates the SEMANTICS (independent of the harness re-replay seam),
-    /// and `merge_gate` is proven irrelevant to the Remove arm.
+    /// TG-WAL-015: above the key's version `replay_entry` replays a
+    /// `WalOp::Remove` as the live remove does — a blind delete that never
+    /// consults the frame's stamp, so a Remove whose stamp is older than the
+    /// stored value still deletes. At or below the version — a stale Remove
+    /// over a newer value, or over a key a newer remove already took out — it
+    /// is discarded, and with the gate off the stale Remove deletes the newer
+    /// value.
     #[tokio::test]
-    async fn replay_remove_replays_unconditionally_isolated() {
+    async fn replay_remove_deletes_above_the_version_and_is_discarded_at_or_below_it() {
         let newer = RecordValue::Lww {
             value: TgValue::Int(20),
             timestamp: ts(20),
             ttl_ms: None,
         };
-        let sentinel_remove = WalEntry {
-            map: "m".to_string(),
-            key: "k".to_string(),
-            op: WalOp::Remove,
-            timestamp: Some(Timestamp {
-                millis: 0,
-                counter: 0,
-                node_id: String::new(),
-            }),
-            sequence: 1,
+
+        // Above the version: every Remove deletes — older, equal, newer, a
+        // sentinel and an absent stamp alike.
+        let sentinel = Timestamp {
+            millis: 0,
+            counter: 0,
+            node_id: String::new(),
         };
-
-        // The discriminator: a Remove whose sourced HLC (10) is STRICTLY OLDER than
-        // a newer durable value (20) STILL deletes. The reverted gate would have
-        // skipped this (resurrecting the value and losing the acked delete); live
-        // remove deletes unconditionally, so replay must too. Proven under BOTH
-        // `merge_gate` values — the Remove arm ignores the flag entirely.
-        for merge_gate in [true, false] {
-            let store: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
-            store.add("m", "k", &newer, 0).await.unwrap();
-            WalRecovery::replay_entry(&store, &remove_frame("k", 10), 0, merge_gate)
-                .await
-                .unwrap();
-            assert_eq!(
-                store.load("m", "k").await.unwrap(),
-                None,
-                "a strictly-older Remove still deletes (unconditional replay = live), \
-                 merge_gate={merge_gate}"
-            );
-        }
-
-        // A tie, a newer, a sentinel, and a legacy `None` Remove all delete too —
-        // there is no timestamp condition on the Remove arm at all.
-        for frame in [
-            remove_frame("k", 20),
-            remove_frame("k", 30),
-            sentinel_remove,
-            WalEntry {
-                map: "m".to_string(),
-                key: "k".to_string(),
-                op: WalOp::Remove,
-                timestamp: None,
-                sequence: 1,
-            },
+        for timestamp in [
+            Some(ts(10)),
+            Some(ts(20)),
+            Some(ts(30)),
+            Some(sentinel),
+            None,
         ] {
-            let store: Arc<dyn MapDataStore> = Arc::new(MergeProbeStore::default());
+            let (probe, store) = probe_store();
             store.add("m", "k", &newer, 0).await.unwrap();
+            probe.set_version("m", "k", 5, false);
+            let frame = WalEntry {
+                timestamp,
+                ..at(remove_frame("k", 0), 6)
+            };
             WalRecovery::replay_entry(&store, &frame, 0, true)
                 .await
                 .unwrap();
             assert_eq!(
                 store.load("m", "k").await.unwrap(),
                 None,
-                "every Remove deletes unconditionally regardless of its timestamp: {frame:?}"
+                "a Remove above the version deletes regardless of its stamp: {frame:?}"
             );
         }
+
+        // At or below the version: a stale Remove leaves the newer value.
+        for sequence in [4, 5] {
+            let (probe, store) = probe_store();
+            store.add("m", "k", &newer, 0).await.unwrap();
+            probe.set_version("m", "k", 5, false);
+            WalRecovery::replay_entry(&store, &at(remove_frame("k", 10), sequence), 0, true)
+                .await
+                .unwrap();
+            assert_eq!(
+                store.load("m", "k").await.unwrap(),
+                Some(newer.clone()),
+                "a stale Remove (seq {sequence}) must not delete the newer value"
+            );
+
+            // Gate off: the stale Remove deletes it.
+            WalRecovery::replay_entry(&store, &at(remove_frame("k", 10), sequence), 0, false)
+                .await
+                .unwrap();
+            assert_eq!(store.load("m", "k").await.unwrap(), None);
+        }
+
+        // A removed key's version is its tombstone: a stale Store does not
+        // bring the value back.
+        let (probe, store) = probe_store();
+        probe.set_version("m", "k", 5, true);
+        WalRecovery::replay_entry(&store, &at(lww_frame("k", 10), 4), 0, true)
+            .await
+            .unwrap();
+        assert_eq!(store.load("m", "k").await.unwrap(), None);
     }
 
     /// TG-WAL-011: recovery replays the unapplied window in strictly ASCENDING
     /// WAL-sequence order — `Wal::unapplied` sorts frames by sequence regardless of
     /// the order they were appended (its defensive `sort_by_key`), and `run`
-    /// replays them in that order. This is premise (d) of the TG-WAL-009 gate-free
-    /// warrant — the "a strictly-newer re-creation is replayed AFTER the stale
-    /// Remove" step. Frames appended OUT OF ORDER (seq 3, 1, 2) come back — and
+    /// replays them in that order. Forward replay equals the live write only when
+    /// each frame of a key is applied after every lower one (TG-WAL-015): a
+    /// strictly-newer re-creation is replayed AFTER the stale Remove. Frames
+    /// appended OUT OF ORDER (seq 3, 1, 2) come back — and
     /// replay — 1, 2, 3. Removing the `sort_by_key` in `unapplied` makes both
     /// assertions FAIL — the discriminator for the ordering contract.
     #[tokio::test]
@@ -5411,7 +5609,7 @@ mod tests {
             wal.append(0, &entry).await.unwrap();
         }
         // `unapplied` sorts the shuffled appends into strictly ascending sequence
-        // order — the contract `run`'s in-order replay (and TG-WAL-009) depends on.
+        // order — the contract `run`'s in-order replay (and TG-WAL-015) depends on.
         let enumerated: Vec<u64> = wal
             .unapplied(0)
             .await
@@ -6675,9 +6873,8 @@ mod tests {
     async fn a_flush_pass_ok_terminal_advances_the_durable_watermark() {
         use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
 
-        // `partition_for` is private to the write-behind module, so the partition
-        // is located by the store row that MOVED rather than by recomputing the
-        // hash — which also makes the assertion independent of the hash function.
+        // The partition is located by the store row that MOVED rather than by
+        // recomputing the hash, so the assertion is independent of the hash function.
         fn advanced_partitions(store: &dyn MapDataStore) -> Vec<u32> {
             (0..topgun_core::PARTITION_COUNT)
                 .filter(|p| store_row(store, *p) >= 1)
@@ -6931,6 +7128,29 @@ mod tests {
     }
 }
 
+/// Runs `body` with `subscriber` as this thread's default and returns what it
+/// returned. Every test that captures events goes through here.
+///
+/// While exactly one dispatcher is alive, `tracing` computes a callsite's
+/// interest from the default dispatcher of whichever thread hits it first: a
+/// parallel test's thread, which has none, then caches the event as never
+/// wanted, and this thread's capture misses it. A second dispatcher, alive
+/// for the whole body and created before the capture, makes every interest
+/// computation ask all live dispatchers, the capture included; reading every
+/// interest again once both are alive undoes a computation another thread
+/// began before them.
+#[cfg(test)]
+pub(crate) fn with_thread_subscriber<T>(
+    subscriber: impl tracing::Subscriber + Send + Sync + 'static,
+    body: impl FnOnce() -> T,
+) -> T {
+    let _second_dispatcher = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        body()
+    })
+}
+
 #[cfg(test)]
 #[path = "store_mode_tests.rs"]
 mod store_mode_tests;
@@ -6938,6 +7158,10 @@ mod store_mode_tests;
 #[cfg(test)]
 #[path = "batched_replay_tests.rs"]
 mod batched_replay_tests;
+
+#[cfg(test)]
+#[path = "replay_idempotence_tests.rs"]
+mod replay_idempotence_tests;
 
 #[cfg(all(test, feature = "redb"))]
 mod durable_collect_tests;

@@ -17,7 +17,7 @@
 // would hide the order its claim depends on.
 #![allow(clippy::too_many_lines)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -28,16 +28,19 @@ use parking_lot::Mutex;
 use topgun_core::PARTITION_COUNT;
 
 use super::store_mode_tests::{
-    flush_idle, frames_on_disk, gc_skipped, keys_in, lww, open_engine, sidecar_files, sidecar_path,
-    store_frame, wb_config, CountingEngine, Root, MAP,
+    copy_dir, flush_idle, frames_on_disk, gc_skipped, keys_in, lww, open_engine, sidecar_files,
+    sidecar_path, store_frame, wait_for, wb_config, CountingEngine, Root, MAP,
 };
 use super::{Wal, WalFsyncPolicy, WalRecovery, WalWriter, WAL_COLLECTED_FILE};
-use crate::storage::datastores::engine_store::EngineMapDataStore;
+use crate::storage::datastores::engine_store::{
+    EngineMapDataStore, KS_PARTITION_META, KS_PRIMARY, KS_RECORD_VERSION, MAX_VERSION_KEY,
+};
 #[cfg(feature = "rocksdb")]
 use crate::storage::datastores::kv_crash::RocksTarget;
 use crate::storage::datastores::kv_crash::{CrashMode, CrashTarget, MemTarget, RedbTarget};
 use crate::storage::datastores::kv_engine::{
-    KeyRange, KvCapabilities, KvEngine, KvError, KvResult, KvSnapshot, WriteBatch, WriteOptions,
+    BatchOp, KeyRange, KvCapabilities, KvEngine, KvError, KvResult, KvSnapshot, WriteBatch,
+    WriteOptions,
 };
 #[cfg(feature = "rocksdb")]
 use crate::storage::datastores::rocks_engine::{OpenMode, RocksConfig, RocksKvEngine};
@@ -88,7 +91,15 @@ struct SyncEngine {
     delay: Mutex<Duration>,
     /// One-shot: `(reached, release)`.
     gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    /// One-shot: run by the next `snapshot`, once the inner snapshot is
+    /// taken and before it is returned.
+    on_snapshot: Mutex<Option<Hook>>,
+    /// One-shot: becomes `on_snapshot` once a write that puts an applied
+    /// watermark row has returned `Ok`.
+    after_row_write: Mutex<Option<Hook>>,
 }
+
+type Hook = Box<dyn FnOnce() + Send>;
 
 impl SyncEngine {
     fn new(inner: Arc<CountingEngine>, wal_dir: PathBuf) -> Self {
@@ -102,6 +113,8 @@ impl SyncEngine {
             fault: Mutex::new(None),
             delay: Mutex::new(Duration::ZERO),
             gate: Mutex::new(None),
+            on_snapshot: Mutex::new(None),
+            after_row_write: Mutex::new(None),
         }
     }
 
@@ -138,12 +151,26 @@ impl KvEngine for SyncEngine {
 
     fn write(&self, batch: WriteBatch, opts: WriteOptions) -> KvResult<()> {
         self.writes_entered.fetch_add(1, Ordering::SeqCst);
-        self.inner.write(batch, opts)
+        let puts_row = batch.ops().iter().any(
+            |op| matches!(op, BatchOp::Put { key, .. } if key.first() == Some(&KS_PARTITION_META)),
+        );
+        let result = self.inner.write(batch, opts);
+        if puts_row && result.is_ok() {
+            if let Some(hook) = self.after_row_write.lock().take() {
+                *self.on_snapshot.lock() = Some(hook);
+            }
+        }
+        result
     }
 
     fn snapshot(&self) -> KvResult<Box<dyn KvSnapshot + '_>> {
         self.snapshots.fetch_add(1, Ordering::SeqCst);
-        self.inner.snapshot()
+        let snapshot = self.inner.snapshot()?;
+        let hook = self.on_snapshot.lock().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        Ok(snapshot)
     }
 
     fn ingest(
@@ -351,6 +378,7 @@ async fn commit_and_mark(
             key,
             value: PutValue::Value(value),
             store_time: 0,
+            seq: 0,
         })
         .collect();
     store
@@ -553,6 +581,7 @@ async fn ac1_on_rocksdb_without_a_wal_commits_stay_synced() {
                 key: &recs[0].0,
                 value: PutValue::Value(&recs[0].1),
                 store_time: 0,
+                seq: 0,
             }],
             applied: vec![(P, 1)],
         })
@@ -1029,12 +1058,13 @@ fn with_captured_warns(body: impl std::future::Future<Output = ()>) -> Vec<Strin
     use tracing_subscriber::layer::SubscriberExt as _;
     let capture = WarnCapture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
-    let _guard = tracing::subscriber::set_default(subscriber);
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime")
-        .block_on(body);
+    super::with_thread_subscriber(subscriber, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(body);
+    });
     let warns = capture.0.lock().clone();
     warns
 }
@@ -1458,4 +1488,406 @@ async fn ac10_a_wal_opened_over_the_store_marks_it_attached() {
     )
     .expect("store-mode open");
     assert!(store.is_wal_attached(), "the WAL's open marked it");
+}
+
+// ---------------------------------------------------------------------------
+// AC14: record versions are reclaimed at the durable watermark (TG-WAL-015)
+// ---------------------------------------------------------------------------
+
+/// One store commit of `puts` `(key, value, seq)` and `removes` `(key, seq)`
+/// of [`MAP`] with the rows `applied`. The WAL is not told: its own copy of
+/// the watermark stays where it was, so only the store's durable watermark
+/// can license a reclaim.
+async fn commit_versions(
+    store: &dyn MapDataStore,
+    puts: &[(&str, &RecordValue, u64)],
+    removes: &[(&str, u64)],
+    applied: &[(u32, u64)],
+) {
+    let writes = puts
+        .iter()
+        .map(|(key, value, seq)| StoreWrite::Put {
+            map: MAP,
+            key,
+            value: PutValue::Value(value),
+            store_time: 0,
+            seq: *seq,
+        })
+        .chain(removes.iter().map(|(key, seq)| StoreWrite::Remove {
+            map: MAP,
+            key,
+            store_time: 0,
+            seq: *seq,
+        }))
+        .collect();
+    store
+        .commit(&FlushCommit {
+            writes,
+            applied: applied.to_vec(),
+        })
+        .await
+        .expect("commit");
+}
+
+/// `(seq, removed)` of the version row of `(MAP, key)`, if any.
+async fn version_of(store: &dyn MapDataStore, key: &str) -> Option<(u64, bool)> {
+    store
+        .load_version(MAP, key)
+        .await
+        .expect("load_version")
+        .map(|v| (v.seq, v.removed))
+}
+
+/// The `max_version` row, raw.
+fn max_version_row(engine: &SyncEngine) -> Option<u64> {
+    engine
+        .inner
+        .get(MAX_VERSION_KEY)
+        .expect("engine read")
+        .map(|v| u64::from_be_bytes(v.try_into().expect("8 bytes")))
+}
+
+/// Drops the WAL and the store and waits until nothing else holds the
+/// engine, so the next open of the root is a restart.
+async fn close(node: Node) {
+    let Node { engine, store, wal } = node;
+    let wal_weak = Arc::downgrade(&wal);
+    drop(wal);
+    drop(store);
+    wait_for("the WAL writer and the store to be released", || {
+        wal_weak.upgrade().is_none() && Arc::strong_count(&engine) == 1
+    })
+    .await;
+}
+
+/// The watermark vector a reclaim takes: `w` for [`P`], 0 elsewhere.
+fn watermarks_at(w: u64) -> Vec<u64> {
+    let mut watermarks = vec![0; PARTITION_COUNT as usize];
+    watermarks[P as usize] = w;
+    watermarks
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ac14_rows_above_the_durable_watermark_stay_and_the_tick_after_it_passes_them_drops_them() {
+    let root = Root::new();
+    let node = Node::open(&root, false);
+    let store = node.store.as_ref();
+    let keys = keys_in(P, 3);
+    let (k0, k1, k2) = (keys[0].as_str(), keys[1].as_str(), keys[2].as_str());
+    let v = lww("v", 1);
+    commit_versions(store, &[(k0, &v, 3), (k1, &v, 4)], &[], &[(P, 1)]).await;
+    commit_versions(store, &[], &[(k2, 5)], &[]).await;
+
+    node.wal.collect().await;
+    assert_eq!(version_of(store, k0).await, Some((3, false)));
+    assert_eq!(version_of(store, k1).await, Some((4, false)));
+    assert_eq!(
+        version_of(store, k2).await,
+        Some((5, true)),
+        "a removed key's row is its tombstone"
+    );
+
+    // The store's watermark passes 3 and 4; the WAL's copy stays at 0.
+    commit_versions(store, &[], &[], &[(P, 4)]).await;
+    node.wal.collect().await;
+    assert_eq!(version_of(store, k0).await, None, "3 <= 4: dropped");
+    assert_eq!(version_of(store, k1).await, None, "4 <= 4: dropped");
+    assert_eq!(version_of(store, k2).await, Some((5, true)), "5 > 4: kept");
+    assert_eq!(
+        max_version_row(&node.engine),
+        Some(5),
+        "max_version is kept"
+    );
+
+    commit_versions(store, &[], &[], &[(P, 5)]).await;
+    node.wal.collect().await;
+    assert_eq!(version_of(store, k2).await, None);
+    assert_eq!(
+        max_version_row(&node.engine),
+        Some(5),
+        "max_version is never dropped"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ac14_a_commit_rewriting_a_row_above_the_watermark_between_the_snapshot_and_the_lock_keeps_it(
+) {
+    let root = Root::new();
+    let node = Node::open(&root, false);
+    let keys = keys_in(P, 2);
+    let (k0, k1) = (keys[0].clone(), keys[1].clone());
+    let v1 = lww("v1", 1);
+    commit_versions(
+        node.store.as_ref(),
+        &[(&k0, &v1, 2), (&k1, &v1, 3)],
+        &[],
+        &[(P, 1)],
+    )
+    .await;
+    commit_versions(node.store.as_ref(), &[], &[], &[(P, 4)]).await;
+
+    // Right after the reclaim took its snapshot — both rows at or below 4 are
+    // candidates — a commit rewrites k1's row at 6, above the watermark.
+    let handle = tokio::runtime::Handle::current();
+    let racer = Arc::clone(&node.store);
+    let raced_key = k1.clone();
+    *node.engine.on_snapshot.lock() = Some(Box::new(move || {
+        let v2 = lww("v2", 2);
+        handle.block_on(commit_versions(
+            racer.as_ref(),
+            &[(&raced_key, &v2, 6)],
+            &[],
+            &[],
+        ));
+    }));
+    let reclaimer = Arc::clone(&node.store);
+    let dropped =
+        tokio::task::spawn_blocking(move || reclaimer.reclaim_record_versions(&watermarks_at(4)))
+            .await
+            .expect("join")
+            .expect("reclaim");
+    assert!(
+        node.engine.on_snapshot.lock().is_none(),
+        "the commit ran inside the reclaim"
+    );
+
+    assert_eq!(dropped, 1, "only k0's row is dropped");
+    assert_eq!(version_of(node.store.as_ref(), &k0).await, None);
+    assert_eq!(
+        version_of(node.store.as_ref(), &k1).await,
+        Some((6, false)),
+        "the row rewritten above the watermark is kept"
+    );
+    assert_eq!(
+        node.store.load(MAP, &k1).await.expect("load"),
+        Some(lww("v2", 2))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ac14_no_lock_hold_deletes_more_than_1000_rows() {
+    let root = Root::new();
+    let node = Node::open(&root, false);
+    let keys = keys_in(P, 2500);
+    let v = lww("v", 1);
+    let puts: Vec<(&str, &RecordValue, u64)> = keys
+        .iter()
+        .zip(10u64..)
+        .map(|(key, seq)| (key.as_str(), &v, seq))
+        .collect();
+    commit_versions(node.store.as_ref(), &puts, &[], &[(P, 1)]).await;
+    commit_versions(node.store.as_ref(), &[], &[], &[(P, 5000)]).await;
+
+    let mark = node.engine.inner.mark();
+    node.wal.collect().await;
+    let deletes: Vec<usize> = node
+        .engine
+        .inner
+        .writes_since(mark)
+        .iter()
+        .map(|w| {
+            assert!(w.ok, "every reclaim write is applied");
+            w.ops
+                .iter()
+                .filter(|op| {
+                    matches!(op, BatchOp::Delete { key }
+                        if key.first() == Some(&KS_RECORD_VERSION) && key.len() > 1)
+                })
+                .count()
+        })
+        .filter(|n| *n > 0)
+        .collect();
+    assert!(
+        deletes.iter().all(|n| *n <= 1000),
+        "a lock hold deleted more than 1000 rows: {deletes:?}"
+    );
+    assert_eq!(deletes.iter().sum::<usize>(), 2500, "{deletes:?}");
+    assert_eq!(deletes.len(), 3, "{deletes:?}");
+    assert_eq!(max_version_row(&node.engine), Some(2509));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ac14_a_tick_whose_watermark_read_fails_drops_nothing() {
+    let root = Root::new();
+    let node = Node::open(&root, false);
+    let k0 = keys_in(P, 1).remove(0);
+    let v = lww("v", 1);
+    commit_versions(node.store.as_ref(), &[(&k0, &v, 3)], &[], &[(P, 1)]).await;
+    commit_versions(node.store.as_ref(), &[], &[], &[(P, 4)]).await;
+
+    node.engine.inner.fail_snapshot_in(1);
+    let before = gc_skipped("watermark_read_failed");
+    assert!(node.wal.collect().await, "the tick task goes on");
+    assert!(gc_skipped("watermark_read_failed") > before);
+    assert_eq!(
+        version_of(node.store.as_ref(), &k0).await,
+        Some((3, false)),
+        "a tick that could not read the watermarks drops nothing"
+    );
+
+    node.wal.collect().await;
+    assert_eq!(version_of(node.store.as_ref(), &k0).await, None);
+}
+
+#[test]
+fn ac14_a_failed_reclaim_warns_and_the_tick_still_unlinks_what_the_watermarks_cover() {
+    let root = Root::new();
+    let warns = with_captured_warns(async {
+        let node = Node::open(&root, false);
+        let keys = keys_in(P, 2);
+        let v = lww("v", 1);
+        node.append(&keys[0], &v, 1).await;
+        node.append(&keys[1], &v, 2).await;
+        commit_versions(node.store.as_ref(), &[(&keys[1], &v, 2)], &[], &[(P, 1)]).await;
+        node.commit(&[], 2).await;
+        assert_eq!(
+            version_of(node.store.as_ref(), &keys[1]).await,
+            Some((2, false))
+        );
+
+        // The next engine write is the reclaim's delete batch.
+        node.engine.inner.fail_write_in(1);
+        node.wal.test_advance_clock(SEAL_AGE);
+        assert!(node.wal.collect().await, "the tick task goes on");
+        assert!(
+            frames_on_disk(&root.wal_dir(), P).is_empty(),
+            "the tick's collection unlinked what the watermarks cover"
+        );
+        assert_eq!(
+            version_of(node.store.as_ref(), &keys[1]).await,
+            Some((2, false)),
+            "the failed reclaim dropped nothing"
+        );
+
+        node.wal.collect().await;
+        assert_eq!(
+            version_of(node.store.as_ref(), &keys[1]).await,
+            None,
+            "the next tick retries the reclaim"
+        );
+    });
+    let failed: Vec<_> = warns
+        .iter()
+        .filter(|w| w.contains("record version reclamation failed"))
+        .collect();
+    assert_eq!(
+        failed.len(),
+        1,
+        "one WARN for the failed reclaim: {warns:?}"
+    );
+}
+
+/// The engine content without the version rows at or below `w`: what two
+/// recoveries must agree on when one reclaimed such rows and the other did
+/// not (no decision reads a row at or below the watermark).
+fn without_dead_versions(dump: BTreeMap<Vec<u8>, Vec<u8>>, w: u64) -> BTreeMap<Vec<u8>, Vec<u8>> {
+    dump.into_iter()
+        .filter(|(key, value)| {
+            key.first() != Some(&KS_RECORD_VERSION)
+                || key.len() == 1
+                || u64::from_be_bytes(value[..8].try_into().expect("a version value")) > w
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ac14_a_reclaim_between_two_replay_batches_leaves_the_recovery_result_identical() {
+    let root = Root::new();
+    let keys = keys_in(P, 3);
+    let (k0, k1, k2) = (keys[0].as_str(), keys[1].as_str(), keys[2].as_str());
+    let (a1, a2, b1, b2, b3, c1) = (
+        lww("a1", 1),
+        lww("a2", 3),
+        lww("b1", 2),
+        lww("b2", 4),
+        lww("b3", 6),
+        lww("c1", 5),
+    );
+    {
+        let node = Node::open(&root, false);
+        for (key, value, seq) in [
+            (k0, &a1, 1),
+            (k1, &b1, 2),
+            (k0, &a2, 3),
+            (k1, &b2, 4),
+            (k2, &c1, 5),
+        ] {
+            node.append(key, value, seq).await;
+        }
+        // The store holds k0 at frame 1 and k1 at frame 6, whose frame a cut
+        // to the last fsync took: frames 2 and 4 of k1 are stale.
+        commit_versions(node.store.as_ref(), &[(k0, &a1, 1), (k1, &b3, 6)], &[], &[]).await;
+        close(node).await;
+    }
+    let twin = Root::new();
+    copy_dir(&root.data_dir(), &twin.data_dir());
+    copy_dir(&root.wal_dir(), &twin.wal_dir());
+
+    let recover = |node: &Node| {
+        let mut recovery = WalRecovery::new(Arc::clone(&node.wal), Vec::new());
+        recovery.test_set_replay_batch_limits(1, usize::MAX);
+        let store = Arc::clone(&node.store) as Arc<dyn MapDataStore>;
+        async move { recovery.run(store).await.expect("recovery") }
+    };
+
+    // Without a reclaim.
+    let plain = Node::open(&twin, false);
+    recover(&plain).await;
+    let plain_dump = plain.engine.inner.dump();
+    assert_eq!(
+        version_of(plain.store.as_ref(), k0).await,
+        Some((1, false)),
+        "without a reclaim k0's dead row stays"
+    );
+    close(plain).await;
+
+    // A collection tick right after the first batch's commit, before the
+    // second batch prepares: it drops k0's row at the durable watermark 1.
+    let node = Node::open(&root, false);
+    let handle = tokio::runtime::Handle::current();
+    let wal = Arc::clone(&node.wal);
+    let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ran_in_hook = Arc::clone(&ran);
+    *node.engine.after_row_write.lock() = Some(Box::new(move || {
+        let (done, done_rx) = mpsc::channel();
+        handle.spawn(async move {
+            wal.test_collect_now().await;
+            let _ = done.send(());
+        });
+        done_rx.recv().expect("the tick ran");
+        ran_in_hook.store(true, Ordering::SeqCst);
+    }));
+    recover(&node).await;
+    assert!(
+        ran.load(Ordering::SeqCst),
+        "the tick ran between two batches"
+    );
+    assert_eq!(
+        version_of(node.store.as_ref(), k0).await,
+        None,
+        "the tick dropped k0's row at the durable watermark 1"
+    );
+    let reclaimed_dump = node.engine.inner.dump();
+    for (key, value) in [(k0, &a2), (k1, &b3), (k2, &c1)] {
+        assert_eq!(
+            node.store.load(MAP, key).await.expect("load").as_ref(),
+            Some(value),
+            "{key}"
+        );
+    }
+    let row = node
+        .store
+        .applied_watermarks()
+        .expect("rows")
+        .expect("kept")
+        .by_partition[P as usize];
+    assert_eq!(row, 5);
+    close(node).await;
+
+    assert!(plain_dump.keys().any(|k| k.first() == Some(&KS_PRIMARY)));
+    assert_eq!(
+        without_dead_versions(reclaimed_dump, row),
+        without_dead_versions(plain_dump, row),
+        "the recovery's result is the same with the reclaim between its batches"
+    );
 }

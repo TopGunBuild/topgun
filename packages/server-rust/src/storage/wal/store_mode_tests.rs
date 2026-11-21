@@ -13,7 +13,7 @@
 // depends on.
 #![allow(clippy::too_many_lines)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,18 +25,20 @@ use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
-use topgun_core::{fnv1a_hash, PARTITION_COUNT};
+use topgun_core::PARTITION_COUNT;
 
 use super::format::{decode_stream_segment, FrameDecodeResult};
 use super::segment::{inspect, parse_stream_filename, SegmentHeader, StreamSegmentHeader};
+use super::tests::delta_frame;
 use super::{
-    decode_wal_collected, TestAbortPoint, Wal, WalEntry, WalFsyncPolicy, WalOp, WalRecovery,
-    WalStorePayload, WalTestEvent, WalWriter, TEST_ABORT_AT_ENV, WAL_COLLECTED_FILE,
+    decode_wal_collected, OrDelta, TestAbortPoint, Wal, WalEntry, WalFsyncPolicy, WalOp,
+    WalRecovery, WalStorePayload, WalTestEvent, WalWriter, TEST_ABORT_AT_ENV, WAL_COLLECTED_FILE,
     WAL_GC_SKIPPED_COUNTER,
 };
 use crate::storage::datastores::engine_store::{
     decode_map_by_name_row, map_by_name_key, meta_key, EngineMapDataStore, RecordKey, RecordSpace,
-    KS_BACKUP, KS_PARTITION_META, KS_PRIMARY, META_WAL_IMPORT_PENDING, META_WAL_WATERMARK,
+    KS_BACKUP, KS_PARTITION_META, KS_PRIMARY, MAX_VERSION_KEY, META_WAL_IMPORT_PENDING,
+    META_WAL_WATERMARK,
 };
 use crate::storage::datastores::kv_engine::{
     BatchOp, KeyRange, KvCapabilities, KvEngine, KvError, KvResult, KvSnapshot, WriteBatch,
@@ -45,8 +47,13 @@ use crate::storage::datastores::kv_engine::{
 use crate::storage::datastores::{
     RedbDataStore, RedbKvEngine, WalBootstrap, WriteBehindConfig, WriteBehindDataStore,
 };
-use crate::storage::map_data_store::{FlushCommit, MapDataStore, PutValue, StoreWrite};
-use crate::storage::record::RecordValue;
+use crate::storage::map_data_store::{
+    AppliedWatermarks, CommitDurability, FlushCommit, KeyVersion, LeafSink, Loaded, MapDataStore,
+    PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder, StoreErrorClass, StoreWrite,
+    WriteSource,
+};
+use crate::storage::record::{OrMapEntry, RecordValue};
+use crate::storage::sealing::Keyring;
 
 // ---------------------------------------------------------------------------
 // The counting engine
@@ -376,10 +383,7 @@ pub(super) fn rows_of(dump: &BTreeMap<Vec<u8>, Vec<u8>>) -> BTreeMap<u32, u64> {
         .collect()
 }
 
-/// The WAL partition write-behind gives `(map, key)`.
-pub(super) fn wal_partition(map: &str, key: &str) -> u32 {
-    fnv1a_hash(&format!("{map}:{key}")) % PARTITION_COUNT
-}
+pub(super) use crate::storage::map_data_store::wal_partition;
 
 /// The first `n` keys `k{i}` of `MAP` in WAL partition `partition`.
 pub(super) fn keys_in(partition: u32, n: usize) -> Vec<String> {
@@ -716,6 +720,7 @@ impl Node {
                 key,
                 value: PutValue::Value(value),
                 store_time: 0,
+                seq: 0,
             })
             .collect();
         self.store
@@ -1037,9 +1042,22 @@ async fn a01_a_commit_is_one_engine_write_holding_its_records_and_its_watermark_
             vec![record.clone()],
             "the commit holds its own record and no other"
         );
+        // The commit's own row moves its partition's watermark to `seq`, so
+        // the write is at the replay horizon and gets no version row; it
+        // stores a record at a non-zero sequence above every earlier one, so
+        // it raises `max_version` to `seq` in the same batch (TG-WAL-003).
+        assert_eq!(
+            write.other_keys(),
+            vec![MAX_VERSION_KEY.to_vec()],
+            "the commit holds nothing but its record, its rows and max_version: {write:?}"
+        );
         assert!(
-            write.other_keys().is_empty(),
-            "the commit holds nothing but its record and its rows: {write:?}"
+            write.ops.iter().any(|op| matches!(
+                op,
+                BatchOp::Put { key, value }
+                    if key.as_slice() == MAX_VERSION_KEY && decode_u64(value) == *seq
+            )),
+            "the commit of {key} raises max_version to {seq}: {write:?}"
         );
         assert!(
             write.rows().contains(&(*partition, *seq)),
@@ -2132,7 +2150,7 @@ fn run_captured<T>(body: impl std::future::Future<Output = T>) -> (T, Vec<Captur
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&events)));
-    let output = tracing::subscriber::with_default(subscriber, || block_on(body));
+    let output = super::with_thread_subscriber(subscriber, || block_on(body));
     let events = events.lock().clone();
     (output, events)
 }
@@ -2734,6 +2752,7 @@ async fn a20_a_commit_carrying_a_watermark_below_the_held_row_is_refused_and_wri
                         key: &key,
                         value: PutValue::Value(&value),
                         store_time: 0,
+                        seq: 0,
                     }],
                     applied: vec![(P, sequence)],
                 })
@@ -4014,4 +4033,1066 @@ async fn c12_finish_unlinks_below_the_store_read_and_keeps_what_it_cannot_unlink
     node.close().await;
     assert!(refused.exists(), "the refused unlink kept its segment");
     assert!(segment_files(&root.wal_dir(), Q).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Record versions: the sequence seed and per-key prefix completeness
+// (`TG-WAL-015`)
+// ---------------------------------------------------------------------------
+
+/// A [`MapDataStore`] that forwards every call to the engine store and can be
+/// armed to fail chosen record version reads of a key — a prepare failure of
+/// whichever replay frame of that key makes the read — or to refuse by name
+/// (`RecordRefused`) every committed write of a chosen sequence or key.
+struct ArmedStore {
+    inner: Arc<EngineMapDataStore<CountingEngine>>,
+    /// The `load_version` calls made so far, by key.
+    version_reads: Mutex<HashMap<String, u64>>,
+    /// By key, the 1-based numbers of its `load_version` calls that fail.
+    failing_version_reads: Mutex<HashMap<String, BTreeSet<u64>>>,
+    /// Committed writes of these sequences are refused by name.
+    refused_seqs: Mutex<BTreeSet<u64>>,
+    /// Committed writes of these keys are refused by name.
+    refused_keys: Mutex<BTreeSet<String>>,
+}
+
+impl ArmedStore {
+    /// The `calls`-th `load_version` calls of `key` (1-based, counted from
+    /// this store's open) fail.
+    fn fail_version_reads(&self, key: &str, calls: &[u64]) {
+        self.failing_version_reads
+            .lock()
+            .insert(key.to_string(), calls.iter().copied().collect());
+    }
+
+    /// The `load_version` calls of `key` made so far.
+    fn version_reads(&self, key: &str) -> u64 {
+        self.version_reads.lock().get(key).copied().unwrap_or(0)
+    }
+
+    fn refuse_seqs(&self, seqs: &[u64]) {
+        *self.refused_seqs.lock() = seqs.iter().copied().collect();
+    }
+
+    fn refuse_keys(&self, keys: &[&str]) {
+        *self.refused_keys.lock() = keys.iter().map(|k| (*k).to_string()).collect();
+    }
+}
+
+#[async_trait]
+impl MapDataStore for ArmedStore {
+    async fn add(&self, map: &str, key: &str, value: &RecordValue, now: i64) -> anyhow::Result<()> {
+        self.inner.add(map, key, value, now).await
+    }
+
+    fn accepts_encoded(&self) -> bool {
+        self.inner.accepts_encoded()
+    }
+
+    async fn add_encoded(
+        &self,
+        map: &str,
+        key: &str,
+        bytes: &[u8],
+        now: i64,
+    ) -> anyhow::Result<()> {
+        self.inner.add_encoded(map, key, bytes, now).await
+    }
+
+    fn scan_order(&self) -> Option<ScanOrder> {
+        self.inner.scan_order()
+    }
+
+    async fn add_backup(
+        &self,
+        map: &str,
+        key: &str,
+        value: &RecordValue,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        self.inner.add_backup(map, key, value, now).await
+    }
+
+    async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+        self.inner.remove(map, key, now).await
+    }
+
+    async fn remove_backup(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
+        self.inner.remove_backup(map, key, now).await
+    }
+
+    async fn load(&self, map: &str, key: &str) -> anyhow::Result<Option<RecordValue>> {
+        self.inner.load(map, key).await
+    }
+
+    async fn load_slot(&self, map: &str, key: &str) -> anyhow::Result<Option<Loaded>> {
+        self.inner.load_slot(map, key).await
+    }
+
+    async fn load_all(
+        &self,
+        map: &str,
+        keys: &[String],
+    ) -> anyhow::Result<Vec<(String, RecordValue)>> {
+        self.inner.load_all(map, keys).await
+    }
+
+    async fn enumerate_leaves(
+        &self,
+        map: &str,
+        is_backup: bool,
+        sink: &mut dyn LeafSink,
+    ) -> anyhow::Result<()> {
+        self.inner.enumerate_leaves(map, is_backup, sink).await
+    }
+
+    async fn scan_values(
+        &self,
+        map: &str,
+        is_backup: bool,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        self.inner.scan_values(map, is_backup, max_batch_cost).await
+    }
+
+    async fn scan_values_batched(
+        &self,
+        map: &str,
+        is_backup: bool,
+        cursor: ScanCursor,
+        max_batch_cost: u64,
+    ) -> anyhow::Result<ScanBatch> {
+        self.inner
+            .scan_values_batched(map, is_backup, cursor, max_batch_cost)
+            .await
+    }
+
+    async fn remove_all(&self, map: &str, keys: &[String]) -> anyhow::Result<()> {
+        self.inner.remove_all(map, keys).await
+    }
+
+    async fn list_maps(&self) -> anyhow::Result<Vec<String>> {
+        self.inner.list_maps().await
+    }
+
+    fn is_loadable(&self, key: &str) -> bool {
+        self.inner.is_loadable(key)
+    }
+
+    fn pending_operation_count(&self) -> u64 {
+        self.inner.pending_operation_count()
+    }
+
+    async fn soft_flush(&self) -> anyhow::Result<u64> {
+        self.inner.soft_flush().await
+    }
+
+    fn assigned_write_sequence(&self) -> u64 {
+        self.inner.assigned_write_sequence()
+    }
+
+    fn flushed_watermark(&self) -> u64 {
+        self.inner.flushed_watermark()
+    }
+
+    async fn hard_flush(&self) -> anyhow::Result<()> {
+        self.inner.hard_flush().await
+    }
+
+    fn is_null(&self) -> bool {
+        self.inner.is_null()
+    }
+
+    fn classify_error(&self, err: &anyhow::Error) -> StoreErrorClass {
+        self.inner.classify_error(err)
+    }
+
+    async fn commit(&self, commit: &FlushCommit<'_>) -> anyhow::Result<()> {
+        let refused: Vec<usize> = {
+            let seqs = self.refused_seqs.lock();
+            let keys = self.refused_keys.lock();
+            commit
+                .writes
+                .iter()
+                .enumerate()
+                .filter(|(_, write)| {
+                    let (key, seq) = match write {
+                        StoreWrite::Put { key, seq, .. } | StoreWrite::Remove { key, seq, .. } => {
+                            (*key, *seq)
+                        }
+                    };
+                    seqs.contains(&seq) || keys.contains(key)
+                })
+                .map(|(index, _)| index)
+                .collect()
+        };
+        if refused.is_empty() {
+            return self.inner.commit(commit).await;
+        }
+        Err(anyhow::Error::new(RecordRefused { indices: refused })
+            .context("injected: the store refuses these records"))
+    }
+
+    fn keeps_applied_watermarks(&self) -> bool {
+        self.inner.keeps_applied_watermarks()
+    }
+
+    fn wal_keyring(&self) -> Option<Arc<Keyring>> {
+        self.inner.wal_keyring()
+    }
+
+    fn applied_watermarks(&self) -> anyhow::Result<Option<AppliedWatermarks>> {
+        self.inner.applied_watermarks()
+    }
+
+    fn import_applied_watermarks(&self, rows: &[(u32, u64)]) -> anyhow::Result<()> {
+        self.inner.import_applied_watermarks(rows)
+    }
+
+    async fn load_version(&self, map: &str, key: &str) -> anyhow::Result<Option<KeyVersion>> {
+        let call = {
+            let mut reads = self.version_reads.lock();
+            let count = reads.entry(key.to_string()).or_insert(0);
+            *count += 1;
+            *count
+        };
+        if self
+            .failing_version_reads
+            .lock()
+            .get(key)
+            .is_some_and(|calls| calls.contains(&call))
+        {
+            anyhow::bail!("injected: version read {call} of {map}/{key} fails");
+        }
+        self.inner.load_version(map, key).await
+    }
+
+    fn reclaim_record_versions(&self, watermarks: &[u64]) -> anyhow::Result<u64> {
+        self.inner.reclaim_record_versions(watermarks)
+    }
+
+    fn durable_applied_watermarks(&self) -> anyhow::Result<Option<AppliedWatermarks>> {
+        self.inner.durable_applied_watermarks()
+    }
+
+    fn commit_durability(&self) -> Option<CommitDurability> {
+        self.inner.commit_durability()
+    }
+
+    fn wal_attached(&self) {
+        self.inner.wal_attached();
+    }
+}
+
+/// A store-mode node whose WAL is opened over, and replays into, an
+/// [`ArmedStore`].
+struct ArmedNode {
+    engine: Arc<CountingEngine>,
+    store: Arc<ArmedStore>,
+    wal: Arc<WalWriter>,
+}
+
+impl ArmedNode {
+    fn open(root: &Root) -> Self {
+        let engine = open_engine(root);
+        let store = Arc::new(ArmedStore {
+            inner: Arc::new(EngineMapDataStore::open(Arc::clone(&engine)).expect("store opens")),
+            version_reads: Mutex::new(HashMap::new()),
+            failing_version_reads: Mutex::new(HashMap::new()),
+            refused_seqs: Mutex::new(BTreeSet::new()),
+            refused_keys: Mutex::new(BTreeSet::new()),
+        });
+        let wal = WalWriter::open_over_store(
+            root.wal_dir(),
+            WalFsyncPolicy::PerOp,
+            Arc::clone(&store) as Arc<dyn MapDataStore>,
+        )
+        .expect("store-mode open");
+        Self { engine, store, wal }
+    }
+
+    fn dyn_store(&self) -> Arc<dyn MapDataStore> {
+        Arc::clone(&self.store) as Arc<dyn MapDataStore>
+    }
+
+    /// Runs WAL recovery, in batches of at most `batch_frames` frames when
+    /// given.
+    async fn recover(&self, batch_frames: Option<usize>) {
+        let mut recovery = WalRecovery::new(Arc::clone(&self.wal), Vec::new());
+        if let Some(frames) = batch_frames {
+            recovery.test_set_replay_batch_limits(frames, usize::MAX);
+        }
+        recovery.run(self.dyn_store()).await.expect("recovery");
+    }
+
+    async fn append(&self, entry: &WalEntry) {
+        self.wal.append(P, entry).await.expect("append");
+    }
+
+    /// Stores `value` under `key` at `seq` with no row, as the state a replay
+    /// starts from: `seq` 0 stores no version.
+    async fn seed(&self, key: &str, value: &RecordValue, seq: u64) {
+        self.store
+            .inner
+            .commit(&FlushCommit {
+                writes: vec![StoreWrite::Put {
+                    map: MAP,
+                    key,
+                    value: PutValue::Value(value),
+                    store_time: 0,
+                    seq,
+                }],
+                applied: Vec::new(),
+            })
+            .await
+            .expect("seed the store");
+    }
+
+    async fn value(&self, key: &str) -> Option<RecordValue> {
+        self.store.inner.load(MAP, key).await.expect("load")
+    }
+
+    async fn version(&self, key: &str) -> Option<u64> {
+        self.store
+            .inner
+            .load_version(MAP, key)
+            .await
+            .expect("load_version")
+            .map(|version| version.seq)
+    }
+
+    fn max_version(&self) -> u64 {
+        self.store
+            .inner
+            .applied_watermarks()
+            .expect("watermarks")
+            .expect("kept")
+            .max_version
+    }
+
+    /// The sequences of [`P`]'s frames a start would replay.
+    async fn unapplied(&self) -> Vec<u64> {
+        self.wal
+            .unapplied(P)
+            .await
+            .expect("unapplied")
+            .into_iter()
+            .map(|e| e.sequence)
+            .collect()
+    }
+
+    async fn write_behind(&self, config: WriteBehindConfig) -> Arc<WriteBehindDataStore> {
+        let sequence_start = self
+            .wal
+            .max_observed_sequence()
+            .await
+            .expect("max_observed_sequence")
+            + 1;
+        WriteBehindDataStore::new_with_wal(
+            self.dyn_store(),
+            config,
+            Some(WalBootstrap {
+                wal: Arc::clone(&self.wal) as Arc<dyn Wal>,
+                sequence_start,
+            }),
+        )
+    }
+
+    async fn close(self) {
+        let Self { engine, store, wal } = self;
+        let wal_weak = Arc::downgrade(&wal);
+        drop(wal);
+        drop(store);
+        wait_for("the WAL writer and the store to be released", || {
+            wal_weak.upgrade().is_none() && Arc::strong_count(&engine) == 1
+        })
+        .await;
+        drop(engine);
+    }
+}
+
+fn or_entry(tag: &str, millis: u64) -> OrMapEntry {
+    OrMapEntry {
+        value: Value::String(tag.to_string()),
+        tag: tag.to_string(),
+        timestamp: Timestamp {
+            millis,
+            counter: 0,
+            node_id: "n".to_string(),
+        },
+        ttl_ms: None,
+    }
+}
+
+/// An OR slot holding one entry per tag, no tombstone.
+fn or_slot(tags: &[&str]) -> RecordValue {
+    RecordValue::OrMap {
+        records: tags
+            .iter()
+            .zip(1u64..)
+            .map(|(tag, millis)| or_entry(tag, millis))
+            .collect(),
+        tombstones: Vec::new(),
+    }
+}
+
+fn add_delta(tag: &str, sequence: u64) -> OrDelta {
+    OrDelta::Add {
+        entry: or_entry(tag, 100 + sequence),
+    }
+}
+
+fn remove_delta(tag: &str) -> OrDelta {
+    OrDelta::Remove {
+        tag: tag.to_string(),
+    }
+}
+
+/// An OR add frame of `(MAP, key)`, its entry stamped from its sequence.
+fn or_add(key: &str, tag: &str, sequence: u64) -> WalEntry {
+    delta_frame(key, add_delta(tag, sequence), sequence)
+}
+
+fn or_remove(key: &str, tag: &str, sequence: u64) -> WalEntry {
+    delta_frame(key, remove_delta(tag), sequence)
+}
+
+/// One frame's effect in the replay model: a `Store` frame sets the value,
+/// an OR delta frame folds onto it.
+enum Step {
+    Set(RecordValue),
+    Fold(OrDelta),
+}
+
+/// What replaying the frames of `steps` in order onto `base` produces, frame
+/// kind by frame kind as main's recovery (`67ff9b67`) replays them: a `Store`
+/// frame sets the value, an OR delta frame folds onto the current value
+/// through the live `normalize_to_or_map` and `apply_or_delta`. The callers
+/// pass the frames main applies; a frame whose prepare fails main leaves out
+/// (TODO-823).
+fn replayed(base: &RecordValue, steps: &[Step]) -> RecordValue {
+    let mut value = base.clone();
+    for step in steps {
+        match step {
+            Step::Set(record) => value = record.clone(),
+            Step::Fold(delta) => {
+                crate::service::domain::crdt::normalize_to_or_map(&mut value);
+                crate::service::domain::crdt::apply_or_delta(delta.clone(), &mut value);
+            }
+        }
+    }
+    value
+}
+
+/// The tags of an OR slot's live entries and of its tombstones.
+fn or_tags(value: &RecordValue) -> (BTreeSet<String>, BTreeSet<String>) {
+    match value {
+        RecordValue::OrMap {
+            records,
+            tombstones,
+        } => (
+            records.iter().map(|e| e.tag.clone()).collect(),
+            tombstones.iter().cloned().collect(),
+        ),
+        other => panic!("not an OR slot: {other:?}"),
+    }
+}
+
+fn tags(tags: &[&str]) -> BTreeSet<String> {
+    tags.iter().map(|t| (*t).to_string()).collect()
+}
+
+/// A write-behind configuration whose stop gives up on a refused entry
+/// after 300 ms, so a test can stop a node while the store refuses a key.
+fn wb_config_short_stop() -> WriteBehindConfig {
+    WriteBehindConfig {
+        shutdown_timeout_ms: 300,
+        ..wb_config()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn v10_a_write_after_a_restart_takes_a_sequence_above_every_stored_version() {
+    let root = Root::new();
+    let keys = keys_in(P, 2);
+    let (j, k) = (keys[0].as_str(), keys[1].as_str());
+
+    // A flush stores K at its sequence b while J's earlier sequence a stays
+    // unresolved: the watermark holds below a, so K's version row is kept.
+    let node = ArmedNode::open(&root);
+    node.store.refuse_keys(&[j]);
+    let wb = node.write_behind(wb_config_short_stop()).await;
+    wb.add(MAP, j, &lww("j", 1), 1).await.expect("add J");
+    let segments = stream_files(&root.wal_dir());
+    let segment = segments
+        .values()
+        .next_back()
+        .expect("a stream segment")
+        .clone();
+    let cut_len = std::fs::metadata(&segment).expect("segment").len();
+    wb.add(MAP, k, &lww("v1", 2), 2).await.expect("add K");
+    let frames = node.unapplied().await;
+    assert_eq!(frames.len(), 2, "J's and K's frames: {frames:?}");
+    let (a, b) = (frames[0], frames[1]);
+    wb.soft_flush().await.expect("soft_flush");
+    wait_for("K to be stored while J is refused", || {
+        pending(&wb, P) == vec![a]
+    })
+    .await;
+    assert_eq!(
+        node.version(k).await,
+        Some(b),
+        "K's version is its sequence"
+    );
+    assert_eq!(node.max_version(), b);
+    let _ = wb.hard_flush().await;
+    drop(wb);
+    node.close().await;
+
+    // The WAL is cut below b: K's frame is gone, its stored version stays.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&segment)
+        .expect("open segment")
+        .set_len(cut_len)
+        .expect("cut");
+    assert_eq!(frames_on_disk(&root.wal_dir(), P), BTreeSet::from([a]));
+
+    // Restart: the seed is above K's version, so a new write of K is above it.
+    let node = ArmedNode::open(&root);
+    node.recover(None).await;
+    let start = node
+        .wal
+        .max_observed_sequence()
+        .await
+        .expect("max_observed_sequence")
+        + 1;
+    assert!(
+        start > b,
+        "the seed {start} is not above the stored version {b}"
+    );
+    node.store.refuse_keys(&[k]);
+    let wb = node.write_behind(wb_config_short_stop()).await;
+    wb.add(MAP, k, &lww("v2", 3), 3).await.expect("add K again");
+    let new_seq = *node.unapplied().await.last().expect("the new frame");
+    assert!(new_seq > b, "the new write took {new_seq}, at or below {b}");
+    // The crash before the new write is flushed: the store keeps refusing it.
+    let _ = wb.hard_flush().await;
+    drop(wb);
+    assert_eq!(node.value(k).await, Some(lww("v1", 2)), "not flushed");
+    node.close().await;
+
+    // Restart: the new write is recovered.
+    let node = ArmedNode::open(&root);
+    node.recover(None).await;
+    assert_eq!(
+        node.value(k).await,
+        Some(lww("v2", 3)),
+        "the write acknowledged after the restart is recovered"
+    );
+    node.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn v11_a_refused_or_add_holds_the_later_or_remove_of_its_key_and_both_apply_at_the_next_boot()
+{
+    let root = Root::new();
+    let k = keys_in(P, 1).remove(0);
+    let seed = or_slot(&["x", "b"]);
+    let add = or_add(&k, "a", 1);
+    let remove = or_remove(&k, "b", 2);
+
+    let node = ArmedNode::open(&root);
+    node.seed(&k, &seed, 0).await;
+    node.append(&add).await;
+    node.append(&remove).await;
+    node.store.refuse_seqs(&[1]);
+    node.recover(None).await;
+    assert_eq!(
+        node.value(&k).await,
+        Some(seed.clone()),
+        "the remove is held behind the refused add: nothing of K is stored"
+    );
+    assert_eq!(node.version(&k).await, None, "K's version did not advance");
+    assert_eq!(node.unapplied().await, vec![1, 2], "both stay replayable");
+    node.close().await;
+
+    let node = ArmedNode::open(&root);
+    node.recover(None).await;
+    let value = node.value(&k).await.expect("K");
+    assert_eq!(
+        value,
+        replayed(
+            &seed,
+            &[Step::Fold(add_delta("a", 1)), Step::Fold(remove_delta("b"))]
+        )
+    );
+    let (live, tombstones) = or_tags(&value);
+    assert!(live.contains("a"), "the refused add's effect: {value:?}");
+    assert!(
+        !live.contains("b") && tombstones.contains("b"),
+        "the held remove's effect: {value:?}"
+    );
+    node.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn v11_a_store_after_a_refused_frame_commits_and_its_version_covers_that_frame() {
+    let root = Root::new();
+    let k = keys_in(P, 1).remove(0);
+    let seed = or_slot(&["x"]);
+    let snapshot = or_slot(&["y"]);
+    let add = or_add(&k, "a", 1);
+    let store = store_frame(&k, &snapshot, 2);
+
+    let node = ArmedNode::open(&root);
+    node.seed(&k, &seed, 0).await;
+    node.append(&add).await;
+    node.append(&store).await;
+    node.store.refuse_seqs(&[1]);
+    node.recover(None).await;
+    assert_eq!(node.value(&k).await, Some(snapshot.clone()));
+    assert_eq!(
+        node.version(&k).await,
+        Some(2),
+        "the subsuming frame's version covers the refused frame below it"
+    );
+    assert_eq!(node.unapplied().await, vec![1, 2]);
+    node.close().await;
+
+    let node = ArmedNode::open(&root);
+    let mark = node.engine.mark();
+    node.recover(None).await;
+    assert_eq!(node.value(&k).await, Some(snapshot));
+    assert!(
+        node.engine
+            .committed_since(mark)
+            .iter()
+            .all(|w| w.record_keys().is_empty()),
+        "both frames are at or below K's version: nothing of K is written again"
+    );
+    node.close().await;
+}
+
+/// Frames of AC 11 (a)–(c): `i` = 1.
+struct HeldCase {
+    k: String,
+    k2: String,
+    seed: RecordValue,
+    snapshot: RecordValue,
+}
+
+impl HeldCase {
+    fn new() -> Self {
+        let keys = keys_in(P, 2);
+        Self {
+            k: keys[0].clone(),
+            k2: keys[1].clone(),
+            seed: or_slot(&["x"]),
+            snapshot: or_slot(&["y"]),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn v11a_an_or_delta_after_a_written_store_of_its_held_key_applies_at_the_same_boot_as_on_main(
+) {
+    let root = Root::new();
+    let case = HeldCase::new();
+    let (k, k2) = (case.k.as_str(), case.k2.as_str());
+    let f1 = or_add(k, "a", 1);
+    let f2 = store_frame(k, &case.snapshot, 2);
+    let f3 = store_frame(k2, &lww("other", 3), 3);
+    let f4 = or_add(k, "c", 4);
+    let f5 = or_add(k, "d", 5);
+
+    let node = ArmedNode::open(&root);
+    node.seed(k, &case.seed, 0).await;
+    for frame in [&f1, &f2, &f3, &f4, &f5] {
+        node.append(frame).await;
+    }
+    // Frame 1 is K's first version read: it fails in prepare.
+    node.store.fail_version_reads(k, &[1]);
+    // Batches [1, 2, 3, 4] and [5].
+    node.recover(Some(4)).await;
+
+    // Main replays this sequence as: frame 1 fails and is left out (TODO-823);
+    // frame 2 sets K to its snapshot; frame 4 folds onto it within the batch;
+    // frame 5 folds onto the stored value in the next batch.
+    let main = replayed(
+        &case.seed,
+        &[
+            Step::Set(case.snapshot.clone()),
+            Step::Fold(add_delta("c", 4)),
+            Step::Fold(add_delta("d", 5)),
+        ],
+    );
+    assert_eq!(
+        or_tags(&main),
+        (tags(&["y", "c", "d"]), BTreeSet::new()),
+        "the derivation of main's result"
+    );
+    assert_eq!(
+        node.value(k).await,
+        Some(main),
+        "frames 4 and 5 apply at the same boot, as on main"
+    );
+    assert_eq!(node.version(k).await, Some(5));
+    assert_eq!(node.value(k2).await, Some(lww("other", 3)));
+    assert_eq!(node.store.version_reads(k), 4, "frames 1, 2, 4 and 5 read");
+    node.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn v11b_a_later_delta_failing_on_its_own_keeps_the_key_held_past_the_written_store() {
+    let root = Root::new();
+    let case = HeldCase::new();
+    let k = case.k.as_str();
+    let f1 = or_add(k, "a", 1);
+    let f2 = store_frame(k, &case.snapshot, 2);
+    let f3 = or_add(k, "b", 3);
+    let f4 = or_add(k, "c", 4);
+    let f5 = or_add(k, "d", 5);
+
+    let node = ArmedNode::open(&root);
+    node.seed(k, &case.seed, 0).await;
+    for frame in [&f1, &f2, &f3, &f4, &f5] {
+        node.append(frame).await;
+    }
+    // K's version reads: frame 1 (fails), frame 2, frame 3 (fails); frames 4
+    // and 5 are held before they read.
+    node.store.fail_version_reads(k, &[1, 3]);
+    node.recover(Some(4)).await;
+    assert_eq!(node.store.version_reads(k), 3, "frames 4 and 5 were held");
+    assert_eq!(
+        node.value(k).await,
+        Some(case.snapshot.clone()),
+        "frame 5 is not applied: K stays held past frame 2's commit"
+    );
+    assert_eq!(
+        node.version(k).await,
+        Some(2),
+        "no version row of K above frame 2"
+    );
+    assert_eq!(node.unapplied().await, vec![1, 2, 3, 4, 5]);
+    node.close().await;
+
+    let node = ArmedNode::open(&root);
+    node.recover(Some(4)).await;
+    let value = node.value(k).await.expect("K");
+    assert_eq!(
+        value,
+        replayed(
+            &case.snapshot,
+            &[
+                Step::Fold(add_delta("b", 3)),
+                Step::Fold(add_delta("c", 4)),
+                Step::Fold(add_delta("d", 5))
+            ],
+        )
+    );
+    let (live, _) = or_tags(&value);
+    assert!(
+        live.contains("b") && live.contains("d"),
+        "the effects of frames 3 and 5 are both present: {value:?}"
+    );
+    node.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn v11c_a_refused_store_of_a_held_key_holds_the_delta_prepared_after_it() {
+    let root = Root::new();
+    let case = HeldCase::new();
+    let (k, k2) = (case.k.as_str(), case.k2.as_str());
+    let f1 = or_add(k, "a", 1);
+    let f2 = store_frame(k, &case.snapshot, 2);
+    let f3 = store_frame(k2, &lww("other", 3), 3);
+    let f4 = or_add(k, "c", 4);
+    let f5 = or_add(k, "d", 5);
+
+    let node = ArmedNode::open(&root);
+    node.seed(k, &case.seed, 0).await;
+    for frame in [&f1, &f2, &f3, &f4, &f5] {
+        node.append(frame).await;
+    }
+    // K's version reads: frame 1 (fails), frame 2, frame 4; after the commit
+    // refuses frame 2 the part is prepared again, frame 1 first (fails
+    // again), and frame 4 is held before it reads.
+    node.store.fail_version_reads(k, &[1, 4]);
+    node.store.refuse_seqs(&[2]);
+    node.recover(Some(4)).await;
+    assert_eq!(
+        node.store.version_reads(k),
+        4,
+        "frame 4 was held when prepared again"
+    );
+    assert_eq!(
+        node.value(k).await,
+        Some(case.seed.clone()),
+        "neither frame 2 nor frame 4 is stored"
+    );
+    assert_eq!(node.version(k).await, None);
+    assert_eq!(node.value(k2).await, Some(lww("other", 3)));
+    assert_eq!(node.unapplied().await, vec![1, 2, 3, 4, 5]);
+    node.close().await;
+
+    let node = ArmedNode::open(&root);
+    node.recover(Some(4)).await;
+    assert_eq!(
+        node.value(k).await,
+        Some(replayed(
+            &case.seed,
+            &[
+                Step::Fold(add_delta("a", 1)),
+                Step::Set(case.snapshot.clone()),
+                Step::Fold(add_delta("c", 4)),
+                Step::Fold(add_delta("d", 5)),
+            ],
+        )),
+        "frames 2 and 4 replay at the next boot"
+    );
+    node.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn v11d_a_store_the_gate_discards_releases_nothing_and_the_next_delta_stays_held() {
+    let root = Root::new();
+    let k = keys_in(P, 1).remove(0);
+    let snapshot = or_slot(&["y"]);
+    let f1 = or_add(&k, "a", 1);
+    let f2 = store_frame(&k, &snapshot, 2);
+    let f3 = or_add(&k, "c", 3);
+
+    let node = ArmedNode::open(&root);
+    // The store already holds frame 2's state at version 2.
+    node.seed(&k, &snapshot, 2).await;
+    for frame in [&f1, &f2, &f3] {
+        node.append(frame).await;
+    }
+    node.store.fail_version_reads(&k, &[1]);
+    node.recover(None).await;
+    assert_eq!(node.store.version_reads(&k), 2, "frame 3 was held");
+    assert_eq!(
+        node.value(&k).await,
+        Some(snapshot.clone()),
+        "frame 3 stays held: the discarded frame 2 released nothing"
+    );
+    assert_eq!(node.version(&k).await, Some(2));
+    node.close().await;
+
+    let node = ArmedNode::open(&root);
+    node.recover(None).await;
+    assert_eq!(
+        node.value(&k).await,
+        Some(replayed(&snapshot, &[Step::Fold(add_delta("c", 3))]))
+    );
+    node.close().await;
+}
+
+/// The hold is decided by the unresolved frames of the key *below* the frame,
+/// not by the highest unresolved frame of the key: a store refused later in
+/// the part leaves the delta before it as complete as it was, because the
+/// written store below that delta covers every unresolved frame below it.
+/// Holding the delta by the key's highest unresolved frame (the refused store
+/// above it) would leave it out at this boot, where main applies it.
+#[tokio::test(flavor = "multi_thread")]
+async fn v11e_a_store_refused_after_a_delta_does_not_hold_that_delta_on_the_second_preparation() {
+    let root = Root::new();
+    let case = HeldCase::new();
+    let k = case.k.as_str();
+    let later = or_slot(&["z"]);
+    let f1 = or_add(k, "a", 1);
+    let f2 = store_frame(k, &case.snapshot, 2);
+    let f3 = or_add(k, "c", 3);
+    let f4 = store_frame(k, &later, 4);
+    let f5 = or_add(k, "d", 5);
+
+    let node = ArmedNode::open(&root);
+    node.seed(k, &case.seed, 0).await;
+    for frame in [&f1, &f2, &f3, &f4, &f5] {
+        node.append(frame).await;
+    }
+    // K's version reads, one batch: frames 1 (fails), 2, 3, 4, 5; the commit
+    // refuses frame 4 by name, and the part prepared again reads frames
+    // 1 (fails again), 2 and 3, while frame 5 is held before it reads.
+    node.store.fail_version_reads(k, &[1, 6]);
+    node.store.refuse_seqs(&[4]);
+    node.recover(None).await;
+    assert_eq!(
+        node.store.version_reads(k),
+        8,
+        "frame 3 was prepared again and frame 5 was held"
+    );
+    assert_eq!(
+        node.value(k).await,
+        Some(replayed(
+            &case.seed,
+            &[
+                Step::Set(case.snapshot.clone()),
+                Step::Fold(add_delta("c", 3)),
+            ],
+        )),
+        "frame 3 applies at this boot, folded onto the written frame 2"
+    );
+    assert_eq!(node.version(k).await, Some(3));
+    assert_eq!(
+        node.unapplied().await,
+        vec![1, 2, 3, 4, 5],
+        "frame 4 and frame 5 stay replayable"
+    );
+    node.close().await;
+
+    let node = ArmedNode::open(&root);
+    node.recover(None).await;
+    // Main applies every frame of K in order; frame 4 sets the key's whole
+    // state, so the result is frame 4's value with frame 5 folded in.
+    let main = replayed(
+        &case.seed,
+        &[
+            Step::Fold(add_delta("a", 1)),
+            Step::Set(case.snapshot.clone()),
+            Step::Fold(add_delta("c", 3)),
+            Step::Set(later.clone()),
+            Step::Fold(add_delta("d", 5)),
+        ],
+    );
+    assert_eq!(
+        or_tags(&main),
+        (tags(&["z", "d"]), BTreeSet::new()),
+        "the derivation of main's result"
+    );
+    assert_eq!(node.value(k).await, Some(main));
+    assert!(node.unapplied().await.is_empty(), "every frame resolved");
+    node.close().await;
+}
+
+/// A frame that failed in prepare and is written when its part is prepared
+/// again after a refusal is resolved: it holds the later frames of its key no
+/// longer, so a delta of the key in a later batch applies at this boot.
+#[tokio::test(flavor = "multi_thread")]
+async fn v11f_a_frame_written_on_the_second_preparation_holds_its_key_no_longer() {
+    let root = Root::new();
+    let mut keys = keys_in(P, 2);
+    let (k, l) = (keys.remove(0), keys.remove(0));
+    let seed = or_slot(&["x"]);
+    let f1 = or_add(&k, "a", 1);
+    let f2 = store_frame(&l, &or_slot(&["y"]), 2);
+    let f3 = or_add(&k, "c", 3);
+
+    let node = ArmedNode::open(&root);
+    node.seed(&k, &seed, 0).await;
+    for frame in [&f1, &f2, &f3] {
+        node.append(frame).await;
+    }
+    // Batches of two: frames 1 and 2, then frame 3. Frame 1 fails its first
+    // version read; the commit refuses frame 2 by name, and the part prepared
+    // again writes frame 1.
+    node.store.fail_version_reads(&k, &[1]);
+    node.store.refuse_seqs(&[2]);
+    node.recover(Some(2)).await;
+    assert_eq!(node.store.version_reads(&k), 3, "frame 3 was not held");
+    assert_eq!(
+        node.value(&k).await,
+        Some(replayed(
+            &seed,
+            &[Step::Fold(add_delta("a", 1)), Step::Fold(add_delta("c", 3))],
+        )),
+        "frame 3 applies at this boot, as on main"
+    );
+    assert_eq!(node.version(&k).await, Some(3));
+    assert_eq!(
+        node.unapplied().await,
+        vec![2, 3],
+        "frame 2 stays replayable"
+    );
+    node.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn v12_a_frame_failed_in_prepare_holds_the_later_delta_of_its_key() {
+    let root = Root::new();
+    let k = keys_in(P, 1).remove(0);
+    let seed = or_slot(&["x", "b"]);
+    let add = or_add(&k, "a", 1);
+    let remove = or_remove(&k, "b", 2);
+
+    let node = ArmedNode::open(&root);
+    node.seed(&k, &seed, 0).await;
+    node.append(&add).await;
+    node.append(&remove).await;
+    node.store.fail_version_reads(&k, &[1]);
+    node.recover(None).await;
+    assert_eq!(node.store.version_reads(&k), 1, "frame 2 was held");
+    assert_eq!(node.value(&k).await, Some(seed.clone()));
+    assert_eq!(node.version(&k).await, None);
+    node.close().await;
+
+    let node = ArmedNode::open(&root);
+    node.recover(None).await;
+    let value = node.value(&k).await.expect("K");
+    assert_eq!(
+        value,
+        replayed(
+            &seed,
+            &[Step::Fold(add_delta("a", 1)), Step::Fold(remove_delta("b"))]
+        )
+    );
+    let (live, tombstones) = or_tags(&value);
+    assert!(live.contains("a") && !live.contains("b") && tombstones.contains("b"));
+    node.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn v13_a_frame_failed_at_boot_is_discarded_once_a_live_write_of_its_key_is_flushed_above_it()
+{
+    let root = Root::new();
+    let k = keys_in(P, 1).remove(0);
+    let seed = or_slot(&["x"]);
+    let add = or_add(&k, "a", 1);
+
+    let node = ArmedNode::open(&root);
+    node.seed(&k, &seed, 0).await;
+    node.append(&add).await;
+    node.store.refuse_seqs(&[1]);
+    node.recover(None).await;
+    node.store.refuse_seqs(&[]);
+    assert_eq!(node.value(&k).await, Some(seed.clone()), "frame 1 failed");
+
+    // A live OR write of K, framed as a delta, over what the node serves.
+    let wb = node.write_behind(wb_config()).await;
+    let delta = OrDelta::Add {
+        entry: or_entry("b", 500),
+    };
+    let mut value = wb.load(MAP, &k).await.expect("load").expect("K");
+    crate::service::domain::crdt::normalize_to_or_map(&mut value);
+    crate::service::domain::crdt::apply_or_delta(delta.clone(), &mut value);
+    wb.add_with_witness(MAP, &k, WriteSource::Value(&value), 1, Some(&delta))
+        .await
+        .expect("live OR write");
+    let live = *node.unapplied().await.last().expect("the live frame");
+    assert!(live > 1);
+    flush_idle(&wb).await;
+    let served = wb.load(MAP, &k).await.expect("load").expect("K");
+    assert_eq!(served, value);
+    assert_eq!(
+        node.version(&k).await,
+        Some(live),
+        "the live write is flushed above the failed frame"
+    );
+    stop_write_behind(wb).await;
+    assert_eq!(
+        node.unapplied().await,
+        vec![1, live],
+        "frame 1 is still retained"
+    );
+    node.close().await;
+
+    let node = ArmedNode::open(&root);
+    node.recover(None).await;
+    assert_eq!(
+        node.value(&k).await,
+        Some(served),
+        "frame 1 is discarded: the store equals what the node served"
+    );
+    node.close().await;
 }

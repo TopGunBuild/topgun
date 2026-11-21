@@ -11,6 +11,8 @@
 //! | `0x02` | map by id | map id u32 BE | the map name, UTF-8 |
 //! | `0x10` | primary records | partition u32 BE ‖ map id u32 BE ‖ user key | the record's msgpack, plain or sealed |
 //! | `0x11` | backup records | as `0x10` | as `0x10` |
+//! | `0x12` | record versions | WAL partition u32 BE ‖ map id u32 BE ‖ user key | seq u64 BE ‖ kind u8 (`0` record, `1` removed) |
+//! | `0x12` | the `max_version` row | nothing: the key is the single byte | sequence u64 BE |
 //! | `0x20` | applied WAL watermarks | WAL partition u32 BE ‖ `applied` | sequence u64 BE |
 //!
 //! Every other first byte is reserved. The partition of a record key is
@@ -25,6 +27,22 @@
 //! A `0x20` row holds the applied watermark of a **WAL** partition,
 //! `fnv1a("{map}:{key}") % 271` — not the record partition above, from which
 //! it differs. An absent row means 0 (`TG-ENG-004`).
+//!
+//! # Record versions (`TG-WAL-015`)
+//!
+//! A `0x12` row holds the highest WAL sequence the state of a primary record
+//! reflects, and whether that write removed it; replay discards a frame at or
+//! below it. Its partition is the record's WAL partition, so a reclaim
+//! compares a partition's rows with that partition's watermark by one range.
+//! A [`MapDataStore::commit`] writes a row only for a write above its
+//! partition's applied watermark after the commit, in the batch of the record
+//! it describes, and never below the row the key holds; rows at or below the
+//! durable watermark are dropped by [`MapDataStore::reclaim_record_versions`].
+//! The `max_version` row is at least every version row: a commit that stores
+//! a record at a non-zero sequence raises it, and nothing lowers or drops it,
+//! so the WAL seeds its sequence above every version (`TG-WAL-010`). A store
+//! that never stored a record under a WAL holds no `0x12` row. Version rows
+//! are not sealed: they hold no value.
 //!
 //! # Registry (`TG-ENG-005`) and metadata (`TG-ENG-006`)
 //!
@@ -54,10 +72,12 @@
 //!
 //! # Durability
 //!
-//! Every [`MapDataStore`] method except [`MapDataStore::commit`] writes with
-//! `sync = true`: the store is write-through, durable on return. A `commit`
-//! is one engine batch holding its records and its `0x20` rows, written
-//! `sync = true` unless the engine has
+//! Every [`MapDataStore`] method except [`MapDataStore::commit`] and
+//! [`MapDataStore::reclaim_record_versions`] writes with `sync = true`: the
+//! store is write-through, durable on return. A reclaim drops only dead rows,
+//! which a crash may bring back harmlessly. A `commit` is one engine batch
+//! holding its records, their `0x12` rows, `max_version` and its `0x20` rows,
+//! written `sync = true` unless the engine has
 //! [`unsynced_write_survives_process_crash`](super::kv_engine::KvCapabilities::unsynced_write_survives_process_crash)
 //! and a WAL is attached to the store (RocksDB under a WAL; never redb). Such
 //! a commit is made durable by the sync the WAL's collection and `finish`
@@ -78,9 +98,10 @@ use topgun_core::types::tenant_owns;
 
 use super::kv_engine::{KeyRange, KvEngine, KvError, KvSnapshot, WriteBatch, WriteOptions};
 use crate::storage::map_data_store::{
-    check_map_name, check_tenant, merkle_leaf_hash, AppliedWatermarks, CommitDurability,
-    DropOutcome, FlushCommit, LeafSink, MapDataStore, MerkleLeaf, PutValue, RecordRefused,
-    ScanBatch, ScanCursor, ScanOrder, StoreErrorClass, StoreSyncFailed, StoreWrite,
+    check_map_name, check_tenant, merkle_leaf_hash, wal_partition, AppliedWatermarks,
+    CommitDurability, DropOutcome, FlushCommit, KeyVersion, LeafSink, MapDataStore, MerkleLeaf,
+    PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder, StoreErrorClass, StoreSyncFailed,
+    StoreWrite,
 };
 use crate::storage::record::RecordValue;
 use crate::storage::sealing::{
@@ -98,6 +119,8 @@ pub const KS_MAP_BY_ID: u8 = 0x02;
 pub const KS_PRIMARY: u8 = 0x10;
 /// Backup records.
 pub const KS_BACKUP: u8 = 0x11;
+/// Record versions and, under the one-byte key, the `max_version` row.
+pub const KS_RECORD_VERSION: u8 = 0x12;
 /// Partition metadata: the applied watermark row of every WAL partition.
 pub const KS_PARTITION_META: u8 = 0x20;
 
@@ -150,6 +173,10 @@ const LEAF_BATCH_SIZE: usize = 1024;
 /// as the redb store's.
 const DEFAULT_SCAN_BATCH_COST: u64 = 8 * 1024 * 1024;
 
+/// The most version rows one reclaim deletes per hold of the commit lock, so
+/// a large reclaim never stalls a commit for long.
+const RECLAIM_CHUNK: usize = 1_000;
+
 /// The tail of every applied watermark row key.
 const APPLIED_TAIL: &[u8] = b"applied";
 
@@ -177,6 +204,62 @@ fn decode_applied_row_key(key: &[u8]) -> Option<u32> {
     }
     let partition = be_u32(&key[1..5]);
     (partition < PARTITION_COUNT).then_some(partition)
+}
+
+/// The engine key of the `max_version` row: `KS_RECORD_VERSION` alone, shorter
+/// than every version row key.
+pub const MAX_VERSION_KEY: &[u8] = &[KS_RECORD_VERSION];
+
+/// The engine key of the version row of `(map_id, key)`:
+/// `KS_RECORD_VERSION ‖ WAL partition ‖ map id ‖ user key`.
+#[must_use]
+pub fn version_row_key(map: &str, map_id: u32, key: &str) -> Vec<u8> {
+    let mut bytes = record_prefix(KS_RECORD_VERSION, wal_partition(map, key), map_id);
+    bytes.extend_from_slice(key.as_bytes());
+    bytes
+}
+
+/// The value of a version row.
+fn version_row_value(version: KeyVersion) -> Vec<u8> {
+    let mut value = Vec::with_capacity(9);
+    value.extend_from_slice(&version.seq.to_be_bytes());
+    value.push(u8::from(version.removed));
+    value
+}
+
+/// Decodes the value of a version row.
+///
+/// # Errors
+///
+/// A value that is not 9 bytes or whose kind is not 0 or 1: never skipped,
+/// so a damaged row cannot open the replay gate.
+pub fn decode_version_value(value: &[u8]) -> anyhow::Result<KeyVersion> {
+    let Ok([s0, s1, s2, s3, s4, s5, s6, s7, kind]) = <[u8; 9]>::try_from(value) else {
+        bail!("record version row is {} bytes, not 9", value.len());
+    };
+    let removed = match kind {
+        0 => false,
+        1 => true,
+        other => bail!("record version row holds kind {other}, not 0 or 1"),
+    };
+    Ok(KeyVersion {
+        seq: u64::from_be_bytes([s0, s1, s2, s3, s4, s5, s6, s7]),
+        removed,
+    })
+}
+
+/// The `max_version` row of `snapshot`, 0 when absent.
+fn read_max_version(snapshot: &dyn KvSnapshot) -> anyhow::Result<u64> {
+    match snapshot.get(MAX_VERSION_KEY)? {
+        None => Ok(0),
+        Some(value) => match <[u8; 8]>::try_from(value.as_slice()) {
+            Ok(word) => Ok(u64::from_be_bytes(word)),
+            Err(_) => bail!(
+                "{REFUSAL} the max_version row is {} bytes, not 8",
+                value.len()
+            ),
+        },
+    }
 }
 
 /// The engine key of the metadata row `name`: `KS_META ‖ name`.
@@ -468,6 +551,8 @@ struct StoreMetadata {
     applied: [u64; WAL_PARTITIONS],
     /// The keyring row, checked; a seal pass row is checked against it.
     keyring: Option<KeyringRow>,
+    /// The `max_version` row; an absent row is 0.
+    max_version: u64,
 }
 
 /// Refuses a one-byte mark whose value is not `[0x01]`.
@@ -613,7 +698,7 @@ fn read_store_metadata(snapshot: &dyn KvSnapshot) -> anyhow::Result<Option<Store
             end: Some(vec![KS_PRIMARY]),
         },
         KeyRange {
-            start: Some(vec![KS_BACKUP + 1]),
+            start: Some(vec![KS_RECORD_VERSION + 1]),
             end: Some(vec![KS_PARTITION_META]),
         },
         KeyRange {
@@ -627,12 +712,16 @@ fn read_store_metadata(snapshot: &dyn KvSnapshot) -> anyhow::Result<Option<Store
         }
     }
     let applied = read_applied_rows(snapshot, imported)?;
+    // Only the one row: the version rows are read where a decision needs
+    // them, so the open does not walk them.
+    let max_version = read_max_version(snapshot)?;
     Ok(Some(StoreMetadata {
         migration,
         imported,
         import_pending,
         applied,
         keyring,
+        max_version,
     }))
 }
 
@@ -678,6 +767,27 @@ pub enum RecordOp<'a> {
     },
     /// Puts the import marker and removes the import-pending mark.
     MarkWatermarksImported,
+    /// The WAL sequence `seq` a commit stores for the primary record
+    /// `(map, key)` (`TG-WAL-015`). Resolved by the plan of its batch, like
+    /// a `Delete`, so it never issues an id on its own: under the id a `Put`
+    /// of the batch issues, and as nothing when the map has no id after the
+    /// plan. `row` puts the key's version row. Through
+    /// [`MapDataStore::commit`] every resolved op also counts toward the
+    /// `max_version` row.
+    Version {
+        /// The map.
+        map: &'a str,
+        /// The user key.
+        key: &'a str,
+        /// The WAL sequence, never 0.
+        seq: u64,
+        /// The write removed the record.
+        removed: bool,
+        /// Puts the version row; `false` for a write at or below its
+        /// partition's applied watermark, which only counts toward
+        /// `max_version`.
+        row: bool,
+    },
 }
 
 impl RecordOp<'_> {
@@ -688,7 +798,7 @@ impl RecordOp<'_> {
             Self::Put { map, backup, .. } | Self::Touch { map, backup } => {
                 Some((map, RecordSpace::of(backup).flag()))
             }
-            Self::Delete { map, .. } => Some((map, 0)),
+            Self::Delete { map, .. } | Self::Version { map, .. } => Some((map, 0)),
             // Metadata ops name no map. Listed one by one so a new variant
             // must decide whether it names a map.
             Self::SetMigrationMark(_)
@@ -707,6 +817,23 @@ struct RegistryPlan<'s, 'n> {
     guard: Option<MutexGuard<'s, ()>>,
 }
 
+/// The rows a commit checks and raises, held under one lock.
+#[derive(Clone, Copy)]
+struct Committed {
+    /// The applied watermark of every WAL partition.
+    applied: [u64; WAL_PARTITIONS],
+    /// The `max_version` row.
+    max_version: u64,
+}
+
+impl Committed {
+    /// A store that holds no row of either kind.
+    const EMPTY: Self = Self {
+        applied: [0; WAL_PARTITIONS],
+        max_version: 0,
+    };
+}
+
 /// A [`MapDataStore`] over a [`KvEngine`], in the key format of this module.
 pub struct EngineMapDataStore<E: KvEngine> {
     engine: Arc<E>,
@@ -715,13 +842,13 @@ pub struct EngineMapDataStore<E: KvEngine> {
     registry_lock: Mutex<()>,
     /// `name → (map_id, flags)`, filled only from rows that exist.
     cache: RwLock<HashMap<String, (u32, u8)>>,
-    /// The `0x20` row of every WAL partition as the last returned commit
-    /// left it (durable once a later sync covers it, `TG-WAL-003`), loaded
-    /// at open and updated only after the engine write that stored it
-    /// returned. Held
-    /// across a commit's check, write and update, so no row moves below the
-    /// value it holds, whoever commits.
-    applied: Mutex<[u64; WAL_PARTITIONS]>,
+    /// The `0x20` row of every WAL partition and the `max_version` row as
+    /// the last returned commit left them (durable once a later sync covers
+    /// it, `TG-WAL-003`), loaded at open and updated only after the engine
+    /// write that stored them returned. Held across a commit's check, write
+    /// and update, so no row moves below the value it holds, whoever commits;
+    /// a reclaim of version rows takes it too (`TG-WAL-015`).
+    applied: Mutex<Committed>,
     /// Commits whose engine write returned. Written only under `applied`,
     /// read without it (`TG-WB-001`).
     returned: AtomicU64,
@@ -787,14 +914,21 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                     batch.put(key, value);
                 }
                 engine.write(batch, WriteOptions { sync: true })?;
-                [0; WAL_PARTITIONS]
+                Committed::EMPTY
             }
             Some(StoreMetadata {
                 migration: Some(_), ..
             }) => {
                 bail!("{REFUSAL} a migration into this store is unfinished");
             }
-            Some(StoreMetadata { applied, .. }) => applied,
+            Some(StoreMetadata {
+                applied,
+                max_version,
+                ..
+            }) => Committed {
+                applied,
+                max_version,
+            },
         };
         Ok(Self::over(engine, &applied, None))
     }
@@ -816,12 +950,12 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     pub fn open_sealed(engine: Arc<E>, encryption: &Encryption) -> anyhow::Result<Self> {
         let metadata = read_store_metadata(&*engine.snapshot()?)?;
         let mut batch = WriteBatch::new();
-        let (applied, row) = match metadata {
+        let (committed, row) = match metadata {
             None => {
                 for (key, value) in format_rows() {
                     batch.put(key, value);
                 }
-                ([0; WAL_PARTITIONS], None)
+                (Committed::EMPTY, None)
             }
             Some(StoreMetadata {
                 migration: Some(_), ..
@@ -829,8 +963,17 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                 bail!("{REFUSAL} a migration into this store is unfinished");
             }
             Some(StoreMetadata {
-                applied, keyring, ..
-            }) => (applied, keyring),
+                applied,
+                keyring,
+                max_version,
+                ..
+            }) => (
+                Committed {
+                    applied,
+                    max_version,
+                },
+                keyring,
+            ),
         };
         let (mut keyring, mut row_changed) = match row {
             Some(row) => {
@@ -888,7 +1031,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         if !batch.is_empty() {
             engine.write(batch, WriteOptions { sync: true })?;
         }
-        Ok(Self::over(engine, &applied, keyring.map(Arc::new)))
+        Ok(Self::over(engine, &committed, keyring.map(Arc::new)))
     }
 
     /// Runs a present `seal_pass` to its end (`TG-ENC-004`): walks `0x10` then
@@ -1015,16 +1158,12 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         Ok(open_value(self.keyring.as_deref(), engine_key, value)?)
     }
 
-    fn over(
-        engine: Arc<E>,
-        applied: &[u64; WAL_PARTITIONS],
-        keyring: Option<Arc<Keyring>>,
-    ) -> Self {
+    fn over(engine: Arc<E>, committed: &Committed, keyring: Option<Arc<Keyring>>) -> Self {
         Self {
             engine,
             registry_lock: Mutex::new(()),
             cache: RwLock::new(HashMap::new()),
-            applied: Mutex::new(*applied),
+            applied: Mutex::new(*committed),
             returned: AtomicU64::new(0),
             durable: AtomicU64::new(0),
             pass_sync: None,
@@ -1086,13 +1225,20 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                 }
                 batch.put(meta_key(META_MIGRATION), initial_mark.to_vec());
                 engine.write(batch, WriteOptions { sync: true })?;
-                (initial_mark.to_vec(), [0; WAL_PARTITIONS])
+                (initial_mark.to_vec(), Committed::EMPTY)
             }
             Some(StoreMetadata {
                 migration: Some(mark),
                 applied,
+                max_version,
                 ..
-            }) => (mark, applied),
+            }) => (
+                mark,
+                Committed {
+                    applied,
+                    max_version,
+                },
+            ),
             Some(StoreMetadata {
                 migration: None, ..
             }) => bail!(
@@ -1239,6 +1385,19 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     /// A refused map name (nothing is written); `map id space exhausted`;
     /// an engine error, with nothing of the batch applied.
     pub fn write_records(&self, ops: &[RecordOp<'_>], options: WriteOptions) -> anyhow::Result<()> {
+        self.write_ops(ops, options, None).map(drop)
+    }
+
+    /// [`Self::write_records`]; with `max_version` the `max_version` row the
+    /// store holds, the batch also puts the highest sequence of the resolved
+    /// [`RecordOp::Version`] ops when it is above that row, and the call
+    /// returns the row as the batch leaves it.
+    fn write_ops(
+        &self,
+        ops: &[RecordOp<'_>],
+        options: WriteOptions,
+        max_version: Option<u64>,
+    ) -> anyhow::Result<u64> {
         let mut needs: BTreeMap<&str, u8> = BTreeMap::new();
         for op in ops {
             if let Some((map, need)) = op.map_need() {
@@ -1252,6 +1411,9 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         for (key, value) in &plan.puts {
             batch.put(key.clone(), value.clone());
         }
+        // The highest resolved `Version` sequence; counted only when the
+        // caller holds the `max_version` row it compares with.
+        let mut highest = 0u64;
         for op in ops {
             match *op {
                 RecordOp::Put {
@@ -1300,8 +1462,35 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                     batch.put(meta_key(META_WAL_WATERMARK), vec![1]);
                     batch.delete(meta_key(META_WAL_IMPORT_PENDING));
                 }
+                RecordOp::Version {
+                    map,
+                    key,
+                    seq,
+                    removed,
+                    row,
+                } => {
+                    // A map without an id stored no record of it, so no
+                    // stale frame can overwrite anything, and issuing an id
+                    // would bring a dropped map's name back (TG-TEN-002).
+                    if let Some((map_id, _)) = plan.rows.get(map).copied().flatten() {
+                        if row {
+                            batch.put(
+                                version_row_key(map, map_id, key),
+                                version_row_value(KeyVersion { seq, removed }),
+                            );
+                        }
+                        highest = highest.max(seq);
+                    }
+                }
             }
         }
+        // Never lowered: only a higher value is put.
+        let max_version = max_version.map(|held| {
+            if highest > held {
+                batch.put(MAX_VERSION_KEY.to_vec(), highest.to_be_bytes().to_vec());
+            }
+            held.max(highest)
+        });
         if !batch.is_empty() {
             self.engine.write(batch, options)?;
         }
@@ -1315,7 +1504,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                 }
             }
         }
-        Ok(())
+        Ok(max_version.unwrap_or(0))
     }
 
     /// Visits every record of `(map, backup)` in [`PARTITION_THEN_KEY`]
@@ -1442,8 +1631,8 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         Ok(names)
     }
 
-    /// Removes `name`'s registry rows and every record of it, primary and
-    /// backup, in one durable engine batch under `registry_lock`; `false`
+    /// Removes `name`'s registry rows, every record of it, primary and
+    /// backup, and every version row of it, in one durable engine batch under `registry_lock`; `false`
     /// when it has no registry row (dropped already). The cache entry is
     /// evicted after the batch returned: a reader that re-inserts a stale
     /// row meanwhile is harmless only because the write-behind close refuses
@@ -1472,10 +1661,78 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                 );
             }
         }
+        // Version rows are keyed by WAL partition, so the map has one range
+        // in each; with its records gone they describe nothing (TG-TEN-002).
+        for partition in 0..PARTITION_COUNT {
+            batch.delete_range(
+                record_prefix(KS_RECORD_VERSION, partition, map_id),
+                record_prefix(KS_RECORD_VERSION, partition, map_id + 1),
+            );
+        }
         self.engine.write(batch, WriteOptions { sync: true })?;
         drop(guard);
         self.cache.write().remove(name);
         Ok(true)
+    }
+
+    /// Refuses a version row at `seq` below the one `(map, key)` holds
+    /// (`TG-WAL-015`); equal is a re-commit. Read under the commit lock, so
+    /// no commit or reclaim moves the row between this read and the write.
+    fn check_version_regression(&self, map: &str, key: &str, seq: u64) -> anyhow::Result<()> {
+        // A map with no id holds no version row.
+        let Some((map_id, _)) = self.cached_row(map)? else {
+            return Ok(());
+        };
+        let Some(value) = self.engine.get(&version_row_key(map, map_id, key))? else {
+            return Ok(());
+        };
+        let held = decode_version_value(&value)?.seq;
+        // Lower would let a replay apply frames the store already holds.
+        if seq < held {
+            let refusal = format!(
+                "record version regression refused: {map}/{key} holds {held}, the commit carries \
+                 {seq}"
+            );
+            tracing::error!("{refusal}");
+            bail!(refusal);
+        }
+        Ok(())
+    }
+
+    /// Pushes the [`RecordOp::Version`] op of every write of a commit
+    /// carrying a WAL sequence, with a row for a write above `next`, its
+    /// partition's watermark after the commit (`TG-WAL-015`). Called under
+    /// the commit lock.
+    fn push_versions<'w>(
+        &self,
+        writes: &[StoreWrite<'w>],
+        next: &[u64; WAL_PARTITIONS],
+        ops: &mut Vec<RecordOp<'w>>,
+    ) -> anyhow::Result<()> {
+        for write in writes {
+            let (map, key, seq, removed) = match *write {
+                StoreWrite::Put { map, key, seq, .. } => (map, key, seq, false),
+                StoreWrite::Remove { map, key, seq, .. } => (map, key, seq, true),
+            };
+            // 0 = no WAL is attached: no frame can be replayed over the key.
+            if seq == 0 {
+                continue;
+            }
+            // No frame at or below the watermark is replayed, so a row there
+            // would never be read; an existing one is left to the reclaim.
+            let row = seq > next[wal_partition(map, key) as usize];
+            if row {
+                self.check_version_regression(map, key, seq)?;
+            }
+            ops.push(RecordOp::Version {
+                map,
+                key,
+                seq,
+                removed,
+                row,
+            });
+        }
+        Ok(())
     }
 
     /// Writes one op for `(map, key)` and nothing else.
@@ -1518,6 +1775,14 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     pub(crate) fn registry_cache_len(&self) -> usize {
         self.cache.read().len()
     }
+}
+
+/// `space ‖ partition`, the head of every key of one partition of a keyspace.
+fn partition_head(space: u8, partition: u32) -> Vec<u8> {
+    let mut head = Vec::with_capacity(5);
+    head.push(space);
+    head.extend_from_slice(&partition.to_be_bytes());
+    head
 }
 
 /// The engine range of one partition of a map: `[ks ‖ p ‖ id, ks ‖ p ‖ (id + 1))`,
@@ -1919,7 +2184,7 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         // Check, write and update under one lock and with no `.await`, so
         // no other commit can store a row between this check and this write.
         let mut held = self.applied.lock();
-        let mut next = *held;
+        let mut next = held.applied;
         for &(partition, sequence) in &commit.applied {
             let Some(slot) = next.get_mut(partition as usize) else {
                 bail!(
@@ -1943,10 +2208,17 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
                 sequence,
             });
         }
+        // After the watermarks, so `next` is each partition's watermark as
+        // this commit leaves it (TG-WAL-015).
+        self.push_versions(&commit.writes, &next, &mut ops)?;
         let sync = self.commit_sync();
-        match self.write_records(&ops, WriteOptions { sync }) {
-            Ok(()) => {
-                *held = next;
+        match self.write_ops(&ops, WriteOptions { sync }, Some(held.max_version)) {
+            Ok(max_version) => {
+                // Raised only now: raised before a write that then failed,
+                // a later commit between the durable and the raised value
+                // would skip its put and leave a version row above the row.
+                held.applied = next;
+                held.max_version = max_version;
                 // `returned` before `durable`, both under the lock: a
                 // lock-free reader that loads them in the same order never
                 // sees this commit durable before it counts it.
@@ -1982,6 +2254,77 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         true
     }
 
+    async fn load_version(&self, map: &str, key: &str) -> anyhow::Result<Option<KeyVersion>> {
+        check_name(map)?;
+        let snapshot = self.engine.snapshot()?;
+        let Some(map_id) = self.read_map_id(&*snapshot, map)? else {
+            return Ok(None);
+        };
+        snapshot
+            .get(&version_row_key(map, map_id, key))?
+            .map(|value| decode_version_value(&value))
+            .transpose()
+    }
+
+    /// Collects the candidates of every partition from one snapshot without
+    /// the commit lock, then deletes them under it in chunks of at most
+    /// [`RECLAIM_CHUNK`], each re-read by a point get and deleted only while
+    /// it is still at or below the watermark: a commit that rewrote the row
+    /// above it meanwhile keeps it (`TG-WAL-015`). The `max_version` row lies
+    /// outside every partition range. The deletes are not synced: a row a
+    /// crash brings back is at or below a durable watermark, dead, and the
+    /// next reclaim drops it again.
+    fn reclaim_record_versions(&self, watermarks: &[u64]) -> anyhow::Result<u64> {
+        let started = std::time::Instant::now();
+        let mut rows_seen: u64 = 0;
+        let mut candidates: Vec<(Vec<u8>, u64)> = Vec::new();
+        {
+            let snapshot = self.engine.snapshot()?;
+            for (partition, &watermark) in (0..PARTITION_COUNT).zip(watermarks) {
+                // Every version is at least 1, so nothing is at or below 0.
+                if watermark == 0 {
+                    continue;
+                }
+                let range = KeyRange {
+                    start: Some(partition_head(KS_RECORD_VERSION, partition)),
+                    end: Some(partition_head(KS_RECORD_VERSION, partition + 1)),
+                };
+                for entry in snapshot.iter(range)? {
+                    let (key, value) = entry?;
+                    rows_seen += 1;
+                    if decode_version_value(&value)?.seq <= watermark {
+                        candidates.push((key, watermark));
+                    }
+                }
+            }
+        }
+        let mut rows_dropped: u64 = 0;
+        for chunk in candidates.chunks(RECLAIM_CHUNK) {
+            let _held = self.applied.lock();
+            let mut batch = WriteBatch::new();
+            for (key, watermark) in chunk {
+                let Some(value) = self.engine.get(key)? else {
+                    continue;
+                };
+                if decode_version_value(&value)?.seq <= *watermark {
+                    batch.delete(key.clone());
+                }
+            }
+            let dropped = u64::try_from(batch.len()).unwrap_or(u64::MAX);
+            if !batch.is_empty() {
+                self.engine.write(batch, WriteOptions { sync: false })?;
+            }
+            rows_dropped += dropped;
+        }
+        tracing::debug!(
+            rows_seen,
+            rows_dropped,
+            elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "record versions reclaimed"
+        );
+        Ok(rows_dropped)
+    }
+
     fn wal_keyring(&self) -> Option<Arc<Keyring>> {
         self.keyring.clone()
     }
@@ -1994,11 +2337,13 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
                 imported: held.imported,
                 import_pending: held.import_pending,
                 by_partition: held.applied.to_vec(),
+                max_version: held.max_version,
             },
             None => AppliedWatermarks {
                 imported: false,
                 import_pending: false,
                 by_partition: vec![0; WAL_PARTITIONS],
+                max_version: 0,
             },
         }))
     }
@@ -2047,7 +2392,7 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         if self.engine.get(&meta_key(META_WAL_WATERMARK))?.is_some() {
             bail!("applied watermarks refused: the store has imported its WAL sidecars already");
         }
-        let mut next = *held;
+        let mut next = held.applied;
         let mut ops = Vec::with_capacity(rows.len() + 1);
         for &(partition, sequence) in rows {
             let Some(slot) = next.get_mut(partition as usize) else {
@@ -2069,7 +2414,7 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         // the batch of the rows it vouches for and nowhere else (TG-ENG-006).
         ops.push(RecordOp::MarkWatermarksImported);
         self.write_records(&ops, WriteOptions { sync: true })?;
-        *held = next;
+        held.applied = next;
         Ok(())
     }
 }
@@ -2492,6 +2837,81 @@ mod sealing_tests {
         let again = rows(&**engine);
         drop(EngineMapDataStore::open_sealed(Arc::clone(engine), &rotation).expect("ignored"));
         assert_eq!(rows(&**engine), again);
+    }
+
+    /// Seal and unseal passes walk `0x10`/`0x11` only: the version rows and
+    /// the `max_version` row stay byte for byte, and the store reopens and
+    /// reads them (`TG-WAL-015`).
+    #[test]
+    fn seal_and_unseal_passes_leave_record_versions_byte_identical() {
+        versions_survive_passes(&Arc::new(MemKvEngine::new()));
+        let dir = tempfile::tempdir().expect("tempdir");
+        versions_survive_passes(&Arc::new(
+            RedbKvEngine::open(&dir.path().join("engine.redb")).expect("open"),
+        ));
+    }
+
+    fn versions_survive_passes<E: KvEngine>(engine: &Arc<E>) {
+        let version_rows = |engine: &E| -> Rows {
+            rows(engine)
+                .into_iter()
+                .filter(|(k, _)| k[0] == KS_RECORD_VERSION)
+                .collect()
+        };
+        {
+            let store = EngineMapDataStore::open(Arc::clone(engine)).expect("open");
+            let value = lww("v");
+            let writes = vec![
+                StoreWrite::Put {
+                    map: "m",
+                    key: "a",
+                    value: PutValue::Value(&value),
+                    store_time: 0,
+                    seq: 5,
+                },
+                StoreWrite::Remove {
+                    map: "m",
+                    key: "b",
+                    store_time: 0,
+                    seq: 6,
+                },
+            ];
+            block_on(store.commit(&FlushCommit {
+                writes,
+                applied: vec![],
+            }))
+            .expect("commit");
+        }
+        let before = version_rows(engine);
+        assert_eq!(before.len(), 3, "two version rows and max_version");
+        let provider = kek();
+        for (encryption, sealed) in [(on(&provider), true), (off(&provider), false)] {
+            let store =
+                EngineMapDataStore::open_sealed(Arc::clone(engine), &encryption).expect("open");
+            store.run_seal_pass().expect("pass");
+            drop(store);
+            assert!(
+                record_rows(&**engine)
+                    .values()
+                    .all(|v| (v[0] == SEALED_MARK) == sealed),
+                "the pass did not run"
+            );
+            assert_eq!(version_rows(engine), before, "a pass touched 0x12");
+            let store =
+                EngineMapDataStore::open_sealed(Arc::clone(engine), &encryption).expect("reopen");
+            block_on(async {
+                assert_eq!(
+                    store.load_version("m", "b").await.expect("read"),
+                    Some(KeyVersion {
+                        seq: 6,
+                        removed: true
+                    })
+                );
+                assert_eq!(store.load("m", "a").await.expect("load"), Some(lww("v")));
+            });
+            let held = store.applied_watermarks().expect("read").expect("kept");
+            assert_eq!(held.max_version, 6);
+        }
     }
 
     /// 30 001 records over two maps and both spaces: four batches of the pass.

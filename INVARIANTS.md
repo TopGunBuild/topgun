@@ -218,32 +218,19 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 
 ### TG-WAL-006: WAL re-replay is merge-idempotent for `RecordValue::Lww` (enforced, LWW-scoped)
 
-- **Scope:** `WalRecovery::run` replay through `prepare_entry`, for `RecordValue::Lww` values.
-- **Statement (positive):** re-replaying a WAL frame whose value is OLDER than the current durable
-  value MUST NOT change the durable value, for `RecordValue::Lww`: `prepare_entry` reads the current
-  value and discards a modern Lww frame whose HLC timestamp is strictly lower (last-write-wins by
-  timestamp); ties and newer timestamps write through. `WalStorePayload::Legacy` frames (synthesized
-  always-merge timestamp), `RecordValue::OrMap`/`OrTombstones` frames, and a cross-kind (non-Lww
-  stored) value BYPASS the gate and keep the pre-existing blind replay. `write_one` stays a
-  CRDT-agnostic blind insert; the merge lives at the recovery boundary.
-- **Maintaining code:** `wal/mod.rs::prepare_entry` (the `RecordValue::Lww` read-compare gate) +
-  `run` / call-site doc-contracts; `datastores/redb.rs` (`write_one` doc-comment records the
-  guarantee lives upstream).
-- **Enforcing test:** `wal/mod.rs::tests::replay_lww_gate_discards_older_frame_isolated` (older
-  discarded, ties/newer through, gate-off clobbers) and `::replay_or_crosskind_and_legacy_bypass_lww_gate`
-  (the bypass proof, since the harness model is LWW-only); the harness value-equality case
-  `wal_harness::cases::ac4_5_replay_clobber_caught_by_value_equality_oracle`.
-- **Superseded (still true, kept):** the weaker in-window proptests
-  `prefix_watermark_proptest.rs::a_frame_written_after_the_partition_drains_is_still_replayed`
-  and `::a_mid_loop_remove_all_failure_still_replays_the_earlier_tombstones` remain valid and are
-  subsumed by the stronger property above.
-- **OR residue (routed, NOT closed here):** OR-Map merge-idempotency as an independent property is
-  owned by `TG-OR-003` / SPEC-349b (tracked by TODO-608), where delta-fold-delegates-to-live-apply
-  answers it by construction; this invariant covers only the `RecordValue::Lww` case.
-- **Violation consequence:** timestamp regression on crash-recovery — a stale re-replayed frame
-  resurrects an older durable value.
-- **Discovered by:** SPEC-350 execution (AC4(b) honest-unmet escalation); closed by SPEC-353.
-- **Status:** decided, **enforced (LWW-scoped)**.
+- **Superseded by `TG-WAL-015`.** This entry stated an HLC gate: `prepare_entry` read the stored
+  value and discarded an LWW frame whose HLC timestamp was strictly lower. That gate is deleted.
+  Replay now discards a frame of every kind, LWW included, at or below its key's stored record
+  version, the WAL sequence of the newest write the stored state reflects (`TG-WAL-015`); the HLC
+  of a stored value is no longer read on replay. The ID is kept so that earlier citations resolve.
+- **Enforcing test:** the rewritten cases of `TG-WAL-015`:
+  `wal/mod.rs::tests::replay_version_gate_discards_a_frame_at_or_below_the_version_isolated`,
+  `::replay_version_gate_covers_or_crosskind_and_legacy_frames`, and the harness value-equality case
+  `wal_harness::cases::ac4_5_replay_clobber_caught_by_value_equality_oracle` (its defect mode turns
+  the version gate off).
+- **Discovered by:** SPEC-350 execution (AC4(b) honest-unmet escalation); closed by SPEC-353;
+  superseded by SPEC-419.
+- **Status:** superseded by `TG-WAL-015`.
 
 ### TG-WAL-007: WAL write-path failures fail-stop through one abort-based mechanism
 
@@ -296,42 +283,14 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 
 ### TG-WAL-009: WAL re-replay is idempotent for `WalOp::Remove` (enforced, Remove-scoped)
 
-- **Scope:** `WalRecovery::prepare_entry` `WalOp::Remove` arm. Modern Remove frames carry
-  `timestamp: None`; replay does not consult it.
-- **Statement (positive):** a `WalOp::Remove` replays UNCONDITIONALLY — a blind delete, identical to
-  the live remove path (`WriteBehindDataStore::remove`, which stages a pending-delete with no
-  timestamp compare). There is deliberately NO replay gate: the live path has no such condition, so a
-  gate would make `replay(Remove) != live(Remove)` and is itself unsound — an HLC-sourced gate
-  wrongly skipped a Remove whose sourced value-HLC was strictly older than the LWW survivor, losing
-  the acked delete (surfaced as `AckedWriteLost`). Idempotency is a property of the replay ORDER, not
-  a per-frame timestamp compare.
-- **Warrant (why no gate is NEEDED — structural non-reachability):** under prefix-complete, strictly
-  in-order replay of the unapplied window, a stale Remove can never delete a strictly-newer
-  re-creation. Let the Remove be at WAL sequence N and W the prefix-complete applied watermark
-  (`min(pending) - 1`, never at/above an unresolved sequence). For the Remove to be replayed, N > W.
-  A re-creation strictly newer than it has, by per-partition monotonic sequencing (= arrival order),
-  sequence M > N; for that re-creation to be durable-but-unframed (not re-enumerated after the
-  Remove) it must sit below the watermark, M <= W. Together: `M <= W < N < M` — a contradiction. So
-  either every strictly-newer re-creation's frame is also above W (enumerated and replayed AFTER the
-  Remove, re-creating the value) or the Remove is the newest op for the key (deleting is
-  live-correct). The stale-Remove-over-newer-frameless-value juxtaposition is reachable ONLY by
-  re-applying an already-applied older frame after the in-order pass — the harness
-  `re_replay_oldest_frame` seam, never a production path. The chain rests on FOUR premises, none of
-  them asserted prose — three are TEST-backed (each a catalogued enforced invariant with a real test:
-  (a), (c), (d)) and one is COMPILER/TYPE-backed ((b): a pure free function, which is why it cites no
-  invariant ID and needs no enforcing test):
-  - **(a) prefix-complete watermark** — `W = min(unresolved) - 1`, never at/above an unresolved
-    sequence, so `N > W` bounds the replay window: `TG-WAL-005` / `TG-WB-001` / `TG-WAL-003`.
-  - **(b) one sequence space per key** — `partition_for(map, key)` is deterministic, so a key's ops
-    are all sequenced in a single per-partition space (this is a SINGLE-SPACE claim, NOT itself an
-    ordering claim; the ordering is (c)/(d)): `partition_for` is a pure function.
-  - **(c) strictly-monotone per-partition sequence assignment** — a later arrival gets a strictly
-    HIGHER sequence, which is what makes the re-creation `M > N`: `TG-WAL-010`.
-  - **(d) strictly-ascending replay of the unapplied window** — a frame at `M > N` is replayed AFTER
-    the Remove at `N`, so the re-creation survives: `TG-WAL-011`.
-  Premises (c) and (d) carry the load-bearing `M > N` and replayed-after steps; (a) and (b) bound the
-  window and the sequence space. (b) alone is necessary-but-insufficient for the ordering — it is
-  (c)+(d) that order the space.
+- **Superseded by `TG-WAL-015`.** This entry stated that a `WalOp::Remove` replays
+  unconditionally, with no gate, and argued from in-order replay of the unapplied window that a
+  stale Remove can never delete a strictly newer re-creation; that argument held only for in-order
+  replay of the window, not for a frame applied again outside it. Replay now discards a Remove, like every frame kind, at or
+  below its key's stored record version, and a Remove above it deletes and stores a `removed`
+  version, which discards every older frame of the key (`TG-WAL-015`). Modern Remove frames still
+  carry `timestamp: None`; replay does not read it. The ID is kept so that earlier citations
+  resolve; the windowing residual below is still true.
 - **Windowing residual — structurally absent.** The frameless window existed only because the
   single-key flush method of the data store, removed, made a value durable in the inner store with
   no frame of its own. With the method gone, no path makes a value durable without a frame of its
@@ -359,31 +318,14 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     `a_subsuming_write_over_a_survivor_resolves_the_carried_sequences`). The early resolve is
     sound: the subsuming write's own frame is still pending at a higher sequence, so the watermark
     does not pass it. No value becomes durable without a frame of its own.
-- **Maintaining code:** `wal/mod.rs::prepare_entry` (`WalOp::Remove` arm, unconditional) + `run` /
-  `WalEntry` doc-contracts; `datastores/write_behind.rs` `remove`/`remove_all` append Remove frames
-  with `timestamp: None`.
-- **Enforcing test:** `wal/mod.rs::tests::replay_remove_replays_unconditionally_isolated`
-  (strictly-older / tie / newer / sentinel / legacy-`None` Remove all delete unconditionally, under
-  both `merge_gate` values — the discriminator vs the reverted gate) and the harness case
-  `wal_harness::cases::ac1_ac6_stale_remove_clobber_caught_by_o1_oracle` (O1 `AckedWriteLost` catches
-  the seam-injected out-of-order clobber; the `DefectMode::None` in-order run is green).
-  **Coverage note (deliberate narrowing):** the GENERATIVE baseline is not a second guard for the
-  gate-free property. `wal_harness`'s generator constrains arrival to a monotone-HLC domain (the O1
-  oracle's sound domain, `make_hlc_monotone`), which narrows it out of the range where a reintroduced
-  Remove gate would surface as `AckedWriteLost`. The isolated unit test above is therefore the SOLE
-  enforcing guard against gate reintroduction; oracle genericity over the non-monotone domain is owned
-  by TODO-610.
-- **Sibling invariant (DISTINCT):** `TG-WAL-006` owns the same re-replay-idempotency loss-class for
-  `RecordValue::Lww` VALUES — there a gate IS correct because live-Store is HLC-conditional (LWW), so
-  replay must mirror that compare. Remove is the counterpart whose live semantics are UNCONDITIONAL,
-  so it needs no gate; the two share the recovery-boundary layering but not a comparison basis.
-- **Violation consequence:** acked-write loss on crash-recovery — either an unsound gate wrongly
-  skips a legitimate delete, or (if the windowing residual were left unhandled) a stale-Remove
-  clobbers a re-creation. Both surface as `AckedWriteLost`.
+- **Enforcing test:** the rewritten cases of `TG-WAL-015`:
+  `wal/mod.rs::tests::replay_remove_deletes_above_the_version_and_is_discarded_at_or_below_it` and
+  the harness case `wal_harness::cases::ac1_ac6_stale_remove_clobber_caught_by_o1_oracle` (its
+  defect mode turns the version gate off; O1 `AckedWriteLost` catches the clobber).
 - **Discovered by:** SPEC-353 `/xask` (Review v1 flagged the Remove-clobber loss-class, routed to
   TODO-609); SPEC-354 Review v1 caught the unsound gate (an `AckedWriteLost` regression); closed by
-  SPEC-354 via a pre-fix `/xask` + a structural non-reachability spike.
-- **Status:** decided, **enforced (Remove-scoped)**.
+  SPEC-354 via a pre-fix `/xask` + a structural non-reachability spike; superseded by SPEC-419.
+- **Status:** superseded by `TG-WAL-015`.
 
 ### TG-WAL-010: Per-partition WAL sequence assignment is strictly monotone
 
@@ -392,9 +334,16 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Statement:** every assigned WAL sequence is drawn from one process-global atomic counter
   (`next_wal_sequence`, a `fetch_add`), so a partition's assigned sequences are a strictly-increasing
   subsequence: no sequence is ever reused, and a later arrival gets a strictly HIGHER sequence than
-  an earlier op on the same partition. This is what makes a re-created value carry `M > N` relative to
-  an older op on the same key — premise (c) of `TG-WAL-009`.
-- **Maintaining code:** `write_behind.rs` `next_wal_sequence` (atomic `fetch_add`) + `assign_wal_sequence`.
+  an earlier op on the same partition. At open the counter is seeded above every applied watermark,
+  the `max_version` row (at least every stored record version) and every retained frame, so a
+  sequence assigned after a restart is also above every sequence the store holds — a watermark or a
+  record version — even when the WAL ends below a version the store already holds (a `batched`
+  power loss, a WAL directory older than the data directory). This is what makes a later write of a
+  key carry a sequence above every version stored for it, so the replay gate of `TG-WAL-015` never
+  discards it.
+- **Maintaining code:** `write_behind.rs` `next_wal_sequence` (atomic `fetch_add`) + `assign_wal_sequence`;
+  the seed, `wal/mod.rs::max_observed_sequence` (folds the `max_version` that
+  `engine_store.rs::applied_watermarks` returned at `open_over_store`).
 - **Enforcing test:** `write_behind.rs::tests::wal_sequence_assignment_is_strictly_monotone_per_partition`
   — 8 tasks on 8 DISTINCT partitions × 250 assigns each, asserting BOTH clauses: each partition's own
   returns are strictly increasing in ARRIVAL order (per-partition monotonicity, the `M > N` step), and
@@ -406,9 +355,14 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   same mutation goes RED on the ARRIVAL-ORDER assertion (observed: partition 0 returned `… 83, 75 …`,
   i.e. the counter moved backwards), which aborts the test before the distinctness assertion is reached;
   a distinctness-only variant of this test reports the same break as ~705 distinct values out of 2000.
-  Mutation-verified in both directions (green with `fetch_add`, red without).
-- **Violation consequence:** sequence reuse or non-monotone assignment breaks both the prefix-complete
-  watermark and `TG-WAL-009`'s `M > N` step, admitting a stale-Remove clobber.
+  Mutation-verified in both directions (green with `fetch_add`, red without). The seed:
+  `store_mode_tests.rs::a11_the_sequence_seed_is_above_the_engine_watermark_of_a_fully_collected_partition`
+  (watermarks); the seed above stored record versions,
+  `store_mode_tests.rs::v10_a_write_after_a_restart_takes_a_sequence_above_every_stored_version`
+  (`TG-WAL-015`).
+- **Violation consequence:** sequence reuse or non-monotone assignment breaks the prefix-complete
+  watermark; a write sequenced at or below a stored record version is discarded by its own replay
+  after a crash (`TG-WAL-015`) — an acked write lost.
 - **Discovered by:** SPEC-354 Review v2 (cataloguing the gate-free warrant's premises).
 - **Status:** decided, **enforced**.
 
@@ -418,7 +372,7 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
 - **Statement:** `Wal::unapplied` returns the unapplied window sorted strictly ascending by WAL
   sequence — a defensive `sort_by_key(|e| e.sequence)` that holds REGARDLESS of the order frames were
   appended or enumerated across segments — and `run` replays that Vec in order. A frame at sequence
-  `M > N` is therefore always replayed AFTER the frame at `N` (premise (d) of `TG-WAL-009`), and the
+  `M > N` is therefore always replayed AFTER the frame at `N` (the order `TG-WAL-015`'s per-key hold relies on), and the
   contiguous-success frontier the applied watermark advances to is well-defined by sequence. In
   store mode the window is replayed in batches that keep this order — a batch takes the next frames
   in sequence and applies its writes in that order — and the partition's row is committed
@@ -469,6 +423,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   not recency, is what licenses that replace: tombstones a partial snapshot omitted would come back
   from the store's older value, resurrecting deleted tags after a crash. It is the load-bearing
   precondition of the OR fold's warrant (`TG-OR-003`).
+- **Scope note (`TG-WAL-015`):** the absolute-set write runs only for a snapshot frame above its
+  key's stored record version; one at or below it is discarded before the replace. Completeness is
+  still what licenses the replace of every snapshot the gate admits.
 - **Discovered by:** SPEC-349b Review v1 — the one precondition of that warrant left uncatalogued.
 - **Status:** decided, **enforced (type-backed)**.
 
@@ -501,8 +458,9 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     filtered, and a frame at or below `W(p)` that reached recovery would refuse the start
     (`WAL recovery: refusing to start: partition {p} holds frame {sequence} at or below its
     applied watermark {W}; …`), never be re-applied. (ii) The sequence counter is seeded from
-    the engine, `max(W(p), the highest sequence in any segment)`, so a new write never takes a
-    number at or below a stored row. Hence nothing acknowledged **and already in the data
+    the engine, `max(W(p), max_version, the highest sequence in any segment)`, `max_version`
+    being at least every stored record version (`TG-WAL-015`), so a new write never takes a
+    number at or below a stored watermark or record version. Hence nothing acknowledged **and already in the data
     directory** is lost or overwritten. What the data directory does not hold is only what the
     WAL held above `W(p)` at the moment the data directory was copied; after a stop that exited
     0 **and logged `write-behind shutdown: rollback hints written` with `drained=true`** that set
@@ -516,7 +474,8 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `wal-collected` read, `refuse_collected_above_watermark`), `write_wal_collected`, the
   collection tick (the mark written before the unlink, `G(p) ≤` the durable watermark),
   `unapplied`, `max_observed_sequence`, `covered_stream_segments`; `WalRecovery::run` (the
-  refusal of a frame at or below the engine watermark); `engine_store.rs` `applied_watermarks`.
+  refusal of a frame at or below the engine watermark); `engine_store.rs` `applied_watermarks`
+  (the watermarks and `max_version`).
 - **Enforcing test:** `store_mode_tests.rs::a09_a_data_directory_older_than_the_wal_directory_is_refused_and_nothing_is_written`
   (both variants: a data directory below the collected mark, and one with no applied watermarks
   beside the WAL directory of a killed run and of a clean stop),
@@ -586,6 +545,165 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   on Linux (TODO-939).
 - **Discovered by:** SPEC-409e (the per-partition fsync under the append lock, one fsync per
   partition per window).
+- **Status:** decided, **enforced**.
+
+### TG-WAL-015: WAL replay above the applied watermark is an idempotent merge: a frame at or below its key's stored record version changes nothing
+
+- **Scope:** store-mode WAL recovery (`WalRecovery::prepare_entry`, `prepare_frame`, `reprepare`,
+  `replay_partition`, `commit_batch`, `ReplayProgress`) over `EngineMapDataStore` and every test store
+  that keeps watermarks (`WatermarkKeeping`); the write-behind flush that commits buffered writes;
+  the WAL sequence seed; the collection tick. Every frame kind: LWW and legacy `Store`, OR snapshot
+  `Store`, `Remove`, `OrDelta` Add, Remove and Prune. Primary records only (`0x10`); backup rows
+  (`0x11`) have no version.
+- **Statement:** for a primary record of key `K` the store keeps a **record version** — the WAL
+  sequence of the newest write whose effect the stored state reflects, and whether that write
+  removed `K` — in a `0x12` row committed in the same engine batch as the record state it
+  describes. Replay discards every frame of `K` at or below that version without writing anything,
+  and applies a frame above it as before. So, above the horizon, replaying a frame again, or
+  replaying a stale frame of `K` alone, changes no record and no version row, and a key's version
+  never advances past a frame of it that replay left unapplied unless a written frame that
+  subsumes the key covers it. **Horizon:** the claim holds above each WAL partition's applied
+  watermark `W(p)`, the local replay horizon. No frame at or below `W(p)` is replayed (recovery
+  refuses one, `TG-WAL-013`), and version rows at or below the durable `W(p)` are dropped, so a key
+  with no row has version 0 and replays forward. The `max_version` row is at least every stored
+  version row and is never dropped, and the WAL sequence counter is seeded above it, so a write
+  made after a restart never takes a sequence at or below a stored version (`TG-WAL-010`).
+- **Warrant:**
+  - **A version is written with its record.** A `commit` writes, for a `Put { seq }` or
+    `Remove { seq }` above its partition's watermark after the commit (`W'(p)`), the record change
+    and the version row `(seq, kind)` in one engine batch (`TG-ENG-001`). A write at or below
+    `W'(p)` writes no version row: no frame there is replayed, so no decision reads one. A version
+    row below the row the key holds refuses the whole commit with nothing written
+    (`record version regression refused: {map}/{key} holds {held}, the commit carries {seq}`);
+    equal is a re-commit. `seq = 0` (a store with no WAL) writes neither a version row nor
+    `max_version`; a Remove of a map with no registry id writes no version row and issues no id
+    (`TG-TEN-002`, `TG-ENG-005`). Every commit that stores a record at a non-zero sequence raises
+    `max_version` to its highest such sequence, in the same batch, under the commit lock, and the
+    in-memory copy is raised only after the engine write returned `Ok`. A flushed entry stores as
+    its version the highest WAL sequence it resolves — its own frame's; the sequences carried onto
+    it are older writes of the same key, whose effects its value carries (`TG-WB-009`).
+  - **The gate.** `prepare_entry` first reads the key's version from the store; a frame whose
+    sequence is at or below it is discarded, counted as replayed for the frontier. A read error is
+    a prepare failure of that frame. Within a replay batch a key's frames are ascending
+    (`TG-WAL-011`), so a later admitted frame is always above an earlier one; the overlay keeps
+    values only.
+  - **The seed.** `max_observed_sequence` is the highest of the applied watermarks, the
+    `max_version` read at the store open, and every retained frame — so the seed is above every
+    version even when the WAL ends below one (a `batched` power loss, a WAL cut to its last fsync,
+    a WAL directory older than the data directory).
+  - **Per-key prefix completeness.** A frame of `K` that fails in prepare or that the store refuses
+    is an unresolved frame of `K` until it is written later in the same run (prepared again after
+    a refusal in its batch); the highest of them is `F(K)`. A frame that subsumes the key
+    (`Store`, `Remove`) prepares normally: its state is complete, so its version covers the failed
+    frames below it. A non-subsuming frame of `K` with an unresolved frame of `K` below it folds
+    onto the overlay only when its part has already written a subsuming frame of `K` above the
+    highest unresolved frame of `K` below it; otherwise it is left unapplied and is unresolved
+    itself. A committed frame releases `K` only when it subsumes the key, was written (not
+    discarded by the gate) and lies above `F(K)` read when its commit returned. The decision is
+    made in `prepare_frame`, the one path of the first preparation and of `reprepare`, so a part
+    prepared again after a refusal decides against the refused frames.
+  - **Reclamation.** The collection tick, after the store made the watermarks durable, drops the
+    version rows at or below their partition's durable watermark: candidates are read from a
+    snapshot, then each is read again under the commit lock and deleted only while still at or
+    below the watermark, at most 1 000 deletes per lock hold. A durable watermark never reverts, so
+    a dropped row could only have gated a frame that is never replayed again. `max_version` is
+    never dropped. A failed reclaim logs at `WARN`, and the tick still collects segments; a tick
+    that could not read the watermarks drops nothing. A reclaim during recovery is safe: the
+    durable watermark is never above recovery's committed contiguous frontier, and every frame
+    still to prepare lies above it.
+- **Maintaining code:** `storage/datastores/engine_store.rs` — `version_row_key`,
+  `decode_version_value`, `RecordOp::Version`, `push_versions`, `write_ops`, the `max_version`
+  row held with the watermarks under `applied`, `load_version`, `reclaim_record_versions`,
+  `read_store_metadata` (`0x12` admitted, `0x13..=0x1F` still refused), `drop_map` (`TG-TEN-002`);
+  `storage/wal/mod.rs` — `prepare_entry` (the gate), `prepare_frame` / `held_below`, `HeldKeys`,
+  `ReplayOverlay` (`subsuming`), `ReplayProgress::release`, `log_unreplayed`, `commit_batch`,
+  `max_observed_sequence`, the collection tick's reclaim; `storage/datastores/write_behind.rs` — the
+  flush's version (the highest WAL sequence an entry resolves, `0` with no WAL);
+  `storage/map_data_store.rs` — `StoreWrite::{Put, Remove}` `seq`, `KeyVersion`, `load_version`,
+  `reclaim_record_versions`, `AppliedWatermarks::max_version`, `WatermarkKeeping`.
+- **Enforcing test:** the engine rows, `engine_store_tests.rs::record_versions` —
+  `v01_a_commit_stores_version_rows_in_the_r1_layout`,
+  `v02_a_crash_shows_the_record_and_its_version_together_or_neither`,
+  `v03_a_write_at_or_below_the_watermark_stores_no_row`, `v04_a_malformed_version_row_is_an_error`,
+  `v05_a_remove_of_a_map_without_an_id_writes_nothing`,
+  `v06_a_commit_at_sequence_zero_writes_no_version`,
+  `v07_a_failed_engine_write_does_not_raise_max_version`,
+  `v08_a_version_regression_is_refused_and_writes_nothing`,
+  `v09_max_version_is_lazy_and_a_malformed_one_refuses_the_open`,
+  `v10_a_tenant_drop_removes_the_version_rows_of_its_maps`,
+  `v11_version_rows_open_and_0x13_is_still_refused`,
+  `v12_reclaim_drops_rows_at_or_below_the_watermark_only`, and
+  `engine_store.rs::sealing_tests::seal_and_unseal_passes_leave_record_versions_byte_identical`;
+  the gate per frame kind, `wal/mod.rs::tests::replay_version_gate_discards_a_frame_at_or_below_the_version_isolated`,
+  `replay_version_gate_covers_or_crosskind_and_legacy_frames`,
+  `replay_remove_deletes_above_the_version_and_is_discarded_at_or_below_it`; idempotence, the
+  `replay_idempotence_tests` module (every frame kind replayed again and alone after a full
+  replay, each stale case named, `equal_version_add_does_not_reorder`, and the property over
+  random op sequences, flush points, watermark pins and crash points); the harness defect modes
+  `wal_harness::cases::ac4_5_replay_clobber_caught_by_value_equality_oracle` and
+  `ac1_ac6_stale_remove_clobber_caught_by_o1_oracle` (gate off, caught by their oracles), and
+  `ac12_out_of_stamp_order_writes_recover_to_the_last_arrival`; the seed,
+  `wal/store_mode_tests.rs::v10_a_write_after_a_restart_takes_a_sequence_above_every_stored_version`;
+  per-key prefix completeness, `store_mode_tests.rs` —
+  `v11_a_refused_or_add_holds_the_later_or_remove_of_its_key_and_both_apply_at_the_next_boot`,
+  `v11_a_store_after_a_refused_frame_commits_and_its_version_covers_that_frame`,
+  `v11a_an_or_delta_after_a_written_store_of_its_held_key_applies_at_the_same_boot_as_on_main`,
+  `v11b_a_later_delta_failing_on_its_own_keeps_the_key_held_past_the_written_store`,
+  `v11c_a_refused_store_of_a_held_key_holds_the_delta_prepared_after_it`,
+  `v11d_a_store_the_gate_discards_releases_nothing_and_the_next_delta_stays_held`,
+  `v11e_a_store_refused_after_a_delta_does_not_hold_that_delta_on_the_second_preparation` (the
+  hold is decided by the unresolved frames of the key below the frame),
+  `v11f_a_frame_written_on_the_second_preparation_holds_its_key_no_longer`,
+  `v12_a_frame_failed_in_prepare_holds_the_later_delta_of_its_key` and
+  `v13_a_frame_failed_at_boot_is_discarded_once_a_live_write_of_its_key_is_flushed_above_it`;
+  the flush order, `write_behind_batch_tests.rs::b20_a_key_commits_in_wal_order_across_passes_and_a_coalesced_survivor_stores_its_own_wal_sequence`;
+  reclamation, `wal/durable_collect_tests.rs` —
+  `ac14_rows_above_the_durable_watermark_stay_and_the_tick_after_it_passes_them_drops_them`,
+  `ac14_a_commit_rewriting_a_row_above_the_watermark_between_the_snapshot_and_the_lock_keeps_it`,
+  `ac14_no_lock_hold_deletes_more_than_1000_rows`, `ac14_a_tick_whose_watermark_read_fails_drops_nothing`,
+  `ac14_a_failed_reclaim_warns_and_the_tick_still_unlinks_what_the_watermarks_cover` and
+  `ac14_a_reclaim_between_two_replay_batches_leaves_the_recovery_result_identical`; real crashes,
+  `wal/batched_replay_tests.rs::c90_crash_loop` (SIGKILL loop under `per_op` and `batched`: every
+  frame left above the watermark replays again with no row changed, `max_version` never decreases,
+  no sequence at or below it is handed out);
+  the over-the-wire rollback refusal, `tests/integration-rust/version-rollback.test.ts`.
+- **Violation consequence:** after a crash, a stale or repeated frame overwrites newer stored
+  state — an acknowledged write lost, a removed value back, an OR tag reordered or revived; a
+  write made after a restart sequenced at or below a stored version and discarded by its own
+  replay; a key's version advanced past a frame left unapplied, which is then lost.
+- **Not claimed:**
+  - Idempotence below the applied watermark: a frame there is refused, not replayed, and its
+    version row is dropped. A tier that replays from below the watermark (a snapshot, a cold tier)
+    must lower the horizon, fence collection at capture and filter tenant-dropped maps (TODO-844).
+  - A frame recovery leaves failed (TODO-823) is not applied again once a live write of its key
+    flushes a higher version: the node served the key without it, and the live write was made over
+    that state. The **held frames** — the non-subsuming frames of a key that follow an unresolved
+    frame of that key with no written subsuming frame of it above the highest unresolved frame of
+    the key below them — share that
+    outcome: left unapplied at that boot with their failed predecessor, served without, and lost
+    for good once a live write of the key flushes above them. This is TODO-823's class (a key whose
+    earlier frame failed at boot). A frame that follows a written subsuming frame of its key above
+    every unresolved frame of the key below it is not held: it is applied at that boot.
+  - A frame the store refuses for ever holds the later non-subsuming frames of its key for as long
+    as it is refused, and stalls its partition's watermark, so every key of that partition written
+    meanwhile keeps a version row until the refusal ends (TODO-824, TODO-828).
+  - The first boot of this binary after an unclean `batched` stop of an older binary: no version
+    row exists yet, so a retained older frame of a key can overwrite a newer value whose frame was
+    never fsynced — within the `batched` loss contract. A stop of the older binary that logs
+    `drained=true` before the upgrade leaves no frame above the watermark.
+  - An HLC stamp on Remove: Remove frames keep `timestamp: None`; a durable remove stamp belongs
+    to the tombstone horizon (TODO-634) and delete propagation (TODO-653). A removed key's row
+    lives only until the watermark passes it.
+  - Versions across nodes: a version is comparable only within one node's WAL sequence space;
+    moving or adopting a partition must ship its rows and seed above them (TODO-850). Cross-node
+    LWW by HLC (TODO-1002).
+  - The backup keyspace (`add_backup` / `remove_backup`), and writes made outside `commit`, which
+    write no version.
+  - Version rows are not sealed under encryption at rest (`TG-ENC-002` covers values): they hold
+    record keys and sequences.
+- **Supersedes:** `TG-WAL-006` (the LWW HLC replay gate, deleted) and `TG-WAL-009` (unconditional
+  Remove replay).
+- **Discovered by:** SPEC-419 (TODO-849).
 - **Status:** decided, **enforced**.
 
 ### TG-WB-001: The flushed watermark is prefix-complete — no mid-range hole
@@ -2021,6 +2139,10 @@ weaker than a test.
   base of a key an earlier frame of the batch wrote is that frame's value, read from the batch's
   own-batch overlay, which makes batched replay equal to per-frame replay; the fold itself stays
   one delta at a time.
+- **Scope note (`TG-WAL-015`):** both paths see only the frames above their key's stored record
+  version; a delta or snapshot frame at or below it is discarded before any fold or replace, so a
+  frame applied again changes nothing on either path. The equivalence is stated over the frames
+  the version gate admits.
 - **Maintaining code:** types + oracle landed (SPEC-346); fold delegates to the live apply path
   (single-algebra rule, SPEC-349 R-mandate). That path now has a named anchor: `crdt.rs::apply_or_delta`
   — the ONE extracted pure apply of the add-wins / remove-wins / prune algebra, which the live OR_ADD,
@@ -3021,7 +3143,8 @@ weaker than a test.
 - **Maintaining code:** `storage/datastores/write_behind.rs` — `TenantCloses` (`enter`, `close`,
   `lift`, `wait_in_flight`, `try_start_drop`), `InFlightWrite`, `OwnClose`, `DropRunning`,
   `drop_tenant`, `wal_frontier_snapshot`, `owned_writes_durable` and the `enter` call in each write
-  entry; `storage/datastores/engine_store.rs` — `drop_tenant`, `owned_map_names`, `drop_map`;
+  entry; `storage/datastores/engine_store.rs` — `drop_tenant`, `owned_map_names`, `drop_map` (with the
+  map's record version ranges in `0x12`, one per WAL partition, in the batch of its records);
   `storage/map_data_store.rs` — `check_tenant`, `DropOutcome`, `MapDataStore::drop_tenant`.
 - **Enforcing test:** `ac10a_a_drop_waits_for_a_write_parked_in_its_wal_append`,
   `ac10a_a_drop_waits_for_a_write_parked_before_its_queue_insert`,
@@ -3042,7 +3165,8 @@ weaker than a test.
   `continuous_writes_of_another_map_do_not_hold_the_drop`,
   `a_registration_raced_by_a_switch_is_taken_back_once` and
   `the_close_is_lifted_before_the_drop_slot_is_freed` (`write_behind.rs`, module
-  `tenant_drop_tests`); the store-level drop under `TG-ENG-005`.
+  `tenant_drop_tests`); the store-level drop under `TG-ENG-005`; the version rows,
+  `engine_store_tests.rs::record_versions::v10_a_tenant_drop_removes_the_version_rows_of_its_maps`.
 - **Violation consequence:** a dropped tenant's map comes back — from a write that raced the drop,
   a buffered entry flushed after it, or a WAL frame replayed at the next start — or a drop that
   failed leaves a tenant refusing writes with nothing deleted, or lifts the permanent close of an

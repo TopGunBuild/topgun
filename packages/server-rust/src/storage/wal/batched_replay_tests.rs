@@ -34,8 +34,8 @@ use super::tests::delta_frame;
 use super::{OrDelta, Wal, WalEntry, WalFsyncPolicy, WalOp, WalRecovery, WalWriter};
 use crate::storage::datastores::engine_store::{EngineMapDataStore, KS_PARTITION_META, KS_PRIMARY};
 use crate::storage::map_data_store::{
-    FlushCommit, LeafSink, MapDataStore, PutValue, RecordRefused, ScanBatch, ScanCursor,
-    StoreBrokenCause, StoreErrorClass, StoreWrite,
+    FlushCommit, KeyVersion, LeafSink, MapDataStore, PutValue, RecordRefused, ScanBatch,
+    ScanCursor, StoreBrokenCause, StoreErrorClass, StoreWrite,
 };
 use crate::storage::record::{OrMapEntry, RecordValue};
 
@@ -45,7 +45,7 @@ use crate::storage::record::{OrMapEntry, RecordValue};
 
 /// How a [`FaultStore`] refuses a commit that holds a poisoned put.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Refusal {
+pub(super) enum Refusal {
     /// `RecordRefused` naming the poisoned writes: the store takes the rest
     /// once they are left out.
     Record,
@@ -82,8 +82,8 @@ impl std::error::Error for InjectedBroken {}
 /// [`poisoned`]) is refused by `add` and by `commit`, `load` of a chosen key
 /// fails, and the next `n` commits fail as a broken store. Every `commit`,
 /// `add` and `remove` call is logged.
-struct FaultStore {
-    inner: Arc<EngineMapDataStore<CountingEngine>>,
+pub(super) struct FaultStore {
+    pub(super) inner: Arc<EngineMapDataStore<CountingEngine>>,
     refusal: Mutex<Option<Refusal>>,
     failing_loads: Mutex<BTreeSet<String>>,
     broken_commits: Mutex<usize>,
@@ -103,7 +103,7 @@ impl FaultStore {
         })
     }
 
-    fn refuse_poisoned(&self, refusal: Option<Refusal>) {
+    pub(super) fn refuse_poisoned(&self, refusal: Option<Refusal>) {
         *self.refusal.lock() = refusal;
     }
 
@@ -342,17 +342,30 @@ impl MapDataStore for FaultStore {
     fn import_applied_watermarks(&self, rows: &[(u32, u64)]) -> anyhow::Result<()> {
         self.inner.import_applied_watermarks(rows)
     }
+
+    async fn load_version(&self, map: &str, key: &str) -> anyhow::Result<Option<KeyVersion>> {
+        // Replay reads the version before anything else of a frame, so a key
+        // whose read is armed to fail fails its prepare here too (`TG-WAL-015`).
+        if self.failing_loads.lock().contains(key) {
+            anyhow::bail!("injected: the version read of {map}/{key} fails");
+        }
+        self.inner.load_version(map, key).await
+    }
+
+    fn reclaim_record_versions(&self, watermarks: &[u64]) -> anyhow::Result<u64> {
+        self.inner.reclaim_record_versions(watermarks)
+    }
 }
 
 /// A store-mode node whose WAL replays into a [`FaultStore`].
-struct FaultNode {
-    engine: Arc<CountingEngine>,
-    store: Arc<FaultStore>,
-    wal: Arc<WalWriter>,
+pub(super) struct FaultNode {
+    pub(super) engine: Arc<CountingEngine>,
+    pub(super) store: Arc<FaultStore>,
+    pub(super) wal: Arc<WalWriter>,
 }
 
 impl FaultNode {
-    fn open(root: &Root) -> Self {
+    pub(super) fn open(root: &Root) -> Self {
         let engine = open_engine(root);
         let inner = Arc::new(EngineMapDataStore::open(Arc::clone(&engine)).expect("store"));
         let store = FaultStore::new(inner);
@@ -365,19 +378,19 @@ impl FaultNode {
         Self { engine, store, wal }
     }
 
-    fn dyn_store(&self) -> Arc<dyn MapDataStore> {
+    pub(super) fn dyn_store(&self) -> Arc<dyn MapDataStore> {
         Arc::clone(&self.store) as Arc<dyn MapDataStore>
     }
 
-    fn recovery(&self) -> WalRecovery {
+    pub(super) fn recovery(&self) -> WalRecovery {
         WalRecovery::new(Arc::clone(&self.wal), Vec::new())
     }
 
-    async fn recover(&self) -> anyhow::Result<()> {
+    pub(super) async fn recover(&self) -> anyhow::Result<()> {
         self.recovery().run(self.dyn_store()).await
     }
 
-    async fn append(&self, partition: u32, entry: &WalEntry) {
+    pub(super) async fn append(&self, partition: u32, entry: &WalEntry) {
         self.wal
             .append(partition, entry)
             .await
@@ -393,6 +406,7 @@ impl FaultNode {
                 key,
                 value: PutValue::Value(value),
                 store_time: 0,
+                seq: 0,
             })
             .collect();
         self.store
@@ -405,12 +419,12 @@ impl FaultNode {
             .expect("seed the store");
     }
 
-    async fn load(&self, key: &str) -> Option<RecordValue> {
+    pub(super) async fn load(&self, key: &str) -> Option<RecordValue> {
         self.store.inner.load(MAP, key).await.expect("load")
     }
 
     /// The sequences of `partition` a restart would replay.
-    async fn replayable(&self, partition: u32) -> Vec<u64> {
+    pub(super) async fn replayable(&self, partition: u32) -> Vec<u64> {
         self.wal
             .unapplied(partition)
             .await
@@ -420,7 +434,7 @@ impl FaultNode {
             .collect()
     }
 
-    async fn close(self) {
+    pub(super) async fn close(self) {
         let Self { engine, store, wal } = self;
         let wal_weak = Arc::downgrade(&wal);
         drop(wal);
@@ -441,7 +455,7 @@ const P: u32 = 7;
 const Q: u32 = 11;
 const R: u32 = 13;
 
-fn ts(millis: u64) -> Timestamp {
+pub(super) fn ts(millis: u64) -> Timestamp {
     Timestamp {
         millis,
         counter: 0,
@@ -449,7 +463,7 @@ fn ts(millis: u64) -> Timestamp {
     }
 }
 
-fn entry(tag: &str, text: &str) -> OrMapEntry {
+pub(super) fn entry(tag: &str, text: &str) -> OrMapEntry {
     OrMapEntry {
         value: Value::String(text.to_string()),
         tag: tag.to_string(),
@@ -458,14 +472,14 @@ fn entry(tag: &str, text: &str) -> OrMapEntry {
     }
 }
 
-fn or_value(live: &[(&str, &str)], tombstones: &[&str]) -> RecordValue {
+pub(super) fn or_value(live: &[(&str, &str)], tombstones: &[&str]) -> RecordValue {
     RecordValue::OrMap {
         records: live.iter().map(|(t, v)| entry(t, v)).collect(),
         tombstones: tombstones.iter().map(|t| (*t).to_string()).collect(),
     }
 }
 
-fn remove_frame(key: &str, sequence: u64) -> WalEntry {
+pub(super) fn remove_frame(key: &str, sequence: u64) -> WalEntry {
     WalEntry {
         map: MAP.to_string(),
         key: key.to_string(),
@@ -767,7 +781,8 @@ async fn batched_outcome(window: &Window, entries: &[WalEntry], batch_frames: us
 }
 
 /// Seeds a fresh store and replays the window frame by frame through
-/// `replay_entry`, keeping the contiguous-success frontier by hand.
+/// `replay_entry`, keeping the contiguous-success frontier and the held keys
+/// by hand.
 async fn per_frame_outcome(window: &Window, entries: &[WalEntry]) -> Outcome {
     let root = Root::new();
     let engine = open_engine(&root);
@@ -785,6 +800,7 @@ async fn per_frame_outcome(window: &Window, entries: &[WalEntry]) -> Outcome {
             key,
             value: PutValue::Value(value),
             store_time: 0,
+            seq: 0,
         })
         .collect();
     inner
@@ -798,11 +814,31 @@ async fn per_frame_outcome(window: &Window, entries: &[WalEntry]) -> Outcome {
     let dyn_store = Arc::clone(&store) as Arc<dyn MapDataStore>;
     let mut frontier = 0;
     let mut failed = false;
+    // Batched replay holds a key once one of its frames failed: its later
+    // non-subsuming frames stay unapplied until a written subsuming frame of
+    // the key above every failed one (`TG-WAL-015`). Frame by frame, that is
+    // the key's highest failed sequence, cleared by such a frame.
+    let mut held: BTreeMap<(String, String), u64> = BTreeMap::new();
     for e in entries {
-        match WalRecovery::replay_entry(&dyn_store, e, 0, true).await {
-            Ok(()) if !failed => frontier = e.sequence,
-            Ok(()) => {}
-            Err(_) => failed = true,
+        let id = (e.map.clone(), e.key.clone());
+        let subsumes = e.op.subsumes_on_coalesce();
+        let result = if held.contains_key(&id) && !subsumes {
+            Err(())
+        } else {
+            WalRecovery::replay_entry(&dyn_store, e, 0, true)
+                .await
+                .map_err(|_| ())
+        };
+        if result.is_ok() {
+            if held.get(&id).is_some_and(|f| e.sequence > *f) {
+                held.remove(&id);
+            }
+            if !failed {
+                frontier = e.sequence;
+            }
+        } else {
+            held.insert(id, e.sequence);
+            failed = true;
         }
     }
     let mut values = Vec::new();
@@ -1507,6 +1543,17 @@ async fn crash_loop_writer(
     hold: bool,
 ) {
     let (_engine, store, wal) = open_loop_store(root, policy);
+    // The `max_version` this open read: every sequence this incarnation hands
+    // out must lie above it (`TG-WAL-015`).
+    let max_version = store
+        .applied_watermarks()
+        .expect("watermarks")
+        .expect("a store that keeps watermarks")
+        .max_version;
+    append_durable(
+        &root.join("opens-log"),
+        &format!("{incarnation}\t{max_version}"),
+    );
     let fsync_log = root.join("fsync-log");
     wal.test_set_fsync_observer(Some(Arc::new(move |path: &Path, length: u64| {
         append_durable(&fsync_log, &format!("{}\t{length}", path.display()));
@@ -1643,6 +1690,11 @@ struct LoopDump {
     unapplied: u64,
     /// The first sequence the open would hand out.
     seed: u64,
+    /// The store's `max_version`, read at the open before recovery.
+    max_version: u64,
+    /// Frames still above their partition's watermark after recovery, each
+    /// replayed once more through the version gate.
+    replayed_again: u64,
     rows: BTreeMap<u32, u64>,
     collected: BTreeMap<u32, u64>,
     /// `(map, key)` → the value's description.
@@ -1680,16 +1732,62 @@ fn describe(value: Option<&RecordValue>) -> String {
 async fn crash_loop_dump(root: &Path, policy: WalFsyncPolicy, name: &str) {
     use sha2::Digest as _;
     let (engine, store, wal) = open_loop_store(root, policy);
+    let max_version = store
+        .applied_watermarks()
+        .expect("watermarks")
+        .expect("a store that keeps watermarks")
+        .max_version;
+    let partitions = WalRecovery::discover_partitions(&root.join("wal")).expect("partitions");
     let mut unapplied = 0;
-    for partition in WalRecovery::discover_partitions(&root.join("wal")).expect("partitions") {
-        unapplied += wal.unapplied(partition).await.expect("unapplied").len();
+    for partition in &partitions {
+        unapplied += wal.unapplied(*partition).await.expect("unapplied").len();
     }
     WalRecovery::new(Arc::clone(&wal), Vec::new())
         .run(Arc::clone(&store))
         .await
         .expect("recovery");
+
+    // Every frame still above its partition's watermark, replayed once more
+    // through the version gate, changes no primary record and no version.
+    let records_and_versions = || {
+        let snapshot = crate::storage::datastores::kv_engine::KvEngine::snapshot(engine.as_ref())
+            .expect("engine snapshot");
+        snapshot
+            .iter(crate::storage::datastores::kv_engine::KeyRange::default())
+            .expect("engine iter")
+            .map(|item| item.expect("engine entry"))
+            .filter(|(k, _)| {
+                matches!(
+                    k.first(),
+                    Some(
+                        &KS_PRIMARY | &crate::storage::datastores::engine_store::KS_RECORD_VERSION
+                    )
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let recovered = records_and_versions();
+    let mut replayed_again = 0u64;
+    for partition in &partitions {
+        for entry in wal.unapplied(*partition).await.expect("unapplied") {
+            WalRecovery::replay_entry(&store, &entry, 0, true)
+                .await
+                .expect("a replay of one frame");
+            replayed_again += 1;
+        }
+    }
+    assert!(
+        records_and_versions() == recovered,
+        "replaying the frames above the watermark once more changed a row"
+    );
+
     let seed = wal.max_observed_sequence().await.expect("seed") + 1;
-    let mut lines = vec![format!("unapplied\t{unapplied}"), format!("seed\t{seed}")];
+    let mut lines = vec![
+        format!("unapplied\t{unapplied}"),
+        format!("seed\t{seed}"),
+        format!("max_version\t{max_version}"),
+        format!("replayed_again\t{replayed_again}"),
+    ];
     let watermarks = store
         .applied_watermarks()
         .expect("watermarks")
@@ -1734,6 +1832,8 @@ fn parse_dump(text: &str) -> LoopDump {
     let mut dump = LoopDump {
         unapplied: 0,
         seed: 0,
+        max_version: 0,
+        replayed_again: 0,
         rows: BTreeMap::new(),
         collected: BTreeMap::new(),
         values: BTreeMap::new(),
@@ -1744,6 +1844,8 @@ fn parse_dump(text: &str) -> LoopDump {
         match fields[0] {
             "unapplied" => dump.unapplied = fields[1].parse().expect("count"),
             "seed" => dump.seed = fields[1].parse().expect("seed"),
+            "max_version" => dump.max_version = fields[1].parse().expect("max_version"),
+            "replayed_again" => dump.replayed_again = fields[1].parse().expect("count"),
             "row" => {
                 dump.rows
                     .insert(fields[1].parse().expect("p"), fields[2].parse().expect("w"));
@@ -1929,6 +2031,23 @@ struct LoopReport {
     /// frame left in the WAL.
     below_w: u64,
     acked: usize,
+    /// Frames the dumps replayed once more after their recovery.
+    replayed_again: u64,
+}
+
+/// The `max_version` each writer incarnation read at its open, by incarnation.
+fn read_opens(root: &Path) -> BTreeMap<u64, u64> {
+    std::fs::read_to_string(root.join("opens-log"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| {
+            let (incarnation, max_version) = line.split_once('\t').expect("an opens-log line");
+            (
+                incarnation.parse().expect("incarnation"),
+                max_version.parse().expect("max_version"),
+            )
+        })
+        .collect()
 }
 
 /// Runs `kills` incarnations of one policy on one root; `held_at` names the
@@ -1945,10 +2064,13 @@ fn crash_loop(
     let mut rows_seen: BTreeMap<u32, u64> = BTreeMap::new();
     // No sequence at or below this may be handed out by the next incarnation.
     let mut floor = 0u64;
+    // The highest `max_version` any open has read so far: it never goes down.
+    let mut max_version_seen = 0u64;
     let mut report = LoopReport {
         kills: 0,
         below_w: 0,
         acked: 0,
+        replayed_again: 0,
     };
     let fail = |incarnation: u64, what: String| -> ! {
         panic!(
@@ -2010,6 +2132,23 @@ fn crash_loop(
                 format!("sequence {reused} handed out again: none at or below {floor} may be"),
             );
         }
+        let opened_at = read_opens(&root.path).get(&incarnation).copied();
+        let Some(opened_at) = opened_at else {
+            fail(incarnation, "the writer logged no open".to_string());
+        };
+        if let Some(below) = mine.iter().find(|s| **s <= opened_at) {
+            fail(
+                incarnation,
+                format!("sequence {below} handed out at or below the max_version {opened_at} its open read"),
+            );
+        }
+        if opened_at < max_version_seen {
+            fail(
+                incarnation,
+                format!("max_version went down from {max_version_seen} to {opened_at} (the writer's open)"),
+            );
+        }
+        max_version_seen = opened_at;
         if hold && mine.len() as u64 != HELD_OPS {
             fail(
                 incarnation,
@@ -2049,8 +2188,22 @@ fn crash_loop(
                 format!("the second open replays {} frames", dumps[1].unapplied),
             );
         }
+        for (name, dump) in ["a", "b"].iter().zip(&dumps) {
+            if dump.max_version < max_version_seen {
+                fail(
+                    incarnation,
+                    format!(
+                        "max_version went down from {max_version_seen} to {} (dump {name})",
+                        dump.max_version
+                    ),
+                );
+            }
+            max_version_seen = dump.max_version;
+            report.replayed_again += dump.replayed_again;
+        }
         let mut second = dumps[1].clone();
         second.unapplied = dumps[0].unapplied;
+        second.max_version = dumps[0].max_version;
         if second != dumps[0] {
             fail(
                 incarnation,
@@ -2169,20 +2322,30 @@ async fn run_crash_loops(test: &str, kills: u64) {
         crash_loop(test, WalFsyncPolicy::Batched, batched_seed, kills, Some(1))
     });
     println!(
-        "{test}: per_op seed {per_op_seed} kills {} acked {} below-W incarnations {}; batched seed \
-         {batched_seed} kills {} acked {} below-W incarnations {}; {:?}",
+        "{test}: per_op seed {per_op_seed} kills {} acked {} below-W incarnations {} replayed \
+         again {}; batched seed {batched_seed} kills {} acked {} below-W incarnations {} replayed \
+         again {}; {:?}",
         per_op.kills,
         per_op.acked,
         per_op.below_w,
+        per_op.replayed_again,
         batched.kills,
         batched.acked,
         batched.below_w,
+        batched.replayed_again,
         started.elapsed()
     );
     assert!(
         batched.below_w > 0,
         "no batched incarnation ended with a row above the frames its cut left (seed {batched_seed})"
     );
+    // No count of frames the version gate discards is required here: measured
+    // with a temporary counter, the recoveries of this loop and of its 50-kill
+    // variant discarded none under either policy — the kills never caught a
+    // flush that stored a write ahead of its partition's contiguous prefix.
+    // The gate on such a frame is proven by `replay_idempotence_tests` (every
+    // frame kind, each stale case, and the property over flush points, watermark
+    // pins and crash points) (`TG-WAL-015`).
 }
 
 #[tokio::test(flavor = "multi_thread")]

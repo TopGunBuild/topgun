@@ -1275,7 +1275,7 @@ pub(super) mod cases {
     }
 
     pub(in super::super) fn s21<K: EngineKind>() {
-        for first in [0x03u8, 0x0F, 0x12, 0x20, 0xFF] {
+        for first in [0x03u8, 0x0F, 0x13, 0x1F, 0x20, 0xFF] {
             let fresh = K::fresh();
             let mut rows = meta_rows(1, 0, 1);
             rows.push((vec![first, 0x01, 0x02], vec![0x07]));
@@ -2284,5 +2284,530 @@ mod mem_only {
         );
         let outcome = map_id_in(&*snapshot, "users");
         assert!(outcome.is_err(), "an engine error read as {outcome:?}");
+    }
+}
+
+/// Record versions (`TG-WAL-015`): the `0x12` rows a commit writes, the
+/// `max_version` row, their reads, their reclaim and their drop.
+mod record_versions {
+    use super::super::engine_store::{
+        decode_version_value, version_row_key, KS_RECORD_VERSION, MAX_VERSION_KEY,
+    };
+    use super::*;
+    use crate::storage::map_data_store::{
+        DropOutcome, FlushCommit, KeyVersion, PutValue, StoreWrite,
+    };
+
+    fn put_at<'a>(map: &'a str, key: &'a str, value: &'a RecordValue, seq: u64) -> StoreWrite<'a> {
+        StoreWrite::Put {
+            map,
+            key,
+            value: PutValue::Value(value),
+            store_time: 0,
+            seq,
+        }
+    }
+
+    fn remove_at<'a>(map: &'a str, key: &'a str, seq: u64) -> StoreWrite<'a> {
+        StoreWrite::Remove {
+            map,
+            key,
+            store_time: 0,
+            seq,
+        }
+    }
+
+    fn commit<E: KvEngine>(
+        store: &EngineMapDataStore<E>,
+        writes: Vec<StoreWrite<'_>>,
+        applied: Vec<(u32, u64)>,
+    ) -> anyhow::Result<()> {
+        block_on(store.commit(&FlushCommit { writes, applied }))
+    }
+
+    use crate::storage::map_data_store::wal_partition;
+
+    /// `0x12 ‖ WAL partition ‖ map id ‖ key`, spelled out byte by byte.
+    fn expected_row_key(map: &str, map_id: u32, key: &str) -> Vec<u8> {
+        let mut bytes = vec![0x12];
+        bytes.extend_from_slice(&wal_partition(map, key).to_be_bytes());
+        bytes.extend_from_slice(&map_id.to_be_bytes());
+        bytes.extend_from_slice(key.as_bytes());
+        bytes
+    }
+
+    fn expected_row_value(seq: u64, kind: u8) -> Vec<u8> {
+        let mut value = seq.to_be_bytes().to_vec();
+        value.push(kind);
+        value
+    }
+
+    fn version_rows<E: KvEngine + ?Sized>(engine: &E) -> Vec<(Vec<u8>, Vec<u8>)> {
+        dump(engine)
+            .into_iter()
+            .filter(|(k, _)| k.first() == Some(&KS_RECORD_VERSION) && k.len() > 1)
+            .collect()
+    }
+
+    fn max_version_row<E: KvEngine + ?Sized>(engine: &E) -> Option<u64> {
+        engine
+            .get(MAX_VERSION_KEY)
+            .expect("get")
+            .map(|v| u64::from_be_bytes(v.try_into().expect("max_version is 8 bytes")))
+    }
+
+    fn load_version<E: KvEngine>(
+        store: &EngineMapDataStore<E>,
+        map: &str,
+        key: &str,
+    ) -> Option<KeyVersion> {
+        block_on(store.load_version(map, key)).expect("load_version")
+    }
+
+    /// Two keys of one map whose WAL partitions differ.
+    fn two_keys_in_two_partitions(map: &str) -> (String, String) {
+        let first = "k0".to_string();
+        let second = (1..10_000)
+            .map(|i| format!("k{i}"))
+            .find(|k| wal_partition(map, k) != wal_partition(map, &first))
+            .expect("a key in another partition");
+        (first, second)
+    }
+
+    /// AC 1: a Put and a Remove above the watermark store their rows in the
+    /// R1 layout; `load_version` reads them; the Put of a new map gets its
+    /// row under the id the same batch issues, and so does the Remove of a
+    /// key of that map; `max_version` is the highest sequence.
+    #[test]
+    fn v01_a_commit_stores_version_rows_in_the_r1_layout() {
+        let engine = Arc::new(MemKvEngine::new());
+        let store = open(&engine);
+        let value = lww("v", 1);
+        commit(
+            &store,
+            vec![put_at("m", "a", &value, 5), remove_at("m", "b", 6)],
+            vec![],
+        )
+        .expect("commit");
+        let map_id = id_of(&*engine, "m").expect("the Put issued an id");
+        assert_eq!(
+            version_rows(&*engine),
+            {
+                let mut rows = vec![
+                    (expected_row_key("m", map_id, "a"), expected_row_value(5, 0)),
+                    (expected_row_key("m", map_id, "b"), expected_row_value(6, 1)),
+                ];
+                rows.sort();
+                rows
+            },
+            "the rows of R1, under the id issued in the same batch"
+        );
+        assert_eq!(
+            version_row_key("m", map_id, "a"),
+            expected_row_key("m", map_id, "a")
+        );
+        assert_eq!(
+            load_version(&store, "m", "a"),
+            Some(KeyVersion {
+                seq: 5,
+                removed: false
+            })
+        );
+        assert_eq!(
+            load_version(&store, "m", "b"),
+            Some(KeyVersion {
+                seq: 6,
+                removed: true
+            })
+        );
+        assert_eq!(load_version(&store, "m", "never"), None);
+        assert_eq!(load_version(&store, "unknown", "a"), None);
+        assert_eq!(max_version_row(&*engine), Some(6));
+        assert_eq!(
+            store
+                .applied_watermarks()
+                .expect("read")
+                .expect("kept")
+                .max_version,
+            6
+        );
+        // The reopened store reads the row it left.
+        drop(store);
+        let reopened = open(&engine);
+        assert_eq!(
+            reopened
+                .applied_watermarks()
+                .expect("read")
+                .expect("kept")
+                .max_version,
+            6
+        );
+    }
+
+    /// AC 1: a crash at any point of an unsynced commit shows a record and
+    /// its version row together or neither (one engine batch).
+    #[test]
+    fn v02_a_crash_shows_the_record_and_its_version_together_or_neither() {
+        let engine = Arc::new(MemKvEngine::new());
+        let mut store = open(&engine);
+        store.set_pass_sync(false);
+        let value = lww("v", 1);
+        commit(&store, vec![put_at("m", "a", &value, 5)], vec![]).expect("seed");
+        // The removal: the record goes and its kind-1 row comes.
+        commit(&store, vec![remove_at("m", "a", 7)], vec![]).expect("remove");
+        let map_id = id_of(&*engine, "m").expect("id");
+        let record = RecordKey::encode(RecordSpace::Primary, map_id, "a");
+        let row = expected_row_key("m", map_id, "a");
+        let mut states = BTreeSet::new();
+        for keep in 0..=2 {
+            let image = engine.crash_image(keep);
+            let record_held = image.get(&record).expect("get").is_some();
+            let version = image
+                .get(&row)
+                .expect("get")
+                .map(|v| decode_version_value(&v).expect("well-formed"));
+            let max = max_version_row(&image);
+            let state = match (record_held, version, max) {
+                (false, None, None) => "neither",
+                (
+                    true,
+                    Some(KeyVersion {
+                        seq: 5,
+                        removed: false,
+                    }),
+                    Some(5),
+                ) => "put",
+                (
+                    false,
+                    Some(KeyVersion {
+                        seq: 7,
+                        removed: true,
+                    }),
+                    Some(7),
+                ) => "removed",
+                other => panic!("crash image {keep} holds a torn state: {other:?}"),
+            };
+            states.insert(state);
+        }
+        assert_eq!(states.len(), 3, "every image was seen: {states:?}");
+    }
+
+    /// AC 1 (M12): a write at or below its partition's watermark after the
+    /// commit stores no row and leaves an existing one in place; the same
+    /// commit stores the row of a write above its own partition's watermark;
+    /// `max_version` counts both.
+    #[test]
+    fn v03_a_write_at_or_below_the_watermark_stores_no_row() {
+        let engine = Arc::new(MemKvEngine::new());
+        let store = open(&engine);
+        let (low, high) = two_keys_in_two_partitions("m");
+        let value = lww("v", 1);
+        commit(&store, vec![put_at("m", &low, &value, 3)], vec![]).expect("first");
+        let map_id = id_of(&*engine, "m").expect("id");
+        let low_row = (
+            expected_row_key("m", map_id, &low),
+            expected_row_value(3, 0),
+        );
+        assert_eq!(version_rows(&*engine), vec![low_row.clone()]);
+
+        // The commit's own watermark row for `low`'s partition is 10, so its
+        // write at 9 is below it: no row, and the row at 3 stays.
+        commit(
+            &store,
+            vec![put_at("m", &low, &value, 9), put_at("m", &high, &value, 11)],
+            vec![(wal_partition("m", &low), 10)],
+        )
+        .expect("second");
+        let high_row = (
+            expected_row_key("m", map_id, &high),
+            expected_row_value(11, 0),
+        );
+        let mut expected = vec![low_row.clone(), high_row];
+        expected.sort();
+        assert_eq!(version_rows(&*engine), expected);
+        assert_eq!(max_version_row(&*engine), Some(11));
+
+        // Equal to the watermark held (no row in this commit) is at or
+        // below it too, and still raises max_version.
+        commit(
+            &store,
+            vec![remove_at("m", &low, 12)],
+            vec![(wal_partition("m", &low), 12)],
+        )
+        .expect("third");
+        assert!(version_rows(&*engine).contains(&low_row));
+        assert_eq!(max_version_row(&*engine), Some(12));
+    }
+
+    /// AC 1: a malformed version row is an error at read, never skipped.
+    #[test]
+    fn v04_a_malformed_version_row_is_an_error() {
+        let engine = Arc::new(MemKvEngine::new());
+        let store = open(&engine);
+        let value = lww("v", 1);
+        commit(&store, vec![put_at("m", "a", &value, 5)], vec![]).expect("commit");
+        let map_id = id_of(&*engine, "m").expect("id");
+        let row = expected_row_key("m", map_id, "a");
+        for bad in [
+            vec![0u8; 8],
+            vec![0u8; 10],
+            expected_row_value(5, 2),
+            vec![],
+        ] {
+            raw_put(&*engine, &[(row.clone(), bad.clone())]);
+            let outcome = block_on(store.load_version("m", "a"));
+            assert!(outcome.is_err(), "{bad:?} read as {outcome:?}");
+            // A commit that would write the key's row reads it too.
+            let refused = commit(&store, vec![put_at("m", "a", &value, 6)], vec![]);
+            assert!(refused.is_err(), "{bad:?} let a commit through");
+        }
+    }
+
+    /// AC 1: a Remove of a map with no registry id writes no `0x12`, `0x01`
+    /// or `0x02` row and does not raise `max_version`.
+    #[test]
+    fn v05_a_remove_of_a_map_without_an_id_writes_nothing() {
+        let engine = Arc::new(MemKvEngine::new());
+        let store = open(&engine);
+        let before = dump(&*engine);
+        commit(&store, vec![remove_at("ghost", "k", 7)], vec![]).expect("commit");
+        assert_eq!(dump(&*engine), before, "a row was written");
+        assert_eq!(id_of(&*engine, "ghost"), None);
+        assert_eq!(
+            store
+                .applied_watermarks()
+                .expect("read")
+                .expect("kept")
+                .max_version,
+            0
+        );
+        // The in-memory value was not raised either: a later Put at 3 puts
+        // the row at 3.
+        let value = lww("v", 1);
+        commit(&store, vec![put_at("m", "k", &value, 3)], vec![]).expect("put");
+        assert_eq!(max_version_row(&*engine), Some(3));
+    }
+
+    /// AC 1: writes carrying `seq 0` (no WAL) write no version row and no
+    /// `max_version`.
+    #[test]
+    fn v06_a_commit_at_sequence_zero_writes_no_version() {
+        let engine = Arc::new(MemKvEngine::new());
+        let store = open(&engine);
+        let value = lww("v", 1);
+        commit(
+            &store,
+            vec![put_at("m", "a", &value, 0), remove_at("m", "b", 0)],
+            vec![],
+        )
+        .expect("commit");
+        assert!(id_of(&*engine, "m").is_some(), "the record was stored");
+        assert!(keys_in_space(&*engine, KS_RECORD_VERSION).is_empty());
+        // A commit of watermark rows alone writes none either.
+        commit(&store, vec![], vec![(3, 4)]).expect("watermarks only");
+        assert!(keys_in_space(&*engine, KS_RECORD_VERSION).is_empty());
+    }
+
+    /// AC 1 (M14): an engine write that fails leaves the in-memory
+    /// `max_version` where it was, so a later commit between the durable and
+    /// the attempted value still puts the row.
+    #[test]
+    fn v07_a_failed_engine_write_does_not_raise_max_version() {
+        let inner = Arc::new(MemKvEngine::new());
+        let engine = Arc::new(FailingWrites::new(Arc::clone(&inner)));
+        let store = open(&engine);
+        let value = lww("v", 1);
+        commit(&store, vec![put_at("m", "a", &value, 10)], vec![]).expect("first");
+        engine.arm(1);
+        assert!(commit(&store, vec![put_at("m", "b", &value, 30)], vec![]).is_err());
+        assert_eq!(max_version_row(&*inner), Some(10));
+        commit(&store, vec![put_at("m", "c", &value, 20)], vec![]).expect("third");
+        assert_eq!(
+            max_version_row(&*inner),
+            Some(20),
+            "the failed commit's sequence was taken as stored"
+        );
+        assert_eq!(
+            store
+                .applied_watermarks()
+                .expect("read")
+                .expect("kept")
+                .max_version,
+            20
+        );
+    }
+
+    /// AC 1: a commit that would write a row below the key's row is refused
+    /// with the R2 line and writes nothing; equal is a re-commit.
+    #[test]
+    fn v08_a_version_regression_is_refused_and_writes_nothing() {
+        let engine = Arc::new(MemKvEngine::new());
+        let store = open(&engine);
+        let value = lww("v", 1);
+        commit(&store, vec![put_at("m", "a", &value, 9)], vec![]).expect("first");
+        let before = dump(&*engine);
+        let other = lww("w", 2);
+        let refused = commit(
+            &store,
+            vec![put_at("m", "b", &other, 12), put_at("m", "a", &other, 7)],
+            vec![(0, 1)],
+        );
+        assert_eq!(
+            error_text(&refused),
+            "record version regression refused: m/a holds 9, the commit carries 7"
+        );
+        assert_eq!(dump(&*engine), before, "a refused commit wrote");
+        // Nothing in memory moved either: the watermark 1 is not held, so
+        // 0 is no regression.
+        commit(&store, vec![], vec![(0, 0)]).expect("watermark");
+        commit(&store, vec![put_at("m", "a", &other, 9)], vec![]).expect("equal");
+        assert_eq!(
+            load_version(&store, "m", "a"),
+            Some(KeyVersion {
+                seq: 9,
+                removed: false
+            })
+        );
+        assert_eq!(max_version_row(&*engine), Some(9));
+    }
+
+    /// AC 1: `max_version` is absent after an open with no commit, equals the
+    /// highest sequence committed, and a malformed row refuses the open with
+    /// nothing written.
+    #[test]
+    fn v09_max_version_is_lazy_and_a_malformed_one_refuses_the_open() {
+        let engine = Arc::new(MemKvEngine::new());
+        drop(open(&engine));
+        drop(open(&engine));
+        assert_eq!(engine.get(MAX_VERSION_KEY).expect("get"), None);
+        let store = open(&engine);
+        let value = lww("v", 1);
+        commit(&store, vec![put_at("m", "a", &value, 4)], vec![]).expect("first");
+        commit(
+            &store,
+            vec![put_at("m", "b", &value, 8), put_at("m", "c", &value, 6)],
+            vec![],
+        )
+        .expect("second");
+        assert_eq!(max_version_row(&*engine), Some(8));
+        drop(store);
+        for bad in [vec![0u8; 7], vec![0u8; 9], vec![]] {
+            raw_put(&*engine, &[(MAX_VERSION_KEY.to_vec(), bad.clone())]);
+            let before = dump(&*engine);
+            let outcome = EngineMapDataStore::open(Arc::clone(&engine));
+            let text = error_text(&outcome);
+            assert!(
+                text.starts_with("store format: refusing to open: the max_version row is"),
+                "{bad:?}: {text}"
+            );
+            assert_eq!(dump(&*engine), before, "a refusal wrote");
+        }
+    }
+
+    /// AC 2 (M7): a tenant drop leaves no version row of a dropped map;
+    /// other tenants' rows and `max_version` are unchanged.
+    #[test]
+    fn v10_a_tenant_drop_removes_the_version_rows_of_its_maps() {
+        let engine = Arc::new(MemKvEngine::new());
+        let store = open(&engine);
+        let value = lww("v", 1);
+        let keys = numbered("k", 40);
+        let mut writes = Vec::new();
+        for (i, key) in keys.iter().enumerate() {
+            let i = u64::try_from(i).expect("small");
+            writes.push(put_at("t1.a", key, &value, 1 + i));
+            writes.push(put_at("t1.b", key, &value, 100 + i));
+            writes.push(put_at("t2.a", key, &value, 200 + i));
+        }
+        commit(&store, writes, vec![]).expect("commit");
+        let ids = |name| id_of(&*engine, name).expect("id");
+        let (a1, b1, a2) = (ids("t1.a"), ids("t1.b"), ids("t2.a"));
+        let of = |rows: &[(Vec<u8>, Vec<u8>)], id: u32| {
+            rows.iter()
+                .filter(|(k, _)| k[5..9] == id.to_be_bytes())
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let before = version_rows(&*engine);
+        assert_eq!(of(&before, a1).len(), 40);
+        let partitions: BTreeSet<_> = of(&before, a1)
+            .iter()
+            .map(|(k, _)| k[1..5].to_vec())
+            .collect();
+        assert!(partitions.len() > 1, "the dropped map spans partitions");
+        let outcome = block_on(store.drop_tenant("t1")).expect("drop");
+        assert!(
+            matches!(outcome, DropOutcome::Done { ref dropped, ref failed }
+            if dropped.len() == 2 && failed.is_empty())
+        );
+        let after = version_rows(&*engine);
+        assert!(of(&after, a1).is_empty() && of(&after, b1).is_empty());
+        assert_eq!(after, of(&before, a2), "another tenant's rows changed");
+        assert_eq!(max_version_row(&*engine), Some(239));
+    }
+
+    /// AC 3 (M8): a store holding `0x12` rows opens; a key in `0x13` is still
+    /// refused with the reserved-keyspace message.
+    #[test]
+    fn v11_version_rows_open_and_0x13_is_still_refused() {
+        let engine = Arc::new(MemKvEngine::new());
+        let store = open(&engine);
+        let value = lww("v", 1);
+        commit(
+            &store,
+            vec![put_at("m", "a", &value, 5), remove_at("m", "b", 6)],
+            vec![],
+        )
+        .expect("commit");
+        drop(store);
+        assert_eq!(keys_in_space(&*engine, KS_RECORD_VERSION).len(), 3);
+        let reopened = open(&engine);
+        assert_eq!(
+            load_version(&reopened, "m", "b"),
+            Some(KeyVersion {
+                seq: 6,
+                removed: true
+            })
+        );
+        drop(reopened);
+        raw_put(&*engine, &[(vec![0x13, 0x00], vec![0x01])]);
+        let before = dump(&*engine);
+        let text = error_text(&EngineMapDataStore::open(Arc::clone(&engine)));
+        assert_eq!(
+            text,
+            "store format: refusing to open: a key in the reserved keyspace 0x13"
+        );
+        assert_eq!(dump(&*engine), before);
+    }
+
+    /// R7: rows at or below their partition's watermark are dropped, rows
+    /// above it and `max_version` are kept, and a row rewritten above the
+    /// watermark is kept.
+    #[test]
+    fn v12_reclaim_drops_rows_at_or_below_the_watermark_only() {
+        let engine = Arc::new(MemKvEngine::new());
+        let store = open(&engine);
+        let (low, high) = two_keys_in_two_partitions("m");
+        let value = lww("v", 1);
+        commit(
+            &store,
+            vec![put_at("m", &low, &value, 4), put_at("m", &high, &value, 5)],
+            vec![],
+        )
+        .expect("commit");
+        let mut watermarks = vec![0u64; PARTITION_COUNT as usize];
+        watermarks[wal_partition("m", &low) as usize] = 4;
+        watermarks[wal_partition("m", &high) as usize] = 4;
+        assert_eq!(
+            store.reclaim_record_versions(&watermarks).expect("reclaim"),
+            1
+        );
+        assert_eq!(load_version(&store, "m", &low), None);
+        assert_eq!(load_version(&store, "m", &high).map(|v| v.seq), Some(5));
+        assert_eq!(max_version_row(&*engine), Some(5));
+        assert_eq!(
+            store.reclaim_record_versions(&watermarks).expect("again"),
+            0
+        );
     }
 }

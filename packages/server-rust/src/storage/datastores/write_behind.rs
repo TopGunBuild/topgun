@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use tokio::sync::{watch, Notify};
 use topgun_core::types::tenant_owns;
-use topgun_core::{fnv1a_hash, PARTITION_COUNT};
+use topgun_core::PARTITION_COUNT;
 use tracing::{error, info, warn};
 
 use crate::storage::engine::SlotCell;
@@ -22,6 +22,8 @@ use crate::storage::map_data_store::{
     MapDataStore, MerkleLeaf, PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder,
     StoreBrokenCause, StoreErrorClass, StoreWrite, WriteSource,
 };
+// The one routing function of WAL partitions; the version row key uses it too.
+use crate::storage::map_data_store::wal_partition as partition_for;
 use crate::storage::record::{structural_size, RecordValue};
 use crate::storage::wal::{
     describe_wal_watermark_metrics, OrDelta, Wal, WalEntry, WalFsyncPolicy, WalOp, WalStorePayload,
@@ -1450,12 +1452,6 @@ fn now_millis() -> i64 {
             .as_millis(),
     )
     .unwrap_or(i64::MAX)
-}
-
-/// Deterministic partition assignment from (map, key) via `fnv1a_hash`.
-fn partition_for(map: &str, key: &str) -> u32 {
-    let combined = format!("{map}:{key}");
-    fnv1a_hash(&combined) % PARTITION_COUNT
 }
 
 // ---------------------------------------------------------------------------
@@ -4812,6 +4808,19 @@ impl WriteBehindDataStore {
 
         let encoded = self.inner.accepts_encoded();
         let as_bytes = |prepared: &PreparedEntry| encoded && prepared.encoded.is_some();
+        // The record version an entry stores is the highest WAL sequence it
+        // resolves: the survivor's own frame, since every carried sequence is
+        // an older write of the same key (TG-KEY-001), and the stored value
+        // reflects every frame that covers (TG-WB-009). With no WAL the
+        // sequence identifies no frame, so `0` stores no version (TG-WAL-015).
+        let has_wal = self.wal.is_some();
+        let version = |entry: &DelayedEntry| {
+            if has_wal {
+                entry.wal_sequences.last().copied().unwrap_or(0)
+            } else {
+                0
+            }
+        };
         // A store that takes no encoded record gets a cell's value as a
         // value, cloned out under the cell lock; the guard never outlives the
         // closure, so it is not held across the commit's await.
@@ -4837,6 +4846,7 @@ impl WriteBehindDataStore {
                             map,
                             key,
                             store_time,
+                            seq: version(entry),
                         }
                     }
                     DelayedOp::Store { value } => Some(value.as_ref()),
@@ -4854,6 +4864,7 @@ impl WriteBehindDataStore {
                     key,
                     value,
                     store_time,
+                    seq: version(entry),
                 }
             })
             .collect();
@@ -6061,8 +6072,10 @@ impl MapDataStore for WriteBehindDataStore {
 
         // Append to WAL before updating in-memory state so crash recovery can
         // replay the tombstone if the process dies after ack but before flush. A
-        // Remove frame carries no timestamp: replay deletes unconditionally, exactly
-        // as this live path does (see `WalRecovery::prepare_entry`, TG-WAL-009).
+        // Remove frame carries no timestamp: above its key's record version replay
+        // deletes unconditionally, exactly as this live path does, and at or below
+        // it the version gate discards the frame, so no stamp is needed (see
+        // `WalRecovery::prepare_entry`, TG-WAL-015).
         let wal_entry = WalEntry {
             map: map.to_string(),
             key: key.to_string(),
@@ -6235,8 +6248,10 @@ impl MapDataStore for WriteBehindDataStore {
 
             // Append each tombstone to the WAL before queuing so crash recovery
             // can replay every individual key deletion, not just the batch call. A
-            // Remove frame carries no timestamp: replay deletes unconditionally, as
-            // this live path does (see `WalRecovery::prepare_entry`, TG-WAL-009).
+            // Remove frame carries no timestamp: above its key's record version
+            // replay deletes unconditionally, as this live path does, and at or
+            // below it the version gate discards the frame (see
+            // `WalRecovery::prepare_entry`, TG-WAL-015).
             let wal_entry = WalEntry {
                 map: map.to_string(),
                 key: key.clone(),
@@ -8041,9 +8056,10 @@ mod tests {
     }
 
     /// TG-WAL-010: WAL-sequence assignment is strictly monotone per partition and
-    /// never reuses a sequence globally. This is premise (c) of the TG-WAL-009
-    /// gate-free warrant (a strictly-newer re-creation of a key gets a strictly
-    /// HIGHER WAL sequence than an older op on the same key, so `M > N` holds).
+    /// never reuses a sequence globally. The record version gate relies on it
+    /// (TG-WAL-015): a later write of a key gets a strictly HIGHER WAL sequence
+    /// than an older op on the same key, so the version it stores discards the
+    /// older frame at replay and never the newer one.
     ///
     /// The assigns MUST be spread across distinct partitions. `assign_wal_sequence`
     /// mints inside `with_partition`, i.e. under that partition's OWN mutex, so
@@ -8093,8 +8109,8 @@ mod tests {
             let (partition, assigned) = h.await.unwrap();
 
             // Per-partition monotonicity, in ARRIVAL order (not sorted): a later
-            // arrival on a partition gets a strictly higher sequence. This is the
-            // `M > N` step of the TG-WAL-009 warrant.
+            // arrival on a partition gets a strictly higher sequence, which is
+            // what lets a stored record version order a key's writes (TG-WAL-015).
             assert!(
                 assigned.windows(2).all(|w| w[0] < w[1]),
                 "partition {partition} assignments must be strictly increasing in \
@@ -8391,7 +8407,7 @@ mod tests {
 
         // A misspelled disarm, and a value some env systems deliver with its
         // quotes still attached -- the two shapes that actually reach operators.
-        let cfgs = tracing::subscriber::with_default(subscriber, || {
+        let cfgs = crate::storage::wal::with_thread_subscriber(subscriber, || {
             ["flase", "\"false\""].map(|raw| {
                 WriteBehindConfig::from_source(config_source(&[("TOPGUN_OR_DELTA_WAL", raw)]))
             })
@@ -13619,7 +13635,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscriber =
             tracing_subscriber::registry().with(ScheduleEventCapture(Arc::clone(&events)));
-        tracing::subscriber::with_default(subscriber, || {
+        crate::storage::wal::with_thread_subscriber(subscriber, || {
             paused_runtime().block_on(scenario);
         });
         let events = events.lock().unwrap().clone();
@@ -13891,7 +13907,7 @@ mod tests {
                 .with_writer(move || writer.clone())
                 .with_ansi(false)
                 .finish();
-            tracing::subscriber::with_default(subscriber, || {
+            crate::storage::wal::with_thread_subscriber(subscriber, || {
                 let _ = WriteBehindConfig::from_source(config_source(vars));
             });
             let text = String::from_utf8(captured.lock().unwrap().clone()).expect("utf-8 log");
@@ -15487,7 +15503,7 @@ mod tests {
                 .with_writer(move || writer.clone())
                 .with_ansi(false)
                 .finish();
-            let bytes = tracing::subscriber::with_default(subscriber, || {
+            let bytes = crate::storage::wal::with_thread_subscriber(subscriber, || {
                 WriteBehindConfig::from_source(|key| {
                     (key == VAR).then(|| raw.map(str::to_string)).flatten()
                 })
@@ -16726,7 +16742,7 @@ mod background_task_panic_tests {
 
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&events)));
-        let output = tracing::subscriber::with_default(subscriber, || {
+        let output = crate::storage::wal::with_thread_subscriber(subscriber, || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -19225,7 +19241,7 @@ mod store_broken_tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&events)));
         let output = metrics::with_local_recorder(recorder, || {
-            tracing::subscriber::with_default(subscriber, || {
+            crate::storage::wal::with_thread_subscriber(subscriber, || {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -20541,6 +20557,265 @@ mod write_path_measure {
                     ops / secs as f64,
                     p50 as f64 / 1000.0,
                     p99 as f64 / 1000.0
+                );
+            });
+    }
+
+    /// The RocksDB engine of a store in `dir`, sized as a default node.
+    #[cfg(feature = "rocksdb")]
+    fn rocks_store(
+        dir: &std::path::Path,
+    ) -> Arc<EngineMapDataStore<crate::storage::datastores::rocks_engine::RocksKvEngine>> {
+        use crate::storage::datastores::rocks_engine::{OpenMode, RocksConfig, RocksKvEngine};
+        let engine = RocksKvEngine::open(
+            dir,
+            OpenMode::CreateNew,
+            &RocksConfig::production(256 * 1024 * 1024, -1),
+        )
+        .unwrap();
+        Arc::new(EngineMapDataStore::open(Arc::new(engine)).unwrap())
+    }
+
+    /// Wall time of `WalRecovery::run` over `RM_FRAMES` frames (default
+    /// 100 000) above the watermark of a fresh RocksDB store, written to
+    /// `RM_KEYS` keys (default 25 000) of one map in turn, with rising
+    /// timestamps; with `RM_REMOVES=1` every eighth frame removes its key.
+    /// The frames are the same on every build. Prints one `RM_MEASURE` line.
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    #[allow(clippy::cast_precision_loss)]
+    fn recovery_of_n_frames() {
+        use crate::storage::wal::{WalEntry, WalOp, WalStorePayload};
+        let env_u64 = |name: &str, default: u64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let frames = env_u64("RM_FRAMES", 100_000);
+        let keys = env_u64("RM_KEYS", 25_000);
+        let removes = env_u64("RM_REMOVES", 0) == 1;
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let root = tempfile::tempdir().unwrap();
+                let wal_dir = root.path().join("wal");
+                let data = root.path().join("engine.rocksdb");
+                {
+                    let store: Arc<dyn MapDataStore> = rocks_store(&data);
+                    let wal =
+                        WalWriter::open_over_store(wal_dir.clone(), WalFsyncPolicy::None, store)
+                            .unwrap();
+                    for seq in 1..=frames {
+                        let key = format!("k{}", seq % keys);
+                        let op = if removes && seq % 8 == 0 {
+                            WalOp::Remove
+                        } else {
+                            WalOp::Store {
+                                value: WalStorePayload::Record(RecordValue::Lww {
+                                    value: Value::String(format!("v{seq}")),
+                                    timestamp: Timestamp {
+                                        millis: seq,
+                                        counter: 0,
+                                        node_id: "n".to_string(),
+                                    },
+                                    ttl_ms: None,
+                                }),
+                            }
+                        };
+                        let entry = WalEntry {
+                            map: "m".to_string(),
+                            key: key.clone(),
+                            op,
+                            timestamp: Some(Timestamp {
+                                millis: seq,
+                                counter: 0,
+                                node_id: "n".to_string(),
+                            }),
+                            sequence: seq,
+                        };
+                        let partition = partition_for("m", &key);
+                        wal.append(partition, &entry).await.unwrap();
+                    }
+                    super::release_wal(wal).await;
+                }
+                let store: Arc<dyn MapDataStore> = rocks_store(&data);
+                let wal = WalWriter::open_over_store(
+                    wal_dir.clone(),
+                    WalFsyncPolicy::None,
+                    Arc::clone(&store),
+                )
+                .unwrap();
+                let started = Instant::now();
+                WalRecovery::new(Arc::clone(&wal), Vec::new())
+                    .run(Arc::clone(&store))
+                    .await
+                    .unwrap();
+                let elapsed = started.elapsed();
+                println!(
+                    "RM_MEASURE frames={frames} keys={keys} removes={removes} recovery_ms={:.1} \
+                     frames_per_s={:.0}",
+                    elapsed.as_secs_f64() * 1000.0,
+                    frames as f64 / elapsed.as_secs_f64()
+                );
+            });
+    }
+
+    /// Duration of the record-version reclaim of each of `RV_TICKS` ticks
+    /// (default 60) over a RocksDB store, while one WAL partition's watermark
+    /// is held, and of the tick that releases it. Each tick commits
+    /// `RV_WRITES` writes (default 10 000; every fourth a remove), half of
+    /// them to new keys of the held partition and half spread over the
+    /// others, each stored ahead of its partition's watermark so it leaves a
+    /// version row; the watermarks of the other partitions then pass the
+    /// tick's writes and the reclaim runs. The held partition's rows pile up
+    /// among the point tombstones the earlier reclaims left, and the release
+    /// reclaims them all. Prints one `RV_MEASURE` line.
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::too_many_lines
+    )]
+    fn reclaim_tick_with_a_held_partition() {
+        use crate::storage::map_data_store::{FlushCommit, PutValue, StoreWrite};
+        use topgun_core::PARTITION_COUNT;
+        const HELD: u32 = 7;
+        let env_u64 = |name: &str, default: u64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let ticks = env_u64("RV_TICKS", 60);
+        let writes = env_u64("RV_WRITES", 10_000);
+        let partition = |key: &str| partition_for("m", key);
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let root = tempfile::tempdir().unwrap();
+                let store = rocks_store(&root.path().join("engine.rocksdb"));
+                let value = RecordValue::Lww {
+                    value: Value::String("v".to_string()),
+                    timestamp: Timestamp {
+                        millis: 1,
+                        counter: 0,
+                        node_id: "n".to_string(),
+                    },
+                    ttl_ms: None,
+                };
+                let (mut held_keys, mut other_keys) = (Vec::new(), Vec::new());
+                let mut i = 0u64;
+                while (held_keys.len() as u64) < ticks * writes / 2
+                    || (other_keys.len() as u64) < ticks * writes / 2
+                {
+                    let key = format!("k{i}");
+                    if partition(&key) == HELD {
+                        held_keys.push(key);
+                    } else {
+                        other_keys.push(key);
+                    }
+                    i += 1;
+                }
+                let mut watermarks = vec![0u64; PARTITION_COUNT as usize];
+                let mut seq = 0u64;
+                let mut tick_ms = Vec::new();
+                for tick in 0..ticks {
+                    let half = (writes / 2) as usize;
+                    let start = tick as usize * half;
+                    let keys: Vec<&String> = held_keys[start..start + half]
+                        .iter()
+                        .chain(&other_keys[start..start + half])
+                        .collect();
+                    let mut top = vec![0u64; PARTITION_COUNT as usize];
+                    let batch: Vec<StoreWrite<'_>> = keys
+                        .iter()
+                        .enumerate()
+                        .map(|(n, key)| {
+                            seq += 1;
+                            top[partition(key) as usize] = seq;
+                            if n % 4 == 3 {
+                                StoreWrite::Remove {
+                                    map: "m",
+                                    key,
+                                    store_time: 0,
+                                    seq,
+                                }
+                            } else {
+                                StoreWrite::Put {
+                                    map: "m",
+                                    key,
+                                    value: PutValue::Value(&value),
+                                    store_time: 0,
+                                    seq,
+                                }
+                            }
+                        })
+                        .collect();
+                    // Every write is ahead of its partition's watermark, which
+                    // this commit leaves where it was.
+                    store
+                        .commit(&FlushCommit {
+                            writes: batch,
+                            applied: Vec::new(),
+                        })
+                        .await
+                        .unwrap();
+                    for (p, high) in top.iter().enumerate() {
+                        if p as u32 != HELD && *high > 0 {
+                            watermarks[p] = *high;
+                        }
+                    }
+                    store
+                        .commit(&FlushCommit {
+                            writes: Vec::new(),
+                            applied: watermarks
+                                .iter()
+                                .enumerate()
+                                .filter(|(p, w)| *p as u32 != HELD && **w > 0)
+                                .map(|(p, w)| (p as u32, *w))
+                                .collect(),
+                        })
+                        .await
+                        .unwrap();
+                    let started = Instant::now();
+                    store.reclaim_record_versions(&watermarks).unwrap();
+                    tick_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+                }
+                watermarks[HELD as usize] = seq;
+                store
+                    .commit(&FlushCommit {
+                        writes: Vec::new(),
+                        applied: vec![(HELD, seq)],
+                    })
+                    .await
+                    .unwrap();
+                let started = Instant::now();
+                let released = store.reclaim_record_versions(&watermarks).unwrap();
+                let release_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let started = Instant::now();
+                let after = store.reclaim_record_versions(&watermarks).unwrap();
+                let after_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let mut sorted = tick_ms.clone();
+                sorted.sort_by(f64::total_cmp);
+                let p99 = sorted[(sorted.len() * 99 / 100).min(sorted.len() - 1)];
+                println!(
+                    "RV_MEASURE ticks={ticks} writes_per_tick={writes} held_tick_max_ms={:.1} \
+                     held_tick_p99_ms={p99:.1} held_tick_first_ms={:.1} held_tick_last_ms={:.1} \
+                     release_rows={released} release_ms={release_ms:.1} next_tick_rows={after} \
+                     next_tick_ms={after_ms:.1} seq={seq}",
+                    sorted[sorted.len() - 1],
+                    tick_ms[0],
+                    tick_ms[tick_ms.len() - 1],
                 );
             });
     }

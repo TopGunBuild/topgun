@@ -476,6 +476,10 @@ pub enum StoreWrite<'a> {
         value: PutValue<'a>,
         /// The `now` the per-entry call would be given.
         store_time: i64,
+        /// The WAL sequence this write stores: the frame's on replay, the
+        /// highest one the entry resolves on a flush; 0 when no WAL is
+        /// attached. A frame's sequence is never 0 (`TG-WAL-015`).
+        seq: u64,
     },
     /// Removes a record, as [`MapDataStore::remove`].
     Remove {
@@ -485,7 +489,20 @@ pub enum StoreWrite<'a> {
         key: &'a str,
         /// The `now` the per-entry call would be given.
         store_time: i64,
+        /// The WAL sequence this write stores, as for [`StoreWrite::Put`].
+        seq: u64,
     },
+}
+
+/// The version a store keeps for a key: the WAL sequence of the last write
+/// committed to it, and whether that write removed the record. Replay
+/// discards a frame at or below it (`TG-WAL-015`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyVersion {
+    /// The WAL sequence of the key's last committed write.
+    pub seq: u64,
+    /// That write removed the record.
+    pub removed: bool,
 }
 
 /// The record of a [`StoreWrite::Put`]: a value, or its msgpack encoding
@@ -508,6 +525,9 @@ pub struct AppliedWatermarks {
     /// The watermark of every WAL partition, indexed by partition (length
     /// `PARTITION_COUNT`); an absent row is 0.
     pub by_partition: Vec<u64>,
+    /// At least every record version the store holds; 0 when it holds none.
+    /// The WAL seeds its sequence above it (`TG-WAL-010`).
+    pub max_version: u64,
 }
 
 /// Writes of a [`FlushCommit`] the store refused on their own (a map name it
@@ -947,6 +967,7 @@ pub trait MapDataStore: Send + Sync {
                     key,
                     value: PutValue::Encoded(bytes),
                     store_time,
+                    ..
                 } => {
                     self.add_encoded(map, key, bytes, *store_time).await?;
                 }
@@ -955,6 +976,7 @@ pub trait MapDataStore: Send + Sync {
                     key,
                     value: PutValue::Value(value),
                     store_time,
+                    ..
                 } => {
                     self.add(map, key, value, *store_time).await?;
                 }
@@ -962,6 +984,7 @@ pub trait MapDataStore: Send + Sync {
                     map,
                     key,
                     store_time,
+                    ..
                 } => self.remove(map, key, *store_time).await?,
             }
         }
@@ -1002,6 +1025,42 @@ pub trait MapDataStore: Send + Sync {
     fn import_applied_watermarks(&self, rows: &[(u32, u64)]) -> anyhow::Result<()> {
         let _ = rows;
         anyhow::bail!("this store keeps no applied watermark to import into")
+    }
+
+    /// The version this store keeps for `key` of `map`, or `None` when it
+    /// keeps none for the key (version 0).
+    ///
+    /// The default refuses, like
+    /// [`import_applied_watermarks`](MapDataStore::import_applied_watermarks):
+    /// a WAL is opened only over a store that keeps watermarks, and such a
+    /// store must answer this, so replay can never run with its gate silently
+    /// off (`TG-WAL-015`).
+    ///
+    /// # Errors
+    ///
+    /// A store that keeps no record version; a store error; a malformed
+    /// version row.
+    async fn load_version(&self, map: &str, key: &str) -> anyhow::Result<Option<KeyVersion>> {
+        let _ = (map, key);
+        anyhow::bail!("this store keeps no record version")
+    }
+
+    /// Drops every record version at or below its WAL partition's applied
+    /// watermark in `watermarks` (indexed by partition), and returns how many
+    /// it dropped. No frame at or below the watermark is replayed, so such a
+    /// version is never read by a decision.
+    ///
+    /// Synchronous, like
+    /// [`durable_applied_watermarks`](MapDataStore::durable_applied_watermarks):
+    /// the WAL calls it off the runtime workers. The default drops nothing: a
+    /// store keeping no version has none to drop.
+    ///
+    /// # Errors
+    ///
+    /// A store error.
+    fn reclaim_record_versions(&self, watermarks: &[u64]) -> anyhow::Result<u64> {
+        let _ = watermarks;
+        Ok(0)
     }
 
     /// The applied WAL watermarks, made durable before they are returned: the
@@ -1051,6 +1110,13 @@ pub trait MapDataStore: Send + Sync {
 /// (`TG-WAL-005`). `S` is reached through `Deref`. The witness methods keep
 /// their defaults: only the write-behind store and one test spy implement them,
 /// and a test guards that count.
+///
+/// It keeps record versions and `max_version` under the engine store's rules
+/// (`TG-WAL-015`), so replay over it runs with its version gate on: a commit
+/// writes a key's version only for a write above its WAL partition's watermark
+/// after the commit, never below the version the key holds, and raises
+/// `max_version` for every record it stores under a WAL — each only once the
+/// records returned `Ok`.
 #[cfg(test)]
 pub(crate) struct WatermarkKeeping<S> {
     inner: S,
@@ -1058,6 +1124,25 @@ pub(crate) struct WatermarkKeeping<S> {
     /// between the check of this commit's rows and their store.
     commits: tokio::sync::Mutex<()>,
     rows: parking_lot::Mutex<AppliedWatermarks>,
+    /// The version of each `(map, key)` a commit stored above its partition's
+    /// watermark and the reclaim has not dropped yet.
+    versions: parking_lot::Mutex<KeyVersions>,
+    /// Maps a record was ever stored in: the maps the engine store would
+    /// hold a registry id for. A remove of any other map stores nothing, so
+    /// it writes no version and leaves `max_version` alone, as on the engine.
+    maps: parking_lot::Mutex<std::collections::HashSet<String>>,
+}
+
+/// The record version of each `(map, key)`.
+#[cfg(test)]
+type KeyVersions = HashMap<(String, String), KeyVersion>;
+
+/// The WAL partition the write-behind store frames `(map, key)` under:
+/// `fnv1a("{map}:{key}") % 271`. The version row of a key is keyed by it, so a
+/// version is reclaimed against the watermark of the partition its frames went to.
+#[must_use]
+pub fn wal_partition(map: &str, key: &str) -> u32 {
+    fnv1a_hash(&format!("{map}:{key}")) % topgun_core::PARTITION_COUNT
 }
 
 #[cfg(test)]
@@ -1071,8 +1156,77 @@ impl<S> WatermarkKeeping<S> {
                 imported: false,
                 import_pending: false,
                 by_partition: vec![0; topgun_core::PARTITION_COUNT as usize],
+                max_version: 0,
             }),
+            versions: parking_lot::Mutex::new(HashMap::new()),
+            maps: parking_lot::Mutex::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// The versions `commit` writes, the highest sequence of a record it
+    /// stores, and the maps it puts into, given the watermarks `next` it
+    /// leaves; refused before anything is written when a version would go
+    /// down.
+    fn plan_versions<'c>(
+        &self,
+        commit: &FlushCommit<'c>,
+        next: &[u64],
+    ) -> anyhow::Result<(KeyVersions, u64, Vec<&'c str>)> {
+        // The engine plans the map ids of a whole batch at once, so a remove
+        // stores something when its map had an id or a put of the same commit
+        // issues one.
+        let put_maps: Vec<&str> = commit
+            .writes
+            .iter()
+            .filter_map(|write| match write {
+                StoreWrite::Put { map, .. } => Some(*map),
+                StoreWrite::Remove { .. } => None,
+            })
+            .collect();
+        let maps_with_id = |map: &str| put_maps.contains(&map) || self.maps.lock().contains(map);
+        // The versions this commit writes, checked against what each key
+        // holds before anything is written: a commit never lowers a key's
+        // version. A write at or below its partition's watermark after this
+        // commit writes none (no frame there is replayed) and so is not
+        // compared; seq 0 means no WAL and writes none either.
+        let mut version_writes = KeyVersions::new();
+        let mut max_version = 0;
+        {
+            let held = self.versions.lock();
+            for write in &commit.writes {
+                let (map, key, seq, removed) = match write {
+                    StoreWrite::Put { map, key, seq, .. } => (*map, *key, *seq, false),
+                    StoreWrite::Remove { map, key, seq, .. } => (*map, *key, *seq, true),
+                };
+                if seq == 0 || (removed && !maps_with_id(map)) {
+                    continue;
+                }
+                max_version = max_version.max(seq);
+                if seq <= next[wal_partition(map, key) as usize] {
+                    continue;
+                }
+                let id = (map.to_string(), key.to_string());
+                if let Some(current) = version_writes.get(&id).or_else(|| held.get(&id)) {
+                    if seq < current.seq {
+                        anyhow::bail!(
+                            "record version regression refused: {map}/{key} holds {}, the \
+                             commit carries {seq}",
+                            current.seq
+                        );
+                    }
+                }
+                version_writes.insert(id, KeyVersion { seq, removed });
+            }
+        }
+        Ok((version_writes, max_version, put_maps))
+    }
+
+    /// Records that `map` holds a record id, once a write of it succeeded.
+    fn stored_in(&self, map: &str, result: anyhow::Result<()>) -> anyhow::Result<()> {
+        if result.is_ok() {
+            self.maps.lock().insert(map.to_string());
+        }
+        result
     }
 }
 
@@ -1089,7 +1243,8 @@ impl<S> std::ops::Deref for WatermarkKeeping<S> {
 #[async_trait]
 impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
     async fn add(&self, map: &str, key: &str, value: &RecordValue, now: i64) -> anyhow::Result<()> {
-        self.inner.add(map, key, value, now).await
+        let result = self.inner.add(map, key, value, now).await;
+        self.stored_in(map, result)
     }
 
     fn accepts_encoded(&self) -> bool {
@@ -1103,7 +1258,8 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
         bytes: &[u8],
         now: i64,
     ) -> anyhow::Result<()> {
-        self.inner.add_encoded(map, key, bytes, now).await
+        let result = self.inner.add_encoded(map, key, bytes, now).await;
+        self.stored_in(map, result)
     }
 
     fn scan_order(&self) -> Option<ScanOrder> {
@@ -1117,7 +1273,8 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
         value: &RecordValue,
         now: i64,
     ) -> anyhow::Result<()> {
-        self.inner.add_backup(map, key, value, now).await
+        let result = self.inner.add_backup(map, key, value, now).await;
+        self.stored_in(map, result)
     }
 
     async fn remove(&self, map: &str, key: &str, now: i64) -> anyhow::Result<()> {
@@ -1229,6 +1386,7 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
             }
             *slot = sequence;
         }
+        let (version_writes, max_version, put_maps) = self.plan_versions(commit, &next)?;
         // Replay hands its records over encoded whatever the store answers to
         // `accepts_encoded`; a store that does not accept them gets the value,
         // as replay frame by frame gave it.
@@ -1255,6 +1413,7 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
                         map,
                         key,
                         store_time,
+                        seq,
                         ..
                     },
                     Some(value),
@@ -1263,6 +1422,7 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
                     key,
                     value: PutValue::Value(value),
                     store_time: *store_time,
+                    seq: *seq,
                 },
                 _ => write.clone(),
             })
@@ -1279,7 +1439,37 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
         for &(partition, sequence) in &commit.applied {
             held.by_partition[partition as usize] = sequence;
         }
+        // Raised only once the records returned `Ok`, as the engine store
+        // raises it: a commit that failed stored no record, so it must not
+        // move what the store reports as its highest version.
+        held.max_version = held.max_version.max(max_version);
+        drop(held);
+        self.versions.lock().extend(version_writes);
+        self.maps
+            .lock()
+            .extend(put_maps.into_iter().map(str::to_string));
         Ok(())
+    }
+
+    async fn load_version(&self, map: &str, key: &str) -> anyhow::Result<Option<KeyVersion>> {
+        Ok(self
+            .versions
+            .lock()
+            .get(&(map.to_string(), key.to_string()))
+            .copied())
+    }
+
+    fn reclaim_record_versions(&self, watermarks: &[u64]) -> anyhow::Result<u64> {
+        // Decided under the lock a commit stores its versions under, so a
+        // version a commit has just raised above the watermark is kept.
+        let mut versions = self.versions.lock();
+        let before = versions.len();
+        versions.retain(|(map, key), version| {
+            watermarks
+                .get(wal_partition(map, key) as usize)
+                .is_none_or(|&watermark| version.seq > watermark)
+        });
+        Ok((before - versions.len()) as u64)
     }
 
     fn keeps_applied_watermarks(&self) -> bool {
@@ -2573,5 +2763,198 @@ pub(crate) mod ttl_bytes {
                 sequence: 9,
             }
         );
+    }
+}
+
+/// The record versions [`WatermarkKeeping`] keeps, under the engine store's
+/// commit rules (`TG-WAL-015`), so the test stores replay is driven over run
+/// with the version gate on.
+#[cfg(test)]
+mod watermark_keeping_versions {
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    use super::{
+        wal_partition, FlushCommit, KeyVersion, MapDataStore, PutValue, StoreWrite,
+        WatermarkKeeping,
+    };
+    use crate::storage::datastores::NullDataStore;
+    use crate::storage::record::RecordValue;
+
+    fn value() -> RecordValue {
+        RecordValue::Lww {
+            value: Value::String("v".to_string()),
+            timestamp: Timestamp {
+                millis: 1,
+                counter: 0,
+                node_id: "n".to_string(),
+            },
+            ttl_ms: None,
+        }
+    }
+
+    fn put<'a>(map: &'a str, key: &'a str, value: &'a RecordValue, seq: u64) -> StoreWrite<'a> {
+        StoreWrite::Put {
+            map,
+            key,
+            value: PutValue::Value(value),
+            store_time: 0,
+            seq,
+        }
+    }
+
+    fn remove<'a>(map: &'a str, key: &'a str, seq: u64) -> StoreWrite<'a> {
+        StoreWrite::Remove {
+            map,
+            key,
+            store_time: 0,
+            seq,
+        }
+    }
+
+    async fn commit<S: MapDataStore>(
+        store: &WatermarkKeeping<S>,
+        writes: Vec<StoreWrite<'_>>,
+        applied: Vec<(u32, u64)>,
+    ) -> anyhow::Result<()> {
+        store.commit(&FlushCommit { writes, applied }).await
+    }
+
+    fn max_version<S: MapDataStore>(store: &WatermarkKeeping<S>) -> u64 {
+        store
+            .applied_watermarks()
+            .expect("watermarks")
+            .expect("kept")
+            .max_version
+    }
+
+    /// A key of map `m` whose WAL partition is not `of`'s.
+    fn key_apart_from(of: &str, prefix: &str) -> String {
+        (0..1000)
+            .map(|i| format!("{prefix}{i}"))
+            .find(|key| wal_partition("m", key) != wal_partition("m", of))
+            .expect("a key in another partition")
+    }
+
+    async fn version<S: MapDataStore>(
+        store: &WatermarkKeeping<S>,
+        key: &str,
+    ) -> Option<KeyVersion> {
+        store.load_version("m", key).await.expect("version")
+    }
+
+    #[tokio::test]
+    async fn a_commit_keeps_versions_by_the_engine_rules() {
+        let store = WatermarkKeeping::new(NullDataStore);
+        let v = value();
+        let low = key_apart_from("a", "low");
+        let p = wal_partition("m", &low);
+
+        // Above the watermark after the commit: a row; at or below it: none,
+        // though max_version still counts the stored record.
+        commit(&store, vec![put("m", "a", &v, 5)], Vec::new())
+            .await
+            .expect("put");
+        commit(&store, vec![put("m", &low, &v, 7)], vec![(p, 7)])
+            .await
+            .expect("put at the watermark");
+        assert_eq!(
+            version(&store, "a").await,
+            Some(KeyVersion {
+                seq: 5,
+                removed: false
+            })
+        );
+        assert_eq!(version(&store, &low).await, None);
+        assert_eq!(max_version(&store), 7);
+
+        // seq 0 is no WAL: no row and no max_version.
+        commit(&store, vec![put("m", "z", &v, 0)], Vec::new())
+            .await
+            .expect("frameless put");
+        assert_eq!(version(&store, "z").await, None);
+        assert_eq!(max_version(&store), 7);
+
+        // A remove of a map no record was stored in stores nothing.
+        commit(&store, vec![remove("never", "k", 50)], Vec::new())
+            .await
+            .expect("remove of an unknown map");
+        assert_eq!(store.load_version("never", "k").await.expect("v"), None);
+        assert_eq!(max_version(&store), 7);
+        // In a commit that also puts into the map, the remove stores.
+        commit(
+            &store,
+            vec![remove("fresh", "r", 9), put("fresh", "p", &v, 8)],
+            Vec::new(),
+        )
+        .await
+        .expect("remove beside a put");
+        assert_eq!(
+            store.load_version("fresh", "r").await.expect("v"),
+            Some(KeyVersion {
+                seq: 9,
+                removed: true
+            })
+        );
+        assert_eq!(max_version(&store), 9);
+
+        // Equal is a re-commit; lower is refused, with nothing taken.
+        commit(&store, vec![remove("m", "a", 5)], Vec::new())
+            .await
+            .expect("equal");
+        let refused = commit(&store, vec![put("m", "a", &v, 4)], vec![(p, 8)]).await;
+        assert!(refused
+            .expect_err("regression")
+            .to_string()
+            .contains("record version regression refused: m/a holds 5"));
+        assert_eq!(
+            store
+                .applied_watermarks()
+                .expect("w")
+                .expect("k")
+                .by_partition[p as usize],
+            7
+        );
+    }
+
+    #[tokio::test]
+    async fn max_version_rises_only_after_the_records_are_stored() {
+        // The inner store refuses the write (its own key holds a higher
+        // version), so the outer store must report nothing of it.
+        let store = WatermarkKeeping::new(WatermarkKeeping::new(NullDataStore));
+        let v = value();
+        commit(&store.inner, vec![put("m", "k", &v, 10)], Vec::new())
+            .await
+            .expect("inner put");
+        assert!(commit(&store, vec![put("m", "k", &v, 6)], Vec::new())
+            .await
+            .is_err());
+        assert_eq!(max_version(&store), 0);
+        assert_eq!(version(&store, "k").await, None);
+    }
+
+    #[tokio::test]
+    async fn reclaim_drops_versions_at_or_below_their_partitions_watermark() {
+        let store = WatermarkKeeping::new(NullDataStore);
+        let v = value();
+        let b = key_apart_from("a", "b");
+        commit(
+            &store,
+            vec![put("m", "a", &v, 3), put("m", &b, &v, 9)],
+            Vec::new(),
+        )
+        .await
+        .expect("put");
+        let mut watermarks = vec![0; topgun_core::PARTITION_COUNT as usize];
+        watermarks[wal_partition("m", "a") as usize] = 3;
+        watermarks[wal_partition("m", &b) as usize] = 8;
+        assert_eq!(
+            store.reclaim_record_versions(&watermarks).expect("reclaim"),
+            1
+        );
+        assert_eq!(version(&store, "a").await, None);
+        assert_eq!(version(&store, &b).await.map(|v| v.seq), Some(9));
+        // max_version is never reclaimed.
+        assert_eq!(max_version(&store), 9);
     }
 }
