@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed: the client sends each local write once per connection.** n writes made before an
+  acknowledgement now put n operations on the wire; the previous code re-sent every unacknowledged
+  write on each new write (about n²/2). A write whose batch gets no verdict (a lost acknowledgement,
+  a transient error) is sent again 10 s after it was sent, then 20 s and 40 s later and every 60 s
+  after that, where before it waited for the next write or a reconnect; a reconnect sends every
+  pending write once on the new connection. Against a local server, a 4 000-key burst through the
+  client put exactly 4 000 operations on the wire, and a client holding a 5 000-row live query of the
+  map stayed connected and received every key (the previous code did not finish the same burst
+  within 60 s).
 - **Fixed: a live query's client-side cost per update no longer grows with the number of rows.** A
   burst of 1 000 live updates over a 5 000-row sorted query, delivered in one macrotask, blocked the
   event loop for at most 7.4 ms, against 14 101 ms for the previous code in the same test (an Apple
