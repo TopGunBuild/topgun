@@ -166,7 +166,7 @@ describe('SyncEngine', () => {
       mockStorage.getPendingOps.mockResolvedValue(pendingOps as any);
 
       syncEngine = new SyncEngine(config);
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       expect(mockStorage.getPendingOps).toHaveBeenCalled();
     });
@@ -352,13 +352,13 @@ describe('SyncEngine', () => {
 
       syncEngine = new SyncEngine(config);
       syncEngine.setAuthToken('test-token');
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       const ws = MockWebSocket.getLastInstance()!;
       ws.sentMessages = [];
 
       ws.simulateMessage({ type: 'AUTH_ACK' });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       const opBatch = ws.sentMessages.find((m) => m.type === 'OP_BATCH');
       expect(opBatch).toBeDefined();
@@ -388,11 +388,11 @@ describe('SyncEngine', () => {
       mockStorage.getPendingOps.mockResolvedValue(pendingOps as any);
 
       syncEngine = new SyncEngine(config);
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       const ws = MockWebSocket.getLastInstance()!;
       ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '5', achievedLevel: 'APPLIED' } });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(5);
     });
@@ -1291,11 +1291,11 @@ describe('SyncEngine', () => {
         connectionProvider: clusterProvider as any,
       });
       syncEngine.setAuthToken('test-token');
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       // Simulate AUTH_ACK to trigger syncPendingOperations
       simulateProviderMessage(clusterProvider, { type: 'AUTH_ACK' });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       // sendBatch should have been called with pending ops
       expect(clusterProvider.sendBatch).toHaveBeenCalledTimes(1);
@@ -1324,13 +1324,13 @@ describe('SyncEngine', () => {
 
       syncEngine = new SyncEngine(config); // uses SingleServerProvider (no sendBatch)
       syncEngine.setAuthToken('test-token');
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       const ws = MockWebSocket.getLastInstance()!;
       ws.sentMessages = [];
 
       ws.simulateMessage({ type: 'AUTH_ACK' });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       const opBatch = ws.sentMessages.find((m: any) => m.type === 'OP_BATCH');
       expect(opBatch).toBeDefined();
@@ -1377,10 +1377,10 @@ describe('SyncEngine', () => {
         connectionProvider: clusterProvider as any,
       });
       syncEngine.setAuthToken('test-token');
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       simulateProviderMessage(clusterProvider, { type: 'AUTH_ACK' });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       expect(clusterProvider.sendBatch).toHaveBeenCalledTimes(1);
 
@@ -1993,7 +1993,7 @@ describe('SyncEngine', () => {
       // interface types more loosely than the engine writes it.
       mockStorage.getPendingOps.mockResolvedValue(ops as unknown as StoredOpLogEntry[]);
       syncEngine = new SyncEngine({ ...config, ...overrides });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
       return MockWebSocket.getLastInstance()!;
     }
 
@@ -2016,7 +2016,7 @@ describe('SyncEngine', () => {
       mockStorage.markOpsSynced.mockClear();
 
       inject();
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       expect(syncEngine!.getPendingOpsCount()).toBe(pendingBefore);
       expect(mockStorage.markOpsSynced).not.toHaveBeenCalled();
@@ -2031,7 +2031,7 @@ describe('SyncEngine', () => {
       const ws = await bootWith([pendingOp('7', 'user7')]);
 
       ws.simulateMessage(refusal('7'));
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       // Retired: durably deleted, gone from the op log, and no longer pending.
       expect(mockStorage.deleteOp).toHaveBeenCalledWith(7);
@@ -2064,7 +2064,7 @@ describe('SyncEngine', () => {
       // refused op — the two arrive back to back, before the delete resolves.
       ws.simulateMessage(refusal('5'));
       ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '5', achievedLevel: 'APPLIED' } });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       await expect(syncEngine!.waitForOpSynced('5', 100)).resolves.toBe('rejected');
       // The prefix stops at the last op the server did NOT refuse.
@@ -2080,7 +2080,7 @@ describe('SyncEngine', () => {
       const ws = await bootWith([pendingOp('abc', 'userAbc')]);
 
       expect(() => ws.simulateMessage(refusal('abc'))).not.toThrow();
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       // deleteOp addresses a durable row by numeric id, so this op cannot be
       // deleted at all: it stays in memory, visibly refused, rather than being
@@ -2104,7 +2104,7 @@ describe('SyncEngine', () => {
 
       // Op 3 is refused earlier in the stream, then the ack names the other two.
       ws.simulateMessage(refusal('3'));
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
       mockStorage.markOpsSynced.mockClear();
 
       ws.simulateMessage({
@@ -2119,7 +2119,7 @@ describe('SyncEngine', () => {
           ],
         },
       });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       expect(mockStorage.markOpsSynced).toHaveBeenCalledTimes(1);
       expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(2);
@@ -2149,7 +2149,7 @@ describe('SyncEngine', () => {
           ],
         },
       });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(2);
       expect(opLogOf().map((o) => o.id)).toEqual(['4']);
@@ -2179,7 +2179,7 @@ describe('SyncEngine', () => {
           ],
         },
       });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       // Op 2 has no verdict this exchange: still pending, never spliced, and no
       // refusal record — a failure is not a refusal.
@@ -2217,7 +2217,7 @@ describe('SyncEngine', () => {
           ],
         },
       });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       expect(opLogOf().map((o) => o.id)).toEqual(['2']);
       expect(opLogOf()[0].synced).toBe(false);
@@ -2264,7 +2264,7 @@ describe('SyncEngine', () => {
       // The batch is still on record, so its real acknowledgement still lands.
       expect([...(engine().inFlightBatches?.get('3') ?? [])]).toEqual(['1', '2', '3']);
       ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '3', achievedLevel: 'APPLIED' } });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
       expect(syncEngine!.getPendingOpsCount()).toBe(0);
       expect(mockStorage.markOpsSynced.mock.calls).toEqual([[3]]);
     });
@@ -2277,7 +2277,7 @@ describe('SyncEngine', () => {
       ]);
 
       ws.simulateMessage({ type: 'OP_ACK', payload: { lastId: '5', achievedLevel: 'APPLIED' } });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
       expect(mockStorage.markOpsSynced).toHaveBeenCalledTimes(1);
       expect(mockStorage.markOpsSynced).toHaveBeenCalledWith(5);
 
@@ -2290,7 +2290,7 @@ describe('SyncEngine', () => {
           results: [{ opId: '2', success: true, achievedLevel: 'PERSISTED' }],
         },
       });
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
       expect(mockStorage.markOpsSynced).toHaveBeenCalledTimes(1);
     });
 
@@ -2299,9 +2299,9 @@ describe('SyncEngine', () => {
       const recordSpy = jest.spyOn(engine(), 'recordRejection');
 
       ws.simulateMessage(refusal('4'));
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
       ws.simulateMessage(refusal('4'));
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       // recordRejection is where a refusal becomes visible to a presentation
       // surface, so "called once" is "presented once".
@@ -2330,7 +2330,7 @@ describe('SyncEngine', () => {
       // handleOpAck — the other backpressure release — never runs.
       ws.simulateMessage(refusal('1'));
       ws.simulateMessage(refusal('2'));
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       expect(lowWaterSpy).toHaveBeenCalled();
       expect(syncEngine!.getPendingOpsCount()).toBe(0);
@@ -2359,7 +2359,7 @@ describe('SyncEngine', () => {
       const ws = await bootWith([pendingOp('9', 'user9')]);
 
       ws.simulateMessage(refusal('9', false));
-      await jest.runAllTimersAsync();
+      await jest.advanceTimersByTimeAsync(1_000);
 
       expect(mockStorage.deleteOp).not.toHaveBeenCalled();
       expect(opLogOf().find((o) => o.id === '9')?.rejected).toBeUndefined();
@@ -2574,7 +2574,7 @@ describe('SyncEngine', () => {
           // else. Demanding a level here would leave every HTTP write pending
           // forever.
           http.deliver({ type: 'OP_ACK', payload: { lastId: '3' } });
-          await jest.runAllTimersAsync();
+          await jest.advanceTimersByTimeAsync(1_000);
 
           expectRetiredUpTo(3);
         });
@@ -2598,18 +2598,18 @@ describe('SyncEngine', () => {
         expect(batchesSentOn(ws)).toEqual([['1', '2', '3']]);
 
         ws.close();
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(2_000);
         const reconnected = MockWebSocket.getLastInstance()!;
         expect(reconnected).not.toBe(ws);
 
         reconnected.simulateMessage({ type: 'AUTH_ACK' });
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
         expect(lastOf(batchesSentOn(reconnected))).toEqual(['1', '2', '3']);
 
         // Neither the lost connection nor the new authentication may forget the
         // batch: this ack answers it whichever of the sends the server processed.
         reconnected.simulateMessage(applied('3'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
 
         expectRetiredUpTo(3);
       });
@@ -2632,7 +2632,7 @@ describe('SyncEngine', () => {
         expect(batchesSentOn(ws)).toEqual([['1', '2', '3']]);
 
         ws.simulateMessage(applied('3'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
 
         expectRetiredUpTo(3);
       });
@@ -2643,32 +2643,32 @@ describe('SyncEngine', () => {
 
         // A lone CLIENT_OP and a one-op batch are answered with the same frame.
         ws.simulateMessage(applied('1'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
 
         expectRetiredUpTo(1);
       });
 
       test('two in-flight batches are each retired by their own ack, in either order', async () => {
         // Op 1 is flushed alone; a second write arrives before any answer and is
-        // flushed together with the still-pending op 1.
+        // flushed alone too, since op 1 is already on the wire.
         const bootTwoBatches = async () => {
           issueOpIdsFrom(2);
           const ws = await bootWith([pendingOp('1', 'user1')], {
             connectionProvider: new SingleServerProvider({ url: 'ws://localhost:8080' }),
           });
           await write('user2');
-          expect(batchesSentOn(ws)).toEqual([['1'], ['1', '2']]);
+          expect(batchesSentOn(ws)).toEqual([['1'], ['2']]);
           mockStorage.markOpsSynced.mockClear();
           return ws;
         };
 
         const inOrder = await bootTwoBatches();
         inOrder.simulateMessage(applied('1'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
         expect(opLogOf().map((o) => o.id)).toEqual(['2']);
         expect(mockStorage.markOpsSynced.mock.calls).toEqual([[1]]);
         inOrder.simulateMessage(applied('2'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
         expect(opLogOf()).toHaveLength(0);
         expect(mockStorage.markOpsSynced.mock.calls).toEqual([[1], [2]]);
 
@@ -2676,10 +2676,14 @@ describe('SyncEngine', () => {
 
         const reversed = await bootTwoBatches();
         reversed.simulateMessage(applied('2'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
+        // Op 1 is still pending below op 2, so no durable row goes yet.
+        expect(opLogOf().map((o) => o.id)).toEqual(['1']);
+        expect(mockStorage.markOpsSynced).not.toHaveBeenCalled();
+        reversed.simulateMessage(applied('1'));
+        await jest.advanceTimersByTimeAsync(1_000);
+        // The durable prefix reaches op 2, which the earlier ack retired.
         expectRetiredUpTo(2);
-        // The ack of the first batch arrives late and finds nothing left to say.
-        await expectNotAVerdict(() => reversed.simulateMessage(applied('1')));
       });
 
       test("an ack for one node's batch does not delete a still-pending op of another node's batch", async () => {
@@ -2700,7 +2704,7 @@ describe('SyncEngine', () => {
         // Node A acknowledges its frame. Op 2 travelled to node B and nobody has
         // answered for it, though its id is below the acknowledged one.
         cluster.deliver(applied('3'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
 
         expect(opLogOf().map((o) => o.id)).toEqual(['2', '4']);
         expect(opLogOf().every((o) => !o.synced)).toBe(true);
@@ -2709,7 +2713,7 @@ describe('SyncEngine', () => {
         expect(mockStorage.markOpsSynced.mock.calls).toEqual([[1]]);
 
         cluster.deliver(applied('4'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
 
         expect(opLogOf()).toHaveLength(0);
         expect(mockStorage.markOpsSynced.mock.calls).toEqual([[1], [4]]);
@@ -2718,23 +2722,23 @@ describe('SyncEngine', () => {
       test('two in-flight batches with the same last id are covered by their intersection', async () => {
         // Two frames ending in the same op are in flight at once and the ack does
         // not say which one it answers, so it vouches only for the ops that are
-        // in both.
+        // in both. The second frame comes from the resend timer's round 10 s
+        // after the first; the script gives, per sendBatch call (one call per
+        // planned frame), what the provider put on the wire and reported.
         const covered = async (
           ops: ReturnType<typeof pendingOp>[],
-          firstFlush: string[][],
-          secondFlush: string[][],
+          calls: string[][][],
           stillPending: string[],
         ) => {
           const cluster = clusterMock();
-          cluster.script(firstFlush, secondFlush);
+          cluster.script(...calls);
           mockStorage.markOpsSynced.mockClear();
           await bootOn(cluster, ops);
-          cluster.deliver({ type: 'AUTH_ACK' });
-          await jest.runAllTimersAsync();
-          expect(cluster.frames).toEqual([...firstFlush, ...secondFlush]);
+          await jest.advanceTimersByTimeAsync(10_000);
+          expect(cluster.frames).toEqual(calls.flat());
 
           cluster.deliver(applied('3'));
-          await jest.runAllTimersAsync();
+          await jest.advanceTimersByTimeAsync(1_000);
 
           expect(opLogOf().map((o) => o.id)).toEqual(stillPending);
           expect(opLogOf().every((o) => !o.synced)).toBe(true);
@@ -2746,43 +2750,19 @@ describe('SyncEngine', () => {
           await expectNotAVerdict(() => cluster.deliver(applied('3')));
         };
 
-        // A wider frame first, then a narrower one.
+        // A wider frame first; the re-send of its frame reaches the wire as a
+        // narrower one.
         await covered(
           [pendingOp('2', 'user2'), pendingOp('3', 'user3')],
-          [['2', '3']],
-          [['3']],
+          [[['2', '3']], [['3']]],
           ['2'],
         );
 
         syncEngine!.close();
 
-        // The narrower frame first, then a wider one that reuses its last id.
-        await covered(threeOps(), [['3']], [['1', '2', '3']], ['1', '2']);
-      });
-
-      test('the in-flight registry is bounded', async () => {
-        await bootWith([], roomy);
-        issueOpIdsFrom(1);
-
-        // No write is ever answered, so flush n carries ops 1..n and ends in n:
-        // three hundred distinct batches.
-        for (const n of range(1, 300)) {
-          await write(`key${n}`);
-        }
-        expect(syncEngine!.getPendingOpsCount()).toBe(300);
-
-        const registry = inFlight();
-        expect(registry).toBeInstanceOf(Map);
-
-        const nonEmpty = [...registry!.values()].filter((ids) => ids.size > 0);
-        expect(nonEmpty.length).toBeLessThanOrEqual(256);
-        // The bound empties the oldest sets and keeps their keys: a key that was
-        // dropped could be registered afresh and acknowledge ops again.
-        for (const n of range(1, 44)) {
-          expect(registry!.get(String(n))).toEqual(new Set());
-        }
-        // The oldest batch inside the bound is untouched.
-        expect(registry!.get('45')).toEqual(new Set(range(1, 45).map(String)));
+        // The narrower frame first; in the re-send, the fresh frame of ops 1 and 2
+        // fails, and the frame of op 3 is reported as a wider one under its id.
+        await covered(threeOps(), [[['3']], [], [['1', '2', '3']]], ['1', '2']);
       });
 
       test('an HTTP batch re-sent by the provider after a failed poll is retired by its ack', async () => {
@@ -2796,7 +2776,7 @@ describe('SyncEngine', () => {
         // new authentication and makes no new flush in between.
         http.emit('disconnected', 'mock-node');
         http.deliver({ type: 'OP_ACK', payload: { lastId: '1' } });
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
 
         expectRetiredUpTo(1);
         expect(lowWaterSpy).toHaveBeenCalled();
@@ -2817,7 +2797,7 @@ describe('SyncEngine', () => {
 
         await bootOn(cluster, [pendingOp('1', 'user1'), pendingOp('2', 'user2')]);
         cluster.deliver({ type: 'AUTH_ACK' });
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
         expect(cluster.sendBatch).toHaveBeenCalledTimes(2);
 
         // Without a report the engine cannot tell which acks answer this
@@ -2843,7 +2823,7 @@ describe('SyncEngine', () => {
         // A provider written before the declaration existed must keep working:
         // the engine cannot ask its frames for a level it never promised.
         bare.deliver({ type: 'OP_ACK', payload: { lastId: '3' } });
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
 
         expectRetiredUpTo(3);
       });
@@ -2860,60 +2840,6 @@ describe('SyncEngine', () => {
         );
       });
 
-      test('an evicted key acknowledges nothing, and registering it again keeps it empty', async () => {
-        const ws = await bootWith([], roomy);
-        issueOpIdsFrom(1);
-        for (const n of range(1, 300)) {
-          await write(`key${n}`);
-        }
-        expect(lastOf(batchesSentOn(ws))).toHaveLength(300);
-
-        // (1) The batch that ended in op 1 is far past the bound, so its set was
-        // emptied. Its late ack must retire nothing, and the key must stay: with
-        // the key gone the ack could not be told from a stray one, and with the
-        // set restored it would acknowledge again.
-        await expectNotAVerdict(() => ws.simulateMessage(applied('1')));
-        expect(inFlight()?.get('1')).toEqual(new Set());
-
-        // (2) Every other op is retired by an ack that names it, leaving op 1 as
-        // the only pending write.
-        ws.simulateMessage(
-          ack({
-            lastId: '300',
-            results: range(2, 300).map((n) => ({
-              opId: String(n),
-              success: true,
-              achievedLevel: 'APPLIED',
-            })),
-          }),
-        );
-        await jest.runAllTimersAsync();
-        expect(opLogOf().map((o) => o.id)).toEqual(['1']);
-
-        // A reconnect flushes op 1 alone, under the very key that was emptied.
-        ws.close();
-        await jest.runAllTimersAsync();
-        const reconnected = MockWebSocket.getLastInstance()!;
-        expect(reconnected).not.toBe(ws);
-        reconnected.simulateMessage({ type: 'AUTH_ACK' });
-        await jest.runAllTimersAsync();
-        expect(lastOf(batchesSentOn(reconnected))).toEqual(['1']);
-
-        // Registering under an emptied key must not refill it.
-        await expectNotAVerdict(() => reconnected.simulateMessage(applied('1')));
-        expect(inFlight()?.get('1')).toEqual(new Set());
-
-        // (3) Op 1 is not stranded: the next write flushes it under a fresh key,
-        // and that batch's ack retires both.
-        await write('key301');
-        expect(lastOf(batchesSentOn(reconnected))).toEqual(['1', '301']);
-        mockStorage.markOpsSynced.mockClear();
-        reconnected.simulateMessage(applied('301'));
-        await jest.runAllTimersAsync();
-
-        expectRetiredUpTo(301);
-      });
-
       test('the transport is read when the ack arrives, not when the engine is built', async () => {
         const late = bareMock();
         await bootOn(late, threeOps());
@@ -2927,18 +2853,19 @@ describe('SyncEngine', () => {
         await expectNotAVerdict(() => late.deliver({ type: 'OP_ACK', payload: { lastId: '3' } }));
 
         late.deliver(applied('3'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
 
         expectRetiredUpTo(3);
       });
 
-      test('entries with nothing pending are pruned before an eviction, so refused writes do not grow the registry', async () => {
+      test('entries with nothing pending are pruned, so refused writes do not grow the registry', async () => {
         const ws = await bootWith([], roomy);
         issueOpIdsFrom(1);
 
         // Each write is flushed alone and refused before the next one is made, so
         // every batch names a single op that has already left the op log, and no
-        // ack is ever applied: nothing but the bound itself can clean up.
+        // ack is ever applied: only the prune a flush runs once the registry has
+        // more than doubled since the last prune (plus 64) can clean up.
         for (const n of range(1, 300)) {
           await write(`key${n}`);
           ws.simulateMessage(refusal(String(n)));
@@ -2952,13 +2879,11 @@ describe('SyncEngine', () => {
         expect(registry).toBeInstanceOf(Map);
 
         const keys = [...registry!.keys()];
-        expect(keys.length).toBeLessThanOrEqual(256);
-        // Emptying the oldest set keeps its key for good when no ack ever
-        // arrives, so dead entries have to be deleted before anything is emptied.
         expect([...registry!.values()].filter((ids) => ids.size === 0)).toHaveLength(0);
-        // The 257th batch found 256 entries with nothing pending and deleted them
-        // all; only what was recorded from then on remains.
-        expect(keys).toEqual(range(257, 300).map(String));
+        // Each prune ran right after its write was sent, so it kept only that
+        // write's entry: at writes 65, 131, 197 and 263. Only what was recorded
+        // from the last one on remains.
+        expect(keys).toEqual(range(263, 300).map(String));
       });
 
       test('a refused op that is still in the op log keeps its sent-batch entry, so a late ack cannot retire an op its batch never carried', async () => {
@@ -2973,21 +2898,22 @@ describe('SyncEngine', () => {
         // stays in the op log, flagged, and every later flush sends it again.
         mockStorage.deleteOp.mockRejectedValue(new Error('storage refused the delete'));
         cluster.deliver(refusal('2'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
         expect(opLogOf().map((o) => o.id)).toEqual(['1', '2', '3']);
         expect(opLogOf().find((o) => o.id === '2')?.rejected).toBe(true);
 
         // Another batch is acknowledged, which is when finished entries are
         // cleared out. Op 1 is still pending below it, so no durable row goes.
         cluster.deliver(applied('3'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
         expect(opLogOf().map((o) => o.id)).toEqual(['1', '2']);
 
-        // Op 1 now has a node, the same one, and the flush that carries it ends
-        // in the refused op again: a second, wider frame under the same last id.
+        // Op 1 now has a node, the same one. The engine hands over op 1 alone (op
+        // 2 is still on the wire), and the provider reports a frame that ends in
+        // the refused op again: a second, wider frame under the same last id.
         cluster.script([['1', '2']]);
         cluster.deliver({ type: 'AUTH_ACK' });
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
         expect(cluster.frames).toEqual([['2'], ['3'], ['1', '2']]);
         const recordedUnderRefusedOp = new Set(inFlight()?.get('2'));
         const pendingBefore = syncEngine!.getPendingOpsCount();
@@ -2995,7 +2921,7 @@ describe('SyncEngine', () => {
         // The answer to the FIRST frame arrives late. That frame carried op 2
         // alone, so it says nothing about op 1.
         cluster.deliver(applied('2'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
 
         expect(opLogOf().map((o) => o.id)).toEqual(['1', '2']);
         expect(opLogOf().find((o) => o.id === '1')?.synced).toBeFalsy();
@@ -3008,31 +2934,33 @@ describe('SyncEngine', () => {
 
       test("an ack that matches a refused op's entry does not free the key while the op can still be sent", async () => {
         // Op 2 travels alone, twice, before anything is answered; op 1 finds no
-        // node on either flush.
+        // node on either flush. The second time the engine hands over op 1 alone
+        // (op 2 is still on the wire) and the provider reports op 2 alone.
         const cluster = clusterMock();
         cluster.script([['2']], [['2']]);
         await bootOn(cluster, [pendingOp('1', 'user1'), pendingOp('2', 'user2')]);
         cluster.deliver({ type: 'AUTH_ACK' });
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
         expect(cluster.frames).toEqual([['2'], ['2']]);
 
         // Op 2 is refused for good, but storage will not delete its row, so it
         // stays in the op log, flagged, and every later flush sends it again.
         mockStorage.deleteOp.mockRejectedValue(new Error('storage refused the delete'));
         cluster.deliver(refusal('2'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
 
         // The answer to the first frame arrives late. It matches the entry and
         // has nothing to retire: the only op it covers is the refused one.
         cluster.deliver(applied('2'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
         expect(opLogOf().map((o) => o.id)).toEqual(['1', '2']);
 
-        // Op 1 now has a node, and the frame that carries it ends in the refused
-        // op again: a wider frame under the same last id.
+        // Op 1 now has a node. The engine hands over op 1 alone (op 2 is still on
+        // the wire), and the provider reports a frame that ends in the refused op
+        // again: a wider frame under the same last id.
         cluster.script([['1', '2']]);
         cluster.deliver({ type: 'AUTH_ACK' });
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
         expect(cluster.frames).toEqual([['2'], ['2'], ['1', '2']]);
         const recordedUnderRefusedOp = new Set(inFlight()?.get('2'));
         const pendingBefore = syncEngine!.getPendingOpsCount();
@@ -3040,7 +2968,7 @@ describe('SyncEngine', () => {
         // The answer to the SECOND frame arrives. That frame, too, carried op 2
         // alone, so it says nothing about op 1.
         cluster.deliver(applied('2'));
-        await jest.runAllTimersAsync();
+        await jest.advanceTimersByTimeAsync(1_000);
 
         expect(opLogOf().map((o) => o.id)).toEqual(['1', '2']);
         expect(opLogOf().find((o) => o.id === '1')?.synced).toBeFalsy();
