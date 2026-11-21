@@ -1621,6 +1621,19 @@ export class SyncEngine {
   private armResendTimer(): void {
     const now = performance.now();
     const authenticated = this.isAuthenticated();
+    // Every due time set from now on is at least 10 s away, and every earlier
+    // one was evaluated when it was set, so a timer due within 10 s cannot be
+    // moved earlier. Skipping the scan then keeps a burst of writes, each
+    // evaluating while no ack can arrive, from costing O(n²).
+    if (
+      authenticated &&
+      !this.closed &&
+      this.resendTimer &&
+      this.opLog.length > 0 &&
+      this.resendDueAt <= now + SyncEngine.RESEND_DELAYS_MS[0]
+    ) {
+      return;
+    }
     let due = Infinity;
     if (!this.closed) {
       for (const op of this.opLog) {

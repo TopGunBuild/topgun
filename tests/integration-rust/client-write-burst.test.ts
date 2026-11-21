@@ -17,8 +17,12 @@
  * evidence that nothing is re-sent on a healthy burst.
  *
  * - Raw subscriber: S is a protocol-level connection holding a live query of
- *   the map. Its own decoding cost cannot be what disconnects it, so this case
- *   measures the writer's wire volume.
+ *   the map, in a process of its own (helpers/raw-subscriber-process.js). Its
+ *   own decoding cost cannot be what disconnects it, so this case measures the
+ *   writer's wire volume. It must not share the test's event loop: W's burst
+ *   keeps that loop busy for seconds, during which an in-process S reads
+ *   nothing and the server drops it as a slow consumer, which no real
+ *   subscriber, running in a process other than the writer's, would see.
  * - Client subscriber: the map is seeded with 5 000 rows through raw OP_BATCHes,
  *   S is a TopGunClient holding a live query of it, and the burst starts once
  *   S's view holds the seed. S's view must end with all 9 000 keys and S must
@@ -27,6 +31,9 @@
  * In both cases the server's log must not contain the slow-consumer line, which
  * it writes when it disconnects a subscriber that cannot keep up.
  */
+
+import * as child_process from 'child_process';
+import * as path from 'path';
 
 import { deserialize } from '@topgunbuild/core';
 import { TopGunClient, SyncState } from '@topgunbuild/client';
@@ -117,24 +124,12 @@ async function burst(
   );
 }
 
-/** Every key of the map in one QUERY_RESP of a fresh query on the raw connection. */
-async function queryKeys(c: TestClient, mapName: string, queryId: string): Promise<Set<string>> {
-  c.messages.length = 0;
-  c.send({ type: 'QUERY_SUB', payload: { queryId, mapName, query: {} } });
-  const deadline = Date.now() + STEP_WAIT_MS;
-  for (;;) {
-    const frame = c.messages.find((m) => m.type === 'QUERY_RESP' && m.payload?.queryId === queryId);
-    if (frame) return new Set((frame.payload.results ?? []).map((r: { key: string }) => r.key));
-    if (Date.now() >= deadline) throw new Error(`no QUERY_RESP for ${queryId}`);
-    await sleep(20);
-  }
-}
-
 describe('Integration: a client write burst is sent once per write', () => {
   let server: SpawnedServer | null = null;
   let log = '';
   const clients: TopGunClient[] = [];
   const raws: TestClient[] = [];
+  const children: child_process.ChildProcess[] = [];
 
   beforeEach(async () => {
     log = '';
@@ -147,6 +142,7 @@ describe('Integration: a client write burst is sent once per write', () => {
   afterEach(async () => {
     for (const client of clients.splice(0)) await client.close().catch(() => undefined);
     for (const raw of raws.splice(0)) raw.close();
+    for (const child of children.splice(0)) child.kill();
     await server?.cleanup().catch(() => undefined);
     server = null;
   });
@@ -155,15 +151,17 @@ describe('Integration: a client write burst is sent once per write', () => {
     const port = server!.port;
     const mapName = 'burst_raw_m';
 
-    const s = await connectWithin(port, 'burst-raw-subscriber', STEP_WAIT_MS);
-    raws.push(s);
-    s.startHeartbeat();
-    let sClosed = false;
-    s.ws.on('close', () => (sClosed = true));
-    let inbound = 0;
-    s.ws.on('message', () => (inbound += 1));
-    s.send({ type: 'QUERY_SUB', payload: { queryId: 'live', mapName, query: {} } });
-    expect(await firstFrame(s, ['QUERY_RESP'], STEP_WAIT_MS)).not.toBeNull();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- IPC messages of the subscriber process
+    const fromS: any[] = [];
+    const s = child_process.fork(
+      path.join(__dirname, 'helpers', 'raw-subscriber-process.js'),
+      [String(port), mapName],
+      { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] },
+    );
+    children.push(s);
+    s.on('message', (message) => fromS.push(message));
+    const said = (type: string) => fromS.find((m) => m.type === type);
+    await until('S holds its live query', () => said('ready') !== undefined, STEP_WAIT_MS);
 
     const w = makeClient(port, 'burst-raw-writer');
     clients.push(w);
@@ -174,11 +172,16 @@ describe('Integration: a client write burst is sent once per write', () => {
 
     expect(wire.ids.size).toBe(BURST_KEYS);
     expect(wire.total()).toBe(BURST_KEYS);
-    expect(sClosed).toBe(false);
+    s.send({ type: 'final' });
+    await until(
+      'S answers with a final query of the map',
+      () => said('final') !== undefined || said('closed') !== undefined,
+      STEP_WAIT_MS,
+    );
+    expect(said('closed')).toBeUndefined();
     expect(log.includes(SLOW_CONSUMER_TEXT)).toBe(false);
-    expect(inbound).toBeGreaterThan(0);
-    const keys = await queryKeys(s, mapName, 'final');
-    expect(keys.size).toBe(BURST_KEYS);
+    expect(said('final').events).toBe(BURST_KEYS);
+    expect(said('final').keys).toBe(BURST_KEYS);
   }, 120_000);
 
   test('a client holding a 5 000-row live query stays connected and sees every key', async () => {
