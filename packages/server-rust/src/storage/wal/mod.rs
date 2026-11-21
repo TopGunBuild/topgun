@@ -3701,8 +3701,8 @@ impl ReplayProgress {
         frontier
     }
 
-    /// Takes in the outcome of `frames`, committed or failed, and releases
-    /// the held keys a committed subsuming frame covers.
+    /// Takes in the outcome of `frames`, committed or failed: a resolved frame
+    /// leaves its key's unresolved set.
     ///
     /// The frontier is the partition's applied watermark, so it moves only
     /// over a contiguous run of resolved frames; a key's record version is a
@@ -3723,8 +3723,19 @@ impl ReplayProgress {
         for (entry, frame) in frames.iter().zip(prepared) {
             if matches!(frame, Prepared::Failed) {
                 self.first_failed.get_or_insert(entry.sequence);
-            } else if self.first_failed.is_none() {
+                continue;
+            }
+            if self.first_failed.is_none() {
                 self.frontier = entry.sequence;
+            }
+            // A frame that failed earlier in this run and is resolved now (prepared again
+            // after a refusal in its batch) holds its key no longer.
+            let key = (entry.map.clone(), entry.key.clone());
+            if let Some(unresolved) = self.held.get_mut(&key) {
+                unresolved.remove(&entry.sequence);
+                if unresolved.is_empty() {
+                    self.held.remove(&key);
+                }
             }
         }
     }

@@ -592,14 +592,16 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     version even when the WAL ends below one (a `batched` power loss, a WAL cut to its last fsync,
     a WAL directory older than the data directory).
   - **Per-key prefix completeness.** A frame of `K` that fails in prepare or that the store refuses
-    makes `K` held. A frame that subsumes the key (`Store`, `Remove`) prepares normally: its state
-    is complete, so its version covers the failed frames below it. A non-subsuming frame of a held
-    key folds onto the overlay only when its part has already written a subsuming frame of `K`
-    above the highest failed sequence `F(K)`; otherwise it is left unapplied and raises `F(K)`.
-    A committed frame releases `K` only when it subsumes the key, was written (not discarded by
-    the gate) and lies above `F(K)` read when its commit returned. The decision is made in
-    `prepare_frame`, the one path of the first preparation and of `reprepare`, so a part prepared
-    again after a refusal sees the raised `F(K)`.
+    is an unresolved frame of `K` until it is written later in the same run (prepared again after
+    a refusal in its batch); the highest of them is `F(K)`. A frame that subsumes the key
+    (`Store`, `Remove`) prepares normally: its state is complete, so its version covers the failed
+    frames below it. A non-subsuming frame of `K` with an unresolved frame of `K` below it folds
+    onto the overlay only when its part has already written a subsuming frame of `K` above the
+    highest unresolved frame of `K` below it; otherwise it is left unapplied and is unresolved
+    itself. A committed frame releases `K` only when it subsumes the key, was written (not
+    discarded by the gate) and lies above `F(K)` read when its commit returned. The decision is
+    made in `prepare_frame`, the one path of the first preparation and of `reprepare`, so a part
+    prepared again after a refusal decides against the refused frames.
   - **Reclamation.** The collection tick, after the store made the watermarks durable, drops the
     version rows at or below their partition's durable watermark: candidates are read from a
     snapshot, then each is read again under the commit lock and deleted only while still at or
@@ -651,6 +653,7 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `v11d_a_store_the_gate_discards_releases_nothing_and_the_next_delta_stays_held`,
   `v11e_a_store_refused_after_a_delta_does_not_hold_that_delta_on_the_second_preparation` (the
   hold is decided by the unresolved frames of the key below the frame),
+  `v11f_a_frame_written_on_the_second_preparation_holds_its_key_no_longer`,
   `v12_a_frame_failed_in_prepare_holds_the_later_delta_of_its_key` and
   `v13_a_frame_failed_at_boot_is_discarded_once_a_live_write_of_its_key_is_flushed_above_it`;
   the flush order, `write_behind_batch_tests.rs::b20_a_key_commits_in_wal_order_across_passes_and_a_coalesced_survivor_stores_its_own_wal_sequence`;
@@ -674,12 +677,13 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     must lower the horizon, fence collection at capture and filter tenant-dropped maps (TODO-844).
   - A frame recovery leaves failed (TODO-823) is not applied again once a live write of its key
     flushes a higher version: the node served the key without it, and the live write was made over
-    that state. The **held frames** — the non-subsuming frames of a key that follow a failed frame
-    of that key with no written subsuming frame of it above `F(K)` before them — share that
+    that state. The **held frames** — the non-subsuming frames of a key that follow an unresolved
+    frame of that key with no written subsuming frame of it above the highest unresolved frame of
+    the key below them — share that
     outcome: left unapplied at that boot with their failed predecessor, served without, and lost
     for good once a live write of the key flushes above them. This is TODO-823's class (a key whose
     earlier frame failed at boot). A frame that follows a written subsuming frame of its key above
-    `F(K)` is not held: it is applied at that boot.
+    every unresolved frame of the key below it is not held: it is applied at that boot.
   - A frame the store refuses for ever holds the later non-subsuming frames of its key for as long
     as it is refused, and stalls its partition's watermark, so every key of that partition written
     meanwhile keeps a version row until the refusal ends (TODO-824, TODO-828).

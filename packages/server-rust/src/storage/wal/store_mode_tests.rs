@@ -4969,6 +4969,48 @@ async fn v11e_a_store_refused_after_a_delta_does_not_hold_that_delta_on_the_seco
     node.close().await;
 }
 
+/// A frame that failed in prepare and is written when its part is prepared
+/// again after a refusal is resolved: it holds the later frames of its key no
+/// longer, so a delta of the key in a later batch applies at this boot.
+#[tokio::test(flavor = "multi_thread")]
+async fn v11f_a_frame_written_on_the_second_preparation_holds_its_key_no_longer() {
+    let root = Root::new();
+    let mut keys = keys_in(P, 2);
+    let (k, l) = (keys.remove(0), keys.remove(0));
+    let seed = or_slot(&["x"]);
+    let f1 = or_add(&k, "a", 1);
+    let f2 = store_frame(&l, &or_slot(&["y"]), 2);
+    let f3 = or_add(&k, "c", 3);
+
+    let node = ArmedNode::open(&root);
+    node.seed(&k, &seed, 0).await;
+    for frame in [&f1, &f2, &f3] {
+        node.append(frame).await;
+    }
+    // Batches of two: frames 1 and 2, then frame 3. Frame 1 fails its first
+    // version read; the commit refuses frame 2 by name, and the part prepared
+    // again writes frame 1.
+    node.store.fail_version_reads(&k, &[1]);
+    node.store.refuse_seqs(&[2]);
+    node.recover(Some(2)).await;
+    assert_eq!(node.store.version_reads(&k), 3, "frame 3 was not held");
+    assert_eq!(
+        node.value(&k).await,
+        Some(replayed(
+            &seed,
+            &[Step::Fold(add_delta("a", 1)), Step::Fold(add_delta("c", 3))],
+        )),
+        "frame 3 applies at this boot, as on main"
+    );
+    assert_eq!(node.version(&k).await, Some(3));
+    assert_eq!(
+        node.unapplied().await,
+        vec![2, 3],
+        "frame 2 stays replayable"
+    );
+    node.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn v12_a_frame_failed_in_prepare_holds_the_later_delta_of_its_key() {
     let root = Root::new();
