@@ -548,6 +548,23 @@ describe('HttpSyncProvider', () => {
       expect(frames.map((f) => f.type)).toEqual(['OP_REJECTED', 'OP_ACK', 'OP_ACK', 'OP_ACK']);
     });
 
+    it('(d) keeps every other field of the ack on each frame ack', async () => {
+      await provider.connect();
+      const frames = listen();
+      respond((ids) => ({
+        ack: { lastId: ids[ids.length - 1], achievedLevel: 'APPLIED', extra: 7 },
+      }));
+
+      sendFrame('1');
+      sendFrame('2', '3');
+      await new Promise((r) => setTimeout(r, 150));
+
+      expect(acks(frames)).toEqual([
+        { lastId: '1', achievedLevel: 'APPLIED', extra: 7 },
+        { lastId: '3', achievedLevel: 'APPLIED', extra: 7 },
+      ]);
+    });
+
     it('(b) forwards any other ack unchanged, as one frame', async () => {
       await provider.connect();
       const frames = listen();

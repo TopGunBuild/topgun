@@ -409,7 +409,8 @@ export class HttpSyncProvider implements IConnectionProvider {
       // last op says the server accepted every op of the request (TG-SYNC-001), so
       // it is true of each engine frame the request carried, and is delivered as
       // one ack per frame: the engine retires an op only through an ack whose
-      // lastId is the last op of a frame it sent. Any other ack is passed on as is.
+      // lastId is the last op of a frame it sent; every other field of the ack is
+      // kept on each of them. Any other ack is passed on as is.
       const ack = syncResponse.ack;
       if (
         ack &&
@@ -421,7 +422,7 @@ export class HttpSyncProvider implements IConnectionProvider {
           this.emit(
             'message',
             'http',
-            serialize({ type: 'OP_ACK', payload: { lastId: frame[frame.length - 1]?.id } }),
+            serialize({ type: 'OP_ACK', payload: { ...ack, lastId: frame[frame.length - 1]?.id } }),
           );
         }
       } else if (ack) {
