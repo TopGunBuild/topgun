@@ -573,6 +573,57 @@ pub struct QueryService {
     scan_hold: DrainHold,
 }
 
+/// Environment variable naming the sentinel file of the query-hold seam.
+#[cfg(feature = "fault-injection")]
+const FAULT_QUERY_DRAIN_HOLD_FILE_ENV: &str = "TOPGUN_FAULT_QUERY_DRAIN_HOLD_FILE";
+
+/// The sentinel path of the query-hold seam, read from the environment once per
+/// process, so the hold and the boot line cannot observe different answers.
+/// The boot line is logged by the same first read, so it appears once per
+/// process however many `QueryService`s are built.
+#[cfg(feature = "fault-injection")]
+fn fault_query_hold_path() -> Option<&'static std::path::Path> {
+    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let path = std::env::var_os(FAULT_QUERY_DRAIN_HOLD_FILE_ENV).map(std::path::PathBuf::from);
+        if let Some(path) = &path {
+            tracing::warn!(
+                hold_file = %path.display(),
+                "fault-injection build: live subscribes are held while the query-hold sentinel file exists"
+            );
+        } else {
+            tracing::warn!(
+                "fault-injection build: no query-hold sentinel file is configured, a live subscribe is never held"
+            );
+        }
+        path
+    })
+    .as_deref()
+}
+
+/// Holds a live subscribe between the end of its scan and the seeding of its
+/// window, with its snapshot buffer active, while the query-hold sentinel file
+/// exists. The file is polled with an async sleep: the hold runs on the global
+/// worker's task, and a blocking sleep would pin a runtime thread. A hold
+/// longer than the 30 s operation timeout cancels the handler; its subscribe
+/// guard then removes the registration (TG-LIVE-001).
+#[cfg(feature = "fault-injection")]
+async fn fault_query_hold(query_id: &str) {
+    let Some(path) = fault_query_hold_path() else {
+        return;
+    };
+    if !path.exists() {
+        return;
+    }
+    tracing::warn!(
+        query_id,
+        "fault-injection build: a live subscribe is held while the sentinel file exists"
+    );
+    while path.exists() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 /// `QUERY_RESP.code` of a refused live subscription that carries a non-empty
 /// `group_by` or `aggregations`: the live fan-out sends per-record deltas, which
 /// would mix raw records into a grouped result.
@@ -650,6 +701,10 @@ impl QueryService {
             Arc<dyn crate::service::domain::query_backend::SqlQueryBackend>,
         >,
     ) -> Self {
+        // A build that can hold a live subscribe on demand must say so at boot,
+        // whether or not the seam is configured.
+        #[cfg(feature = "fault-injection")]
+        let _ = fault_query_hold_path();
         Self {
             query_registry,
             record_store_factory,
@@ -1026,6 +1081,10 @@ impl QueryService {
         #[cfg(test)]
         if live.is_some() {
             self.scan_hold.pass(&query_id).await;
+        }
+        #[cfg(feature = "fault-injection")]
+        if live.is_some() {
+            fault_query_hold(&query_id).await;
         }
 
         // Seed the window from the snapshot page, before field projection so
