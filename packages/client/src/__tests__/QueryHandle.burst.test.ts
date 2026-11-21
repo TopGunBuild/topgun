@@ -152,8 +152,13 @@ async function runBurst(
     flushEnd = performance.now();
     emissions++;
   });
+  // The monitor records nothing until its first timer is armed: a block that
+  // starts in the iteration that enabled it goes unmeasured.
+  await new Promise<void>((resolve) => setTimeout(resolve, 5));
   await new Promise<void>((resolve) =>
     setImmediate(() => {
+      emissions = 0;
+      deltaCalls = 0;
       const t0 = performance.now();
       for (const op of ops) handle.onUpdate(op.key, op.value);
       burstMs = performance.now() - t0;
@@ -201,6 +206,8 @@ describe('QueryHandle burst', () => {
       process.stdout.write(
         `BURST N=${n} M=${m} ${label} burst_ms=${result.burstMs.toFixed(2)} flush_ms=${result.flushMs.toFixed(2)} max_loop_delay_ms=${result.maxDelayMs.toFixed(2)} gc=${gcAvailable}\n`,
       );
+      // The monitor must have seen the burst itself, or the budget proves nothing.
+      expect(result.maxDelayMs + 2).toBeGreaterThanOrEqual(result.burstMs);
       expect(result.maxDelayMs).toBeLessThanOrEqual(BUDGET_MS);
       expect(result.emissions).toBe(1);
       expect(result.deltaCalls).toBe(1);
