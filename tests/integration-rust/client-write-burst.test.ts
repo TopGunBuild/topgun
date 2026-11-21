@@ -24,7 +24,8 @@
  *   nothing and the server drops it as a slow consumer, which no real
  *   subscriber, running in a process other than the writer's, would see.
  * - Client subscriber: the map is seeded with 5 000 rows through raw OP_BATCHes,
- *   S is a TopGunClient holding a live query of it, and the burst starts once
+ *   S is a TopGunClient holding a live query of it, in a process of its own
+ *   (helpers/client-subscriber-process.js) for the same reason, and the burst starts once
  *   S's view holds the seed. S's view must end with all 9 000 keys and S must
  *   never leave CONNECTED.
  *
@@ -37,7 +38,6 @@ import * as path from 'path';
 
 import { deserialize } from '@topgunbuild/core';
 import { TopGunClient, SyncState } from '@topgunbuild/client';
-import type { StateChangeEvent } from '@topgunbuild/client';
 
 import { spawnRustServer, createTestToken, MemoryStorageAdapter, SpawnedServer } from './helpers';
 import { TestClient } from './helpers/test-client';
@@ -214,16 +214,20 @@ describe('Integration: a client write burst is sent once per write', () => {
       }
     }
 
-    const s = makeClient(port, 'burst-view-subscriber');
-    clients.push(s);
-    await connected(s, 'S');
-    const stateChanges: StateChangeEvent[] = [];
-    s.onConnectionStateChange((event) => stateChanges.push(event));
-    let view: Array<{ _key: string }> = [];
-    s.query<{ v: number }>(mapName, {}).subscribe((rows) => {
-      view = rows as Array<{ _key: string }>;
+    // A real subscriber never shares the writer's event loop; one that did would
+    // read nothing for the whole burst, and the server drops broadcasts to a full
+    // queue. So S runs in a process of its own, on the same client source.
+    let status: { keys: number; state: string; changes: Array<{ to: string }> } | undefined;
+    const s = child_process.fork(
+      path.join(__dirname, 'helpers', 'client-subscriber-process.js'),
+      [String(port), mapName],
+      { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] },
+    );
+    children.push(s);
+    s.on('message', (message: { type?: string }) => {
+      if (message?.type === 'status') status = message as typeof status;
     });
-    await until("S's view holds the seed", () => view.length === SEED_ROWS, VIEW_CEILING_MS);
+    await until("S's view holds the seed", () => status?.keys === SEED_ROWS, VIEW_CEILING_MS);
 
     const w = makeClient(port, 'burst-view-writer');
     clients.push(w);
@@ -236,11 +240,11 @@ describe('Integration: a client write burst is sent once per write', () => {
     expect(wire.total()).toBe(BURST_KEYS);
     await until(
       "S's view holds every key",
-      () => view.length === SEED_ROWS + BURST_KEYS,
+      () => status?.keys === SEED_ROWS + BURST_KEYS,
       VIEW_CEILING_MS,
     );
-    expect(new Set(view.map((r) => r._key)).size).toBe(SEED_ROWS + BURST_KEYS);
     expect(log.includes(SLOW_CONSUMER_TEXT)).toBe(false);
-    expect(stateChanges.filter((e) => e.to !== SyncState.CONNECTED)).toEqual([]);
+    expect(status?.state).toBe(SyncState.CONNECTED);
+    expect(status?.changes).toEqual([]);
   }, 180_000);
 });

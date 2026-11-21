@@ -728,4 +728,30 @@ describe('SyncEngine: each pending op is on the wire once per connection', () =>
     await settle();
     expect(pendingIds()).toEqual([]);
   });
+
+  test('case 23: a timer kept for an op that is then acked fires early, sends nothing, and re-arms for the next op', async () => {
+    const mock = providerMock();
+    await boot(mock);
+    issueOpIdsFrom(1);
+    const t0 = performance.now();
+    await write('a');
+    await advanceTo(t0, 5_000);
+    await write('b');
+    expect(mock.frames()).toEqual([['1'], ['2']]);
+
+    // Op 1 is retired; the timer armed for it (t0 + 10 s) is kept, without a scan.
+    await advanceTo(t0, 6_000);
+    mock.deliver(applied('1'));
+    await settle();
+    expect(pendingIds()).toEqual(['2']);
+
+    await advanceTo(t0, 10_000);
+    expect(mock.frames()).toEqual([['1'], ['2']]);
+    expect((privates() as unknown as { resendDueAt: number }).resendDueAt).toBe(t0 + 15_000);
+
+    await advanceTo(t0, 14_999);
+    expect(mock.frames()).toEqual([['1'], ['2']]);
+    await advanceTo(t0, 15_000);
+    expect(mock.frames()).toEqual([['1'], ['2'], ['2']]);
+  });
 });
