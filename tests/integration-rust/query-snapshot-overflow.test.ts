@@ -11,7 +11,12 @@
  * was built from (FAULT_SERVER_COMMIT). With either missing the test fails; it
  * never skips and never falls back to another binary.
  *
- * Two clients: S subscribes, W writes. W seeds map `m` with 50 rows first.
+ * Two clients: S, the TopGun client, subscribes; W, a protocol-level
+ * connection of its own, writes. W seeds map `m` with 50 rows first. W sends
+ * each batch as one OP_BATCH and waits for its OP_ACK: the TopGun client sends
+ * its whole unacknowledged op log again on every write, so a burst written
+ * through it would reach the server, and S as SERVER_EVENTs, about n²/2 times
+ * instead of n.
  *
  * - Case B (fold). S subscribes `qB` (no predicate, limit or sort, so every key
  *   of `m` is on its page) and is held. W updates `s-0` and writes 10 new keys.
@@ -46,7 +51,16 @@ import type { QueryHandle, StateChangeEvent } from '@topgunbuild/client';
 
 import { createTestToken, MemoryStorageAdapter } from './helpers';
 import { SEAM_BOOT_TEXT, requireFaultBinary } from './helpers/fault-binary';
-import { logField, plainLines, sleep, spawnBinary, SpawnedBinary } from './helpers/two-binary';
+import { TestClient } from './helpers/test-client';
+import {
+  connectWithin,
+  firstFrame,
+  logField,
+  plainLines,
+  sleep,
+  spawnBinary,
+  SpawnedBinary,
+} from './helpers/two-binary';
 
 const MAP = 'snapshot_overflow_m';
 const SEED_ROWS = 50;
@@ -106,10 +120,12 @@ describe('Integration: a live subscribe folds the writes of its scan and overflo
   let dir = '';
   let server: SpawnedBinary | null = null;
   const clients: TopGunClient[] = [];
+  let writer: TestClient | null = null;
   const notes: string[] = [];
 
   afterAll(async () => {
     for (const client of clients) await client.close().catch(() => undefined);
+    writer?.close();
     if (server) {
       await server.stop();
       const outDir = process.env.LIVENESS_OUT_DIR;
@@ -167,7 +183,8 @@ describe('Integration: a live subscribe folds the writes of its scan and overflo
       return client;
     };
     const s = await open('overflow-subscriber');
-    const w = await open('overflow-writer');
+    const w = await connectWithin(port, 'overflow-writer', CONNECT_WAIT_MS);
+    writer = w;
 
     // Spies on S: its connection state, every inbound frame in arrival order,
     // and every outbound QUERY_SUB.
@@ -210,10 +227,27 @@ describe('Integration: a live subscribe folds the writes of its scan and overflo
       return originalSend(message, key);
     };
 
-    const wMap = w.getMap<string, { v: number | string }>(MAP);
+    // One OP_BATCH per call, answered by one OP_ACK naming its last op. The
+    // counter makes every stamp of W strictly newer than the one before it.
+    let opSeq = 0;
     const writeAcked = async (keys: Array<[string, { v: number | string }]>) => {
-      for (const [key, value] of keys) wMap.set(key, value);
-      await until('W has no pending op', () => w.getPendingOpsCount() === 0, STEP_WAIT_MS);
+      const ops = keys.map(([key, value]) => {
+        opSeq += 1;
+        return {
+          id: `w-${opSeq}`,
+          mapName: MAP,
+          opType: 'PUT',
+          key,
+          record: { value, timestamp: { millis: Date.now(), counter: opSeq, nodeId: 'w' } },
+        };
+      });
+      w.messages.length = 0;
+      w.send({ type: 'OP_BATCH', payload: { ops } });
+      const frame = await firstFrame(w, ['OP_ACK', 'OP_REJECTED', 'ERROR'], STEP_WAIT_MS);
+      const lastId = ops[ops.length - 1].id;
+      if (frame?.type !== 'OP_ACK' || frame.payload?.lastId !== lastId) {
+        throw new Error(`W's batch ending ${lastId}: ${JSON.stringify(frame)?.slice(0, 400)}`);
+      }
     };
     const seedKeys = Array.from({ length: SEED_ROWS }, (_, i) => `s-${i}`);
     await writeAcked(seedKeys.map((k, i) => [k, { v: i }]));
