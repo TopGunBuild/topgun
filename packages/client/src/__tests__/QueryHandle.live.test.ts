@@ -323,6 +323,19 @@ describe('QueryHandle live delivery', () => {
       expect(emissions.length).toBe(before + 1);
       expect(lastKeys()).toEqual([]);
     });
+
+    test('resetChangeTracker delivers the undelivered changes to onDelta first', async () => {
+      const { handle, deltas } = setup();
+      seed(handle, [
+        ['a', { v: 1 }],
+        ['b', { v: 2 }],
+      ]);
+      handle.onUpdate('a', null);
+      handle.resetChangeTracker();
+      await nextTurn();
+      expect(brief(deltas[deltas.length - 1])).toEqual([['remove', 'a', null, { v: 1 }]]);
+      expect(handle.getPendingChanges()).toEqual([]);
+    });
   });
 
   describe('snapshots', () => {

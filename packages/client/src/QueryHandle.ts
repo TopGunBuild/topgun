@@ -576,9 +576,12 @@ export class QueryHandle<T> {
    * Use when query filter changes or on reconnect.
    */
   public resetChangeTracker(): void {
+    // Deliver what onDelta listeners are owed first: a dropped remove would
+    // leave a removed key in a consumer's own copy, which the full add that
+    // follows cannot take out.
+    this.flush();
     this.reportAllAsAdd = true;
     this.pendingChanges = [];
-    this.deliveryBatch = [];
   }
 
   /** The order of two rows: field by field as the server's sort key, then the key. */
