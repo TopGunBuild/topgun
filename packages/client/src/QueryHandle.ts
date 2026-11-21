@@ -510,7 +510,9 @@ export class QueryHandle<T> {
     const timestamp = Date.now();
     const change =
       value === null ? this.applyRemove(key, timestamp) : this.applyValue(key, value, timestamp);
-    if (this.recordChanges(change ? [change] : [], timestamp)) {
+    // Emit when the rows changed even if nothing was recorded: after
+    // resetChangeTracker, removing the last row records no add.
+    if (this.recordChanges(change ? [change] : [], timestamp) || change !== null) {
       this.scheduleFlush();
     }
   }

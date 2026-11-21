@@ -311,6 +311,18 @@ describe('QueryHandle live delivery', () => {
       handle.onUpdate('b', { v: 3 });
       expect(handle.getLastChange()).toMatchObject({ type: 'update', key: 'b' });
     });
+
+    test('after resetChangeTracker, removing the last row still emits the empty rows', async () => {
+      const { handle, emissions, lastKeys } = setup();
+      seed(handle, [['a', { v: 1 }]]);
+      await nextTurn();
+      handle.resetChangeTracker();
+      const before = emissions.length;
+      handle.onUpdate('a', null);
+      await nextTurn();
+      expect(emissions.length).toBe(before + 1);
+      expect(lastKeys()).toEqual([]);
+    });
   });
 
   describe('snapshots', () => {
