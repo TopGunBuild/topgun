@@ -1784,6 +1784,14 @@ if (hasMore) {
 
 `QueryHandle<T>` methods: `subscribe(cb)`, `loadMore()`, `onDelta(listener)`, `consumeChanges()`, `getLastChange()`, `getPendingChanges()`, `clearChanges()`, `resetChangeTracker()`, `getFilter()`, `getMapName()`, `getPaginationInfo()`, `onPaginationChange(listener)`, `updatePaginationInfo(info)`, `syncState` (getter), `onSyncStateChange(listener)`, `getError()`, `onError(listener)`.
 
+#### When updates are delivered
+
+A live update is delivered on the next timer turn, together with every other update that arrived in that turn: one `subscribe` call with the new rows, and one `onDelta` array holding every change in the order it arrived — a key changed twice gives two `update` events. A server snapshot, and a `loadMore()` page, is delivered before the call that delivered it returns, after any live updates still waiting. The pull methods (`consumeChanges()`, `getLastChange()`, `getPendingChanges()`) see a change as soon as it arrives.
+
+Rows are ordered by the server's sort-key order: booleans, then numbers, then strings, then `null` and missing values; `desc` reverses a field; ties are broken by key. The server's page and its live updates follow the same order for finite numbers, strings, `null` and missing values under ascending sort, and for finite numbers and strings under descending sort. `Date`, object and array sort values rank as missing, as on the server, so a query sorted on a `Date` field is ordered by key. A query without `sort` is ordered by key; a page without a `limit`, or with a filter, has no server order. A `fields` projection that drops the sort field is not covered.
+
+The row objects are shared between deliveries and with `getSnapshot()`: do not mutate them. The array a `subscribe` listener receives is its own, so sorting or pushing into it is safe.
+
 #### Knowing when a result is authoritative — `subscribe` `{ settled }`
 
 A live query fires immediately with whatever is in the local cache, then fires again once the server answers. Most UIs don't care about the difference — but if you need to tell "the server confirmed this" apart from "this is just my optimistic local view" (for example, to hide a spinner only once data is real), `subscribe` passes an optional second argument:
