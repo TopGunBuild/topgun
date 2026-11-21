@@ -1532,10 +1532,11 @@ export class SyncEngine {
     const frames = new Map<string, OpLogEntry[]>();
     for (const op of pending) {
       const frameKey = this.inFlightBatches.has(op.id) ? op.id : (holder.get(op.id) ?? FRESH);
-      const frame = frames.get(frameKey);
+      const frame = frames.get(frameKey) ?? [];
+      frame.push(op);
       // Deleting and re-inserting keeps the Map in op-log order of each frame's last op.
       frames.delete(frameKey);
-      frames.set(frameKey, frame ? [...frame, op] : [op]);
+      frames.set(frameKey, frame);
     }
     const sendable = new Map(this.opLog.map((op) => [op.id, op]));
 
