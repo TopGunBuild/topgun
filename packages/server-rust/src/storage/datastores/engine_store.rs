@@ -93,15 +93,15 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
 use parking_lot::{Mutex, MutexGuard, RwLock};
-use topgun_core::fnv1a_hash;
 use topgun_core::partition::{hash_to_partition, PARTITION_COUNT};
 use topgun_core::types::tenant_owns;
 
 use super::kv_engine::{KeyRange, KvEngine, KvError, KvSnapshot, WriteBatch, WriteOptions};
 use crate::storage::map_data_store::{
-    check_map_name, check_tenant, merkle_leaf_hash, AppliedWatermarks, CommitDurability,
-    DropOutcome, FlushCommit, KeyVersion, LeafSink, MapDataStore, MerkleLeaf, PutValue,
-    RecordRefused, ScanBatch, ScanCursor, ScanOrder, StoreErrorClass, StoreSyncFailed, StoreWrite,
+    check_map_name, check_tenant, merkle_leaf_hash, wal_partition, AppliedWatermarks,
+    CommitDurability, DropOutcome, FlushCommit, KeyVersion, LeafSink, MapDataStore, MerkleLeaf,
+    PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder, StoreErrorClass, StoreSyncFailed,
+    StoreWrite,
 };
 use crate::storage::record::RecordValue;
 use crate::storage::sealing::{
@@ -209,12 +209,6 @@ fn decode_applied_row_key(key: &[u8]) -> Option<u32> {
 /// The engine key of the `max_version` row: `KS_RECORD_VERSION` alone, shorter
 /// than every version row key.
 pub const MAX_VERSION_KEY: &[u8] = &[KS_RECORD_VERSION];
-
-/// The WAL partition the write-behind store frames `(map, key)` under, the
-/// partition whose watermark a version row of the key is compared with.
-fn wal_partition(map: &str, key: &str) -> u32 {
-    fnv1a_hash(&format!("{map}:{key}")) % PARTITION_COUNT
-}
 
 /// The engine key of the version row of `(map_id, key)`:
 /// `KS_RECORD_VERSION ‖ WAL partition ‖ map id ‖ user key`.

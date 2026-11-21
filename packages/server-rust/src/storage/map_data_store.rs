@@ -1137,12 +1137,12 @@ pub(crate) struct WatermarkKeeping<S> {
 #[cfg(test)]
 type KeyVersions = HashMap<(String, String), KeyVersion>;
 
-/// The WAL partition a key's frames go to: `fnv1a("{map}:{key}") % 271`, the
-/// write-behind store's framing, so a version is reclaimed against its own
-/// partition's watermark.
-#[cfg(test)]
-fn wal_partition_of(map: &str, key: &str) -> usize {
-    (fnv1a_hash(&format!("{map}:{key}")) % topgun_core::PARTITION_COUNT) as usize
+/// The WAL partition the write-behind store frames `(map, key)` under:
+/// `fnv1a("{map}:{key}") % 271`. The version row of a key is keyed by it, so a
+/// version is reclaimed against the watermark of the partition its frames went to.
+#[must_use]
+pub fn wal_partition(map: &str, key: &str) -> u32 {
+    fnv1a_hash(&format!("{map}:{key}")) % topgun_core::PARTITION_COUNT
 }
 
 #[cfg(test)]
@@ -1202,7 +1202,7 @@ impl<S> WatermarkKeeping<S> {
                     continue;
                 }
                 max_version = max_version.max(seq);
-                if seq <= next[wal_partition_of(map, key)] {
+                if seq <= next[wal_partition(map, key) as usize] {
                     continue;
                 }
                 let id = (map.to_string(), key.to_string());
@@ -1466,7 +1466,7 @@ impl<S: MapDataStore> MapDataStore for WatermarkKeeping<S> {
         let before = versions.len();
         versions.retain(|(map, key), version| {
             watermarks
-                .get(wal_partition_of(map, key))
+                .get(wal_partition(map, key) as usize)
                 .is_none_or(|&watermark| version.seq > watermark)
         });
         Ok((before - versions.len()) as u64)
@@ -2775,7 +2775,7 @@ mod watermark_keeping_versions {
     use topgun_core::types::Value;
 
     use super::{
-        wal_partition_of, FlushCommit, KeyVersion, MapDataStore, PutValue, StoreWrite,
+        wal_partition, FlushCommit, KeyVersion, MapDataStore, PutValue, StoreWrite,
         WatermarkKeeping,
     };
     use crate::storage::datastores::NullDataStore;
@@ -2832,7 +2832,7 @@ mod watermark_keeping_versions {
     fn key_apart_from(of: &str, prefix: &str) -> String {
         (0..1000)
             .map(|i| format!("{prefix}{i}"))
-            .find(|key| wal_partition_of("m", key) != wal_partition_of("m", of))
+            .find(|key| wal_partition("m", key) != wal_partition("m", of))
             .expect("a key in another partition")
     }
 
@@ -2848,7 +2848,7 @@ mod watermark_keeping_versions {
         let store = WatermarkKeeping::new(NullDataStore);
         let v = value();
         let low = key_apart_from("a", "low");
-        let p = u32::try_from(wal_partition_of("m", &low)).expect("partition");
+        let p = wal_partition("m", &low);
 
         // Above the watermark after the commit: a row; at or below it: none,
         // though max_version still counts the stored record.
@@ -2946,8 +2946,8 @@ mod watermark_keeping_versions {
         .await
         .expect("put");
         let mut watermarks = vec![0; topgun_core::PARTITION_COUNT as usize];
-        watermarks[wal_partition_of("m", "a")] = 3;
-        watermarks[wal_partition_of("m", &b)] = 8;
+        watermarks[wal_partition("m", "a") as usize] = 3;
+        watermarks[wal_partition("m", &b) as usize] = 8;
         assert_eq!(
             store.reclaim_record_versions(&watermarks).expect("reclaim"),
             1

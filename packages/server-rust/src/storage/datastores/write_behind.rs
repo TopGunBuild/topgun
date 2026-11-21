@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use tokio::sync::{watch, Notify};
 use topgun_core::types::tenant_owns;
-use topgun_core::{fnv1a_hash, PARTITION_COUNT};
+use topgun_core::PARTITION_COUNT;
 use tracing::{error, info, warn};
 
 use crate::storage::engine::SlotCell;
@@ -22,6 +22,8 @@ use crate::storage::map_data_store::{
     MapDataStore, MerkleLeaf, PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder,
     StoreBrokenCause, StoreErrorClass, StoreWrite, WriteSource,
 };
+// The one routing function of WAL partitions; the version row key uses it too.
+use crate::storage::map_data_store::wal_partition as partition_for;
 use crate::storage::record::{structural_size, RecordValue};
 use crate::storage::wal::{
     describe_wal_watermark_metrics, OrDelta, Wal, WalEntry, WalFsyncPolicy, WalOp, WalStorePayload,
@@ -1450,12 +1452,6 @@ fn now_millis() -> i64 {
             .as_millis(),
     )
     .unwrap_or(i64::MAX)
-}
-
-/// Deterministic partition assignment from (map, key) via `fnv1a_hash`.
-fn partition_for(map: &str, key: &str) -> u32 {
-    let combined = format!("{map}:{key}");
-    fnv1a_hash(&combined) % PARTITION_COUNT
 }
 
 // ---------------------------------------------------------------------------
@@ -20591,7 +20587,6 @@ mod write_path_measure {
     #[allow(clippy::cast_precision_loss)]
     fn recovery_of_n_frames() {
         use crate::storage::wal::{WalEntry, WalOp, WalStorePayload};
-        use topgun_core::{fnv1a_hash, PARTITION_COUNT};
         let env_u64 = |name: &str, default: u64| {
             std::env::var(name)
                 .ok()
@@ -20643,7 +20638,7 @@ mod write_path_measure {
                             }),
                             sequence: seq,
                         };
-                        let partition = fnv1a_hash(&format!("m:{key}")) % PARTITION_COUNT;
+                        let partition = partition_for("m", &key);
                         wal.append(partition, &entry).await.unwrap();
                     }
                     super::release_wal(wal).await;
@@ -20690,7 +20685,7 @@ mod write_path_measure {
     )]
     fn reclaim_tick_with_a_held_partition() {
         use crate::storage::map_data_store::{FlushCommit, PutValue, StoreWrite};
-        use topgun_core::{fnv1a_hash, PARTITION_COUNT};
+        use topgun_core::PARTITION_COUNT;
         const HELD: u32 = 7;
         let env_u64 = |name: &str, default: u64| {
             std::env::var(name)
@@ -20700,7 +20695,7 @@ mod write_path_measure {
         };
         let ticks = env_u64("RV_TICKS", 60);
         let writes = env_u64("RV_WRITES", 10_000);
-        let partition = |key: &str| fnv1a_hash(&format!("m:{key}")) % PARTITION_COUNT;
+        let partition = |key: &str| partition_for("m", key);
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
             .enable_all()

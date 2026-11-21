@@ -47,7 +47,7 @@ use crate::storage::datastores::{
     RedbDataStore, WalBootstrap, WriteBehindConfig, WriteBehindDataStore,
 };
 use crate::storage::map_data_store::{
-    LeafSink, MapDataStore, ScanBatch, ScanCursor, WatermarkKeeping,
+    wal_partition, LeafSink, MapDataStore, ScanBatch, ScanCursor, WatermarkKeeping,
 };
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::wal::segment::inspect;
@@ -788,26 +788,20 @@ async fn ac2c_mid_file_corruption_is_fatal() {
 // ---------------------------------------------------------------------------
 
 /// Finds a key distinct from `first_key` that maps to the **same** partition as
-/// `first_key` under `partition_for(map, key)`.
+/// `first_key` under `wal_partition(map, key)`.
 ///
 /// k0 and k1 must share a partition so that the watermark recovery advances for
 /// k0's partition is the exact value the rebuilt counter would (without the
 /// seed) re-hand to k1 — making the second recovery drop k1.
 fn colliding_key(map: &str, first_key: &str) -> String {
-    let target = partition_of(map, first_key);
+    let target = wal_partition(map, first_key);
     for i in 0..1_000_000u64 {
         let candidate = format!("collide-{i}");
-        if candidate != first_key && partition_of(map, &candidate) == target {
+        if candidate != first_key && wal_partition(map, &candidate) == target {
             return candidate;
         }
     }
     panic!("no colliding key found for partition {target}");
-}
-
-/// Mirrors `write_behind::partition_for` (private): deterministic partition id.
-fn partition_of(map: &str, key: &str) -> u32 {
-    let combined = format!("{map}:{key}");
-    topgun_core::fnv1a_hash(&combined) % topgun_core::PARTITION_COUNT
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -818,10 +812,10 @@ async fn ac4_acked_writes_survive_multiple_restart_cycles() {
     let k0 = "k0".to_string();
     // k1 must share a partition with k0 so the watermark collision bites.
     let k1 = colliding_key(TEST_MAP, &k0);
-    let partition = partition_of(TEST_MAP, &k0);
+    let partition = wal_partition(TEST_MAP, &k0);
     assert_eq!(
         partition,
-        partition_of(TEST_MAP, &k1),
+        wal_partition(TEST_MAP, &k1),
         "k0 and k1 must collide on one partition to exercise the watermark resume"
     );
 
@@ -1039,7 +1033,7 @@ fn keys_for_partition(map: &str, partition: u32, count: usize) -> Vec<String> {
     let mut i = 0u64;
     while out.len() < count {
         let candidate = format!("cp-{i}");
-        if partition_of(map, &candidate) == partition {
+        if wal_partition(map, &candidate) == partition {
             out.push(candidate);
         }
         i += 1;
@@ -1056,7 +1050,7 @@ async fn concurrent_compaction_loses_no_acked_write_across_crash() {
     // the same file. 2000 ops reproduces the pre-fix loss reliably (the audit's
     // repro dropped 1864/2000).
     let total = 2000usize;
-    let partition = partition_of(TEST_MAP, "anchor");
+    let partition = wal_partition(TEST_MAP, "anchor");
     let keys = keys_for_partition(TEST_MAP, partition, total);
 
     // Production write path; never-flush so acked writes live ONLY in the WAL
@@ -1167,7 +1161,7 @@ async fn crash_on_partial_active_segment_recovers_intact_prefix() {
     let wal_dir = dir.path().to_path_buf();
 
     let total = 1000usize;
-    let partition = partition_of(TEST_MAP, "anchor");
+    let partition = wal_partition(TEST_MAP, "anchor");
     let keys = keys_for_partition(TEST_MAP, partition, total);
 
     // Production write path; never-flush so acked writes live ONLY in the WAL

@@ -25,7 +25,7 @@ use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use topgun_core::hlc::Timestamp;
 use topgun_core::types::Value;
-use topgun_core::{fnv1a_hash, PARTITION_COUNT};
+use topgun_core::PARTITION_COUNT;
 
 use super::format::{decode_stream_segment, FrameDecodeResult};
 use super::segment::{inspect, parse_stream_filename, SegmentHeader, StreamSegmentHeader};
@@ -383,10 +383,7 @@ pub(super) fn rows_of(dump: &BTreeMap<Vec<u8>, Vec<u8>>) -> BTreeMap<u32, u64> {
         .collect()
 }
 
-/// The WAL partition write-behind gives `(map, key)`.
-pub(super) fn wal_partition(map: &str, key: &str) -> u32 {
-    fnv1a_hash(&format!("{map}:{key}")) % PARTITION_COUNT
-}
+pub(super) use crate::storage::map_data_store::wal_partition;
 
 /// The first `n` keys `k{i}` of `MAP` in WAL partition `partition`.
 pub(super) fn keys_in(partition: u32, n: usize) -> Vec<String> {

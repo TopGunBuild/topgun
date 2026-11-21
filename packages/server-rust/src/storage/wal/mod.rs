@@ -6873,9 +6873,8 @@ mod tests {
     async fn a_flush_pass_ok_terminal_advances_the_durable_watermark() {
         use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
 
-        // `partition_for` is private to the write-behind module, so the partition
-        // is located by the store row that MOVED rather than by recomputing the
-        // hash — which also makes the assertion independent of the hash function.
+        // The partition is located by the store row that MOVED rather than by
+        // recomputing the hash, so the assertion is independent of the hash function.
         fn advanced_partitions(store: &dyn MapDataStore) -> Vec<u32> {
             (0..topgun_core::PARTITION_COUNT)
                 .filter(|p| store_row(store, *p) >= 1)

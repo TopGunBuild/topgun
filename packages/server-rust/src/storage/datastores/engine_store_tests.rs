@@ -2325,11 +2325,7 @@ mod record_versions {
         block_on(store.commit(&FlushCommit { writes, applied }))
     }
 
-    /// The WAL partition the write-behind store frames `(map, key)` under,
-    /// computed here independently of the store.
-    fn wal_partition(map: &str, key: &str) -> u32 {
-        topgun_core::fnv1a_hash(&format!("{map}:{key}")) % PARTITION_COUNT
-    }
+    use crate::storage::map_data_store::wal_partition;
 
     /// `0x12 ‖ WAL partition ‖ map id ‖ key`, spelled out byte by byte.
     fn expected_row_key(map: &str, map_id: u32, key: &str) -> Vec<u8> {
