@@ -5,7 +5,7 @@
 //! metadata storage for authentication and subscription state.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -70,6 +70,43 @@ pub enum BroadcastOutcome {
     Closed,
 }
 
+/// Why a live event owed to a subscriber was lost (`TG-LIVE-003`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwedLoss {
+    /// The connection's outbound queue was full.
+    ChannelFull,
+    /// The event could not be encoded.
+    EncodeFailed,
+}
+
+impl OwedLoss {
+    /// The `cause` label of the loss metric and log line.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ChannelFull => "channel_full",
+            Self::EncodeFailed => "encode_failed",
+        }
+    }
+}
+
+/// Client connections disconnected because they lost a live event they were
+/// owed, labeled by the cause (`TG-LIVE-003`).
+pub const LIVE_EVENT_LOSS_COUNTER: &str = "topgun_live_event_loss_disconnects_total";
+
+/// Describes the loss counter and registers both of its series at zero, so a
+/// scrape shows them before the first loss.
+fn register_live_event_loss_metrics() {
+    metrics::describe_counter!(
+        LIVE_EVENT_LOSS_COUNTER,
+        "Client connections disconnected because they lost a live event they were owed, \
+         labeled by the cause"
+    );
+    for cause in [OwedLoss::ChannelFull, OwedLoss::EncodeFailed] {
+        metrics::counter!(LIVE_EVENT_LOSS_COUNTER, "cause" => cause.as_str()).increment(0);
+    }
+}
+
 /// Handle to a single connection, providing send capabilities and metadata access.
 ///
 /// Each connection gets a bounded mpsc channel for backpressure. The receiver
@@ -105,6 +142,9 @@ pub struct ConnectionHandle {
     /// to force resync. 0 disables the disconnect behavior (pure best-effort
     /// drop, the legacy semantics).
     slow_consumer_drop_threshold: u64,
+    /// Set by the first lost owed live event; from then on the owed sites
+    /// encode and enqueue nothing more for this connection (`TG-LIVE-003`).
+    owed_lost: AtomicBool,
 }
 
 impl ConnectionHandle {
@@ -168,6 +208,72 @@ impl ConnectionHandle {
                 }
             }
         }
+    }
+
+    /// Sends a live event this connection is owed: a `SERVER_EVENT` of a map it
+    /// holds a query on, a `QUERY_UPDATE` of one of its live queries, or an
+    /// update of one of its live searches (`TG-LIVE-003`).
+    ///
+    /// Never awaits. A success resets the consecutive-drop streak as
+    /// [`try_send_broadcast`](Self::try_send_broadcast) does, so the best-effort
+    /// pushes sharing that streak see what they saw before. A full queue loses
+    /// the event, and a client that loses an event it is owed holds a view no
+    /// fresh query would give: it is disconnected at this first loss, whatever
+    /// `slow_consumer_drop_threshold` says, so it reconnects and resyncs
+    /// ([`owed_event_lost`](Self::owed_event_lost)).
+    // The outcome is informational: a loss has already been acted on, so a caller
+    // with nothing more to send may ignore it.
+    #[allow(clippy::must_use_candidate)]
+    pub fn try_send_owed(&self, msg: OutboundMessage) -> BroadcastOutcome {
+        match self.tx.try_send(msg) {
+            Ok(()) => {
+                self.consecutive_drops.store(0, Ordering::Relaxed);
+                BroadcastOutcome::Sent
+            }
+            Err(TrySendError::Closed(_)) => BroadcastOutcome::Closed,
+            Err(TrySendError::Full(_)) => {
+                self.dropped_broadcasts.fetch_add(1, Ordering::Relaxed);
+                self.owed_event_lost(OwedLoss::ChannelFull)
+            }
+        }
+    }
+
+    /// Acts on the loss of a live event this connection was owed
+    /// (`TG-LIVE-003`).
+    ///
+    /// A client connection is flagged, so the owed sites skip it from now on,
+    /// and cancelled; the cancellation token is not a queue slot, so the signal
+    /// cannot itself be lost. The first loss of a connection not cancelled
+    /// before logs one `WARN` and counts once in
+    /// `topgun_live_event_loss_disconnects_total{cause}`; the `swap` keeps that
+    /// once also under racing losses. A cluster peer carries no owed event and
+    /// its liveness is the failure detector's: it is left alone (`Dropped`).
+    // The outcome is informational, as for `try_send_owed`.
+    #[allow(clippy::must_use_candidate)]
+    pub fn owed_event_lost(&self, cause: OwedLoss) -> BroadcastOutcome {
+        if self.kind != ConnectionKind::Client {
+            return BroadcastOutcome::Dropped;
+        }
+        if !self.owed_lost.swap(true, Ordering::Relaxed) && !self.cancel.is_cancelled() {
+            warn!(
+                conn_id = ?self.id,
+                cause = cause.as_str(),
+                dropped_total = self.dropped_broadcasts.load(Ordering::Relaxed),
+                "a live event owed to a subscriber was lost; \
+                 disconnecting it so it reconnects and resyncs"
+            );
+            metrics::counter!(LIVE_EVENT_LOSS_COUNTER, "cause" => cause.as_str()).increment(1);
+        }
+        self.cancel();
+        BroadcastOutcome::Disconnected
+    }
+
+    /// Whether this connection has lost an owed live event, so the owed sites
+    /// skip it before encoding (`TG-LIVE-003`). A relaxed load and no lock:
+    /// `is_cancelled` takes a mutex and stays off the send path.
+    #[must_use]
+    pub fn owed_closed(&self) -> bool {
+        self.owed_lost.load(Ordering::Relaxed)
     }
 
     /// Cumulative number of live-event broadcasts dropped to this connection
@@ -313,6 +419,7 @@ impl ConnectionRegistry {
     /// Connection IDs start at 1 (0 is reserved as "no connection").
     #[must_use]
     pub fn new() -> Self {
+        register_live_event_loss_metrics();
         Self {
             connections: DashMap::new(),
             next_id: AtomicU64::new(1),
@@ -344,6 +451,7 @@ impl ConnectionRegistry {
             consecutive_drops: AtomicU64::new(0),
             dropped_broadcasts: AtomicU64::new(0),
             slow_consumer_drop_threshold: config.slow_consumer_drop_threshold,
+            owed_lost: AtomicBool::new(false),
         });
 
         self.connections.insert(id, Arc::clone(&handle));
@@ -546,6 +654,21 @@ impl ConnectionRegistry {
         for id in ids {
             if let Some(handle) = self.get(*id) {
                 let _ = handle.try_send_broadcast(OutboundMessage::Binary(msg_bytes.to_vec()));
+            }
+        }
+    }
+
+    /// Sends a live event the connections of `ids` are owed (`TG-LIVE-003`):
+    /// missing ids and connections that already lost an owed event are skipped
+    /// before the bytes are copied; every other target gets
+    /// [`try_send_owed`](ConnectionHandle::try_send_owed), so a target whose
+    /// queue is full is disconnected at that loss.
+    pub fn send_owed_to_connections(&self, ids: &HashSet<ConnectionId>, msg_bytes: &[u8]) {
+        for id in ids {
+            if let Some(handle) = self.get(*id) {
+                if !handle.owed_closed() {
+                    handle.try_send_owed(OutboundMessage::Binary(msg_bytes.to_vec()));
+                }
             }
         }
     }
@@ -1046,6 +1169,231 @@ mod tests {
             );
         }
         assert!(!handle.is_cancelled());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Owed live events (TG-LIVE-003): a client that loses one is disconnected at
+    // that first loss, whatever the best-effort threshold says.
+    // ---------------------------------------------------------------------------
+
+    /// Runs `f` under a local Prometheus recorder and returns the rendered text.
+    fn rendered(f: impl FnOnce()) -> String {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, f);
+        handle.render()
+    }
+
+    /// The value of the loss counter's series for `cause`, if rendered.
+    fn loss_series(rendered: &str, cause: &str) -> Option<u64> {
+        let prefix = format!("{LIVE_EVENT_LOSS_COUNTER}{{cause=\"{cause}\"}} ");
+        rendered
+            .lines()
+            .find_map(|l| l.strip_prefix(prefix.as_str()))
+            .map(|v| v.trim().parse().expect("a counter value"))
+    }
+
+    fn bin(n: u8) -> OutboundMessage {
+        OutboundMessage::Binary(vec![n])
+    }
+
+    #[test]
+    fn an_owed_event_lost_on_a_full_queue_disconnects_at_the_first_loss() {
+        let config =
+            slow_consumer_config(2, ConnectionConfig::default().slow_consumer_drop_threshold);
+        let registry = ConnectionRegistry::new();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+
+        assert_eq!(handle.try_send_owed(bin(1)), BroadcastOutcome::Sent);
+        assert_eq!(handle.try_send_owed(bin(2)), BroadcastOutcome::Sent);
+        assert!(!handle.is_cancelled());
+        assert_eq!(handle.try_send_owed(bin(3)), BroadcastOutcome::Disconnected);
+        assert!(
+            handle.is_cancelled(),
+            "the first lost owed event disconnects"
+        );
+        assert!(handle.owed_closed());
+    }
+
+    #[test]
+    fn a_loss_between_successful_sends_disconnects() {
+        let config = slow_consumer_config(1, 256);
+        let registry = ConnectionRegistry::new();
+        let (handle, mut rx) = registry.register(ConnectionKind::Client, &config);
+
+        assert_eq!(handle.try_send_owed(bin(1)), BroadcastOutcome::Sent);
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(handle.try_send_owed(bin(2)), BroadcastOutcome::Sent);
+        assert_eq!(handle.try_send_owed(bin(3)), BroadcastOutcome::Disconnected);
+        assert!(
+            handle.is_cancelled(),
+            "a single loss between successes must not hide behind the streak reset"
+        );
+    }
+
+    #[test]
+    fn a_draining_subscriber_is_never_disconnected_by_owed_events() {
+        let config = slow_consumer_config(2, 3);
+        let registry = ConnectionRegistry::new();
+        let (handle, mut rx) = registry.register(ConnectionKind::Client, &config);
+
+        for i in 0..100u8 {
+            assert_eq!(handle.try_send_owed(bin(i)), BroadcastOutcome::Sent);
+            assert!(rx.try_recv().is_ok());
+        }
+        assert!(!handle.is_cancelled(), "a draining subscriber survives");
+        assert!(!handle.owed_closed());
+        assert_eq!(handle.dropped_broadcasts(), 0);
+    }
+
+    #[test]
+    fn an_owed_success_resets_the_broadcast_drop_streak() {
+        let config = slow_consumer_config(1, 3);
+        let registry = ConnectionRegistry::new();
+        let (handle, mut rx) = registry.register(ConnectionKind::Client, &config);
+
+        assert_eq!(handle.try_send_broadcast(bin(1)), BroadcastOutcome::Sent);
+        assert_eq!(handle.try_send_broadcast(bin(2)), BroadcastOutcome::Dropped);
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(handle.try_send_owed(bin(3)), BroadcastOutcome::Sent);
+        assert_eq!(handle.try_send_broadcast(bin(4)), BroadcastOutcome::Dropped);
+        assert_eq!(handle.try_send_broadcast(bin(5)), BroadcastOutcome::Dropped);
+        assert!(
+            !handle.is_cancelled(),
+            "the owed success reset the streak: two drops stay under the threshold of 3"
+        );
+    }
+
+    #[test]
+    fn a_cluster_peer_is_not_disconnected_by_an_owed_loss() {
+        let config = slow_consumer_config(1, 1);
+        let registry = ConnectionRegistry::new();
+        let (handle, _rx) = registry.register(ConnectionKind::ClusterPeer, &config);
+
+        assert_eq!(handle.try_send_owed(bin(1)), BroadcastOutcome::Sent);
+        for _ in 0..10 {
+            assert_eq!(handle.try_send_owed(bin(2)), BroadcastOutcome::Dropped);
+        }
+        assert!(
+            !handle.is_cancelled(),
+            "a cluster peer is never cancelled by it"
+        );
+        assert!(!handle.owed_closed());
+    }
+
+    #[test]
+    fn an_owed_loss_signals_once_per_connection() {
+        let twice = rendered(|| {
+            let registry = ConnectionRegistry::new();
+            let (handle, _rx) =
+                registry.register(ConnectionKind::Client, &slow_consumer_config(1, 256));
+            assert_eq!(handle.try_send_owed(bin(1)), BroadcastOutcome::Sent);
+            assert_eq!(handle.try_send_owed(bin(2)), BroadcastOutcome::Disconnected);
+            assert_eq!(handle.try_send_owed(bin(3)), BroadcastOutcome::Disconnected);
+        });
+        assert_eq!(loss_series(&twice, "channel_full"), Some(1), "{twice}");
+
+        let cancelled_before = rendered(|| {
+            let registry = ConnectionRegistry::new();
+            let (handle, _rx) =
+                registry.register(ConnectionKind::Client, &slow_consumer_config(1, 256));
+            assert_eq!(handle.try_send_owed(bin(1)), BroadcastOutcome::Sent);
+            handle.cancel();
+            assert_eq!(handle.try_send_owed(bin(2)), BroadcastOutcome::Disconnected);
+        });
+        assert_eq!(
+            loss_series(&cancelled_before, "channel_full"),
+            Some(0),
+            "a connection cancelled before is not counted: {cancelled_before}"
+        );
+    }
+
+    #[test]
+    fn an_encode_failure_disconnects_a_client() {
+        let out = rendered(|| {
+            let registry = ConnectionRegistry::new();
+            let (handle, _rx) = registry.register(ConnectionKind::Client, &test_config());
+            assert_eq!(
+                handle.owed_event_lost(OwedLoss::EncodeFailed),
+                BroadcastOutcome::Disconnected
+            );
+            assert!(handle.is_cancelled());
+            assert!(handle.owed_closed());
+        });
+        assert_eq!(loss_series(&out, "encode_failed"), Some(1), "{out}");
+    }
+
+    #[test]
+    fn send_owed_to_connections_disconnects_only_the_full_target() {
+        let registry = ConnectionRegistry::new();
+        let (full, _full_rx) =
+            registry.register(ConnectionKind::Client, &slow_consumer_config(1, 256));
+        let (open, mut open_rx) = registry.register(ConnectionKind::Client, &test_config());
+        let (flagged, mut flagged_rx) = registry.register(ConnectionKind::Client, &test_config());
+        assert_eq!(full.try_send_owed(bin(0)), BroadcastOutcome::Sent);
+        flagged.owed_event_lost(OwedLoss::EncodeFailed);
+
+        let ids: HashSet<ConnectionId> = [full.id, open.id, flagged.id].into_iter().collect();
+        registry.send_owed_to_connections(&ids, &[7, 7]);
+
+        assert!(full.is_cancelled(), "the full target is disconnected");
+        assert!(!open.is_cancelled(), "the other target is not");
+        match open_rx.try_recv() {
+            Ok(OutboundMessage::Binary(bytes)) => assert_eq!(bytes, vec![7, 7]),
+            other => panic!("the open target receives the bytes: {other:?}"),
+        }
+        assert!(
+            flagged_rx.try_recv().is_err(),
+            "a flagged target receives nothing"
+        );
+    }
+
+    /// Characterizes the channel only, not a bound on the server path: a
+    /// sender parked on a full queue is not released by `cancel()`, only by the
+    /// receiver's drop. On the server the registry holds a sender until the
+    /// connection is removed, and the receiver ends only when the writer task
+    /// is aborted after its join timeout, so a cancelled connection's parked
+    /// response sends wait that long.
+    #[tokio::test]
+    async fn characterization_a_parked_sender_is_released_by_the_receiver_drop_not_by_cancel() {
+        let registry = ConnectionRegistry::new();
+        let (handle, rx) = registry.register(ConnectionKind::Client, &slow_consumer_config(1, 256));
+        assert_eq!(handle.try_send_owed(bin(1)), BroadcastOutcome::Sent);
+        let tx = handle.tx.clone();
+        let parked = tokio::spawn(async move { tx.send(bin(2)).await });
+
+        handle.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !parked.is_finished(),
+            "cancel() does not release a parked send"
+        );
+
+        drop(rx);
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(1), parked)
+            .await
+            .expect("the receiver's drop releases the send")
+            .expect("join");
+        assert!(sent.is_err(), "the released send fails");
+    }
+
+    #[test]
+    fn the_loss_metric_is_registered_at_zero_for_both_causes() {
+        let out = rendered(|| {
+            let _registry = ConnectionRegistry::new();
+        });
+        assert_eq!(loss_series(&out, "channel_full"), Some(0), "{out}");
+        assert_eq!(loss_series(&out, "encode_failed"), Some(0), "{out}");
+    }
+
+    #[test]
+    fn a_threshold_of_zero_does_not_spare_an_owed_loss() {
+        let registry = ConnectionRegistry::new();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &slow_consumer_config(1, 0));
+        assert_eq!(handle.try_send_owed(bin(1)), BroadcastOutcome::Sent);
+        assert_eq!(handle.try_send_owed(bin(2)), BroadcastOutcome::Disconnected);
+        assert!(handle.is_cancelled());
+        assert!(handle.owed_closed());
     }
 
     #[test]

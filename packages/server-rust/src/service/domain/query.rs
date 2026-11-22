@@ -38,7 +38,9 @@ use crate::query::window::{LiveWindow, WindowDelta};
 
 use tracing::Instrument;
 
-use crate::network::connection::{ConnectionId, ConnectionRegistry, OutboundMessage};
+use crate::network::connection::{
+    BroadcastOutcome, ConnectionId, ConnectionRegistry, OutboundMessage, OwedLoss,
+};
 use crate::service::domain::index::attribute::AttributeExtractor;
 use crate::service::domain::index::query_optimizer::index_aware_evaluate;
 use crate::service::domain::index::IndexObserverFactory;
@@ -286,6 +288,12 @@ impl QueryRegistry {
             let Some(handle) = connections.get(sub.connection_id) else {
                 continue;
             };
+            // A connection that lost an owed event is being torn down and its
+            // subscriptions end with it: nothing more is encoded for it
+            // (`TG-LIVE-003`).
+            if handle.owed_closed() {
+                continue;
+            }
             for delta in deltas {
                 let msg = Message::QueryUpdate {
                     payload: QueryUpdatePayload {
@@ -295,8 +303,24 @@ impl QueryRegistry {
                         change_type: delta.event,
                     },
                 };
-                if let Ok(bytes) = rmp_serde::to_vec_named(&msg) {
-                    let _ = handle.try_send_broadcast(OutboundMessage::Binary(bytes));
+                let outcome = match rmp_serde::to_vec_named(&msg) {
+                    Ok(bytes) => handle.try_send_owed(OutboundMessage::Binary(bytes)),
+                    Err(error) => {
+                        tracing::error!(
+                            map = map_name,
+                            key,
+                            kind = "query_update",
+                            %error,
+                            "a live event owed to subscribers could not be encoded; \
+                             disconnecting them"
+                        );
+                        handle.owed_event_lost(OwedLoss::EncodeFailed)
+                    }
+                };
+                // After a loss the rest of this subscription's deltas would only
+                // land on a connection that is being disconnected.
+                if outcome != BroadcastOutcome::Sent {
+                    break;
                 }
             }
         }
@@ -1876,7 +1900,9 @@ mod tests {
 
     use super::*;
     use crate::network::config::ConnectionConfig;
-    use crate::network::connection::{ConnectionId, ConnectionKind, ConnectionRegistry};
+    use crate::network::connection::{
+        ConnectionHandle, ConnectionId, ConnectionKind, ConnectionRegistry,
+    };
     use crate::service::operation::{service_names, OperationContext};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
@@ -4894,6 +4920,129 @@ mod tests {
         release(hold, task).await;
         let (rows, _) = snapshot_first(query_frames(&mut fx.s_rx, LIVE_ID));
         assert_eq!(rows.get("kp"), Some(&v(7)), "only the projected field");
+    }
+
+    // --- TG-LIVE-003: a live event lost on a full queue disconnects ---
+
+    /// Fills `handle`'s queue with `Close` frames, which no test decodes.
+    fn fill_queue(handle: &ConnectionHandle) {
+        while handle.try_send(OutboundMessage::Close(None)) {}
+    }
+
+    /// The decoded binary frames on `rx`, fillers skipped.
+    fn binary_frames(rx: &mut Rx) -> Vec<Message> {
+        let mut frames = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            if let OutboundMessage::Binary(bytes) = frame {
+                frames.push(rmp_serde::from_slice(&bytes).expect("decodes"));
+            }
+        }
+        frames
+    }
+
+    /// `{"v": 999}`, which no write of these tests stores.
+    fn matches_nothing() -> Query {
+        Query {
+            predicate: Some(PredicateNode {
+                op: PredicateOp::Eq,
+                attribute: Some("v".to_string()),
+                value: Some(rmpv::Value::from(999)),
+                ..Default::default()
+            }),
+            ..Query::default()
+        }
+    }
+
+    /// S's live query over every value, its snapshot drained; then S's queue
+    /// is left with one free slot and W writes one matching key: the
+    /// `SERVER_EVENT` takes the slot and the `QUERY_UPDATE` is lost.
+    async fn lose_a_query_update(fx: &mut Live) -> Arc<ConnectionHandle> {
+        fx.spawn_subscribe(None)
+            .await
+            .expect("join")
+            .expect("subscribe");
+        let _ = binary_frames(&mut fx.s_rx);
+        let s = fx.conns.get(fx.s).expect("s registered");
+        fill_queue(&s);
+        assert!(fx.s_rx.try_recv().is_ok(), "one slot freed");
+        fx.client(fx.w, put("k1", v(1))).await;
+        s
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_live_update_lost_on_a_full_queue_disconnects_the_subscriber() {
+        let mut fx = live_over(make_factory(), 8);
+        let s = lose_a_query_update(&mut fx).await;
+        assert!(s.is_cancelled(), "the lost QUERY_UPDATE disconnects S");
+        assert!(s.owed_closed());
+        let frames = binary_frames(&mut fx.s_rx);
+        assert!(
+            matches!(&frames[..], [Message::ServerEvent { .. }]),
+            "the SERVER_EVENT was sent, the QUERY_UPDATE was the loss: {frames:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_server_event_lost_on_a_full_queue_disconnects_the_subscriber() {
+        let mut fx = live_over(make_factory(), 8);
+        fx.spawn_subscribe_query(matches_nothing())
+            .await
+            .expect("join")
+            .expect("subscribe");
+        let _ = binary_frames(&mut fx.s_rx);
+        let s = fx.conns.get(fx.s).expect("s registered");
+        fill_queue(&s);
+        fx.client(fx.w, put("k1", v(1))).await;
+        assert!(s.is_cancelled(), "the lost SERVER_EVENT disconnects S");
+        assert!(
+            binary_frames(&mut fx.s_rx).is_empty(),
+            "no QUERY_UPDATE was due"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_writer_is_not_disconnected_by_its_own_full_queue() {
+        let mut fx = live_over(make_factory(), 8);
+        fx.spawn_subscribe(None)
+            .await
+            .expect("join")
+            .expect("subscribe");
+        let mut op = fx.subscribe_op(LIVE_ID, LIVE_MAP, None);
+        if let Operation::QuerySubscribe { ctx, .. } = &mut op {
+            ctx.connection_id = Some(fx.w);
+        }
+        Arc::clone(&fx.svc).oneshot(op).await.expect("w subscribes");
+        let w = fx.conns.get(fx.w).expect("w registered");
+        fill_queue(&w);
+        fx.client(fx.w, put("k1", v(1))).await;
+        assert!(
+            !w.is_cancelled(),
+            "the writer is excluded from both fan-outs"
+        );
+        assert!(!w.owed_closed());
+        let frames = query_frames(&mut fx.s_rx, LIVE_ID);
+        assert!(
+            frames
+                .iter()
+                .any(|m| matches!(m, Message::QueryUpdate { payload } if payload.key == "k1")),
+            "S still receives the update: {frames:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn after_a_loss_no_owed_event_is_encoded_or_sent_to_that_connection() {
+        let mut fx = live_over(make_factory(), 8);
+        let s = lose_a_query_update(&mut fx).await;
+        assert!(s.is_cancelled());
+        while fx.s_rx.try_recv().is_ok() {}
+        for key in ["k2", "k3", "k4"] {
+            fx.client(fx.w, put(key, v(1))).await;
+        }
+        let frames = binary_frames(&mut fx.s_rx);
+        assert!(
+            frames.is_empty(),
+            "nothing owed is sent after the loss: {frames:?}"
+        );
     }
 
     /// An overflow answers with the scan snapshot, then the overflow frame, on
