@@ -1756,7 +1756,7 @@ pub struct SearchService {
     populations: Arc<Populations>,
     /// Set when the one hybrid notifier task has been spawned.
     notifier_started: AtomicBool,
-    /// Maps handled by notifier passes so far.
+    /// Maps whose notifier pass has finished, its updates sent.
     #[cfg(test)]
     notifier_passes: AtomicU64,
     /// Full-text subscribe, keyed by subscription id: after `register`, before
@@ -1904,6 +1904,8 @@ impl SearchService {
                 svc.shared.dirty_wake.notified().await;
                 for map_name in svc.shared.take_dirty() {
                     svc.notify_hybrid_subscriptions_for_map(&map_name).await;
+                    #[cfg(test)]
+                    svc.notifier_passes.fetch_add(1, Ordering::SeqCst);
                 }
             }
         });
@@ -1960,7 +1962,7 @@ impl SearchService {
     /// against the current index through the live path, and ends the capture.
     /// It holds the `indexes` read guard and then `sub.capture`, so no phase 3
     /// of the map interleaves with it.
-    fn close(&self, sub: &SearchSubscription, snapshot: &[SearchResultEntry]) {
+    fn close_subscribe(&self, sub: &SearchSubscription, snapshot: &[SearchResultEntry]) {
         let indexes = self.indexes.read();
         let mut capture = sub.capture.lock();
         for entry in snapshot {
@@ -2098,7 +2100,7 @@ impl SearchService {
                 let results = self.visible_entries(&payload.map_name, docs).await;
                 #[cfg(test)]
                 self.subscribe_hold.pass(&payload.subscription_id).await;
-                self.close(&sub, &results);
+                self.close_subscribe(&sub, &results);
                 guard.disarm();
 
                 let total_count = u32::try_from(results.len()).unwrap_or(u32::MAX);
@@ -2467,8 +2469,6 @@ impl SearchService {
     /// index and never start or join a population.
     #[allow(clippy::too_many_lines)]
     pub async fn notify_hybrid_subscriptions_for_map(&self, map_name: &str) {
-        #[cfg(test)]
-        self.notifier_passes.fetch_add(1, Ordering::SeqCst);
         // An unseeded subscription is skipped and marked as missed; its
         // subscribe handler starts one more pass after seeding it
         // (`TG-LIVE-002`).
@@ -4619,6 +4619,8 @@ mod tests {
             let mut h = harness();
             store_rows(&h, 2);
             let mut p0 = h.svc.populations.swap_hold.arm(M);
+            // Read before the one-shot, which waits for its own population.
+            let before = waiting(&h);
             let svc = Arc::clone(&h.svc);
             let one_shot = tokio::spawn(async move { search(&svc).await });
             p0.wait_reached().await;
@@ -4626,10 +4628,9 @@ mod tests {
             let mut p1 = h.svc.populations.swap_hold.arm(M);
 
             write(&h, "x", &format!("{TERM} skipped")).await;
-            let before = waiting(&h);
             let (svc, op) = (Arc::clone(&h.svc), text_sub(&h, "k1"));
             let task = tokio::spawn(async move { call(&svc, op).await });
-            eventually("the subscribe waits for P0", || waiting(&h) > before).await;
+            eventually("the subscribe waits for P0", || waiting(&h) >= before + 2).await;
             p0.release();
             let one = one_shot.await.unwrap();
             assert!(
@@ -4686,11 +4687,30 @@ mod tests {
         /// view, and nothing of the subscription is sent before its seeding.
         #[tokio::test(flavor = "multi_thread")]
         async fn live_hybrid_write_in_the_window_reaches_the_subscriber() {
+            hybrid_write_in_the_window(WireSearchMethod::FullText).await;
+        }
+
+        /// As above, for the `exact` leg.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_hybrid_exact_write_in_the_window_reaches_the_subscriber() {
+            hybrid_write_in_the_window(WireSearchMethod::Exact).await;
+        }
+
+        async fn hybrid_write_in_the_window(method: WireSearchMethod) {
+            let exact = method == WireSearchMethod::Exact;
             let mut h = harness();
             store_rows(&h, 2);
             h.index_factory.register_map(M);
             let mut hold = h.svc.subscribe_hold.arm("hw");
-            let (svc, op) = (Arc::clone(&h.svc), hybrid_sub(&h, "hw"));
+            let mut op = hybrid_sub(&h, "hw");
+            if let Operation::HybridSearchSubscribe { payload, .. } = &mut op {
+                payload.methods = vec![method];
+                if exact {
+                    payload.query_text = String::new();
+                    payload.predicate = Some(status_open());
+                }
+            }
+            let svc = Arc::clone(&h.svc);
             let task = tokio::spawn(async move { call(&svc, op).await });
             hold.wait_reached().await;
 
@@ -4715,7 +4735,19 @@ mod tests {
 
             let view = view(&response, &log, "hw");
             assert!(view.contains("x"), "{view:?} {log:?}");
-            assert_eq!(view, fresh_hybrid(&h).await);
+            let fresh = if exact {
+                let mut op = make_hybrid_search_op(M, "");
+                if let Operation::HybridSearch { payload, .. } = &mut op {
+                    payload.methods = vec![WireSearchMethod::Exact];
+                    payload.predicate = Some(status_open());
+                }
+                let resp = hybrid_resp(call(&h.svc, op).await);
+                assert!(resp.error.is_none(), "{resp:?}");
+                hybrid_keys(&resp).into_iter().collect()
+            } else {
+                fresh_hybrid(&h).await
+            };
+            assert_eq!(view, fresh);
             assert!(passed, "a notifier pass ran while the subscribe was held");
         }
 
@@ -4728,16 +4760,17 @@ mod tests {
             store_rows(&h, 2);
             h.index_factory.register_map(M);
             let mut p0 = h.svc.populations.swap_hold.arm(M);
+            // Read before the one-shot, which waits for its own population.
+            let before = waiting(&h);
             let svc = Arc::clone(&h.svc);
             let one_shot = tokio::spawn(async move { search(&svc).await });
             p0.wait_reached().await;
             let mut p1 = h.svc.populations.swap_hold.arm(M);
 
             write(&h, "x", &format!("{TERM} skipped")).await;
-            let before = waiting(&h);
             let (svc, op) = (Arc::clone(&h.svc), hybrid_sub(&h, "hk"));
             let task = tokio::spawn(async move { call(&svc, op).await });
-            eventually("the subscribe waits for P0", || waiting(&h) > before).await;
+            eventually("the subscribe waits for P0", || waiting(&h) >= before + 2).await;
             p0.release();
             let one = one_shot.await.unwrap();
             assert!(
@@ -4880,6 +4913,8 @@ mod tests {
 
             force_population(&h);
             let mut p0 = h.svc.populations.swap_hold.arm(M);
+            // Read before the one-shot, which waits for its own population.
+            let before = waiting(&h);
             let svc = Arc::clone(&h.svc);
             let one_shot = tokio::spawn(async move { search(&svc).await });
             p0.wait_reached().await;
@@ -4889,10 +4924,9 @@ mod tests {
             let (svc, op) = (Arc::clone(&h.svc), text_sub(&h, "A"));
             let a = tokio::spawn(async move { call(&svc, op).await });
             cover.wait_reached().await;
-            let before = waiting(&h);
             let (svc, op) = (Arc::clone(&h.svc), text_sub(&h, "B"));
             let b = tokio::spawn(async move { call(&svc, op).await });
-            eventually("B waits for P0", || waiting(&h) > before).await;
+            eventually("B waits for P0", || waiting(&h) >= before + 2).await;
             p0.release();
             let _ = one_shot.await.unwrap();
             cover.release();

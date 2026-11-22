@@ -3617,10 +3617,10 @@ weaker than a test.
   another lock is taken. Verified by review: a deadlock cannot be made deterministic in a test.
 - **Maintaining code:** `service/domain/search/mod.rs` — `SearchSubscription::capture`,
   `HybridSearchSubscription::seed`, `notify_key_subscriptions`, `notify_clear_subscriptions`,
-  `notify_key`, `SearchService::close`, the `SearchSubscribe` arm of `SearchService::handle`,
-  `handle_hybrid_search_subscribe`, `notify_hybrid_subscriptions_for_map`, `RegistrationGuard`,
-  `Populations::ensure` / `start` / `run`, `PopGuard`, `replay_onto` and phase 2 of
-  `process_batch`; `service/domain/search/registry.rs` — `MapCoverage`, `CoverToken`,
+  `notify_key`, `SearchService::close_subscribe`, the `SearchSubscribe` arm of
+  `SearchService::handle`, `handle_hybrid_search_subscribe`, `notify_hybrid_subscriptions_for_map`,
+  `RegistrationGuard`, `Populations::ensure` / `start` / `run`, `PopGuard`, `replay_onto` and
+  phase 2 of `process_batch`; `service/domain/search/registry.rs` — `MapCoverage`, `CoverToken`,
   `SubscriptionRegistry::register` / `covered_since` / `unregister_if_same` /
   `has_subscriptions_for_map`; the observer's generation bump (`note_write`). Citations are
   line-number-free.
@@ -3631,6 +3631,7 @@ weaker than a test.
   `live_search_skipped_write_before_registration_is_in_the_snapshot`,
   `live_search_population_during_subscribe_keeps_writes_indexed_meanwhile`,
   `live_hybrid_write_in_the_window_reaches_the_subscriber`,
+  `live_hybrid_exact_write_in_the_window_reaches_the_subscriber`,
   `live_hybrid_skipped_write_before_registration_is_in_the_snapshot`,
   `a_cancelled_live_search_subscribe_leaves_no_registration`,
   `live_search_second_subscribe_on_a_covered_map_starts_no_population`,
@@ -3661,7 +3662,7 @@ weaker than a test.
 | `live_search_clear_in_the_window_empties_the_view` | full-text: a clear in the window empties the view. Shown red on the tree whose close ignores a captured clear | CI (`cargo test`) |
 | `live_search_skipped_write_before_registration_is_in_the_snapshot`, `live_hybrid_skipped_write_before_registration_is_in_the_snapshot` | coverage: a write skipped after an in-flight population's scan is in the snapshot; the subscribe waits for that population and populates once more. Shown red on the tree whose `ensure` ignores the minimum generation (it joins), and the hybrid one also on the tree whose hybrid handler skips the covering population | CI (`cargo test`) |
 | `live_search_population_during_subscribe_keeps_writes_indexed_meanwhile` | replay: a write applied to the old index during a population is in the swapped-in index and in the view. Shown red on the tree whose swap applies no log | CI (`cargo test`) |
-| `live_hybrid_write_in_the_window_reaches_the_subscriber` | hybrid: a write while the subscription is unseeded reaches the view, and no update is sent before the seeding. Shown red on the tree whose handler never starts the reconciling pass and on the tree whose notifier ignores the seed state | CI (`cargo test`) |
+| `live_hybrid_write_in_the_window_reaches_the_subscriber`, `live_hybrid_exact_write_in_the_window_reaches_the_subscriber` | hybrid, the `fullText` and the `exact` leg: a write while the subscription is unseeded reaches the view, and no update is sent before the seeding. Shown red on the tree whose handler never starts the reconciling pass and on the tree whose notifier ignores the seed state | CI (`cargo test`) |
 | `a_cancelled_live_search_subscribe_leaves_no_registration` | cancellation: an aborted text or hybrid subscribe leaves no registration and a zero coverage count. Shown red on the tree without the guard | CI (`cargo test`) |
 | `live_search_second_subscribe_on_a_covered_map_starts_no_population` | cost: a second subscribe on a covered, populated map starts no population and sees the writes enqueued meanwhile. Shown red on the tree whose subscribe always populates | CI (`cargo test`) |
 | `live_search_first_subscribe_after_skipped_writes_populates`, `live_search_resubscribe_after_the_last_unsubscribe_populates` | coverage: after a skipped write — on a populated map, or after the last subscription left — the next subscribe populates once and sees it. Shown red on the tree whose subscribe accepts any populated index | CI (`cargo test`) |
@@ -4509,8 +4510,8 @@ weaker than a test.
 - **Stated limits:** an unsanitized write of a trusted origin with a lower timestamp than the stored
   row loses to that row between its engine put and its staging. Each data-store batch is its own
   snapshot, so there is no point-in-time read. A search that joins a population may miss a write
-  acknowledged before it; that population then does not record "populated". `Clear` / `reset` issued before a population reads
-  its generation are not covered (no production caller).
+  acknowledged before it; that population then does not record "populated". `Clear` / `reset`
+  issued before a population reads its generation are not covered (no production caller).
 - **Maintaining code:** `storage/factory.rs` — `scan_merged`, `scan_merged_batches`;
   `storage/datastores/write_behind.rs` — the scan overlay; `service/domain/search/mod.rs` —
   `SearchShared`, `PopState`, the population task and the observer's generation bump.
