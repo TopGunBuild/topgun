@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed: live searches keep working after a reconnect.** On a WebSocket connection to a single
+  server, the handles of `searchSubscribe` and `hybridSearchSubscribe` are now subscribed again on
+  every reconnect, as live queries and topics already were, and the server's fresh result then
+  replaces their rows, so a row removed while the client was disconnected leaves them. Before, they
+  received nothing after the first disconnect, and a handle created before the client was
+  authenticated never received anything. The HTTP transport and `ClusterClient` do not restore them.
+  Also fixed: after `setAuthToken` during a disconnect, or after `resetConnection`, every later
+  connection sent two `AUTH` frames and delivered each server message twice.
 - **Fixed: the client sends each local write once per connection.** n writes made before an
   acknowledgement now put n operations on the wire; the previous code re-sent every unacknowledged
   write on each new write (about n²/2). A write whose batch gets no verdict (a lost acknowledgement,
