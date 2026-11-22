@@ -246,6 +246,12 @@ export interface BackpressureControllerConfig {
 // Query Manager Types
 // ============================================
 
+/** A live search handle the client restores on every newly authenticated socket. */
+export interface LiveSearchSubscription {
+  /** Subscribe under a new subscription id; the next response replaces the handle's rows. */
+  resubscribe(): void;
+}
+
 /**
  * Interface for query management.
  * Handles query subscriptions, unsubscriptions, and local query execution.
@@ -314,7 +320,19 @@ export interface IQueryManager {
   ): Promise<Array<{ key: string; value: T; score?: number; matchedTerms?: string[] }>>;
 
   /**
-   * Re-subscribe all queries (called after auth).
+   * Register a live search handle; it subscribes now if authenticated, else at the next restore.
+   * @param handle - Live search handle to register
+   */
+  subscribeToLiveSearch(handle: LiveSearchSubscription): void;
+
+  /**
+   * Remove a live search handle from the registry; sends nothing.
+   * @param handle - Live search handle to remove
+   */
+  unsubscribeFromLiveSearch(handle: LiveSearchSubscription): void;
+
+  /**
+   * Re-subscribe all queries and live searches (called after auth).
    */
   resubscribeAll(): void;
 

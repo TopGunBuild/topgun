@@ -77,6 +77,7 @@ import type {
   HybridSearchClientOptions,
   HybridSearchClientResult,
   IMessageRouter,
+  LiveSearchSubscription,
 } from './sync';
 
 // Re-export SearchResult and SqlQueryResult from sync module for backwards compatibility
@@ -1959,6 +1960,22 @@ export class SyncEngine {
   }
 
   /**
+   * Register a live search handle for restore on every authenticated socket.
+   * Delegates to QueryManager.
+   */
+  public subscribeToLiveSearch(handle: LiveSearchSubscription): void {
+    this.queryManager.subscribeToLiveSearch(handle);
+  }
+
+  /**
+   * Remove a live search handle from the restore registry.
+   * Delegates to QueryManager.
+   */
+  public unsubscribeFromLiveSearch(handle: LiveSearchSubscription): void {
+    this.queryManager.unsubscribeFromLiveSearch(handle);
+  }
+
+  /**
    * Subscribe to a topic.
    * Delegates to TopicManager.
    */
@@ -2133,7 +2150,11 @@ export class SyncEngine {
     // Flush any queued topic messages from offline period (delegates to TopicManager)
     this.topicManager.flushTopicQueue();
 
-    // Only re-subscribe on first authentication to prevent UI flickering
+    // Every opened socket re-arms the machine to CONNECTING before it authenticates,
+    // and every lost socket moves it out of SYNCING/CONNECTED, so only the first
+    // acknowledgement of a socket finds the client unauthenticated. That one restores
+    // every query, live search and topic; a further acknowledgement on the same socket
+    // restores nothing, because the server keeps what it already registered.
     if (!wasAuthenticated) {
       this.webSocketManager.startHeartbeat();
       // Fire-and-forget: the held-map snapshot + persisted-store restore are

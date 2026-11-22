@@ -444,6 +444,7 @@ public searchSubscribe<T>(
 ```
 
 Live BM25 subscription. The handle receives ENTER/UPDATE/LEAVE deltas as documents change.
+On a WebSocket connection to a single server the handle is subscribed again on every reconnect, and the server's fresh result then replaces its rows; the HTTP transport and `ClusterClient` do not restore it.
 
 ```typescript
 const handle = client.searchSubscribe<Article>('articles', 'machine learning', {
@@ -541,6 +542,7 @@ public hybridSearchSubscribe<T = unknown>(
 ```
 
 Live tri-hybrid search subscription.
+On a WebSocket connection to a single server the handle is subscribed again on every reconnect, and the server's fresh result then replaces its rows; the HTTP transport and `ClusterClient` do not restore it.
 
 ### `hybridQuery(mapName, filter?)`
 

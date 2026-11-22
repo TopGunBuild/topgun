@@ -286,6 +286,15 @@ describe('Client Search', () => {
       jest.useRealTimers();
     });
 
+    // A delta that arrives before its subscription's response is held until the
+    // response; answering first makes the deltas below apply at once.
+    function respondEmpty(subscriptionId: string): void {
+      (syncEngine as any).handleServerMessage({
+        type: 'SEARCH_RESP',
+        payload: { requestId: subscriptionId, results: [], totalCount: 0 },
+      });
+    }
+
     it('should send SEARCH_SUB on creation', () => {
       // require() avoids TypeScript generic constraint mismatch for SearchHandle<T = unknown> in test context
       // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -369,7 +378,11 @@ describe('Client Search', () => {
       const sentMessage = mockSendMessage.mock.calls[0][0];
       const subscriptionId = sentMessage.payload.subscriptionId;
 
-      // Send ENTER update
+      const callback = jest.fn();
+      handle.subscribe(callback);
+      callback.mockClear();
+
+      // Send ENTER update before the subscription's response: it is held
       (syncEngine as any).handleServerMessage({
         type: 'SEARCH_UPDATE',
         payload: {
@@ -381,6 +394,13 @@ describe('Client Search', () => {
           changeType: 'ENTER',
         },
       });
+
+      expect(handle.getResults()).toHaveLength(0);
+      expect(callback).not.toHaveBeenCalled();
+
+      // The response applies it after replacing the rows, with one notification
+      respondEmpty(subscriptionId);
+      expect(callback).toHaveBeenCalledTimes(1);
 
       const results = handle.getResults();
       expect(results).toHaveLength(1);
@@ -397,6 +417,8 @@ describe('Client Search', () => {
 
       const sentMessage = mockSendMessage.mock.calls[0][0];
       const subscriptionId = sentMessage.payload.subscriptionId;
+
+      respondEmpty(subscriptionId);
 
       // First ENTER
       (syncEngine as any).handleServerMessage({
@@ -440,6 +462,8 @@ describe('Client Search', () => {
 
       const sentMessage = mockSendMessage.mock.calls[0][0];
       const subscriptionId = sentMessage.payload.subscriptionId;
+
+      respondEmpty(subscriptionId);
 
       // First ENTER
       (syncEngine as any).handleServerMessage({
@@ -577,6 +601,7 @@ describe('Client Search', () => {
 
       // Trigger an update
       const sentMessage = mockSendMessage.mock.calls[0][0];
+      respondEmpty(sentMessage.payload.subscriptionId);
       (syncEngine as any).handleServerMessage({
         type: 'SEARCH_UPDATE',
         payload: {
@@ -622,6 +647,8 @@ describe('Client Search', () => {
 
       const sentMessage = mockSendMessage.mock.calls[0][0];
       const subscriptionId = sentMessage.payload.subscriptionId;
+
+      respondEmpty(subscriptionId);
 
       // Add multiple results in non-sorted order
       (syncEngine as any).handleServerMessage({
@@ -676,6 +703,8 @@ describe('Client Search', () => {
 
       const sentMessage = mockSendMessage.mock.calls[0][0];
       const subscriptionId = sentMessage.payload.subscriptionId;
+
+      respondEmpty(subscriptionId);
 
       const enter = (key: string, score: number) =>
         (syncEngine as any).handleServerMessage({

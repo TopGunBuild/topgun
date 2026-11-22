@@ -56,24 +56,11 @@ export class WebSocketManager implements IWebSocketManager {
   constructor(config: WebSocketManagerConfig) {
     this.config = config;
     this.connectionProvider = config.connectionProvider;
-  }
 
-  /**
-   * Initialize the connection.
-   * Sets up event handlers and starts the connection process.
-   */
-  connect(): void {
-    this.initConnectionProvider();
-  }
-
-  /**
-   * Initialize connection using IConnectionProvider.
-   */
-  private initConnectionProvider(): void {
-    // Transition to CONNECTING state
-    this.config.stateMachine.transition(SyncState.CONNECTING);
-
-    // Set up event handlers
+    // Attached once for the manager's lifetime: connect() runs again after
+    // setAuthToken during a disconnect and after resetConnection, and the provider
+    // keeps its listeners across close(), so attaching them there would run every
+    // handler once more per call (one AUTH and one routed message per listener).
     this.connectionProvider.on('connected', (_nodeId: string) => {
       logger.info('ConnectionProvider connected.');
       // Re-arm the state machine to CONNECTING on every freshly-opened socket.
@@ -130,8 +117,13 @@ export class WebSocketManager implements IWebSocketManager {
         this.config.stateMachine.transition(SyncState.ERROR);
       }
     });
+  }
 
-    // Start connection
+  /**
+   * Start the connection process. Listeners are attached in the constructor.
+   */
+  connect(): void {
+    this.config.stateMachine.transition(SyncState.CONNECTING);
     this.connectionProvider.connect().catch((err) => {
       logger.error({ err }, 'Failed to connect via ConnectionProvider');
       this.config.stateMachine.transition(SyncState.DISCONNECTED);

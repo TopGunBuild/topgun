@@ -14,7 +14,7 @@ import { QueryError } from '../errors/QueryError';
 import type { QueryErrorCode } from '../errors/QueryError';
 import type { QueryHandle, QueryFilter } from '../QueryHandle';
 import type { HybridQueryHandle, HybridQueryFilter } from '../HybridQueryHandle';
-import type { IQueryManager, QueryManagerConfig } from './types';
+import type { IQueryManager, LiveSearchSubscription, QueryManagerConfig } from './types';
 
 const SNAPSHOT_OVERFLOW = 'QUERY_SNAPSHOT_OVERFLOW';
 
@@ -64,6 +64,9 @@ export class QueryManager implements IQueryManager {
   /** Hybrid queries with FTS support (single source of truth) */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased in the manager registry
   private hybridQueries: Map<string, HybridQueryHandle<any>> = new Map();
+
+  /** Live search and live hybrid search handles, restored by resubscribeAll. */
+  private liveSearches: Set<LiveSearchSubscription> = new Set();
 
   // Keyed by the handle so the chain number and the error kind live as long as
   // the handle does, across unsubscribe/subscribe cycles.
@@ -117,6 +120,25 @@ export class QueryManager implements IQueryManager {
       this.startChain(query);
       this.sendQuerySubscription(query);
     }
+  }
+
+  /**
+   * Register a live search handle.
+   * It subscribes now if authenticated; otherwise the next restore subscribes it.
+   */
+  public subscribeToLiveSearch(handle: LiveSearchSubscription): void {
+    this.liveSearches.add(handle);
+    if (this.config.isAuthenticated()) {
+      // A failed send leaves the handle registered: the next restore subscribes it.
+      this.eachLogged([handle], (h) => h.resubscribe());
+    }
+  }
+
+  /**
+   * Remove a live search handle from the registry. The handle sends its own unsubscribe.
+   */
+  public unsubscribeFromLiveSearch(handle: LiveSearchSubscription): void {
+    this.liveSearches.delete(handle);
   }
 
   /**
@@ -548,17 +570,24 @@ export class QueryManager implements IQueryManager {
   // ============================================
 
   /**
-   * Re-subscribe all queries after authentication.
+   * Re-subscribe all queries and live searches after authentication.
    * Called by SyncEngine after AUTH_ACK.
    */
   public resubscribeAll(): void {
     logger.debug(
-      { queryCount: this.queries.size, hybridCount: this.hybridQueries.size },
+      {
+        queryCount: this.queries.size,
+        hybridCount: this.hybridQueries.size,
+        liveSearchCount: this.liveSearches.size,
+      },
       'QueryManager: resubscribing all queries',
     );
 
-    // Re-subscribe standard queries
-    for (const query of this.queries.values()) {
+    // This runs inside the auth acknowledgement, and a send can throw before it is
+    // caught (the payload is serialized outside the send's try): one failing
+    // subscription must not stop the others, the topic restore or the CONNECTED
+    // transition.
+    this.eachLogged(this.queries.values(), (query) => {
       this.startChain(query);
       this.sendQuerySubscription(query);
 
@@ -574,12 +603,25 @@ export class QueryManager implements IQueryManager {
           },
         });
       }
-    }
+    });
 
     // Re-subscribe hybrid queries with FTS predicates
-    for (const query of this.hybridQueries.values()) {
+    this.eachLogged(this.hybridQueries.values(), (query) => {
       if (query.hasFTSPredicate()) {
         this.sendHybridQuerySubscription(query.id, query.getMapName(), query.getFilter());
+      }
+    });
+
+    this.eachLogged(this.liveSearches, (handle) => handle.resubscribe());
+  }
+
+  /** Runs `subscribe` for every item; one that throws is logged and the rest go on. */
+  private eachLogged<T>(items: Iterable<T>, subscribe: (item: T) => void): void {
+    for (const item of items) {
+      try {
+        subscribe(item);
+      } catch (err) {
+        logger.error({ err }, 'QueryManager: resubscribe failed');
       }
     }
   }
