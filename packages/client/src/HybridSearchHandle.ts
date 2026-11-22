@@ -173,10 +173,12 @@ export class HybridSearchHandle<T = unknown> implements LiveSearchSubscription {
     if (message.payload?.requestId !== this.subscriptionId) return;
 
     const { results, error } = message.payload;
+    // Every response of the current subscription ends the wait for it.
+    const held = this.pendingDeltas ?? [];
+    this.pendingDeltas = null;
 
     // An error response registered nothing on the server: keep the rows as they are.
-    if (error !== undefined) {
-      this.pendingDeltas = null;
+    if (error != null) {
       return;
     }
 
@@ -192,8 +194,6 @@ export class HybridSearchHandle<T = unknown> implements LiveSearchSubscription {
         });
       }
 
-      const held = this.pendingDeltas ?? [];
-      this.pendingDeltas = null;
       for (const delta of held) {
         this.applyDelta(delta);
       }

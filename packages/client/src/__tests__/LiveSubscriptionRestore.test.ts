@@ -271,7 +271,7 @@ describe('Live subscription restore on reconnect', () => {
     jest.restoreAllMocks();
   });
 
-  it('R6.1 every reconnect restores every kind of live subscription exactly once, with new search ids', async () => {
+  it('every reconnect restores every kind of live subscription exactly once, with new search ids', async () => {
     engine = createEngine(true);
     const first = await connect(engine, true);
 
@@ -311,7 +311,7 @@ describe('Live subscription restore on reconnect', () => {
     }
   });
 
-  it('R6.2 a second acknowledgement on the same socket restores nothing', async () => {
+  it('a second acknowledgement on the same socket restores nothing', async () => {
     engine = createEngine(true);
     await connect(engine, true);
     new QueryHandle(engine, MAP, {}).subscribe(() => {});
@@ -327,7 +327,7 @@ describe('Live subscription restore on reconnect', () => {
     expect(subFrames(ws)).toHaveLength(afterFirst);
   });
 
-  describe('R6.3 token-less paths', () => {
+  describe('token-less paths', () => {
     async function setup(): Promise<void> {
       engine = createEngine(false);
       await connect(engine, false);
@@ -367,7 +367,7 @@ describe('Live subscription restore on reconnect', () => {
     });
   });
 
-  it('R6.4 handles created before authentication subscribe once, after the ack', async () => {
+  it('handles created before authentication subscribe once, after the ack', async () => {
     engine = createEngine(true);
     const ws = await openNextSocket(0);
     expect(engine.getConnectionState()).toBe(SyncState.AUTHENTICATING);
@@ -387,7 +387,7 @@ describe('Live subscription restore on reconnect', () => {
     ]);
   });
 
-  it('R6.5 a handle disposed while disconnected is not restored', async () => {
+  it('a handle disposed while disconnected is not restored', async () => {
     engine = createEngine(true);
     await connect(engine, true);
     const kept = new SearchHandle(engine, MAP, 'alpha');
@@ -409,7 +409,7 @@ describe('Live subscription restore on reconnect', () => {
     expect(framesOf(ws, 'HYBRID_SEARCH_SUB')).toHaveLength(0);
   });
 
-  describe('R6.6 setQuery / setOptions / dispose before the next acknowledgement', () => {
+  describe('setQuery / setOptions / dispose before the next acknowledgement', () => {
     async function run(beforeAck: 'disconnected' | 'authenticating'): Promise<void> {
       engine = createEngine(true);
       await connect(engine, true);
@@ -482,7 +482,7 @@ describe('Live subscription restore on reconnect', () => {
       return { handle, ws, listener, previousId };
     }
 
-    it('R6.7 the fresh result replaces the rows', async () => {
+    it('the fresh result replaces the rows', async () => {
       const { handle, ws, listener } = await restored();
       // The rows of the previous socket stay visible until the response.
       expect(keysOf(handle)).toEqual(['a', 'b']);
@@ -492,7 +492,7 @@ describe('Live subscription restore on reconnect', () => {
       expect(listener).toHaveBeenCalledTimes(1);
     });
 
-    it('R6.8 frames of the previous subscription are inert', async () => {
+    it('frames of the previous subscription are inert', async () => {
       const { handle, ws, listener, previousId } = await restored();
       ws.simulateMessage(kind.resp(previousId, ['z']));
       ws.simulateMessage(kind.delta(previousId, 'y', 'ENTER'));
@@ -506,7 +506,7 @@ describe('Live subscription restore on reconnect', () => {
       expect(keysOf(handle)).toEqual(['y', 'z']);
     });
 
-    it('R6.9 a delta that arrives before the response is applied after it', async () => {
+    it('a delta that arrives before the response is applied after it', async () => {
       const { handle, ws } = await restored();
       ws.simulateMessage(kind.delta(currentId(handle), 'x', 'ENTER'));
       await flushMicrotasks();
@@ -522,7 +522,7 @@ describe('Live subscription restore on reconnect', () => {
       expect(keysOf(handle)).toEqual(['a']);
     });
 
-    it('R6.10 an error response leaves the rows and notifies nobody', async () => {
+    it('an error response leaves the rows and notifies nobody', async () => {
       const { handle, ws, listener } = await restored();
       ws.simulateMessage(kind.resp(currentId(handle), [], { error: 'search failed' }));
       await flushMicrotasks();
@@ -531,7 +531,7 @@ describe('Live subscription restore on reconnect', () => {
     });
   });
 
-  describe('R6.11 provider listeners are attached once', () => {
+  describe('provider listeners are attached once', () => {
     async function assertOnceOnNextSocket(start: () => void, search: SearchHandle): Promise<void> {
       const known = MockWebSocket.instances.length;
       start();
@@ -576,7 +576,7 @@ describe('Live subscription restore on reconnect', () => {
     });
   });
 
-  it('R6.12 two AUTH frames on one socket do not double the restore', async () => {
+  it('two AUTH frames on one socket do not double the restore', async () => {
     engine = createEngine(true);
     await connect(engine, true);
     new QueryHandle(engine, MAP, {}).subscribe(() => {});
@@ -599,7 +599,7 @@ describe('Live subscription restore on reconnect', () => {
     });
   });
 
-  it('R6.13 one handle that throws does not stop the restore', async () => {
+  it('one handle that throws does not stop the restore', async () => {
     engine = createEngine(true);
     await connect(engine, true);
     const failing = new SearchHandle(engine, MAP, 'alpha');
@@ -624,5 +624,60 @@ describe('Live subscription restore on reconnect', () => {
       errorSpy.mock.calls.filter(([arg]) => (arg as { err?: unknown })?.err === boom),
     ).toHaveLength(1);
     expect(engine.getConnectionState()).toBe(SyncState.CONNECTED);
+  });
+
+  it('a query whose subscribe throws does not stop the live search restore', async () => {
+    engine = createEngine(true);
+    await connect(engine, true);
+    new QueryHandle(engine, MAP, {}).subscribe(() => {});
+    const search = new SearchHandle(engine, MAP, 'alpha');
+
+    const boom = new Error('query subscribe failed');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the query restore step is private
+    jest.spyOn((engine as any).queryManager, 'sendQuerySubscription').mockImplementation(() => {
+      throw boom;
+    });
+    const errorSpy = jest.spyOn(logger, 'error');
+
+    const ws = await dropAndReopen();
+    await ack(ws, true);
+
+    expect(framesOf(ws, 'SEARCH_SUB').map((m) => m.payload.subscriptionId)).toEqual([
+      currentId(search),
+    ]);
+    expect(
+      errorSpy.mock.calls.filter(([arg]) => (arg as { err?: unknown })?.err === boom),
+    ).toHaveLength(1);
+    expect(engine.getConnectionState()).toBe(SyncState.CONNECTED);
+  });
+
+  it('a live search whose first subscribe throws stays registered and is restored', async () => {
+    engine = createEngine(true);
+    await connect(engine, true);
+    const boom = new Error('send failed');
+    jest.spyOn(engine, 'send').mockImplementationOnce(() => {
+      throw boom;
+    });
+    const errorSpy = jest.spyOn(logger, 'error');
+
+    let search: SearchHandle | undefined;
+    expect(() => {
+      search = new SearchHandle(engine!, MAP, 'alpha');
+    }).not.toThrow();
+    expect(
+      errorSpy.mock.calls.filter(([arg]) => (arg as { err?: unknown })?.err === boom),
+    ).toHaveLength(1);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the registry is private by design
+    const registry = (engine as any).queryManager.liveSearches as Set<unknown>;
+    expect(registry.has(search)).toBe(true);
+
+    const ws = await dropAndReopen();
+    await ack(ws, true);
+    expect(framesOf(ws, 'SEARCH_SUB').map((m) => m.payload.subscriptionId)).toEqual([
+      currentId(search!),
+    ]);
+
+    search!.dispose();
+    expect(registry.has(search)).toBe(false);
   });
 });
