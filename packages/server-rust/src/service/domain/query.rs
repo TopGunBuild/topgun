@@ -1770,14 +1770,14 @@ type DrainHoldGate = (
 /// the pipeline's operation timeout (30 s by default), which would cancel the
 /// handler.
 #[derive(Default)]
-struct DrainHold(std::sync::Mutex<Option<(String, DrainHoldGate)>>);
+pub(crate) struct DrainHold(std::sync::Mutex<Option<(String, DrainHoldGate)>>);
 
 #[cfg(test)]
 impl DrainHold {
     /// Holds the caller iff the hold is armed for this query id: reports
     /// "reached", then waits until the test releases it or drops its end. The
     /// gate is taken out of the slot, which is what makes the hold fire once.
-    async fn pass(&self, query_id: &str) {
+    pub(crate) async fn pass(&self, query_id: &str) {
         let gate = {
             let mut slot = self
                 .0
@@ -1794,12 +1794,28 @@ impl DrainHold {
             let _ = release.await;
         }
     }
+
+    /// Arms the hold for the next caller that passes it with `id`, replacing
+    /// any hold armed before.
+    pub(crate) fn arm(&self, id: &str) -> DrainHoldHandle {
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((id.to_string(), (reached_tx, release_rx)));
+        DrainHoldHandle {
+            reached: Some(reached_rx),
+            release: Some(release_tx),
+        }
+    }
 }
 
 #[cfg(test)]
 /// The test's side of a hold. Dropping it releases the held subscribe,
 /// so a failing test never leaves a task held.
-struct DrainHoldHandle {
+pub(crate) struct DrainHoldHandle {
     reached: Option<tokio::sync::oneshot::Receiver<()>>,
     release: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -1808,7 +1824,7 @@ struct DrainHoldHandle {
 impl DrainHoldHandle {
     /// Waits until the subscribe is held; panics after two seconds, which means
     /// the setup never reached the hold point.
-    async fn wait_reached(&mut self) {
+    pub(crate) async fn wait_reached(&mut self) {
         let reached = self.reached.take().expect("wait_reached called once");
         tokio::time::timeout(std::time::Duration::from_secs(2), reached)
             .await
@@ -1816,7 +1832,7 @@ impl DrainHoldHandle {
             .expect("hold dropped before it was reached");
     }
 
-    fn release(&mut self) {
+    pub(crate) fn release(&mut self) {
         if let Some(release) = self.release.take() {
             let _ = release.send(());
         }
@@ -1830,27 +1846,13 @@ impl QueryService {
     /// clamp) and the seeding of its window, with the buffer active, the scan
     /// rows fixed and the window still empty.
     fn test_hold_after_scan(&self, query_id: &str) -> DrainHoldHandle {
-        Self::arm_hold(&self.scan_hold, query_id)
+        self.scan_hold.arm(query_id)
     }
 
     /// Arms the hold for the next live subscribe of `query_id` on this service:
     /// it stops right after `register`, before the scan, with the buffer active.
     fn test_hold_after_register(&self, query_id: &str) -> DrainHoldHandle {
-        Self::arm_hold(&self.register_hold, query_id)
-    }
-
-    fn arm_hold(hold: &DrainHold, query_id: &str) -> DrainHoldHandle {
-        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        *hold
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some((query_id.to_string(), (reached_tx, release_rx)));
-        DrainHoldHandle {
-            reached: Some(reached_rx),
-            release: Some(release_tx),
-        }
+        self.register_hold.arm(query_id)
     }
 }
 
