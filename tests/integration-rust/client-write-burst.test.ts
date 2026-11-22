@@ -29,8 +29,9 @@
  *   S's view holds the seed. S's view must end with all 9 000 keys and S must
  *   never leave CONNECTED.
  *
- * In both cases the server's log must not contain the slow-consumer line, which
- * it writes when it disconnects a subscriber that cannot keep up.
+ * In both cases the server's log must not contain the slow-consumer line or the
+ * live-event-loss line, which it writes when it disconnects a subscriber that
+ * cannot keep up.
  */
 
 import * as child_process from 'child_process';
@@ -50,6 +51,7 @@ const DRAIN_CEILING_MS = 60_000;
 const VIEW_CEILING_MS = 60_000;
 const STEP_WAIT_MS = 10_000;
 const SLOW_CONSUMER_TEXT = 'slow consumer exceeded broadcast drop threshold';
+const LIVE_LOSS_TEXT = 'a live event owed to a subscriber was lost';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -180,6 +182,7 @@ describe('Integration: a client write burst is sent once per write', () => {
     );
     expect(said('closed')).toBeUndefined();
     expect(log.includes(SLOW_CONSUMER_TEXT)).toBe(false);
+    expect(log.includes(LIVE_LOSS_TEXT)).toBe(false);
     expect(said('final').events).toBe(BURST_KEYS);
     expect(said('final').keys).toBe(BURST_KEYS);
   }, 120_000);
@@ -244,6 +247,7 @@ describe('Integration: a client write burst is sent once per write', () => {
       VIEW_CEILING_MS,
     );
     expect(log.includes(SLOW_CONSUMER_TEXT)).toBe(false);
+    expect(log.includes(LIVE_LOSS_TEXT)).toBe(false);
     expect(status?.state).toBe(SyncState.CONNECTED);
     expect(status?.changes).toEqual([]);
   }, 180_000);

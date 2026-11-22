@@ -74,6 +74,7 @@ const HOLD_BOOT_TEXT = 'live subscribes are held while the query-hold sentinel f
 /** The WARN of one held subscribe; the boot line does not contain it. */
 const HOLD_TEXT = 'a live subscribe is held while the sentinel file exists';
 const SLOW_CONSUMER_TEXT = 'slow consumer exceeded broadcast drop threshold';
+const LIVE_LOSS_TEXT = 'a live event owed to a subscriber was lost';
 const OVERFLOW_CODE = 'QUERY_SNAPSHOT_OVERFLOW';
 const OVERFLOW_SERIES = 'topgun_query_snapshot_overflow_total{reason="buffer"}';
 
@@ -358,6 +359,7 @@ describe('Integration: a live subscribe folds the writes of its scan and overflo
     // Isolation: the holds harmed nobody.
     expect(stateChanges).toEqual([]);
     expect(lines().some((l) => l.includes(SLOW_CONSUMER_TEXT))).toBe(false);
+    expect(lines().some((l) => l.includes(LIVE_LOSS_TEXT))).toBe(false);
     expect(heldB).toBeLessThanOrEqual(MAX_HOLD_MS);
     expect(heldC).toBeLessThanOrEqual(MAX_HOLD_MS);
     expect(await metricLine(port, OVERFLOW_SERIES)).toBe(`${OVERFLOW_SERIES} 1`);

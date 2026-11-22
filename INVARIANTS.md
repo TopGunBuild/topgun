@@ -3464,8 +3464,9 @@ weaker than a test.
   - A limited window refilling from the store: it is seeded from the scanned page and keeps at
     most twice its limit, so a removal can leave the subscriber a row short of a fresh query
     (TODO-1005).
-  - A map clear or reset reaching live subscribers (TODO-1003); a live `QUERY_UPDATE` dropped on a
-    full outbound channel (TODO-1004).
+  - A map clear or reset reaching live subscribers (TODO-1003). A live `QUERY_UPDATE` is not
+    dropped silently: an update lost on a full outbound queue disconnects the connection
+    (`TG-LIVE-003`); the subscription ends and the client's resubscribe is a new one.
   - The order of `SERVER_EVENT` relative to `QUERY_RESP` (TODO-995); the subscriber-path throughput (TODO-996); clients
     older than error routing (TODO-997); window membership after the subscriber's own writes on
     the live path (TODO-999).
@@ -3592,7 +3593,8 @@ weaker than a test.
   - The full-text `limit` on the live path: live deltas are not windowed.
   - A key written during the subscribe whose record has already expired: it is delivered as the
     live path delivers it, until the sweep's `LEAVE` (`TG-TTL-001`).
-  - Updates dropped on a full outbound channel (`try_send`).
+  - The registration of an update that was lost: an update lost on a full outbound queue disconnects the connection
+    (`TG-LIVE-003`); the subscription ends and the client's resubscribe is a new one.
   - Index events dropped on a full index queue (the observer's `try_send` of its 10 000-event
     channel).
   - Clients without the pre-response hold of a resubscribe.
@@ -3670,6 +3672,96 @@ weaker than a test.
 | `live_hybrid_subscribe_on_a_quiet_map_runs_no_pass` | cost: a hybrid subscribe on a quiet map runs no notifier pass. Shown red on the tree whose handler always starts the reconciling pass | CI (`cargo test`) |
 | `live_search_rejects_a_populated_index_older_than_its_coverage` | coverage, the `Populated` arm alone: with the flag clear (as between a skipping write's bump and its flag store), an index populated before the coverage began is not accepted. Shown red on the tree that drops the `covered_since` check from that arm | CI (`cargo test`) |
 | `tg_read_001_a_failed_population_answers_errors_and_registers_nothing`, `tg_read_001_a_panicked_population_releases_the_map` | replay-log bound: a population that ends without a swap leaves no log. Shown red on the tree that keeps it | CI (`cargo test`) |
+
+### TG-LIVE-003: A client connection that loses a live event it is owed is disconnected at that loss
+
+- **Scope:** the live events a client connection is owed on one node: a `SERVER_EVENT` sent by
+  `broadcast_server_event` (to the connections holding a query on the map), a `QUERY_UPDATE` sent
+  by `QueryRegistry::deliver_mutation`, and a `SEARCH_UPDATE` / `HYBRID_SEARCH_UPDATE` sent by
+  `search::send_to_connection`. A **loss** is an owed event that was not enqueued because the
+  connection's outbound queue was full or because it could not be encoded.
+- **Statement:**
+  - (a) A loss cancels the client connection at the first loss, whatever the consecutive-drop count
+    and `slow_consumer_drop_threshold` (also when it is `0`). The client reconnects, resubscribes
+    its live queries and searches and re-syncs its maps, so its views equal a fresh query again
+    once writes stop.
+  - (b) The signal is the connection's cancellation token, not a queue slot, so it cannot itself
+    be lost.
+  - (c) At most one `WARN` (`a live event owed to a subscriber was lost; disconnecting it so it
+    reconnects and resyncs`, with `conn_id`, `cause`, `dropped_total`) and one
+    `topgun_live_event_loss_disconnects_total{cause}` increment per connection (a `swap` on the
+    connection's owed-loss flag); none for a connection cancelled before by another path. The
+    counter's two series (`channel_full`, `encode_failed`) are registered at zero when the
+    connection registry is built. An encoding error is also logged at `ERROR` with map and key.
+  - (d) A cluster-peer connection is never cancelled by it.
+  - (e) After the loss the owed sites encode and enqueue nothing more for that connection, except a
+    send that read the flag before it was set. The flag is set only by `owed_event_lost`: a
+    connection cancelled by another path (the reaper, a device takeover, the 256-drop threshold of
+    a best-effort push) still has owed events encoded and enqueued until its first owed loss or its
+    removal from the registry.
+- **Not claimed:**
+  - Convergence during sustained overload: a subscriber slower than the write rate is disconnected
+    again after each reconnect, and its views converge once the burst ends. Each cycle costs the
+    server one full resync of the connection (every live query's snapshot, every live search's
+    snapshot, one `SYNC_INIT` per map).
+  - A prompt, clean close: for a client that still reads, the socket is closed at least 2 s after
+    the loss, by an abort of the writer task after its join timeout, with no WebSocket Close frame;
+    for a client that stopped reading, nothing bounds the server-side close (the client's 15 s
+    heartbeat closes it from its side) (TODO-1019).
+  - An owed send that read the flag before a concurrent loss set it may still be enqueued after the
+    loss; response-path frames (snapshots, acknowledgements) after the loss are not suppressed.
+  - Apply-coverage (`CLIENT_APPLY_ACK`) across the gap (TODO-1017); cross-node live delivery (none
+    exists); the HTTP `/sync` transport.
+  - Event Journal, counter, topic and partition-map pushes: unchanged, best effort with the 256-drop
+    threshold; a journal subscriber across that disconnect (TODO-1018).
+  - The search service's internal index-event queue, which drops on saturation before any outbound
+    send (TODO-1016).
+  - Outbound queue depth and head-age metrics (TODO-931).
+- **Maintaining code:** `network/connection.rs` — `ConnectionHandle::try_send_owed`,
+  `ConnectionHandle::owed_event_lost`, `ConnectionHandle::owed_closed`,
+  `ConnectionRegistry::send_owed_to_connections`, the loss metric's registration in
+  `ConnectionRegistry::new`; `service/domain/crdt.rs` — `broadcast_server_event`;
+  `service/domain/query.rs` — `QueryRegistry::deliver_mutation`; `service/domain/search/mod.rs` —
+  `send_to_connection`, `notify_key`, `SearchService::close_subscribe`. Citations are
+  line-number-free.
+- **Enforcing test:** `an_owed_event_lost_on_a_full_queue_disconnects_at_the_first_loss`,
+  `a_loss_between_successful_sends_disconnects`, `a_threshold_of_zero_does_not_spare_an_owed_loss`,
+  `a_draining_subscriber_is_never_disconnected_by_owed_events`,
+  `an_owed_success_resets_the_broadcast_drop_streak`,
+  `a_cluster_peer_is_not_disconnected_by_an_owed_loss`, `an_owed_loss_signals_once_per_connection`,
+  `an_encode_failure_disconnects_a_client`, `send_owed_to_connections_disconnects_only_the_full_target`,
+  `the_loss_metric_is_registered_at_zero_for_both_causes`,
+  `characterization_a_parked_sender_is_released_by_the_receiver_drop_not_by_cancel`
+  (`network/connection.rs`); `a_live_update_lost_on_a_full_queue_disconnects_the_subscriber`,
+  `a_server_event_lost_on_a_full_queue_disconnects_the_subscriber`,
+  `the_writer_is_not_disconnected_by_its_own_full_queue`,
+  `after_a_loss_no_owed_event_is_encoded_or_sent_to_that_connection` (`service/domain/query.rs`);
+  `a_search_update_lost_on_a_full_queue_disconnects_the_subscriber`,
+  `a_hybrid_search_update_lost_on_a_full_queue_disconnects_the_subscriber`
+  (`service/domain/search/mod.rs`); the integration test `live-event-loss` (real server, a
+  `TopGunClient` subscriber forced to miss events ends with the query view of a fresh query and the
+  search key set of a fresh search). Each unit test was shown red on the mutant the table below
+  names.
+- **Violation consequence:** a subscriber that drains more slowly than the writers, without
+  stalling completely, loses live events with no signal and holds a query or search view that no
+  fresh query gives, until each affected key is written again.
+- **Discovered by:** TODO-1004 (a live query stopped short of the written keys with no disconnect);
+  fixed and catalogued by SPEC-423.
+- **Status:** decided, **enforced**.
+
+| Enforcer | What it covers | Where it runs |
+|----------|----------------|---------------|
+| `an_owed_event_lost_on_a_full_queue_disconnects_at_the_first_loss`, `a_loss_between_successful_sends_disconnects` | (a): the first loss disconnects, also between successful sends. Shown red on the tree whose owed send keeps the threshold semantics | CI (`cargo test`) |
+| `a_threshold_of_zero_does_not_spare_an_owed_loss` | (a): a threshold of `0` does not disable it. Shown red on the tree whose loss path returns without cancelling at threshold `0` | CI (`cargo test`) |
+| `a_live_update_lost_on_a_full_queue_disconnects_the_subscriber` | (a), the `QUERY_UPDATE` site alone. Shown red on the tree whose `deliver_mutation` sends best effort again | CI (`cargo test`) |
+| `a_server_event_lost_on_a_full_queue_disconnects_the_subscriber` | (a), the `SERVER_EVENT` site alone. Shown red on the tree whose `broadcast_server_event` sends best effort again | CI (`cargo test`) |
+| `a_search_update_lost_on_a_full_queue_disconnects_the_subscriber`, `a_hybrid_search_update_lost_on_a_full_queue_disconnects_the_subscriber` | (a), the search sites (batch task, hybrid notifier). Shown red on the tree whose `send_to_connection` ignores a full queue again | CI (`cargo test`) |
+| `an_owed_loss_signals_once_per_connection`, `an_encode_failure_disconnects_a_client` | (c): one count per connection, none after another cancel; an encoding error counts as `encode_failed`. Shown red on the tree that logs and counts every loss | CI (`cargo test`) |
+| `the_loss_metric_is_registered_at_zero_for_both_causes` | (c): both series present at zero. Shown red on the tree without the registration | CI (`cargo test`) |
+| `a_cluster_peer_is_not_disconnected_by_an_owed_loss` | (d). Shown red on the tree whose loss path cancels a peer | CI (`cargo test`) |
+| `after_a_loss_no_owed_event_is_encoded_or_sent_to_that_connection` | (e). Shown red on the tree whose `deliver_mutation` drops the flag check | CI (`cargo test`) |
+| `an_owed_success_resets_the_broadcast_drop_streak`, `a_draining_subscriber_is_never_disconnected_by_owed_events`, `the_writer_is_not_disconnected_by_its_own_full_queue`, `send_owed_to_connections_disconnects_only_the_full_target` | the best-effort pushes keep their streak; a draining subscriber and the writer are never disconnected; only the full target is. The streak test was shown red on the tree whose owed success does not reset the streak | CI (`cargo test`) |
+| `live-event-loss` (`tests/integration-rust`) | end to end: a blocked `TopGunClient` subscriber misses events, is disconnected, reconnects and ends with a fresh query's rows and a fresh search's key set; on the build before this invariant the same test, with an intermittently draining subscriber, ended with a query view unlike a fresh query | CI (`pnpm test:integration-rust`) |
 
 ### TG-QRY-001: A query returns every matching row up to max_query_records, and says has_more when it clamps
 
