@@ -66,6 +66,15 @@ describe('HybridSearchHandle', () => {
     syncEngine.close();
   });
 
+  // A delta that arrives before its subscription's response is held until the
+  // response; answering first makes the deltas below apply at once.
+  function respondEmpty(subscriptionId: string): void {
+    (syncEngine as any).handleServerMessage({
+      type: 'HYBRID_SEARCH_RESP',
+      payload: { requestId: subscriptionId, results: [], searchTimeMs: 0 },
+    });
+  }
+
   // ============================================
   // AC #1 — Constructor sends HYBRID_SEARCH_SUB with valid UUID and correct fields
   // ============================================
@@ -183,6 +192,7 @@ describe('HybridSearchHandle', () => {
     handle.subscribe(callback);
     callback.mockClear();
 
+    // Sent before the subscription's response: held until it arrives.
     (syncEngine as any).handleServerMessage({
       type: 'HYBRID_SEARCH_UPDATE',
       payload: {
@@ -195,6 +205,11 @@ describe('HybridSearchHandle', () => {
       },
     });
 
+    expect(handle.getResults()).toHaveLength(0);
+    expect(callback).not.toHaveBeenCalled();
+
+    // The response applies it after replacing the rows, with one notification.
+    respondEmpty(subscriptionId);
     expect(handle.getResults()).toHaveLength(1);
     expect(handle.getResults()[0].key).toBe('doc1');
     expect(callback).toHaveBeenCalledTimes(1);
@@ -205,6 +220,7 @@ describe('HybridSearchHandle', () => {
   it('AC #5b: UPDATE mutates score, methodScores, and value in place', () => {
     const handle = new HybridSearchHandle(syncEngine, 'docs', 'query');
     const subscriptionId = mockSendMessage.mock.calls[0][0].payload.subscriptionId;
+    respondEmpty(subscriptionId);
 
     // Add via ENTER first
     (syncEngine as any).handleServerMessage({
@@ -249,6 +265,7 @@ describe('HybridSearchHandle', () => {
   it('AC #5c: LEAVE removes key from results', () => {
     const handle = new HybridSearchHandle(syncEngine, 'docs', 'query');
     const subscriptionId = mockSendMessage.mock.calls[0][0].payload.subscriptionId;
+    respondEmpty(subscriptionId);
 
     (syncEngine as any).handleServerMessage({
       type: 'HYBRID_SEARCH_UPDATE',
@@ -320,6 +337,7 @@ describe('HybridSearchHandle', () => {
   it('AC #7: setQuery sends UNSUB for old subscriptionId then SUB with new UUID subscriptionId', () => {
     const handle = new HybridSearchHandle(syncEngine, 'docs', 'old query');
     const oldSubId = mockSendMessage.mock.calls[0][0].payload.subscriptionId;
+    respondEmpty(oldSubId);
 
     // Populate some results so we can verify they're cleared
     (syncEngine as any).handleServerMessage({
@@ -370,6 +388,7 @@ describe('HybridSearchHandle', () => {
   it('AC #8: dispose sends HYBRID_SEARCH_UNSUB, detaches listener, clears state; calling dispose twice is a no-op', () => {
     const handle = new HybridSearchHandle(syncEngine, 'docs', 'query');
     const subscriptionId = mockSendMessage.mock.calls[0][0].payload.subscriptionId;
+    respondEmpty(subscriptionId);
 
     // Add a result so clear() is observable
     (syncEngine as any).handleServerMessage({
@@ -410,6 +429,7 @@ describe('HybridSearchHandle', () => {
   it('AC #9: a listener that throws does not prevent other listeners from firing', () => {
     const handle = new HybridSearchHandle(syncEngine, 'docs', 'query');
     const subscriptionId = mockSendMessage.mock.calls[0][0].payload.subscriptionId;
+    respondEmpty(subscriptionId);
 
     let shouldThrow = false;
     const throwingListener = jest.fn().mockImplementation(() => {
@@ -489,6 +509,7 @@ describe('HybridSearchHandle', () => {
   it('unsubscribe function removes listener from further notifications', () => {
     const handle = new HybridSearchHandle(syncEngine, 'docs', 'query');
     const subscriptionId = mockSendMessage.mock.calls[0][0].payload.subscriptionId;
+    respondEmpty(subscriptionId);
 
     const callback = jest.fn();
     const unsubscribe = handle.subscribe(callback);

@@ -21,6 +21,7 @@ export type {
   BackpressureControllerConfig,
   IQueryManager,
   QueryManagerConfig,
+  LiveSearchSubscription,
   ITopicManager,
   TopicManagerConfig,
   ILockManager,

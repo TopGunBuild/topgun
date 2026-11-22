@@ -11,6 +11,7 @@
 import { vectorToBytes } from '@topgunbuild/core';
 import type { SearchMethodType } from '@topgunbuild/core';
 import type { SyncEngine } from './SyncEngine';
+import type { LiveSearchSubscription } from './sync/types';
 import { logger } from './utils/logger';
 
 /**
@@ -77,7 +78,7 @@ export interface HybridSearchSubscribeOptions {
  * handle.dispose();
  * ```
  */
-export class HybridSearchHandle<T = unknown> {
+export class HybridSearchHandle<T = unknown> implements LiveSearchSubscription {
   /** Map name being searched */
   readonly mapName: string;
 
@@ -98,6 +99,12 @@ export class HybridSearchHandle<T = unknown> {
 
   /** Whether the handle has been disposed */
   private disposed = false;
+
+  // Deltas of the current subscription that arrived before its response. The server
+  // registers a subscription before it answers, so a delta can overtake the response;
+  // it is applied after the response replaces the rows. null: no response awaited.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- HYBRID_SEARCH_UPDATE payloads as received
+  private pendingDeltas: any[] | null = null;
 
   // Cached sorted-results snapshot for synchronous external-store reads
   // (useSyncExternalStore.getSnapshot). Rebuilt lazily only when results change
@@ -131,8 +138,8 @@ export class HybridSearchHandle<T = unknown> {
     // Register for all broadcast messages from SyncEngine
     this.syncEngine.on('message', this.messageHandler);
 
-    // Send initial subscription request to server
-    this.sendSubscribe();
+    // Subscribes now if authenticated, else on the next authenticated socket.
+    this.syncEngine.subscribeToLiveSearch(this);
   }
 
   // ============================================
@@ -165,9 +172,17 @@ export class HybridSearchHandle<T = unknown> {
     if (message.type !== 'HYBRID_SEARCH_RESP') return;
     if (message.payload?.requestId !== this.subscriptionId) return;
 
-    const { results } = message.payload;
+    const { results, error } = message.payload;
+
+    // An error response registered nothing on the server: keep the rows as they are.
+    if (error !== undefined) {
+      this.pendingDeltas = null;
+      return;
+    }
 
     if (Array.isArray(results)) {
+      // The response is the whole result set: rows it lacks are gone.
+      this.results.clear();
       for (const result of results) {
         this.results.set(result.key, {
           key: result.key,
@@ -175,6 +190,12 @@ export class HybridSearchHandle<T = unknown> {
           methodScores: result.methodScores ?? {},
           ...(result.value !== undefined ? { value: result.value as T } : {}),
         });
+      }
+
+      const held = this.pendingDeltas ?? [];
+      this.pendingDeltas = null;
+      for (const delta of held) {
+        this.applyDelta(delta);
       }
 
       this.notifyListeners();
@@ -190,7 +211,21 @@ export class HybridSearchHandle<T = unknown> {
     if (message.type !== 'HYBRID_SEARCH_UPDATE') return;
     if (message.payload?.subscriptionId !== this.subscriptionId) return;
 
-    const { key, value, score, methodScores, changeType } = message.payload;
+    if (this.pendingDeltas) {
+      this.pendingDeltas.push(message.payload);
+      return;
+    }
+
+    this.applyDelta(message.payload);
+    this.notifyListeners();
+  }
+
+  /**
+   * Apply one HYBRID_SEARCH_UPDATE payload to the result map.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- HYBRID_SEARCH_UPDATE payload as received
+  private applyDelta(payload: any): void {
+    const { key, value, score, methodScores, changeType } = payload;
 
     switch (changeType as string) {
       case 'ENTER':
@@ -218,8 +253,6 @@ export class HybridSearchHandle<T = unknown> {
         this.results.delete(key);
         break;
     }
-
-    this.notifyListeners();
   }
 
   // ============================================
@@ -289,7 +322,8 @@ export class HybridSearchHandle<T = unknown> {
   /**
    * Update the search query text.
    * Sends HYBRID_SEARCH_UNSUB for the current subscriptionId, clears local results,
-   * regenerates subscriptionId, then sends a fresh HYBRID_SEARCH_SUB.
+   * regenerates subscriptionId, then subscribes again: at once when authenticated,
+   * else on the next authenticated socket.
    * Subscribers are notified with an empty result array before the new results arrive.
    *
    * No-op if queryText is unchanged.
@@ -310,7 +344,7 @@ export class HybridSearchHandle<T = unknown> {
     this.results.clear();
     this.subscriptionId = crypto.randomUUID();
     this._queryText = queryText;
-    this.sendSubscribe();
+    this.syncEngine.subscribeToLiveSearch(this);
     this.notifyListeners();
   }
 
@@ -330,7 +364,7 @@ export class HybridSearchHandle<T = unknown> {
     this.results.clear();
     this._options = options;
     this.subscriptionId = crypto.randomUUID();
-    this.sendSubscribe();
+    this.syncEngine.subscribeToLiveSearch(this);
     this.notifyListeners();
   }
 
@@ -345,6 +379,7 @@ export class HybridSearchHandle<T = unknown> {
     }
 
     this.disposed = true;
+    this.syncEngine.unsubscribeFromLiveSearch(this);
     this.sendUnsubscribe();
     this.syncEngine.off('message', this.messageHandler);
     this.results.clear();
@@ -361,6 +396,20 @@ export class HybridSearchHandle<T = unknown> {
   // ============================================
   // Wire Protocol
   // ============================================
+
+  /**
+   * Subscribe under a new subscription id. Called by the client on every newly
+   * authenticated socket; the rows stay visible until the response replaces them.
+   */
+  resubscribe(): void {
+    if (this.disposed) {
+      return;
+    }
+    // A new id makes every frame of an earlier subscription inert.
+    this.subscriptionId = crypto.randomUUID();
+    this.pendingDeltas = [];
+    this.sendSubscribe();
+  }
 
   /**
    * Send HYBRID_SEARCH_SUB to server.
