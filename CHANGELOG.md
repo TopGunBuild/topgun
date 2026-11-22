@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed: a live search no longer misses a write made while it is being set up.** A
+  `searchSubscribe`, or the full-text and exact legs of a `hybridSearchSubscribe`, could miss a
+  write made while the server built its first result — including on the first live search of a
+  map, and a write made while the server rebuilt the map's search index — and the handle then did
+  not receive that change until the key was written again. On a single server, a live search now
+  ends with the same keys as a fresh search once writes stop (`TG-LIVE-002`). The semantic leg of a
+  hybrid search is not covered.
 - **Fixed: live searches keep working after a reconnect.** On a WebSocket connection to a single
   server, the handles of `searchSubscribe` and `hybridSearchSubscribe` are now subscribed again on
   every reconnect, as live queries and topics already were, and the server's fresh result then

@@ -3540,6 +3540,137 @@ weaker than a test.
 | `the_bound_counts_distinct_keys_of_any_event_kind` (`delta_buffer.rs`) | (c), the bound counts distinct keys of any kind of event. Shown red on the tree that counts every route | CI (`cargo test`) |
 | `sim_live_subscribe_converges_under_concurrent_writes` | not an enforcer: a fault-scenario smoke (partition and heal of the other nodes) that checks the replayed frames end at the stored rows; nothing in it makes a write land during the scan | CI (`pnpm test:sim`) |
 
+### TG-LIVE-002: A live search's view converges to a fresh search, whatever the interleaving of its subscribe with writes
+
+- **Scope:** a full-text live search subscription (`SEARCH_SUB`), and the `exact` and `fullText`
+  legs of a hybrid live search subscription (`HYBRID_SEARCH_SUB`), served by one node: the
+  snapshot (`SEARCH_RESP` / `HYBRID_SEARCH_RESP`), the updates of that registration, and the writes
+  to its map. The **view** is the snapshot, then every update of the registration applied in send
+  order, an update sent before the response applied after it (as the client's pre-response hold
+  does). A **fresh search** is a one-shot `SEARCH` / `HYBRID_SEARCH` of the same query run after
+  writes stop and the batch tasks and the hybrid notifier are idle.
+- **Statement:** once writes stop and the batch tasks and the notifier are idle, the set of keys in
+  the view equals the key set of a fresh search, whatever the interleaving of the subscribe with
+  writes, removes, a clear, writes skipped for lack of a subscription, and a population of the
+  map's full-text index. The mechanism:
+  - **Full-text: register, capture, close.** The handler registers the subscription before its
+    snapshot, with a capture. Until the close, phase 3 of the batch processor records each key it
+    processes for that subscription (and a clear) instead of scoring and sending. The close,
+    under the `indexes` read guard and then the capture lock, seeds the cache from the snapshot,
+    applies a captured clear, and re-scores every captured key against the current index through
+    the live per-key path, with a non-`LEAVE` change so a removed key gives `LEAVE` and a present
+    one `ENTER` or `UPDATE` against the seeded cache. Nothing of the registration is sent before
+    the close.
+  - **Hybrid: register unseeded, seed, reconcile.** The handler registers the subscription
+    unseeded. A notifier pass skips an unseeded subscription and marks it as missed (one
+    compare-and-swap). After the snapshot the handler seeds the cache and swaps the state to
+    seeded; it starts one more pass only when a pass was skipped, so a subscribe on a quiet map
+    adds none. Nothing of the registration is sent before the seeding.
+  - **Coverage: the index covers the registration.** Each registry keeps per map a count of its
+    subscriptions, raised before an insert and lowered after every removal (a token in the
+    registry entry), and the write generation from which the map has been covered without a gap
+    (`covered_since`, read after the count increment that ended the map's last zero era). The
+    observer bumps the map's write generation before it loads the counts (SeqCst on both sides,
+    a Dekker pair), so a write skipped for lack of a subscription bumped the generation at or
+    before `covered_since`. A subscribe accepts the current index only when the map is
+    `Populated` from a start generation at or after `covered_since` and is not flagged; it joins
+    a population in flight only when that one started at or after it, waits for an earlier one
+    and judges again, and otherwise populates. A subscribe on a covered, populated map starts no
+    population.
+  - **Replay: a population keeps the writes indexed during it.** While a population of a map
+    runs, phase 2 logs what it applies to the old index (the last operation per key, and a
+    clear), and the swap applies that population's log to the new index before it is installed.
+  - **Cancellation.** A guard removes the registration of a subscribe that answers an error, is
+    cancelled by the pipeline timeout, or whose future is dropped; a later registration of the
+    same `(connection, id)` is left alone.
+- **Not claimed:**
+  - The convergence of the hybrid `semantic` leg: the search observer runs before the vector index
+    observer, so a pass started by a write's batch can read the vector index before that write's
+    upsert (TODO-1030).
+  - Cross-node writes: a search subscription sees only the writes of its own node.
+  - Score values of keys not written since the snapshot (BM25 statistics move).
+  - The full-text `limit` on the live path: live deltas are not windowed.
+  - A key written during the subscribe whose record has already expired: it is delivered as the
+    live path delivers it, until the sweep's `LEAVE` (`TG-TTL-001`).
+  - Updates dropped on a full outbound channel (`try_send`).
+  - Index events dropped on a full index queue (the observer's `try_send` of its 10 000-event
+    channel).
+  - Clients without the pre-response hold of a resubscribe.
+  - Frames of a replaced registration of the same `(connection, id)`.
+  - A `Clear` whose phase 3 runs after another partition's batch indexed a key after the clear:
+    the close (or, for a closed subscription, the live clear path, as before) sends `LEAVE` for
+    that key. `Clear` has no production caller.
+  - Bounds on the capture and the replay log: the capture holds at most the distinct keys of the
+    map written during one subscribe, the replay log the distinct keys written during one
+    population with their values; neither has an overflow policy (TODO-931, TODO-933).
+  - Under writes that overlap every population, a subscribe still populates each time: a
+    population a write overlapped does not record the map as populated (`TG-READ-001`, TODO-901).
+  - The first subscriber of one kind (text or hybrid) on a map covered only by the other kind
+    populates once: each registry keeps its own coverage.
+- **Lock order:** `indexes` (read) → a subscription's `capture` (phase 3, the close); `indexes`
+  (write) → `replay` (phase 2, the swap); `states` → `replay` (starting a population); `reset()`:
+  `indexes` (write) → a registry `subscriptions` shard → a coverage mutex (a dropped token), then
+  `states` → `replay`; a registry `subscriptions` shard → a coverage mutex (a token dropped by
+  `retain`, `clear` or a replacing `insert`). A coverage mutex is a leaf: `register` and
+  `covered_since` release it before they touch anything else, and the write path never takes it.
+  No path takes `indexes` while it holds a `capture` lock, and `replay` is never held while
+  another lock is taken. Verified by review: a deadlock cannot be made deterministic in a test.
+- **Maintaining code:** `service/domain/search/mod.rs` — `SearchSubscription::capture`,
+  `HybridSearchSubscription::seed`, `notify_key_subscriptions`, `notify_clear_subscriptions`,
+  `notify_key`, `SearchService::close_subscribe`, the `SearchSubscribe` arm of
+  `SearchService::handle`, `handle_hybrid_search_subscribe`, `notify_hybrid_subscriptions_for_map`,
+  `RegistrationGuard`, `Populations::ensure` / `start` / `run`, `PopGuard`, `replay_onto` and
+  phase 2 of `process_batch`; `service/domain/search/registry.rs` — `MapCoverage`, `CoverToken`,
+  `SubscriptionRegistry::register` / `covered_since` / `unregister_if_same` /
+  `has_subscriptions_for_map`; the observer's generation bump (`note_write`). Citations are
+  line-number-free.
+- **Enforcing test:** `live_search_write_in_the_window_reaches_the_subscriber`,
+  `live_search_remove_in_the_window_leaves_the_view`,
+  `live_search_write_in_both_snapshot_and_capture_is_idempotent`,
+  `live_search_clear_in_the_window_empties_the_view`,
+  `live_search_skipped_write_before_registration_is_in_the_snapshot`,
+  `live_search_population_during_subscribe_keeps_writes_indexed_meanwhile`,
+  `live_hybrid_write_in_the_window_reaches_the_subscriber`,
+  `live_hybrid_exact_write_in_the_window_reaches_the_subscriber`,
+  `live_hybrid_skipped_write_before_registration_is_in_the_snapshot`,
+  `a_cancelled_live_search_subscribe_leaves_no_registration`,
+  `live_search_second_subscribe_on_a_covered_map_starts_no_population`,
+  `live_search_first_subscribe_after_skipped_writes_populates`,
+  `live_search_resubscribe_after_the_last_unsubscribe_populates`,
+  `live_search_racing_first_subscribers_both_see_a_skipped_write`,
+  `live_hybrid_subscribe_on_a_quiet_map_runs_no_pass`,
+  `live_search_rejects_a_populated_index_older_than_its_coverage`, and the replay-log checks of
+  `tg_read_001_a_failed_population_answers_errors_and_registers_nothing` and
+  `tg_read_001_a_panicked_population_releases_the_map` (`search/mod.rs`). Each was shown red on
+  the mutant the table below names. Holds (`DrainHold`) stop the subscribe and the population at
+  fixed points, and a counter of `ensure` calls waiting for a population's outcome makes the
+  races deterministic. The SeqCst orderings are verified by review: a weaker ordering fails only
+  on hardware and interleavings a test cannot force.
+- **Violation consequence:** a write made while a live search was being set up — including the
+  first subscription on a map, and a write made while the search index was rebuilt — is missing
+  from the subscriber's results and never reaches it as a change, so the client holds a stale
+  result for as long as the key is not written again.
+- **Discovered by:** TODO-1026 (a search subscription registered after its snapshot); fixed and
+  catalogued by SPEC-426.
+- **Status:** decided, **enforced**.
+
+| Enforcer | What it covers | Where it runs |
+|----------|----------------|---------------|
+| `live_search_write_in_the_window_reaches_the_subscriber` | full-text: a write between the snapshot and the close reaches the view, and no update of the subscription is sent before its close. Shown red on the tree in the old order (snapshot, seed, register), on the tree whose close drops captured keys, and on the tree that registers first with no capture (an update before the close) | CI (`cargo test`) |
+| `live_search_remove_in_the_window_leaves_the_view` | full-text: a remove in the window takes the key out. Shown red on the tree that registers first with no capture (the `LEAVE` is suppressed against the empty cache and the seeding puts the key back) | CI (`cargo test`) |
+| `live_search_write_in_both_snapshot_and_capture_is_idempotent` | full-text: a write both in the snapshot and captured gives one `UPDATE` and no `ENTER`. Shown red on the tree that registers first with no capture and on the tree whose close re-scores before it seeds | CI (`cargo test`) |
+| `live_search_clear_in_the_window_empties_the_view` | full-text: a clear in the window empties the view. Shown red on the tree whose close ignores a captured clear | CI (`cargo test`) |
+| `live_search_skipped_write_before_registration_is_in_the_snapshot`, `live_hybrid_skipped_write_before_registration_is_in_the_snapshot` | coverage: a write skipped after an in-flight population's scan is in the snapshot; the subscribe waits for that population and populates once more. Shown red on the tree whose `ensure` ignores the minimum generation (it joins), and the hybrid one also on the tree whose hybrid handler skips the covering population | CI (`cargo test`) |
+| `live_search_population_during_subscribe_keeps_writes_indexed_meanwhile` | replay: a write applied to the old index during a population is in the swapped-in index and in the view. Shown red on the tree whose swap applies no log | CI (`cargo test`) |
+| `live_hybrid_write_in_the_window_reaches_the_subscriber`, `live_hybrid_exact_write_in_the_window_reaches_the_subscriber` | hybrid, the `fullText` and the `exact` leg: a write while the subscription is unseeded reaches the view, and no update is sent before the seeding. Shown red on the tree whose handler never starts the reconciling pass and on the tree whose notifier ignores the seed state | CI (`cargo test`) |
+| `a_cancelled_live_search_subscribe_leaves_no_registration` | cancellation: an aborted text or hybrid subscribe leaves no registration and a zero coverage count. Shown red on the tree without the guard | CI (`cargo test`) |
+| `live_search_second_subscribe_on_a_covered_map_starts_no_population` | cost: a second subscribe on a covered, populated map starts no population and sees the writes enqueued meanwhile. Shown red on the tree whose subscribe always populates | CI (`cargo test`) |
+| `live_search_first_subscribe_after_skipped_writes_populates`, `live_search_resubscribe_after_the_last_unsubscribe_populates` | coverage: after a skipped write — on a populated map, or after the last subscription left — the next subscribe populates once and sees it. Shown red on the tree whose subscribe accepts any populated index | CI (`cargo test`) |
+| `live_search_racing_first_subscribers_both_see_a_skipped_write` | coverage, two subscribers racing the 0→1 and 1→2 transitions: neither reads the previous era's `covered_since`. Shown red on the tree whose 0→1 transition does not reset `covered_since`, and on the tree whose `ensure` ignores the minimum generation | CI (`cargo test`) |
+| `live_hybrid_subscribe_on_a_quiet_map_runs_no_pass` | cost: a hybrid subscribe on a quiet map runs no notifier pass. Shown red on the tree whose handler always starts the reconciling pass | CI (`cargo test`) |
+| `live_search_rejects_a_populated_index_older_than_its_coverage` | coverage, the `Populated` arm alone: with the flag clear (as between a skipping write's bump and its flag store), an index populated before the coverage began is not accepted. Shown red on the tree that drops the `covered_since` check from that arm | CI (`cargo test`) |
+| `tg_read_001_a_failed_population_answers_errors_and_registers_nothing`, `tg_read_001_a_panicked_population_releases_the_map` | replay-log bound: a population that ends without a swap leaves no log. Shown red on the tree that keeps it | CI (`cargo test`) |
+
 ### TG-QRY-001: A query returns every matching row up to max_query_records, and says has_more when it clamps
 
 - **Scope:** a query served by one node through `QueryService::handle_query_subscribe` and
@@ -4368,6 +4499,10 @@ weaker than a test.
   only after a swap whose scan no write overlapped: it clears the map's `needs_population` flag
   and reads the map's write generation before the resident snapshot, every non-backup observer
   callback bumps that generation, and an unchanged generation after the swap is the condition.
+  While a population runs, the batch processor logs what it applies to the old index (the last
+  operation per key, and a clear), and the swap applies that population's log to the new index
+  before installing it, so a write indexed during the population is in the new index; a population
+  that ends without a swap leaves no log (`TG-LIVE-002`).
   The read emits live rows only: after the merge decision, a row whose TTL has run out at the
   read's `now` (`factory.now_ms()`, read once per scan) is dropped, so an expired resident still
   shadows an older stored row and neither is emitted (TG-TTL-001).
@@ -4375,10 +4510,8 @@ weaker than a test.
 - **Stated limits:** an unsanitized write of a trusted origin with a lower timestamp than the stored
   row loses to that row between its engine put and its staging. Each data-store batch is its own
   snapshot, so there is no point-in-time read. A search that joins a population may miss a write
-  acknowledged before it; that population then does not record "populated". Notifier passes never
-  populate, so live `fullText` deltas after an overlapped population read an index that may miss
-  writes applied to the old index (TODO-901). `Clear` / `reset` issued before a population reads
-  its generation are not covered (no production caller).
+  acknowledged before it; that population then does not record "populated". `Clear` / `reset`
+  issued before a population reads its generation are not covered (no production caller).
 - **Maintaining code:** `storage/factory.rs` — `scan_merged`, `scan_merged_batches`;
   `storage/datastores/write_behind.rs` — the scan overlay; `service/domain/search/mod.rs` —
   `SearchShared`, `PopState`, the population task and the observer's generation bump.
@@ -4398,7 +4531,8 @@ weaker than a test.
   `tg_read_001_a_failed_population_answers_errors_and_registers_nothing`,
   `tg_read_001_a_panicked_population_releases_the_map`,
   `tg_read_001_an_indexer_panic_after_the_last_batch_swaps_nothing`,
-  `tg_read_001_notifier_passes_run_no_population`.
+  `tg_read_001_notifier_passes_run_no_population`,
+  `live_search_population_during_subscribe_keeps_writes_indexed_meanwhile`.
 - **Integration tests:** `tests/integration-rust/stored-read-paths.test.ts` —
   `AC1: /sync returns every stored record, and the filtered ones`,
   `AC2: SEARCH finds stored records`,
@@ -4588,6 +4722,8 @@ weaker than a test.
   - the DataFusion SQL path (`service/domain/table_provider.rs:244`, disabled, `FEATURE_DISABLED`)
     is not covered;
   - a live query window keeps an expired row until the sweep's LEAVE (TG-TTL-002);
+  - a live search delivers a key written during its subscribe as the live path does, so an
+    already-expired one is removed by the sweep's LEAVE (`TG-LIVE-002`);
   - the Event Journal is history, not a read of the map: it keeps, and `JournalRead` /
     `getEventJournal` return, the PUT event of a record after it expired, followed by the expiry
     DELETE once swept;

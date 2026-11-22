@@ -17,7 +17,7 @@ pub use registry::{RegistryEntry, SubscriptionRegistry};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -84,7 +84,21 @@ pub struct HybridSearchSubscription {
     pub min_score: Option<f64>,
     /// Current result cache: key -> `CachedHybridResult`.
     pub current_results: DashMap<String, CachedHybridResult>,
+    /// [`UNSEEDED`] from its registration until the subscribe handler has
+    /// seeded `current_results`, [`MISSED`] once a notifier pass skipped it
+    /// meanwhile, then [`SEEDED`]. A pass evaluates only a seeded
+    /// subscription (`TG-LIVE-002`).
+    seed: AtomicU8,
 }
+
+/// A hybrid subscription registered by its subscribe handler and not yet
+/// seeded; no notifier pass has looked at it.
+const UNSEEDED: u8 = 0;
+/// Not yet seeded, and a notifier pass skipped it: the handler starts one more
+/// pass after the seeding.
+const MISSED: u8 = 1;
+/// Seeded: notifier passes evaluate it.
+const SEEDED: u8 = 2;
 
 impl HybridSearchSubscription {
     #[must_use]
@@ -113,6 +127,7 @@ impl HybridSearchSubscription {
             include_value,
             min_score,
             current_results: DashMap::new(),
+            seed: AtomicU8::new(SEEDED),
         }
     }
 }
@@ -215,6 +230,24 @@ pub struct SearchSubscription {
     ///
     /// Used to compute ENTER/UPDATE/LEAVE deltas when data changes.
     pub current_results: DashMap<String, CachedSearchResult>,
+    /// `Some` from the subscription's registration by its subscribe handler
+    /// until the handler's close: phase 3 then records the keys it would have
+    /// re-scored instead of sending, and the close re-scores them against the
+    /// seeded cache (`TG-LIVE-002`).
+    ///
+    /// Lock order: a path that holds the `indexes` read guard may then lock
+    /// `capture`; no path takes `indexes` (read or write) while it holds
+    /// `capture`.
+    capture: Mutex<Option<Capture>>,
+}
+
+/// What phase 3 recorded for a subscription while its subscribe ran.
+#[derive(Default)]
+struct Capture {
+    /// Keys whose events phase 3 processed; the close re-scores each.
+    keys: HashSet<String>,
+    /// A `Clear` was processed; the close clears the seeded cache.
+    cleared: bool,
 }
 
 impl RegistryEntry for SearchSubscription {
@@ -248,6 +281,7 @@ impl SearchSubscription {
             query,
             options,
             current_results: DashMap::new(),
+            capture: Mutex::new(None),
         }
     }
 }
@@ -609,6 +643,20 @@ struct SearchShared {
     generations: DashMap<String, Arc<AtomicU64>>,
     dirty: Mutex<HashSet<String>>,
     dirty_wake: tokio::sync::Notify,
+    replay: Mutex<HashMap<String, ReplayLog>>,
+    /// Batches processed so far by attached batch processors, counted at the
+    /// end of the batch (phase 3 and 4 included).
+    #[cfg(test)]
+    batches: AtomicU64,
+}
+
+/// The index operations phase 2 applied to one map while a population of it
+/// runs, replayed onto the population's index at its swap.
+struct ReplayLog {
+    population_id: u64,
+    cleared: bool,
+    /// Last operation per key: `Some(value)` indexes, `None` removes.
+    ops: HashMap<String, Option<rmpv::Value>>,
 }
 
 impl SearchShared {
@@ -658,11 +706,14 @@ pub struct HybridLink {
 /// The population state of one map's full-text index. An absent entry means
 /// "needs population"; so does a set `needs_population` flag over `Populated`.
 enum PopState {
-    /// The last population's scan was overlapped by no write.
-    Populated,
+    /// The last population's scan was overlapped by no write. `generation`:
+    /// the map's write generation the population read before its scan; every
+    /// write bumped at or before it is in the index.
+    Populated { generation: u64 },
     /// A population task runs; a search that needs population joins it.
     InFlight {
         id: u64,
+        start_generation: u64,
         outcome: tokio::sync::watch::Receiver<Option<bool>>,
     },
 }
@@ -781,6 +832,10 @@ impl SearchMutationObserver {
     /// map as needing population instead.
     fn note_write(&self) {
         if let Some(shared) = self.link.get() {
+            // SeqCst: the writer's half of the Dekker pair with a subscribe's
+            // coverage count increment and `covered_since` read
+            // (`TG-LIVE-002`); the subscription check loads the count after
+            // this bump. Downgrading it reopens the skipped-write race.
             self.generation
                 .get_or_init(|| shared.generation(&self.map_name))
                 .fetch_add(1, Ordering::SeqCst);
@@ -1065,8 +1120,22 @@ fn send_leave(conn_reg: &ConnectionRegistry, sub: &SearchSubscription, key: &str
     send_to_connection(conn_reg, sub.connection_id, &msg);
 }
 
+/// Sends LEAVE for every key cached by `sub` and empties its cache.
+fn leave_all(conn_reg: &ConnectionRegistry, sub: &SearchSubscription) {
+    let keys: Vec<String> = sub
+        .current_results
+        .iter()
+        .map(|e| e.key().clone())
+        .collect();
+    for key in keys {
+        sub.current_results.remove(&key);
+        send_leave(conn_reg, sub, &key);
+    }
+}
+
 /// Notifies subscriptions about a Clear: sends LEAVE for every cached key and
-/// clears `current_results`.
+/// clears `current_results`. A subscription whose subscribe has not closed
+/// records the clear instead, and its close applies it.
 fn notify_clear_subscriptions(
     registry: &SearchRegistry,
     connection_registry: &ConnectionRegistry,
@@ -1074,20 +1143,17 @@ fn notify_clear_subscriptions(
 ) {
     let subs = registry.get_subscriptions_for_map(map_name);
     for sub in &subs {
-        let keys: Vec<String> = sub
-            .current_results
-            .iter()
-            .map(|e| e.key().clone())
-            .collect();
-        for key in keys {
-            sub.current_results.remove(&key);
-            send_leave(connection_registry, sub, &key);
+        if let Some(capture) = sub.capture.lock().as_mut() {
+            capture.cleared = true;
+            continue;
         }
+        leave_all(connection_registry, sub);
     }
 }
 
 /// Re-scores a single key against all subscriptions for a map and sends
-/// ENTER/UPDATE/LEAVE deltas as appropriate.
+/// ENTER/UPDATE/LEAVE deltas as appropriate. A subscription whose subscribe has
+/// not closed records the key instead, and its close re-scores it.
 fn notify_key_subscriptions(
     index: &TantivyMapIndex,
     subs: &[Arc<SearchSubscription>],
@@ -1095,58 +1161,72 @@ fn notify_key_subscriptions(
     key: &str,
     change_type: &ChangeEventType,
 ) {
+    for sub in subs {
+        if let Some(capture) = sub.capture.lock().as_mut() {
+            capture.keys.insert(key.to_owned());
+            continue;
+        }
+        notify_key(Some(index), sub, connection_registry, key, change_type);
+    }
+}
+
+/// Re-scores `key` for one subscription against `index` (`None`: no match)
+/// and sends its ENTER/UPDATE/LEAVE delta. A `LEAVE` change removes the key
+/// without scoring it.
+fn notify_key(
+    index: Option<&TantivyMapIndex>,
+    sub: &SearchSubscription,
+    connection_registry: &ConnectionRegistry,
+    key: &str,
+    change_type: &ChangeEventType,
+) {
     if *change_type == ChangeEventType::LEAVE {
-        for sub in subs {
-            if sub.current_results.remove(key).is_some() {
-                send_leave(connection_registry, sub, key);
-            }
+        if sub.current_results.remove(key).is_some() {
+            send_leave(connection_registry, sub, key);
         }
         return;
     }
 
-    for sub in subs {
-        let scored = index.score_single_document(key, &sub.query);
-        match scored {
-            Some(doc) => {
-                let score = doc.score;
-                let min_score = sub.options.min_score.unwrap_or(0.0);
-                if score < min_score {
-                    if sub.current_results.remove(key).is_some() {
-                        send_leave(connection_registry, sub, key);
-                    }
-                    continue;
-                }
-
-                let delta_type = if sub.current_results.contains_key(key) {
-                    ChangeEventType::UPDATE
-                } else {
-                    ChangeEventType::ENTER
-                };
-
-                sub.current_results.insert(
-                    key.to_owned(),
-                    CachedSearchResult {
-                        score,
-                        matched_terms: doc.matched_terms.clone(),
-                    },
-                );
-
-                let msg = Message::SearchUpdate {
-                    payload: SearchUpdatePayload {
-                        subscription_id: sub.subscription_id.clone(),
-                        key: key.to_owned(),
-                        value: rmpv::Value::Nil,
-                        score,
-                        matched_terms: doc.matched_terms,
-                        change_type: delta_type,
-                    },
-                };
-                send_to_connection(connection_registry, sub.connection_id, &msg);
-            }
-            None => {
+    match index.and_then(|index| index.score_single_document(key, &sub.query)) {
+        Some(doc) => {
+            let score = doc.score;
+            let min_score = sub.options.min_score.unwrap_or(0.0);
+            if score < min_score {
                 if sub.current_results.remove(key).is_some() {
                     send_leave(connection_registry, sub, key);
                 }
+                return;
+            }
+
+            let delta_type = if sub.current_results.contains_key(key) {
+                ChangeEventType::UPDATE
+            } else {
+                ChangeEventType::ENTER
+            };
+
+            sub.current_results.insert(
+                key.to_owned(),
+                CachedSearchResult {
+                    score,
+                    matched_terms: doc.matched_terms.clone(),
+                },
+            );
+
+            let msg = Message::SearchUpdate {
+                payload: SearchUpdatePayload {
+                    subscription_id: sub.subscription_id.clone(),
+                    key: key.to_owned(),
+                    value: rmpv::Value::Nil,
+                    score,
+                    matched_terms: doc.matched_terms,
+                    change_type: delta_type,
+                },
+            };
+            send_to_connection(connection_registry, sub.connection_id, &msg);
+        }
+        None => {
+            if sub.current_results.remove(key).is_some() {
+                send_leave(connection_registry, sub, key);
             }
         }
     }
@@ -1158,6 +1238,7 @@ fn notify_key_subscriptions(
 ///   1. Deduplicate per `(map_name, key)` keeping the last `IndexOp`. A `Clear` op
 ///      discards all prior per-key ops for that map.
 ///   2. Acquire WRITE lock per map, apply index/remove/clear ops, commit once.
+///      While a population of the map runs, log what is applied for its swap.
 ///   3. Acquire READ lock, re-score subscriptions, send ENTER/UPDATE/LEAVE deltas.
 ///      For `Clear` ops, send LEAVE for all cached keys and clear `current_results`.
 fn process_batch(
@@ -1196,12 +1277,20 @@ fn process_batch(
     // --- Phase 2: Index documents (WRITE lock, one commit per map) ---
     {
         let mut indexes_w = indexes.write();
+        // A population swaps in an index built from its scan; what is applied
+        // here meanwhile is logged and replayed onto it (`TG-READ-001`).
+        let mut replay = link.get().map(|shared| shared.replay.lock());
         for (map_name, ops) in &ops_by_map {
             let has_clear = cleared_maps.contains_key(map_name);
             let index = indexes_w.entry(map_name.clone()).or_default();
+            let mut log = replay.as_mut().and_then(|logs| logs.get_mut(map_name));
 
             if has_clear {
                 index.clear();
+                if let Some(log) = log.as_mut() {
+                    log.ops.clear();
+                    log.cleared = true;
+                }
             }
 
             let mut did_mutate = has_clear;
@@ -1209,10 +1298,16 @@ fn process_batch(
                 match op {
                     IndexOp::Index { key, value, .. } => {
                         index.index_document(key, value);
+                        if let Some(log) = log.as_mut() {
+                            log.ops.insert(key.clone(), Some(value.clone()));
+                        }
                         did_mutate = true;
                     }
                     IndexOp::Remove { key } => {
                         index.remove_document(key);
+                        if let Some(log) = log.as_mut() {
+                            log.ops.insert(key.clone(), None);
+                        }
                         did_mutate = true;
                     }
                     IndexOp::Clear => {}
@@ -1263,6 +1358,8 @@ fn process_batch(
         for map_name in ops_by_map.keys() {
             shared.mark_dirty(map_name);
         }
+        #[cfg(test)]
+        shared.batches.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -1295,58 +1392,113 @@ struct Populations {
     /// When set, the blocking indexer panics in its commit.
     #[cfg(test)]
     commit_panic: AtomicBool,
+    /// Held after the scan and the indexer finish, before the swap; keyed by
+    /// map name.
+    #[cfg(test)]
+    swap_hold: crate::service::domain::query::DrainHold,
+    /// Calls of `ensure` that have begun to wait for a population's outcome.
+    #[cfg(test)]
+    waiting: AtomicU64,
 }
 
 impl Populations {
-    /// Returns once `map_name`'s index answers from a completed population:
-    /// at once when the map is populated, else after the population this call
-    /// starts or joins.
+    /// Returns once `map_name`'s index answers from a completed population
+    /// that started at write generation `min_generation` or later: at once when
+    /// the map is populated from such a generation, else after the population
+    /// this call joins or starts. A population in flight that started earlier
+    /// is waited for, never doubled, and the state is then judged again.
+    /// `min_generation` 0 accepts any completed population.
     ///
     /// # Errors
     ///
     /// The population failed or panicked: its store scan or its indexer.
-    async fn ensure(self: &Arc<Self>, map_name: &str) -> anyhow::Result<()> {
-        let mut outcome = {
-            let mut states = self.states.lock();
-            let flagged = self
-                .needs_population
-                .get(map_name)
-                .is_some_and(|flag| flag.load(Ordering::Acquire));
-            match states.get(map_name) {
-                Some(PopState::Populated) if !flagged => return Ok(()),
-                Some(PopState::InFlight { outcome, .. }) => outcome.clone(),
-                _ => {
-                    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                    let (tx, rx) = tokio::sync::watch::channel(None);
-                    states.insert(
-                        map_name.to_owned(),
-                        PopState::InFlight {
-                            id,
-                            outcome: rx.clone(),
-                        },
-                    );
-                    // Spawned, not awaited in the request future: a request
-                    // timeout that drops the search cannot cut the population.
-                    tokio::spawn(Arc::clone(self).run(map_name.to_owned(), id, tx));
-                    rx
+    async fn ensure(self: &Arc<Self>, map_name: &str, min_generation: u64) -> anyhow::Result<()> {
+        loop {
+            let (mut outcome, joined) = {
+                let mut states = self.states.lock();
+                let flagged = self
+                    .needs_population
+                    .get(map_name)
+                    .is_some_and(|flag| flag.load(Ordering::Acquire));
+                match states.get(map_name) {
+                    Some(PopState::Populated { generation })
+                        if !flagged && *generation >= min_generation =>
+                    {
+                        return Ok(());
+                    }
+                    Some(PopState::InFlight {
+                        start_generation,
+                        outcome,
+                        ..
+                    }) => (outcome.clone(), *start_generation >= min_generation),
+                    _ => (self.start(&mut states, map_name), true),
                 }
+            };
+            #[cfg(test)]
+            self.waiting.fetch_add(1, Ordering::SeqCst);
+            let succeeded = outcome
+                .wait_for(Option::is_some)
+                .await
+                .is_ok_and(|done| *done == Some(true));
+            if joined {
+                return if succeeded {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(STORE_SCAN_FAILED))
+                };
             }
-        };
-        let succeeded = outcome
-            .wait_for(Option::is_some)
-            .await
-            .is_ok_and(|done| *done == Some(true));
-        if succeeded {
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!(STORE_SCAN_FAILED))
         }
+    }
+
+    /// Starts a population of `map_name` under the `states` lock and returns
+    /// the receiver of its outcome.
+    fn start(
+        self: &Arc<Self>,
+        states: &mut HashMap<String, PopState>,
+        map_name: &str,
+    ) -> tokio::sync::watch::Receiver<Option<bool>> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        // Both before the resident snapshot: a write the snapshot misses bumps
+        // the generation after this read (the observer runs after the engine
+        // reflects the write), so this population cannot record "populated".
+        if let Some(flag) = self.needs_population.get(map_name) {
+            flag.store(false, Ordering::Release);
+        }
+        // SeqCst: compared with a subscribe's `covered_since`, which is read in
+        // the same single order (`TG-LIVE-002`). Downgrading it reopens the
+        // skipped-write race: the population could be accepted by a
+        // subscription whose coverage counts a write its scan missed.
+        let start_generation = self.shared.generation(map_name).load(Ordering::SeqCst);
+        // Before the spawn, so before the scan: phase 2 logs every write it
+        // applies to the old index from here on.
+        self.shared.replay.lock().insert(
+            map_name.to_owned(),
+            ReplayLog {
+                population_id: id,
+                cleared: false,
+                ops: HashMap::new(),
+            },
+        );
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        states.insert(
+            map_name.to_owned(),
+            PopState::InFlight {
+                id,
+                start_generation,
+                outcome: rx.clone(),
+            },
+        );
+        // Spawned, not awaited in the request future: a request timeout that
+        // drops the search cannot cut the population.
+        tokio::spawn(Arc::clone(self).run(map_name.to_owned(), id, start_generation, tx));
+        rx
     }
 
     async fn run(
         self: Arc<Self>,
         map_name: String,
         id: u64,
+        start_generation: u64,
         outcome: tokio::sync::watch::Sender<Option<bool>>,
     ) {
         // Publishes "failed" and releases the in-flight marker on every exit
@@ -1360,15 +1512,7 @@ impl Populations {
         };
         #[cfg(test)]
         self.started.fetch_add(1, Ordering::SeqCst);
-
-        // Both before the resident snapshot: a write the snapshot misses bumps
-        // the generation after this read (the observer runs after the engine
-        // reflects the write), so this population cannot record "populated".
-        if let Some(flag) = self.needs_population.get(&map_name) {
-            flag.store(false, Ordering::Release);
-        }
         let generation = self.shared.generation(&map_name);
-        let start_generation = generation.load(Ordering::SeqCst);
 
         // Capacity 1: back-pressure from the indexer to the scan, at most one
         // batch queued.
@@ -1415,17 +1559,43 @@ impl Populations {
             }
         };
 
-        let replaced = self.indexes.write().insert(map_name, index);
+        #[cfg(test)]
+        self.swap_hold.pass(&map_name).await;
+        let replaced = {
+            let mut indexes_w = self.indexes.write();
+            // Only this population's log: after a reset a later population of
+            // the map may own the entry.
+            let log = {
+                let mut logs = self.shared.replay.lock();
+                if logs
+                    .get(&map_name)
+                    .is_some_and(|log| log.population_id == id)
+                {
+                    logs.remove(&map_name)
+                } else {
+                    None
+                }
+            };
+            if let Some(log) = log {
+                replay_onto(&index, log);
+            }
+            indexes_w.insert(map_name, index)
+        };
         // Dropped after the write lock is released: dropping an index writer
         // joins its threads.
         drop(replaced);
         let overlapped = generation.load(Ordering::SeqCst) != start_generation;
-        guard.finish(!overlapped);
+        guard.finish((!overlapped).then_some(PopState::Populated {
+            generation: start_generation,
+        }));
     }
 
     #[cfg(test)]
     fn is_populated(&self, map_name: &str) -> bool {
-        matches!(self.states.lock().get(map_name), Some(PopState::Populated))
+        matches!(
+            self.states.lock().get(map_name),
+            Some(PopState::Populated { .. })
+        )
     }
 
     #[cfg(test)]
@@ -1434,6 +1604,26 @@ impl Populations {
             self.states.lock().get(map_name),
             Some(PopState::InFlight { .. })
         )
+    }
+}
+
+/// Applies a population's replay log to the index built from its scan: the
+/// writes phase 2 applied to the old index while the population ran
+/// (`TG-READ-001`). Called under the `indexes` write lock, before the swap.
+fn replay_onto(index: &TantivyMapIndex, log: ReplayLog) {
+    if log.cleared {
+        // Commits internally.
+        index.clear();
+    }
+    let applied = !log.ops.is_empty();
+    for (key, op) in log.ops {
+        match op {
+            Some(value) => index.index_document(&key, &value),
+            None => index.remove_document(&key),
+        }
+    }
+    if applied {
+        index.commit();
     }
 }
 
@@ -1463,11 +1653,11 @@ impl PopGuard {
         }
     }
 
-    /// The swap happened. `populated`: no write overlapped the scan, so the map
-    /// is recorded as populated; otherwise it stays "needs population" and the
+    /// The swap happened. `next` is `Populated` when no write overlapped the
+    /// scan; otherwise `None`, and the map stays "needs population" and the
     /// swapped-in index serves only the searches that waited.
-    fn finish(mut self, populated: bool) {
-        self.settle(populated.then_some(PopState::Populated));
+    fn finish(mut self, next: Option<PopState>) {
+        self.settle(next);
         self.finished = true;
         self.outcome.send_replace(Some(true));
     }
@@ -1482,7 +1672,52 @@ impl Drop for PopGuard {
             flag.store(true, Ordering::Release);
         }
         self.settle(None);
+        // Without a swap nothing consumes the log, and phase 2 would keep
+        // filling it. Only this population's: after a reset a later population
+        // of the map may own the entry.
+        {
+            let mut logs = self.pops.shared.replay.lock();
+            if logs
+                .get(&self.map_name)
+                .is_some_and(|log| log.population_id == self.id)
+            {
+                logs.remove(&self.map_name);
+            }
+        }
         self.outcome.send_replace(Some(false));
+    }
+}
+
+/// Removes a subscription registered by a subscribe handler unless the
+/// handler disarms it before its success answer: an error answer, a pipeline
+/// timeout or a dropped handler future leave no registration, and so no
+/// coverage count, behind. A later registration of the same
+/// `(connection, id)` is left alone.
+struct RegistrationGuard<'a, S: RegistryEntry> {
+    registry: &'a SubscriptionRegistry<S>,
+    sub: Option<Arc<S>>,
+}
+
+impl<'a, S: RegistryEntry> RegistrationGuard<'a, S> {
+    fn new(registry: &'a SubscriptionRegistry<S>, sub: &Arc<S>) -> Self {
+        Self {
+            registry,
+            sub: Some(Arc::clone(sub)),
+        }
+    }
+
+    fn disarm(mut self) {
+        self.sub = None;
+    }
+}
+
+impl<S: RegistryEntry> Drop for RegistrationGuard<'_, S> {
+    fn drop(&mut self) {
+        if let Some(sub) = self.sub.take() {
+            let _ =
+                self.registry
+                    .unregister_if_same(sub.connection_id(), sub.subscription_id(), &sub);
+        }
     }
 }
 
@@ -1521,9 +1756,20 @@ pub struct SearchService {
     populations: Arc<Populations>,
     /// Set when the one hybrid notifier task has been spawned.
     notifier_started: AtomicBool,
-    /// Maps handled by notifier passes so far.
+    /// Maps whose notifier pass has finished, its updates sent.
     #[cfg(test)]
     notifier_passes: AtomicU64,
+    /// Full-text subscribe, keyed by subscription id: after `register`, before
+    /// the `covered_since` read.
+    #[cfg(test)]
+    cover_hold: crate::service::domain::query::DrainHold,
+    /// Full-text subscribe: after the covering population, before the snapshot.
+    #[cfg(test)]
+    pre_snapshot_hold: crate::service::domain::query::DrainHold,
+    /// Full-text subscribe: after the snapshot, before the close; hybrid
+    /// subscribe: after the snapshot, before the seeding.
+    #[cfg(test)]
+    subscribe_hold: crate::service::domain::query::DrainHold,
 }
 
 /// The answer to a `SEARCH` / `SEARCH_SUB` whose population failed.
@@ -1591,6 +1837,10 @@ impl SearchService {
             started: AtomicU64::new(0),
             #[cfg(test)]
             commit_panic: AtomicBool::new(false),
+            #[cfg(test)]
+            swap_hold: crate::service::domain::query::DrainHold::default(),
+            #[cfg(test)]
+            waiting: AtomicU64::new(0),
         });
         Self {
             registry,
@@ -1606,6 +1856,12 @@ impl SearchService {
             notifier_started: AtomicBool::new(false),
             #[cfg(test)]
             notifier_passes: AtomicU64::new(0),
+            #[cfg(test)]
+            cover_hold: crate::service::domain::query::DrainHold::default(),
+            #[cfg(test)]
+            pre_snapshot_hold: crate::service::domain::query::DrainHold::default(),
+            #[cfg(test)]
+            subscribe_hold: crate::service::domain::query::DrainHold::default(),
         }
     }
 
@@ -1648,6 +1904,8 @@ impl SearchService {
                 svc.shared.dirty_wake.notified().await;
                 for map_name in svc.shared.take_dirty() {
                     svc.notify_hybrid_subscriptions_for_map(&map_name).await;
+                    #[cfg(test)]
+                    svc.notifier_passes.fetch_add(1, Ordering::SeqCst);
                 }
             }
         });
@@ -1669,6 +1927,16 @@ impl SearchService {
         let scored_docs = self
             .search_map(map_name, query_str, options, FullTextMode::Populate)
             .await?;
+        Ok(self.visible_entries(map_name, scored_docs).await)
+    }
+
+    /// The entries of `scored_docs` whose record is visible, by the point read
+    /// of `read_visible` at one `now` for the whole request.
+    async fn visible_entries(
+        &self,
+        map_name: &str,
+        scored_docs: Vec<ScoredDoc>,
+    ) -> Vec<SearchResultEntry> {
         let factory = &self.populations.factory;
         let now = factory.now_ms();
         let mut results = Vec::with_capacity(scored_docs.len());
@@ -1686,7 +1954,45 @@ impl SearchService {
                 matched_terms: doc.matched_terms,
             });
         }
-        Ok(results)
+        results
+    }
+
+    /// Ends the subscribe of `sub` (`TG-LIVE-002`): seeds its cache with the
+    /// snapshot, applies a captured clear, re-scores every captured key
+    /// against the current index through the live path, and ends the capture.
+    /// It holds the `indexes` read guard and then `sub.capture`, so no phase 3
+    /// of the map interleaves with it.
+    fn close_subscribe(&self, sub: &SearchSubscription, snapshot: &[SearchResultEntry]) {
+        let indexes = self.indexes.read();
+        let mut capture = sub.capture.lock();
+        for entry in snapshot {
+            sub.current_results.insert(
+                entry.key.clone(),
+                CachedSearchResult {
+                    score: entry.score,
+                    matched_terms: entry.matched_terms.clone(),
+                },
+            );
+        }
+        let Some(captured) = capture.take() else {
+            return;
+        };
+        if captured.cleared {
+            leave_all(&self.connection_registry, sub);
+        }
+        let index = indexes.get(&sub.map_name);
+        for key in &captured.keys {
+            // Not `LEAVE`, which removes without scoring: a captured key is
+            // scored, so a removed key gives LEAVE and a present one ENTER or
+            // UPDATE against the seeded cache.
+            notify_key(
+                index,
+                sub,
+                &self.connection_registry,
+                key,
+                &ChangeEventType::UPDATE,
+            );
+        }
     }
 
     /// Executes a BM25 full-text search against the tantivy index for `map_name`.
@@ -1708,13 +2014,23 @@ impl SearchService {
         mode: FullTextMode,
     ) -> anyhow::Result<Vec<ScoredDoc>> {
         if mode == FullTextMode::Populate {
-            self.populations.ensure(map_name).await?;
+            self.populations.ensure(map_name, 0).await?;
         }
-        let indexes = self.indexes.read();
-        Ok(indexes
+        Ok(self.search_current_index(map_name, query_str, options))
+    }
+
+    /// Searches `map_name`'s current index as it is; no index: no hit.
+    fn search_current_index(
+        &self,
+        map_name: &str,
+        query_str: &str,
+        options: &SearchOptions,
+    ) -> Vec<ScoredDoc> {
+        self.indexes
+            .read()
             .get(map_name)
             .map(|index| index.search(query_str, options))
-            .unwrap_or_default())
+            .unwrap_or_default()
     }
 
     async fn handle(&self, op: Operation) -> Result<OperationResponse, OperationError> {
@@ -1745,38 +2061,49 @@ impl SearchService {
                     ))
                 })?;
                 let options = payload.options.unwrap_or_default();
-                // Execute initial search. A failed population is answered as an
-                // error and registers nothing: a subscription seeded from an
-                // incomplete index would look complete to the client.
-                let Ok(results) = self
-                    .execute_search(&payload.map_name, &payload.query, &options)
-                    .await
-                else {
-                    return Ok(OperationResponse::Message(Box::new(Message::SearchResp {
-                        payload: search_failed(payload.subscription_id),
-                    })));
-                };
-                let total_count = u32::try_from(results.len()).unwrap_or(u32::MAX);
-
-                // Build subscription with initial result cache populated.
-                let sub = SearchSubscription::new(
+                // Registered before the snapshot, capturing: until the close
+                // below, phase 3 records each key it processes for this
+                // subscription, so no write falls between the snapshot and
+                // the registration (`TG-LIVE-002`).
+                let mut sub = SearchSubscription::new(
                     payload.subscription_id.clone(),
                     connection_id,
                     payload.map_name.clone(),
                     payload.query.clone(),
                     options.clone(),
                 );
-                for entry in &results {
-                    sub.current_results.insert(
-                        entry.key.clone(),
-                        CachedSearchResult {
-                            score: entry.score,
-                            matched_terms: entry.matched_terms.clone(),
-                        },
-                    );
-                }
-                self.registry.register(sub);
+                sub.capture = Mutex::new(Some(Capture::default()));
+                let sub = self.registry.register(sub);
+                let guard = RegistrationGuard::new(&self.registry, &sub);
+                #[cfg(test)]
+                self.cover_hold.pass(&payload.subscription_id).await;
 
+                // The index must hold every write skipped before the
+                // registration. A failed population is answered as an error
+                // and leaves no registration: a subscription seeded from an
+                // incomplete index would look complete to the client.
+                let generation = self.shared.generation(&payload.map_name);
+                let covered_since = self.registry.covered_since(&payload.map_name, &generation);
+                if self
+                    .populations
+                    .ensure(&payload.map_name, covered_since)
+                    .await
+                    .is_err()
+                {
+                    return Ok(OperationResponse::Message(Box::new(Message::SearchResp {
+                        payload: search_failed(payload.subscription_id),
+                    })));
+                }
+                #[cfg(test)]
+                self.pre_snapshot_hold.pass(&payload.subscription_id).await;
+                let docs = self.search_current_index(&payload.map_name, &payload.query, &options);
+                let results = self.visible_entries(&payload.map_name, docs).await;
+                #[cfg(test)]
+                self.subscribe_hold.pass(&payload.subscription_id).await;
+                self.close_subscribe(&sub, &results);
+                guard.disarm();
+
+                let total_count = u32::try_from(results.len()).unwrap_or(u32::MAX);
                 let resp_payload = SearchRespPayload {
                     request_id: payload.subscription_id,
                     results,
@@ -1926,8 +2253,9 @@ impl SearchService {
 
     /// Handle a hybrid search subscription request.
     ///
-    /// Executes an initial hybrid search, registers the subscription, and
-    /// returns the initial snapshot as a `HybridSearchRespPayload`.
+    /// Registers the subscription unseeded, makes sure a fullText leg reads an
+    /// index that covers the registration, evaluates the snapshot, seeds the
+    /// subscription with it, and returns it as a `HybridSearchRespPayload`.
     #[allow(clippy::too_many_lines)]
     async fn handle_hybrid_search_subscribe(
         &self,
@@ -1975,52 +2303,28 @@ impl SearchService {
             .collect();
 
         let include_value = payload.include_value.unwrap_or(true);
-
-        // Execute initial search snapshot.
         let start = std::time::Instant::now();
-        let initial_resp = if let Some(engine) = self.hybrid_engine.get() {
-            if let Some(registry) = self.index_observer_factory.get_registry(&payload.map_name) {
-                let params = crate::service::domain::search::hybrid::HybridSearchParams {
-                    map_name: &payload.map_name,
-                    index_registry: &registry,
-                    query_text: &payload.query_text,
-                    query_vector: query_vector_f32.as_deref(),
-                    predicate: payload.predicate.as_ref(),
-                    methods: &methods,
-                    k: payload.k as usize,
-                    include_value,
-                };
-                match engine.hybrid_search(params).await {
-                    Ok(mut results) => {
-                        if let Some(min_score) = payload.min_score {
-                            results.retain(|r| r.score >= min_score);
-                        }
-                        results
-                    }
-                    // A failed initial evaluation registers nothing: a
-                    // subscription seeded empty would look complete.
-                    Err(error) => {
-                        return Ok(OperationResponse::Message(Box::new(
-                            Message::HybridSearchResp {
-                                payload: HybridSearchRespPayload {
-                                    request_id: payload.subscription_id.clone(),
-                                    results: vec![],
-                                    search_time_ms: elapsed_ms(start),
-                                    error: Some(error.to_string()),
-                                },
-                            },
-                        )));
-                    }
-                }
-            } else {
-                vec![]
-            }
-        } else {
-            vec![]
-        };
+        // A failed population or evaluation is answered as an error and leaves
+        // no registration: a subscription seeded empty would look complete.
+        macro_rules! error_resp {
+            ($msg:expr) => {{
+                return Ok(OperationResponse::Message(Box::new(
+                    Message::HybridSearchResp {
+                        payload: HybridSearchRespPayload {
+                            request_id: payload.subscription_id.clone(),
+                            results: vec![],
+                            search_time_ms: elapsed_ms(start),
+                            error: Some($msg.to_string()),
+                        },
+                    },
+                )));
+            }};
+        }
 
-        // Build initial result entries and populate cache.
-        let sub = HybridSearchSubscription::new(
+        // Registered before the snapshot and unseeded: notifier passes skip it
+        // until it is seeded below, and a skipped pass is made up for by one
+        // more (`TG-LIVE-002`).
+        let mut sub = HybridSearchSubscription::new(
             payload.subscription_id.clone(),
             connection_id,
             payload.map_name.clone(),
@@ -2032,6 +2336,59 @@ impl SearchService {
             include_value,
             payload.min_score,
         );
+        sub.seed = AtomicU8::new(UNSEEDED);
+        let sub = self.hybrid_registry.register(sub);
+        let guard = RegistrationGuard::new(&self.hybrid_registry, &sub);
+
+        // The fullText leg reads an index that holds every write skipped
+        // before the registration. An empty query reads no index.
+        if sub.methods.contains(&SearchMethod::FullText) && !sub.query_text.is_empty() {
+            let generation = self.shared.generation(&payload.map_name);
+            let covered_since = self
+                .hybrid_registry
+                .covered_since(&payload.map_name, &generation);
+            if let Err(error) = self
+                .populations
+                .ensure(&payload.map_name, covered_since)
+                .await
+            {
+                error_resp!(HybridSearchError::Store(error.to_string()));
+            }
+        }
+
+        let initial_resp = if let Some(engine) = self.hybrid_engine.get() {
+            if let Some(registry) = self.index_observer_factory.get_registry(&payload.map_name) {
+                let params = crate::service::domain::search::hybrid::HybridSearchParams {
+                    map_name: &payload.map_name,
+                    index_registry: &registry,
+                    query_text: &payload.query_text,
+                    query_vector: sub.query_vector.as_deref(),
+                    predicate: payload.predicate.as_ref(),
+                    methods: &sub.methods,
+                    k: payload.k as usize,
+                    include_value,
+                };
+                match engine
+                    .hybrid_search_with_exact(params, None, FullTextMode::CurrentIndex)
+                    .await
+                {
+                    Ok(mut results) => {
+                        if let Some(min_score) = payload.min_score {
+                            results.retain(|r| r.score >= min_score);
+                        }
+                        results
+                    }
+                    Err(error) => error_resp!(error),
+                }
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
+        #[cfg(test)]
+        self.subscribe_hold.pass(&payload.subscription_id).await;
         for r in &initial_resp {
             sub.current_results.insert(
                 r.key.clone(),
@@ -2042,7 +2399,14 @@ impl SearchService {
                 },
             );
         }
-        self.hybrid_registry.register(sub);
+        // AcqRel: the seeding above happens-before a pass that reads SEEDED.
+        if sub.seed.swap(SEEDED, Ordering::AcqRel) == MISSED {
+            // A pass skipped the subscription, so a write it would have
+            // delivered may be missing: one more pass reconciles it. Unseeded,
+            // no pass looked at it, and every later pass evaluates it.
+            self.shared.mark_dirty(&payload.map_name);
+        }
+        guard.disarm();
 
         let entries: Vec<HybridSearchResultEntry> = initial_resp
             .into_iter()
@@ -2105,9 +2469,25 @@ impl SearchService {
     /// index and never start or join a population.
     #[allow(clippy::too_many_lines)]
     pub async fn notify_hybrid_subscriptions_for_map(&self, map_name: &str) {
-        #[cfg(test)]
-        self.notifier_passes.fetch_add(1, Ordering::SeqCst);
-        let subs = self.hybrid_registry.get_subscriptions_for_map(map_name);
+        // An unseeded subscription is skipped and marked as missed; its
+        // subscribe handler starts one more pass after seeding it
+        // (`TG-LIVE-002`).
+        let subs: Vec<Arc<HybridSearchSubscription>> = self
+            .hybrid_registry
+            .get_subscriptions_for_map(map_name)
+            .into_iter()
+            .filter(|sub| {
+                matches!(
+                    sub.seed.compare_exchange(
+                        UNSEEDED,
+                        MISSED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire
+                    ),
+                    Err(SEEDED)
+                )
+            })
+            .collect();
         if subs.is_empty() {
             return;
         }
@@ -2319,6 +2699,7 @@ impl ManagedService for SearchService {
         self.hybrid_registry.subscriptions.clear();
         self.needs_population.clear();
         self.populations.states.lock().clear();
+        self.shared.replay.lock().clear();
         Ok(())
     }
 
@@ -3423,7 +3804,7 @@ mod tests {
     // --- TG-READ-001: population, notifier passes and failures ---
 
     mod stored_read_tests {
-        use std::collections::BTreeMap;
+        use std::collections::{BTreeMap, BTreeSet};
         use std::sync::OnceLock;
         use std::time::Duration;
 
@@ -3486,6 +3867,7 @@ mod tests {
             factory: Arc<RecordStoreFactory>,
             store: Arc<TestStore>,
             index_factory: Arc<IndexObserverFactory>,
+            observers: Arc<TestSearchObservers>,
             rx: tokio::sync::mpsc::Receiver<OutboundMessage>,
             conn: ConnectionId,
         }
@@ -3542,6 +3924,7 @@ mod tests {
                 factory,
                 store,
                 index_factory,
+                observers,
                 rx,
                 conn: handle.id,
             }
@@ -3793,6 +4176,10 @@ mod tests {
             let resp = search(&h.svc).await;
             assert!(resp.error.is_some() && resp.results.is_empty(), "{resp:?}");
             assert!(!h.svc.populations.is_populated(M) && !h.svc.populations.in_flight(M));
+            assert!(
+                !h.svc.shared.replay.lock().contains_key(M),
+                "a population that ends without a swap leaves no replay log"
+            );
 
             let hybrid = hybrid_resp(call(&h.svc, make_hybrid_search_op(M, TERM)).await);
             assert!(
@@ -3843,6 +4230,10 @@ mod tests {
                 .expect("the waiting search must not hang");
             assert!(resp.error.is_some() && resp.results.is_empty(), "{resp:?}");
             assert!(!h.svc.populations.in_flight(M));
+            assert!(
+                !h.svc.shared.replay.lock().contains_key(M),
+                "a panicked population leaves no replay log"
+            );
 
             h.store.panic_scans(false);
             let resp = tokio::time::timeout(Duration::from_secs(10), search(&h.svc))
@@ -3934,6 +4325,665 @@ mod tests {
                 "only registration populated"
             );
             assert_eq!(h.store.scans(M), 1, "only registration scanned");
+        }
+
+        // --- TG-LIVE-002: the subscribe window of a live search ---
+
+        /// One update frame of a live search, as the connection received it.
+        #[derive(Debug, Clone)]
+        struct Upd {
+            sub: String,
+            key: String,
+            change: ChangeEventType,
+        }
+
+        /// Moves every update frame queued on the harness connection to `log`.
+        fn drain(h: &mut Harness, log: &mut Vec<Upd>) {
+            while let Ok(msg) = h.rx.try_recv() {
+                let OutboundMessage::Binary(bytes) = msg else {
+                    continue;
+                };
+                match rmp_serde::from_slice::<Message>(&bytes) {
+                    Ok(Message::SearchUpdate { payload }) => log.push(Upd {
+                        sub: payload.subscription_id,
+                        key: payload.key,
+                        change: payload.change_type,
+                    }),
+                    Ok(Message::HybridSearchUpdate { payload }) => log.push(Upd {
+                        sub: payload.subscription_id,
+                        key: payload.key,
+                        change: payload.change_type,
+                    }),
+                    _ => {}
+                }
+            }
+        }
+
+        fn updates_of<'a>(log: &'a [Upd], sub: &str) -> Vec<&'a Upd> {
+            log.iter().filter(|u| u.sub == sub).collect()
+        }
+
+        /// The key set of one subscription's view, as the client builds it:
+        /// the response replaces the rows, then every update of the
+        /// subscription is applied in send order (an update sent before the
+        /// response is held and applied after it, which ends in the same set).
+        /// ENTER upserts, UPDATE changes only a key already present, LEAVE
+        /// removes. In this harness the response is the call's return value,
+        /// not a frame on the connection.
+        fn view(response: &[String], log: &[Upd], sub: &str) -> BTreeSet<String> {
+            let mut view: BTreeSet<String> = response.iter().cloned().collect();
+            for update in updates_of(log, sub) {
+                match update.change {
+                    ChangeEventType::ENTER => {
+                        view.insert(update.key.clone());
+                    }
+                    ChangeEventType::LEAVE => {
+                        view.remove(&update.key);
+                    }
+                    ChangeEventType::UPDATE => {}
+                }
+            }
+            view
+        }
+
+        fn set<const N: usize>(keys: [&str; N]) -> BTreeSet<String> {
+            keys.iter().map(|k| (*k).to_string()).collect()
+        }
+
+        fn text_sub(h: &Harness, sub_id: &str) -> Operation {
+            let mut op = make_subscribe_op(M, TERM);
+            if let Operation::SearchSubscribe { ctx, payload } = &mut op {
+                ctx.connection_id = Some(h.conn);
+                payload.subscription_id = sub_id.to_string();
+            }
+            op
+        }
+
+        fn hybrid_sub(h: &Harness, sub_id: &str) -> Operation {
+            let mut op = make_hybrid_sub_op(M, TERM, sub_id);
+            if let Operation::HybridSearchSubscribe { ctx, .. } = &mut op {
+                ctx.connection_id = Some(h.conn);
+            }
+            op
+        }
+
+        fn text_resp(msg: Message) -> SearchRespPayload {
+            match msg {
+                Message::SearchResp { payload } => payload,
+                other => panic!("unexpected message: {other:?}"),
+            }
+        }
+
+        fn hybrid_keys(payload: &HybridSearchRespPayload) -> Vec<String> {
+            payload.results.iter().map(|r| r.key.clone()).collect()
+        }
+
+        /// A one-shot full-text search, run once writes have stopped.
+        async fn fresh_text(h: &Harness) -> BTreeSet<String> {
+            keys(&search(&h.svc).await).into_iter().collect()
+        }
+
+        /// A one-shot fullText hybrid search, run once writes have stopped.
+        async fn fresh_hybrid(h: &Harness) -> BTreeSet<String> {
+            let resp = hybrid_resp(call(&h.svc, make_hybrid_search_op(M, TERM)).await);
+            assert!(resp.error.is_none(), "{resp:?}");
+            hybrid_keys(&resp).into_iter().collect()
+        }
+
+        fn batches(h: &Harness) -> u64 {
+            h.svc.shared.batches.load(Ordering::SeqCst)
+        }
+
+        fn waiting(h: &Harness) -> u64 {
+            h.svc.populations.waiting.load(Ordering::SeqCst)
+        }
+
+        fn started(h: &Harness) -> u64 {
+            h.svc.populations.started.load(Ordering::SeqCst)
+        }
+
+        fn passes(h: &Harness) -> u64 {
+            h.svc.notifier_passes.load(Ordering::SeqCst)
+        }
+
+        /// Waits up to two seconds for `cond`. Returns false when it did not
+        /// hold by then: a write skipped for lack of a subscription starts no
+        /// batch, so a test that waits for one must still reach its view
+        /// assertion on a tree that skips it.
+        async fn within(mut cond: impl FnMut() -> bool) -> bool {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !cond() {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            true
+        }
+
+        async fn remove(h: &Harness, key: &str) {
+            let store = h.factory.get_or_create(M, hash_to_partition(key));
+            store
+                .remove(
+                    &KeyWriteToken::for_test(M, key),
+                    key,
+                    CallerProvenance::Client,
+                )
+                .await
+                .unwrap();
+        }
+
+        async fn unsubscribe(h: &Harness, sub_id: &str) {
+            let mut svc = Arc::clone(&h.svc);
+            svc.call(make_unsubscribe_op(h.conn, sub_id))
+                .await
+                .expect("the search service answers");
+        }
+
+        fn force_population(h: &Harness) {
+            h.svc
+                .needs_population
+                .entry(M.to_string())
+                .or_insert_with(|| AtomicBool::new(false))
+                .store(true, Ordering::Release);
+        }
+
+        /// A write made between the snapshot and the close reaches the
+        /// view, and nothing of the subscription is sent before its close.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_search_write_in_the_window_reaches_the_subscriber() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            let mut hold = h.svc.subscribe_hold.arm("w1");
+            let (svc, op) = (Arc::clone(&h.svc), text_sub(&h, "w1"));
+            let task = tokio::spawn(async move { call(&svc, op).await });
+            hold.wait_reached().await;
+
+            let before = batches(&h);
+            write(&h, "x", &format!("{TERM} written in the window")).await;
+            let ran = within(|| batches(&h) > before).await;
+            let mut log = Vec::new();
+            drain(&mut h, &mut log);
+            assert!(
+                updates_of(&log, "w1").is_empty(),
+                "no update of the subscription before its close: {log:?}"
+            );
+            hold.release();
+            let resp = text_resp(task.await.unwrap());
+            drain(&mut h, &mut log);
+
+            let view = view(&keys(&resp), &log, "w1");
+            assert_eq!(view, set(["s0", "s1", "x"]), "{resp:?} {log:?}");
+            assert_eq!(view, fresh_text(&h).await);
+            assert!(ran, "the write's batch ran while the subscribe was held");
+        }
+
+        /// A remove made between the snapshot and the close takes the
+        /// key out of the view.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_search_remove_in_the_window_leaves_the_view() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            h.store
+                .put_row(M, "y", doc(&format!("{TERM} to be removed")));
+            let mut hold = h.svc.subscribe_hold.arm("r1");
+            let (svc, op) = (Arc::clone(&h.svc), text_sub(&h, "r1"));
+            let task = tokio::spawn(async move { call(&svc, op).await });
+            hold.wait_reached().await;
+
+            let before = batches(&h);
+            remove(&h, "y").await;
+            let ran = within(|| batches(&h) > before).await;
+            hold.release();
+            let resp = text_resp(task.await.unwrap());
+            assert!(
+                keys(&resp).contains(&"y".to_string()),
+                "precondition: the snapshot holds y: {resp:?}"
+            );
+            let mut log = Vec::new();
+            drain(&mut h, &mut log);
+
+            let view = view(&keys(&resp), &log, "r1");
+            assert!(!view.contains("y"), "{view:?} {log:?}");
+            assert_eq!(view, fresh_text(&h).await);
+            assert!(ran, "the remove's batch ran while the subscribe was held");
+        }
+
+        /// A write that is both in the snapshot and captured gives one
+        /// UPDATE and no ENTER.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_search_write_in_both_snapshot_and_capture_is_idempotent() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            let mut hold = h.svc.pre_snapshot_hold.arm("b1");
+            let (svc, op) = (Arc::clone(&h.svc), text_sub(&h, "b1"));
+            let task = tokio::spawn(async move { call(&svc, op).await });
+            hold.wait_reached().await;
+
+            let before = batches(&h);
+            write(&h, "x", &format!("{TERM} in both")).await;
+            let ran = within(|| batches(&h) > before).await;
+            hold.release();
+            let resp = text_resp(task.await.unwrap());
+            assert!(keys(&resp).contains(&"x".to_string()), "{resp:?}");
+            let mut log = Vec::new();
+            drain(&mut h, &mut log);
+
+            let changes: Vec<ChangeEventType> = updates_of(&log, "b1")
+                .into_iter()
+                .filter(|u| u.key == "x")
+                .map(|u| u.change.clone())
+                .collect();
+            assert_eq!(changes, vec![ChangeEventType::UPDATE], "{log:?}");
+            let view = view(&keys(&resp), &log, "b1");
+            assert!(view.contains("x"));
+            assert_eq!(view, fresh_text(&h).await);
+            assert!(ran, "the write's batch ran while the subscribe was held");
+        }
+
+        /// A clear made between the snapshot and the close empties the
+        /// view.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_search_clear_in_the_window_empties_the_view() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            let mut hold = h.svc.subscribe_hold.arm("c1");
+            let (svc, op) = (Arc::clone(&h.svc), text_sub(&h, "c1"));
+            let task = tokio::spawn(async move { call(&svc, op).await });
+            hold.wait_reached().await;
+
+            let before = batches(&h);
+            let observer = h
+                .observers
+                .create_observer(M, 0)
+                .expect("the search observer");
+            observer.on_clear();
+            let ran = within(|| batches(&h) > before).await;
+            hold.release();
+            let resp = text_resp(task.await.unwrap());
+            assert!(!resp.results.is_empty(), "precondition: {resp:?}");
+            let mut log = Vec::new();
+            drain(&mut h, &mut log);
+
+            let fresh = fresh_text(&h).await;
+            assert!(fresh.is_empty(), "{fresh:?}");
+            assert_eq!(view(&keys(&resp), &log, "c1"), fresh, "{log:?}");
+            assert!(ran, "the clear's batch ran while the subscribe was held");
+        }
+
+        /// A write skipped before the first registration, after the scan
+        /// of an in-flight population, is in the snapshot: the subscribe does
+        /// not accept that population and populates once more.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_search_skipped_write_before_registration_is_in_the_snapshot() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            let mut p0 = h.svc.populations.swap_hold.arm(M);
+            // Read before the one-shot, which waits for its own population.
+            let before = waiting(&h);
+            let svc = Arc::clone(&h.svc);
+            let one_shot = tokio::spawn(async move { search(&svc).await });
+            p0.wait_reached().await;
+            // A hold fires once, and P0 has taken its gate: arm it for P1.
+            let mut p1 = h.svc.populations.swap_hold.arm(M);
+
+            write(&h, "x", &format!("{TERM} skipped")).await;
+            let (svc, op) = (Arc::clone(&h.svc), text_sub(&h, "k1"));
+            let task = tokio::spawn(async move { call(&svc, op).await });
+            eventually("the subscribe waits for P0", || waiting(&h) >= before + 2).await;
+            p0.release();
+            let one = one_shot.await.unwrap();
+            assert!(
+                !keys(&one).contains(&"x".to_string()),
+                "precondition: P0's index lacks x: {one:?}"
+            );
+            p1.wait_reached().await;
+            p1.release();
+            let resp = text_resp(task.await.unwrap());
+            let mut log = Vec::new();
+            drain(&mut h, &mut log);
+
+            let view = view(&keys(&resp), &log, "k1");
+            assert!(view.contains("x"), "{view:?} {log:?}");
+            assert_eq!(view, fresh_text(&h).await);
+        }
+
+        /// `TG-READ-001`: a write applied to the old index while a
+        /// population runs is replayed onto the population's index at the
+        /// swap.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_search_population_during_subscribe_keeps_writes_indexed_meanwhile() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            let first = text_resp(call(&h.svc, text_sub(&h, "p1")).await);
+            assert!(first.error.is_none(), "{first:?}");
+            force_population(&h);
+            let mut hold = h.svc.populations.swap_hold.arm(M);
+            let (svc, op) = (Arc::clone(&h.svc), text_sub(&h, "p2"));
+            let task = tokio::spawn(async move { call(&svc, op).await });
+            hold.wait_reached().await;
+
+            let before = batches(&h);
+            write(&h, "x", &format!("{TERM} during the population")).await;
+            eventually("the batch applies x to the old index", || {
+                old_index_has(&h, "x") && batches(&h) > before
+            })
+            .await;
+            hold.release();
+            let resp = text_resp(task.await.unwrap());
+            assert!(
+                old_index_has(&h, "x"),
+                "the swapped-in index must hold the replayed write"
+            );
+            let mut log = Vec::new();
+            drain(&mut h, &mut log);
+
+            let view = view(&keys(&resp), &log, "p2");
+            assert!(view.contains("x"), "{view:?} {log:?}");
+            assert_eq!(view, fresh_text(&h).await);
+        }
+
+        /// A write made while a hybrid subscribe is unseeded reaches the
+        /// view, and nothing of the subscription is sent before its seeding.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_hybrid_write_in_the_window_reaches_the_subscriber() {
+            hybrid_write_in_the_window(WireSearchMethod::FullText).await;
+        }
+
+        /// As above, for the `exact` leg.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_hybrid_exact_write_in_the_window_reaches_the_subscriber() {
+            hybrid_write_in_the_window(WireSearchMethod::Exact).await;
+        }
+
+        async fn hybrid_write_in_the_window(method: WireSearchMethod) {
+            let exact = method == WireSearchMethod::Exact;
+            let mut h = harness();
+            store_rows(&h, 2);
+            h.index_factory.register_map(M);
+            let mut hold = h.svc.subscribe_hold.arm("hw");
+            let mut op = hybrid_sub(&h, "hw");
+            if let Operation::HybridSearchSubscribe { payload, .. } = &mut op {
+                payload.methods = vec![method];
+                if exact {
+                    payload.query_text = String::new();
+                    payload.predicate = Some(status_open());
+                }
+            }
+            let svc = Arc::clone(&h.svc);
+            let task = tokio::spawn(async move { call(&svc, op).await });
+            hold.wait_reached().await;
+
+            let before = passes(&h);
+            write(&h, "x", &format!("{TERM} written in the window")).await;
+            let passed = within(|| passes(&h) > before).await;
+            let mut log = Vec::new();
+            drain(&mut h, &mut log);
+            assert!(
+                updates_of(&log, "hw").is_empty(),
+                "no update of the subscription before its seeding: {log:?}"
+            );
+            hold.release();
+            let resp = hybrid_resp(task.await.unwrap());
+            assert!(resp.error.is_none(), "{resp:?}");
+            let response = hybrid_keys(&resp);
+            let _ = within(|| {
+                drain(&mut h, &mut log);
+                view(&response, &log, "hw").contains("x")
+            })
+            .await;
+
+            let view = view(&response, &log, "hw");
+            assert!(view.contains("x"), "{view:?} {log:?}");
+            let fresh = if exact {
+                let mut op = make_hybrid_search_op(M, "");
+                if let Operation::HybridSearch { payload, .. } = &mut op {
+                    payload.methods = vec![WireSearchMethod::Exact];
+                    payload.predicate = Some(status_open());
+                }
+                let resp = hybrid_resp(call(&h.svc, op).await);
+                assert!(resp.error.is_none(), "{resp:?}");
+                hybrid_keys(&resp).into_iter().collect()
+            } else {
+                fresh_hybrid(&h).await
+            };
+            assert_eq!(view, fresh);
+            assert!(passed, "a notifier pass ran while the subscribe was held");
+        }
+
+        /// A write skipped before the first registration of a fullText hybrid
+        /// subscription, after the scan of an in-flight population, is in the
+        /// snapshot.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_hybrid_skipped_write_before_registration_is_in_the_snapshot() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            h.index_factory.register_map(M);
+            let mut p0 = h.svc.populations.swap_hold.arm(M);
+            // Read before the one-shot, which waits for its own population.
+            let before = waiting(&h);
+            let svc = Arc::clone(&h.svc);
+            let one_shot = tokio::spawn(async move { search(&svc).await });
+            p0.wait_reached().await;
+            let mut p1 = h.svc.populations.swap_hold.arm(M);
+
+            write(&h, "x", &format!("{TERM} skipped")).await;
+            let (svc, op) = (Arc::clone(&h.svc), hybrid_sub(&h, "hk"));
+            let task = tokio::spawn(async move { call(&svc, op).await });
+            eventually("the subscribe waits for P0", || waiting(&h) >= before + 2).await;
+            p0.release();
+            let one = one_shot.await.unwrap();
+            assert!(
+                !keys(&one).contains(&"x".to_string()),
+                "precondition: P0's index lacks x: {one:?}"
+            );
+            p1.wait_reached().await;
+            p1.release();
+            let resp = hybrid_resp(task.await.unwrap());
+            assert!(resp.error.is_none(), "{resp:?}");
+            let response = hybrid_keys(&resp);
+            let mut log = Vec::new();
+            let _ = within(|| {
+                drain(&mut h, &mut log);
+                view(&response, &log, "hk").contains("x")
+            })
+            .await;
+
+            let view = view(&response, &log, "hk");
+            assert!(view.contains("x"), "{view:?} {log:?}");
+            assert_eq!(view, fresh_hybrid(&h).await);
+        }
+
+        /// A subscribe cancelled while it is held leaves no registration
+        /// and no coverage count behind.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_cancelled_live_search_subscribe_leaves_no_registration() {
+            let h = harness();
+            store_rows(&h, 2);
+            h.index_factory.register_map(M);
+
+            let mut hold = h.svc.subscribe_hold.arm("cx");
+            let (svc, op) = (Arc::clone(&h.svc), text_sub(&h, "cx"));
+            let task = tokio::spawn(async move { call(&svc, op).await });
+            hold.wait_reached().await;
+            task.abort();
+            let _ = task.await;
+            assert!(h.svc.registry.get_subscriptions_for_map(M).is_empty());
+            assert!(!h.svc.registry.has_subscriptions_for_map(M));
+
+            let mut hold = h.svc.subscribe_hold.arm("hx");
+            let (svc, op) = (Arc::clone(&h.svc), hybrid_sub(&h, "hx"));
+            let task = tokio::spawn(async move { call(&svc, op).await });
+            hold.wait_reached().await;
+            task.abort();
+            let _ = task.await;
+            assert!(h
+                .svc
+                .hybrid_registry
+                .get_subscriptions_for_map(M)
+                .is_empty());
+            assert!(!h.svc.hybrid_registry.has_subscriptions_for_map(M));
+        }
+
+        /// A second subscribe on a map covered by a live subscription
+        /// since its population starts no population, and still sees the
+        /// writes enqueued meanwhile.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_search_second_subscribe_on_a_covered_map_starts_no_population() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            let first = text_resp(call(&h.svc, text_sub(&h, "v1")).await);
+            assert!(first.error.is_none(), "{first:?}");
+            assert!(h.svc.populations.is_populated(M), "precondition");
+
+            let before = batches(&h);
+            for key in ["w1", "w2", "w3"] {
+                write(&h, key, &format!("{TERM} {key}")).await;
+            }
+            eventually("the writes are indexed", || {
+                batches(&h) > before && ["w1", "w2", "w3"].iter().all(|k| old_index_has(&h, k))
+            })
+            .await;
+            let started_before = started(&h);
+            let resp = text_resp(call(&h.svc, text_sub(&h, "v2")).await);
+            assert_eq!(started(&h), started_before, "no population is started");
+            let mut log = Vec::new();
+            drain(&mut h, &mut log);
+
+            let view = view(&keys(&resp), &log, "v2");
+            assert!(
+                ["w1", "w2", "w3"].iter().all(|k| view.contains(*k)),
+                "{view:?}"
+            );
+            assert_eq!(view, fresh_text(&h).await);
+        }
+
+        /// The first subscribe after a skipped write on a populated map
+        /// populates once.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_search_first_subscribe_after_skipped_writes_populates() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            let _ = search(&h.svc).await;
+            assert!(h.svc.populations.is_populated(M), "precondition");
+            write(&h, "x", &format!("{TERM} skipped")).await;
+
+            let started_before = started(&h);
+            let resp = text_resp(call(&h.svc, text_sub(&h, "f1")).await);
+            assert_eq!(started(&h), started_before + 1, "one population");
+            let mut log = Vec::new();
+            drain(&mut h, &mut log);
+            let view = view(&keys(&resp), &log, "f1");
+            assert!(view.contains("x"), "{view:?}");
+            assert_eq!(view, fresh_text(&h).await);
+        }
+
+        /// After the last subscription left, a skipped write is seen by
+        /// the next subscribe, which populates once.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_search_resubscribe_after_the_last_unsubscribe_populates() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            let first = text_resp(call(&h.svc, text_sub(&h, "u1")).await);
+            assert!(first.error.is_none(), "{first:?}");
+            unsubscribe(&h, "u1").await;
+            assert!(!h.svc.registry.has_subscriptions_for_map(M));
+            write(&h, "x", &format!("{TERM} skipped")).await;
+
+            let started_before = started(&h);
+            let resp = text_resp(call(&h.svc, text_sub(&h, "u2")).await);
+            assert_eq!(started(&h), started_before + 1, "one population");
+            let mut log = Vec::new();
+            drain(&mut h, &mut log);
+            let view = view(&keys(&resp), &log, "u2");
+            assert!(view.contains("x"), "{view:?}");
+            assert_eq!(view, fresh_text(&h).await);
+        }
+
+        /// Two subscribers racing the 0→1 and 1→2 transitions both see
+        /// a write skipped after an in-flight population's scan; neither reads
+        /// the previous era's coverage.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_search_racing_first_subscribers_both_see_a_skipped_write() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            let first = text_resp(call(&h.svc, text_sub(&h, "e0")).await);
+            assert!(first.error.is_none(), "{first:?}");
+            unsubscribe(&h, "e0").await;
+
+            force_population(&h);
+            let mut p0 = h.svc.populations.swap_hold.arm(M);
+            // Read before the one-shot, which waits for its own population.
+            let before = waiting(&h);
+            let svc = Arc::clone(&h.svc);
+            let one_shot = tokio::spawn(async move { search(&svc).await });
+            p0.wait_reached().await;
+            write(&h, "x", &format!("{TERM} skipped")).await;
+
+            let mut cover = h.svc.cover_hold.arm("A");
+            let (svc, op) = (Arc::clone(&h.svc), text_sub(&h, "A"));
+            let a = tokio::spawn(async move { call(&svc, op).await });
+            cover.wait_reached().await;
+            let (svc, op) = (Arc::clone(&h.svc), text_sub(&h, "B"));
+            let b = tokio::spawn(async move { call(&svc, op).await });
+            eventually("B waits for P0", || waiting(&h) >= before + 2).await;
+            p0.release();
+            let _ = one_shot.await.unwrap();
+            cover.release();
+            let resp_a = text_resp(a.await.unwrap());
+            let resp_b = text_resp(b.await.unwrap());
+            let mut log = Vec::new();
+            drain(&mut h, &mut log);
+
+            let fresh = fresh_text(&h).await;
+            let view_a = view(&keys(&resp_a), &log, "A");
+            let view_b = view(&keys(&resp_b), &log, "B");
+            assert!(view_b.contains("x"), "B: {view_b:?} {log:?}");
+            assert!(view_a.contains("x"), "A: {view_a:?} {log:?}");
+            assert_eq!(view_a, fresh);
+            assert_eq!(view_b, fresh);
+        }
+
+        /// A hybrid subscribe on a quiet map starts no notifier pass.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_hybrid_subscribe_on_a_quiet_map_runs_no_pass() {
+            let h = harness();
+            store_rows(&h, 2);
+            h.index_factory.register_map(M);
+            // The notifier task runs once an observer of the map exists.
+            let _ = h.factory.get_or_create(M, 0);
+            let before = passes(&h);
+            let resp = hybrid_resp(call(&h.svc, hybrid_sub(&h, "q1")).await);
+            assert!(resp.error.is_none() && !resp.results.is_empty(), "{resp:?}");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(passes(&h), before, "no notifier pass");
+        }
+
+        /// A `Populated` index whose population began before the
+        /// map's coverage is not accepted, even with the `needs_population`
+        /// flag clear, as it is between a skipping write's bump and its flag
+        /// store.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn live_search_rejects_a_populated_index_older_than_its_coverage() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            let _ = search(&h.svc).await;
+            assert!(h.svc.populations.is_populated(M), "precondition");
+            write(&h, "x", &format!("{TERM} skipped")).await;
+            h.svc
+                .needs_population
+                .get(M)
+                .expect("the skipped write set the flag")
+                .store(false, Ordering::Release);
+
+            let started_before = started(&h);
+            let resp = text_resp(call(&h.svc, text_sub(&h, "o1")).await);
+            assert_eq!(started(&h), started_before + 1, "one population");
+            let mut log = Vec::new();
+            drain(&mut h, &mut log);
+            let view = view(&keys(&resp), &log, "o1");
+            assert!(view.contains("x"), "{view:?}");
+            assert_eq!(view, fresh_text(&h).await);
         }
 
         // --- Output filter (TG-TTL-001) ---
