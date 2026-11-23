@@ -145,18 +145,25 @@ pub struct ConnectionConfig {
     /// connections. Should be well below `idle_timeout` so reaping latency is
     /// bounded by roughly `idle_timeout + reaper_interval`.
     pub reaper_interval: Duration,
-    /// WebSocket write buffer size in bytes.
+    /// Per-connection WebSocket write buffer, in bytes: once more than this is
+    /// buffered, the buffer is written out to the socket.
     pub ws_write_buffer_size: usize,
-    /// Maximum WebSocket write buffer size in bytes.
+    /// Most bytes a connection's WebSocket write buffer may hold. It bounds the
+    /// write buffer's memory, and through it the size of an outbound frame: an
+    /// outbound message is sent as frames of at most
+    /// [`outbound_fragment_len`](Self::outbound_fragment_len) bytes, so a
+    /// message of any size is delivered (`TG-WS-001`).
     pub ws_max_write_buffer_size: usize,
     /// Maximum size in bytes of a complete inbound WebSocket message. Frames
     /// exceeding this are rejected by the transport before the handler decodes
     /// them, bounding the unauthenticated memory-spike surface and capping the
     /// input to the depth-checked decoder. Defaults to 2 MB to match the HTTP
-    /// `/sync` body limit.
+    /// `/sync` body limit. It limits only what the server reads, never what it
+    /// sends.
     pub ws_max_message_size: usize,
     /// Maximum size in bytes of a single inbound WebSocket frame (a message may
-    /// span multiple frames). Defaults to 2 MB.
+    /// span multiple frames). Defaults to 2 MB. It limits only what the server
+    /// reads, never what it sends.
     pub ws_max_frame_size: usize,
     /// Consecutive live-event broadcasts dropped (outbound channel full) before
     /// a slow client connection is disconnected to force reconnect + Merkle
@@ -195,6 +202,26 @@ impl Default for ConnectionConfig {
             data_plane_max_ops_per_sec: 20_000,   // generous; bounds a flooding peer
             data_plane_ops_burst: 40_000,         // 2× sustained
         }
+    }
+}
+
+impl ConnectionConfig {
+    /// Largest payload of one outbound WebSocket frame, in bytes; a larger
+    /// message is sent as continuation frames of at most this length.
+    ///
+    /// When a frame is buffered, the write buffer holds at most
+    /// `ws_write_buffer_size` bytes (a fuller buffer is written out first),
+    /// and 10 bytes is the largest header of an unmasked (server) frame. So a
+    /// frame of at most this length, with its header, always fits under
+    /// `ws_max_write_buffer_size`, and the transport never refuses it. The
+    /// floor of 1 keeps the writer making progress under a degenerate
+    /// configuration.
+    #[must_use]
+    pub fn outbound_fragment_len(&self) -> usize {
+        self.ws_max_write_buffer_size
+            .saturating_sub(self.ws_write_buffer_size)
+            .saturating_sub(10)
+            .max(1)
     }
 }
 
@@ -239,6 +266,11 @@ mod tests {
         assert_eq!(config.slow_consumer_drop_threshold, 256);
         assert_eq!(config.data_plane_max_ops_per_sec, 20_000);
         assert_eq!(config.data_plane_ops_burst, 40_000);
+        assert_eq!(config.outbound_fragment_len(), 393_206);
+        assert!(
+            config.outbound_fragment_len() + 10 + config.ws_write_buffer_size
+                <= config.ws_max_write_buffer_size
+        );
     }
 
     #[test]
