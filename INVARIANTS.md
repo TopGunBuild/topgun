@@ -3761,7 +3761,7 @@ weaker than a test.
 | `a_cluster_peer_is_not_disconnected_by_an_owed_loss` | (d). Shown red on the tree whose loss path cancels a peer | CI (`cargo test`) |
 | `after_a_loss_no_owed_event_is_encoded_or_sent_to_that_connection` | (e). Shown red on the tree whose `deliver_mutation` drops the flag check | CI (`cargo test`) |
 | `an_owed_success_resets_the_broadcast_drop_streak`, `a_draining_subscriber_is_never_disconnected_by_owed_events`, `the_writer_is_not_disconnected_by_its_own_full_queue`, `send_owed_to_connections_disconnects_only_the_full_target` | the best-effort pushes keep their streak; a draining subscriber and the writer are never disconnected; only the full target is. The streak test was shown red on the tree whose owed success does not reset the streak | CI (`cargo test`) |
-| `live-event-loss` (`tests/integration-rust`) | end to end: a blocked `TopGunClient` subscriber misses events, is disconnected, reconnects and ends with a fresh query's rows and a fresh search's key set; on the build before this invariant the same test, with an intermittently draining subscriber, ended with a query view unlike a fresh query | CI (`pnpm test:integration-rust`) |
+| `live-event-loss` (`tests/integration-rust`) | end to end: a blocked `TopGunClient` subscriber misses events, is disconnected, reconnects and ends with a fresh query's rows and a fresh search's key set; on the build before this invariant the same test, with an intermittently draining subscriber, ended with a query view unlike a fresh query in 5 of 10 runs, with no disconnect | CI (`pnpm test:integration-rust`) |
 
 ### TG-QRY-001: A query returns every matching row up to max_query_records, and says has_more when it clamps
 

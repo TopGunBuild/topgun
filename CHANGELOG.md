@@ -32,6 +32,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authenticated never received anything. The HTTP transport and `ClusterClient` do not restore them.
   Also fixed: after `setAuthToken` during a disconnect, or after `resetConnection`, every later
   connection sent two `AUTH` frames and delivered each server message twice.
+- **Fixed: a live subscriber that misses an update is disconnected and resyncs.** When the server
+  could not queue a live event a subscriber was owed — a map's `SERVER_EVENT`, a live query's
+  `QUERY_UPDATE` or a live search's update — because the connection's outbound queue was full, or
+  could not encode it, it dropped the event without telling the client: map and query events
+  disconnected the subscriber only after 256 misses in a row, search updates never, so a subscriber
+  that read more slowly than the writers wrote kept a view that no fresh query gives. The first such
+  miss now disconnects the subscriber; the client reconnects, subscribes its live queries and
+  searches again and re-syncs its maps (`TG-LIVE-003`). Each such disconnect logs one `WARN` and
+  counts in the new `topgun_live_event_loss_disconnects_total{cause}` (`channel_full`,
+  `encode_failed`), present at zero from the first scrape. Event Journal, counter, topic and
+  partition-map pushes are unchanged. Shown against a local server with a `TopGunClient` subscriber in
+  its own process holding a live query and a live search of a 4 000-key map with ~1 KiB values: with
+  its event loop blocked during a write burst, then rewrites and removals, its query view equalled a
+  fresh query and its search key set a fresh search in 10 of 10 runs; on the previous build, the same
+  subscriber draining intermittently (8 ms busy every 10 ms) ended with a query view unlike a fresh
+  query, without being disconnected, in 5 of 10 runs.
 - **Fixed: the client sends each local write once per connection.** n writes made before an
   acknowledgement now put n operations on the wire; the previous code re-sent every unacknowledged
   write on each new write (about n²/2). A write whose batch gets no verdict (a lost acknowledgement,
