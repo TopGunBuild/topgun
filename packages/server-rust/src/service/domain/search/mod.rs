@@ -42,7 +42,7 @@ use topgun_core::messages::Message;
 
 use tracing::Instrument;
 
-use crate::network::connection::{ConnectionId, ConnectionRegistry, OutboundMessage};
+use crate::network::connection::{ConnectionId, ConnectionRegistry, OutboundMessage, OwedLoss};
 use crate::service::domain::index::IndexObserverFactory;
 use crate::service::domain::predicate::value_to_rmpv;
 use crate::service::operation::{
@@ -559,16 +559,42 @@ fn extract_query_terms(query_str: &str) -> Vec<String> {
         .collect()
 }
 
-/// Serializes a `Message` to `MsgPack` bytes for sending over the wire.
-fn serialize_message(msg: &Message) -> Option<Vec<u8>> {
-    rmp_serde::to_vec_named(msg).ok()
-}
-
-/// Sends a message to a connection via the registry.
-fn send_to_connection(conn_reg: &ConnectionRegistry, conn_id: ConnectionId, msg: &Message) {
-    if let Some(bytes) = serialize_message(msg) {
-        if let Some(handle) = conn_reg.get(conn_id) {
-            let _ = handle.try_send(OutboundMessage::Binary(bytes));
+/// Sends a live search update of `map` the connection is owed
+/// (`TG-LIVE-003`). A connection that is gone or already lost an owed event is
+/// skipped before encoding; a full queue or an encoding error disconnects it,
+/// so it reconnects and resubscribes instead of holding a stale view.
+fn send_to_connection(
+    conn_reg: &ConnectionRegistry,
+    conn_id: ConnectionId,
+    map: &str,
+    msg: &Message,
+) {
+    let Some(handle) = conn_reg.get(conn_id) else {
+        return;
+    };
+    if handle.owed_closed() {
+        return;
+    }
+    match rmp_serde::to_vec_named(msg) {
+        Ok(bytes) => {
+            handle.try_send_owed(OutboundMessage::Binary(bytes));
+        }
+        Err(error) => {
+            let (kind, key) = match msg {
+                Message::SearchUpdate { payload } => ("search_update", payload.key.as_str()),
+                Message::HybridSearchUpdate { payload } => {
+                    ("hybrid_search_update", payload.key.as_str())
+                }
+                _ => ("search", ""),
+            };
+            tracing::error!(
+                map,
+                key,
+                kind,
+                %error,
+                "a live event owed to subscribers could not be encoded; disconnecting them"
+            );
+            handle.owed_event_lost(OwedLoss::EncodeFailed);
         }
     }
 }
@@ -1117,7 +1143,7 @@ fn send_leave(conn_reg: &ConnectionRegistry, sub: &SearchSubscription, key: &str
             change_type: ChangeEventType::LEAVE,
         },
     };
-    send_to_connection(conn_reg, sub.connection_id, &msg);
+    send_to_connection(conn_reg, sub.connection_id, &sub.map_name, &msg);
 }
 
 /// Sends LEAVE for every key cached by `sub` and empties its cache.
@@ -1222,7 +1248,7 @@ fn notify_key(
                     change_type: delta_type,
                 },
             };
-            send_to_connection(connection_registry, sub.connection_id, &msg);
+            send_to_connection(connection_registry, sub.connection_id, &sub.map_name, &msg);
         }
         None => {
             if sub.current_results.remove(key).is_some() {
@@ -2605,7 +2631,7 @@ impl SearchService {
                         change_type: ChangeEventType::LEAVE,
                     },
                 };
-                send_to_connection(&conn_reg, sub.connection_id, &msg);
+                send_to_connection(&conn_reg, sub.connection_id, &sub.map_name, &msg);
                 sub.current_results.remove(key);
             }
 
@@ -2640,7 +2666,7 @@ impl SearchService {
                         change_type,
                     },
                 };
-                send_to_connection(&conn_reg, sub.connection_id, &msg);
+                send_to_connection(&conn_reg, sub.connection_id, &sub.map_name, &msg);
 
                 // Update cache.
                 sub.current_results.insert(
@@ -4749,6 +4775,81 @@ mod tests {
             };
             assert_eq!(view, fresh);
             assert!(passed, "a notifier pass ran while the subscribe was held");
+        }
+
+        // --- TG-LIVE-003: a live search update lost on a full queue disconnects ---
+
+        /// Fills the harness connection's queue with `Close` frames.
+        fn fill_queue(h: &mut Harness) -> Arc<crate::network::connection::ConnectionHandle> {
+            while h.rx.try_recv().is_ok() {}
+            let handle = h
+                .observers
+                .connection_registry
+                .get(h.conn)
+                .expect("the harness connection");
+            while handle.try_send(OutboundMessage::Close(None)) {}
+            handle
+        }
+
+        #[test]
+        fn a_search_update_lost_on_a_full_queue_disconnects_the_subscriber() {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let render = recorder.handle();
+            metrics::with_local_recorder(&recorder, || {
+                rt.block_on(async {
+                    let mut h = harness();
+                    store_rows(&h, 2);
+                    let resp = text_resp(call(&h.svc, text_sub(&h, "lost")).await);
+                    assert_eq!(keys(&resp), vec!["s0", "s1"]);
+                    let handle = fill_queue(&mut h);
+                    write(&h, "x", &format!("{TERM} written to a full queue")).await;
+                    eventually("the lost SEARCH_UPDATE disconnects the subscriber", || {
+                        handle.is_cancelled()
+                    })
+                    .await;
+                    assert!(handle.owed_closed());
+                });
+            });
+            let out = render.render();
+            assert!(
+                out.contains("topgun_live_event_loss_disconnects_total{cause=\"channel_full\"} 1"),
+                "{out}"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_hybrid_search_update_lost_on_a_full_queue_disconnects_the_subscriber() {
+            let mut h = harness();
+            store_rows(&h, 2);
+            h.index_factory.register_map(M);
+            let resp = hybrid_resp(call(&h.svc, hybrid_sub(&h, "lost")).await);
+            assert!(resp.error.is_none(), "{resp:?}");
+            // The passes the subscribe started end first, so the pass counted
+            // below is the write's, run against the full queue.
+            let mut settled = passes(&h);
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let now = passes(&h);
+                if now == settled {
+                    break;
+                }
+                settled = now;
+            }
+            let handle = fill_queue(&mut h);
+            let before = passes(&h);
+            write(&h, "x", &format!("{TERM} written to a full queue")).await;
+            eventually("a notifier pass finished after the write", || {
+                passes(&h) > before
+            })
+            .await;
+            assert!(
+                handle.is_cancelled(),
+                "the lost HYBRID_SEARCH_UPDATE disconnects the subscriber"
+            );
         }
 
         /// A write skipped before the first registration of a fullText hybrid

@@ -21,7 +21,7 @@ use topgun_core::{hash_to_partition, LWWRecord, Timestamp};
 
 use tracing::Instrument;
 
-use crate::network::connection::{ConnectionId, ConnectionMetadata, ConnectionRegistry};
+use crate::network::connection::{ConnectionId, ConnectionMetadata, ConnectionRegistry, OwedLoss};
 use crate::service::domain::journal::JournalStore;
 use crate::service::domain::key_writer::{KeyWriteToken, KeyWriterRegistry};
 use crate::service::domain::query::QueryRegistry;
@@ -67,9 +67,29 @@ pub(crate) fn broadcast_server_event(
     let msg = Message::ServerEvent {
         payload: payload.clone(),
     };
-    let bytes = rmp_serde::to_vec_named(&msg)
-        .map_err(|e| OperationError::Internal(anyhow::anyhow!("serialize error: {e}")))?;
-    connection_registry.send_to_connections(&ids, &bytes);
+    let bytes = match rmp_serde::to_vec_named(&msg) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            // Every target is owed this event: a subscriber that silently missed
+            // it would hold a view no fresh query gives (`TG-LIVE-003`).
+            tracing::error!(
+                map = %payload.map_name,
+                key = %payload.key,
+                kind = "server_event",
+                %error,
+                "a live event owed to subscribers could not be encoded; disconnecting them"
+            );
+            for id in &ids {
+                if let Some(handle) = connection_registry.get(*id) {
+                    handle.owed_event_lost(OwedLoss::EncodeFailed);
+                }
+            }
+            return Err(OperationError::Internal(anyhow::anyhow!(
+                "serialize error: {error}"
+            )));
+        }
+    };
+    connection_registry.send_owed_to_connections(&ids, &bytes);
     Ok(())
 }
 

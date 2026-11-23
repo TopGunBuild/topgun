@@ -32,6 +32,7 @@ pub struct ServerConfig {
 // packages/server-rust/src/network/config.rs
 pub struct ConnectionConfig {
     pub outbound_channel_capacity: usize,  // default 256
+    pub slow_consumer_drop_threshold: u64, // default 256
     pub idle_timeout: Duration,            // default 60s
     pub ws_write_buffer_size: usize,       // default 128 KB — per-connection write buffer
     pub ws_max_write_buffer_size: usize,   // default 512 KB — its ceiling; also bounds outbound frames
@@ -182,7 +183,8 @@ Deeper configuration is controlled via Rust struct fields, not env vars. To chan
 
 | Field | Default | When to adjust |
 |-------|---------|----------------|
-| `outbound_channel_capacity` | 256 | Increase for slow consumers; decrease if per-connection memory is high |
+| `outbound_channel_capacity` | 256 | Frames queued per connection. A subscriber whose queue is full when a live event is due (a map, query or search update) is disconnected, and resyncs its maps, queries and searches when it reconnects. Raising the capacity absorbs longer bursts; it is not needed for correctness. A client that both writes heavily and subscribes can be disconnected when its own acknowledgements fill its queue at the moment another writer's event is due. Decrease if per-connection memory is high |
+| `slow_consumer_drop_threshold` | 256 | Drops in a row of a best-effort push (Event Journal, counter, partition map) after which a client is disconnected; `0` disables it. It does not govern live map, query or search events: their first miss disconnects whatever this value is, `0` included |
 | `idle_timeout` | 60s | Decrease to reclaim idle connections; increase if frequent reconnects |
 | `ws_write_buffer_size` | 128 KB | The per-connection write buffer: once it holds more than this, it is written out to the socket. Messages of any size are delivered; this does not limit them. Raising it shortens the outbound fragment (`ws_max_write_buffer_size − ws_write_buffer_size − 10` bytes), and it must stay below `ws_max_write_buffer_size` |
 | `ws_max_write_buffer_size` | 512 KB | The most a connection's write buffer may hold, and so its memory. An outbound message larger than `ws_max_write_buffer_size − ws_write_buffer_size − 10` bytes (393 206 at the defaults) is sent as WebSocket continuation frames of at most that size; raising this only makes the frames larger |
