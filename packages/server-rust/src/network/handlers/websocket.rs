@@ -72,6 +72,11 @@ pub(crate) type ServerSocket = WebSocketStream<TokioIo<Upgraded>>;
 /// than one frame needs them (`TG-WS-001`). Its rules are those of axum 0.8's
 /// extractor, in the same order and with the same rejection statuses and
 /// bodies, so every request gets the answer it got before.
+///
+/// # Panics
+///
+/// Never in practice: the accept key is base64, which always converts to a
+/// header value.
 pub async fn ws_upgrade_handler(State(state): State<AppState>, mut request: Request) -> Response {
     let (key, on_upgrade) = match upgrade_request(&mut request) {
         Ok(parts) => parts,
@@ -97,10 +102,13 @@ pub async fn ws_upgrade_handler(State(state): State<AppState>, mut request: Requ
     let headers = response.headers_mut();
     headers.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
     headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
-    // The accept key is base64, which is always a valid header value.
-    if let Ok(accept) = HeaderValue::try_from(derive_accept_key(key.as_bytes())) {
-        headers.insert(header::SEC_WEBSOCKET_ACCEPT, accept);
-    }
+    // The accept key is base64, which is always a valid header value, so the
+    // conversion cannot fail (axum's own handshake expects it the same way).
+    headers.insert(
+        header::SEC_WEBSOCKET_ACCEPT,
+        HeaderValue::try_from(derive_accept_key(key.as_bytes()))
+            .expect("a base64 accept key is a valid header value"),
+    );
     response
 }
 
@@ -4468,14 +4476,16 @@ mod writer_tests {
             let mut chunk = vec![0u8; 16 * 1024];
             loop {
                 while let Some((frame, size)) = parse_frame(&buf) {
+                    // Record before forwarding, so the record never depends on
+                    // when the client reads.
+                    let first_fragment = frame.opcode == OP_BINARY && !frame.fin;
+                    recorded.lock().push(frame);
                     // A client that has stopped reading must not stop the
                     // record of what the server sends.
                     if !client_gone && client_write.write_all(&buf[..size]).await.is_err() {
                         client_gone = true;
                     }
                     buf.drain(..size);
-                    let first_fragment = frame.opcode == OP_BINARY && !frame.fin;
-                    recorded.lock().push(frame);
                     if first_fragment {
                         if let Some(tx) = held_tx.take() {
                             let _ = tx.send(());

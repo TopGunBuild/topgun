@@ -184,7 +184,7 @@ Deeper configuration is controlled via Rust struct fields, not env vars. To chan
 |-------|---------|----------------|
 | `outbound_channel_capacity` | 256 | Increase for slow consumers; decrease if per-connection memory is high |
 | `idle_timeout` | 60s | Decrease to reclaim idle connections; increase if frequent reconnects |
-| `ws_write_buffer_size` | 128 KB | The per-connection write buffer: once it holds more than this, it is written out to the socket. Messages of any size are delivered; this does not limit them |
+| `ws_write_buffer_size` | 128 KB | The per-connection write buffer: once it holds more than this, it is written out to the socket. Messages of any size are delivered; this does not limit them. Raising it shortens the outbound fragment (`ws_max_write_buffer_size − ws_write_buffer_size − 10` bytes), and it must stay below `ws_max_write_buffer_size` |
 | `ws_max_write_buffer_size` | 512 KB | The most a connection's write buffer may hold, and so its memory. An outbound message larger than `ws_max_write_buffer_size − ws_write_buffer_size − 10` bytes (393 206 at the defaults) is sent as WebSocket continuation frames of at most that size; raising this only makes the frames larger |
 
 ### NetworkConfig fields
