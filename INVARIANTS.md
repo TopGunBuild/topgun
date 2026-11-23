@@ -4945,3 +4945,50 @@ weaker than a test.
   unsynced PUT disappears from its view while the server keeps it.
 - **Discovered by:** TODO-908 (TODO-906 research).
 - **Status:** decided, **enforced**.
+
+### TG-WS-001: An outbound message a client connection's writer dequeues reaches the client whole and in queue order, whatever its size; no frame exceeds the connection's write buffer
+
+- **Scope:** `outbound_task` for client WebSocket connections (`network/handlers/websocket.rs`).
+- **Statement:**
+  - (a) every `OutboundMessage::Binary` the writer dequeues is sent as one WebSocket message whose
+    frames each carry at most `ConnectionConfig::outbound_fragment_len()` bytes
+    (`ws_max_write_buffer_size − ws_write_buffer_size − 10`, 393 206 at the defaults). A message
+    of at most that length is one `Binary` frame with `fin` set, the frame it was before; a longer
+    one is a `Binary` frame without `fin`, `Continue` frames, and a last `Continue` frame with
+    `fin` (RFC 6455 §5.4). Since a frame and its header always fit the write buffer, the transport
+    never refuses one.
+  - (b) the frames of one message are written consecutively, each with `send`, before the next
+    message is dequeued, so wire order equals queue order (the order TG-LIVE-001(a) states at
+    enqueue). Control frames tungstenite sends by itself (a Pong, a Close reply) may come between
+    two frames of a message, which RFC 6455 allows.
+  - (c) the writer never ends a connection because of a message's size. It still ends on a send
+    error (a closed or broken socket) and on `OutboundMessage::Close`.
+- **Not claimed:**
+  - the size of what producers materialise: a response is built whole in memory, bounded by
+    `max_query_records` × row size (TODO-532);
+  - a byte bound on the outbound queue, which is bounded at 256 messages, not in bytes
+    (TODO-931 (c));
+  - the cluster link: `LengthDelimitedCodec::new()` in `cluster/formation.rs` keeps tokio-util's
+    default 8 MiB frame limit, and a forwarded response above it is not covered (TODO-1032);
+  - the client's heartbeat on a slow link: the server's application `PONG` is queued behind a
+    large message, and the TS client reconnects when no `PONG` has arrived for 15 s, checked every
+    5 s. A message that takes more than about 10 s to transmit (4.4 MB below about 3.5 Mbit/s)
+    can therefore trip it; the bytes on the wire, and so the time, are the same with or without
+    fragmentation (TODO-1033);
+  - HTTP `/sync`;
+  - client memory.
+- **Maintaining code:** `ConnectionConfig::outbound_fragment_len` (`network/config.rs`);
+  `ws_config`, `message_frames`, `outbound_task`, `send_outbound_message`
+  (`network/handlers/websocket.rs`).
+- **Enforcing test:** `frame_builder_shapes_at_every_boundary`, `writer_delivers_every_size_whole_in_order`,
+  `writer_pends_on_slow_reader_without_closing`, `writer_answers_ping_between_fragments`,
+  `writer_stops_cleanly_on_close_between_fragments` (inline in `websocket.rs`);
+  `connection_config_defaults` (`config.rs`).
+- **Integration tests:** `tests/integration-rust/large-response.test.ts` — a `queryOnce` answer
+  above 512 KB and one above 2 MB, and a ~4.4 MB live snapshot followed by a 4 000-hit search on
+  the same client, each 5 of 5 with no disconnect.
+- **Violation consequence:** a response larger than the write buffer (a query, search or sync
+  answer, or a live snapshot) closes the connection instead of reaching the client, and the
+  client reconnects into the same failure for as long as it runs.
+- **Discovered by:** TODO-1031 (SPEC-423 run).
+- **Status:** decided, **enforced**.

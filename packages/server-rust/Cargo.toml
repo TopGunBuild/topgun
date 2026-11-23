@@ -53,12 +53,19 @@ tikv-jemalloc-ctl = { version = "0.7", features = ["stats"], optional = true }
 mimalloc = { version = "0.1", default-features = false, optional = true }
 async-trait = "0.1"
 anyhow = "1"
-axum = { version = "0.8", features = ["ws"] }
+axum = "0.8"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "timeout", "request-id", "compression-gzip", "fs", "limit"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# The client WebSocket runs on tokio-tungstenite directly, not through axum's
+# `ws` extractor, because only the raw stream can send continuation frames.
+# `handshake` carries the accept-key derivation; the client connect code stays
+# out of the release build.
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 dashmap = "6"
 parking_lot = "0.12"
@@ -130,7 +137,7 @@ required-features = ["redb", "rocksdb"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "time", "process"] }
-tokio-tungstenite = "0.26"
+tokio-tungstenite = { version = "0.28", features = ["connect"] }
 hdrhistogram = "7"
 proptest = "1"
 serial_test = "3"

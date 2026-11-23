@@ -2,12 +2,12 @@
 //!
 //! Implements the `AUTH_REQUIRED` -> `AUTH` -> `AUTH_ACK`/`AUTH_FAIL` flow.
 //! Uses a two-phase approach:
-//!   - `send_auth_required`: sends on the raw `axum::extract::ws::WebSocket` before split
+//!   - `send_auth_required`: sends on the raw server socket (`websocket::ServerSocket`) before split
 //!   - `handle_auth`: sends via `mpsc::Sender<OutboundMessage>` after split
 
 use std::sync::Arc;
 
-use axum::extract::ws::WebSocket;
+use futures_util::SinkExt;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -16,6 +16,7 @@ use topgun_core::Principal;
 use tracing::{debug, warn};
 
 use super::auth_validator::{AuthValidationContext, AuthValidator};
+use super::websocket::ServerSocket;
 use super::AppState;
 use crate::network::OutboundMessage;
 use crate::storage::map_data_store::check_tenant;
@@ -196,11 +197,13 @@ impl AuthHandler {
     /// # Errors
     ///
     /// Returns an error if serialization or WebSocket send fails.
-    pub async fn send_auth_required(&self, socket: &mut WebSocket) -> Result<(), anyhow::Error> {
+    pub async fn send_auth_required(&self, socket: &mut ServerSocket) -> Result<(), anyhow::Error> {
         let msg = Message::AuthRequired(AuthRequiredMessage {});
         let bytes = rmp_serde::to_vec_named(&msg)?;
         socket
-            .send(axum::extract::ws::Message::Binary(bytes.into()))
+            .send(tokio_tungstenite::tungstenite::Message::Binary(
+                bytes.into(),
+            ))
             .await
             .map_err(|e| anyhow::anyhow!("failed to send AUTH_REQUIRED: {e}"))?;
         debug!("sent AUTH_REQUIRED to client");

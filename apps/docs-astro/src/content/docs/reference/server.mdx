@@ -185,7 +185,7 @@ struct NetworkConfig {
 }
 ```
 
-`ConnectionConfig` fields: `outbound_channel_capacity` (256), `send_timeout` (5s), `idle_timeout` (60s), `ws_write_buffer_size` (128 KB), `ws_max_write_buffer_size` (512 KB).
+`ConnectionConfig` fields: `outbound_channel_capacity` (256), `idle_timeout` (60s), `ws_write_buffer_size` (128 KB, the per-connection write buffer), `ws_max_write_buffer_size` (512 KB, the ceiling of that buffer; an outbound message larger than `ws_max_write_buffer_size − ws_write_buffer_size − 10` bytes, 393 206 at the defaults, is sent as WebSocket continuation frames of at most that size, so messages of any size are delivered).
 
 ### ServerConfig
 

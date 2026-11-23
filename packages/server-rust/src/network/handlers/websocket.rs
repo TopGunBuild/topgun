@@ -15,12 +15,22 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use axum::extract::State;
-use axum::response::Response;
-use futures_util::sink::SinkExt;
-use futures_util::stream::{SplitSink, StreamExt};
+use axum::body::Body;
+use axum::extract::{Request, State};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
+use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
+use futures_util::sink::{Sink, SinkExt};
+use futures_util::stream::StreamExt;
+use hyper::upgrade::{OnUpgrade, Upgraded};
+use hyper_util::rt::TokioIo;
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::{CloseCode, Data as OpData, OpCode};
+use tokio_tungstenite::tungstenite::protocol::frame::Frame;
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
 use topgun_core::hash_to_partition;
 use topgun_core::messages::{
     AuthAckData, ClientOp, DeviceAckData, ErrorPayload, Message as TopGunMessage, OpAckMessage,
@@ -31,6 +41,7 @@ use tracing::{debug, warn};
 use super::auth::AuthHandler;
 use super::decode;
 use super::AppState;
+use crate::network::config::ConnectionConfig;
 use crate::network::connection::{ConnectionHandle, ConnectionId};
 use crate::network::device_identity::{frontier_client_id, DeviceIdentityStore};
 use crate::network::{ConnectionKind, OutboundMessage};
@@ -50,22 +61,132 @@ use topgun_core::Principal;
 /// accumulating an unbounded backlog.
 const MAX_IN_FLIGHT: usize = 32;
 
-/// Upgrades an HTTP connection to a WebSocket connection.
-///
-/// Configures write buffer sizes from the connection config, then hands
+/// The server side of a client WebSocket connection.
+pub(crate) type ServerSocket = WebSocketStream<TokioIo<Upgraded>>;
+
+/// Upgrades an HTTP/1.1 request to a client WebSocket connection, then hands
 /// off to `handle_socket` for the message processing loops.
-pub async fn ws_upgrade_handler(
-    State(state): State<AppState>,
-    ws: axum::extract::ws::WebSocketUpgrade,
-) -> Response {
-    ws.write_buffer_size(state.config.connection.ws_write_buffer_size)
-        .max_write_buffer_size(state.config.connection.ws_max_write_buffer_size)
+///
+/// The upgrade is done here rather than by axum's extractor because axum's
+/// socket cannot send continuation frames, and every outbound message larger
+/// than one frame needs them (`TG-WS-001`). Its rules are those of axum 0.8's
+/// extractor, in the same order and with the same rejection statuses and
+/// bodies, so every request gets the answer it got before.
+///
+/// # Panics
+///
+/// Never in practice: the accept key is base64, which always converts to a
+/// header value.
+pub async fn ws_upgrade_handler(State(state): State<AppState>, mut request: Request) -> Response {
+    let (key, on_upgrade) = match upgrade_request(&mut request) {
+        Ok(parts) => parts,
+        Err(rejection) => return rejection.into_response(),
+    };
+    let config = ws_config(&state.config.connection);
+    tokio::spawn(async move {
+        let upgraded = match on_upgrade.await {
+            Ok(upgraded) => upgraded,
+            Err(e) => {
+                debug!("WebSocket upgrade failed: {e}");
+                return;
+            }
+        };
+        let socket =
+            WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(config))
+                .await;
+        handle_socket(socket, state).await;
+    });
+
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    let headers = response.headers_mut();
+    headers.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+    headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+    // The accept key is base64, which is always a valid header value, so the
+    // conversion cannot fail (axum's own handshake expects it the same way).
+    headers.insert(
+        header::SEC_WEBSOCKET_ACCEPT,
+        HeaderValue::try_from(derive_accept_key(key.as_bytes()))
+            .expect("a base64 accept key is a valid header value"),
+    );
+    response
+}
+
+/// A refused upgrade: the status and body axum's extractor answers for it.
+type UpgradeRejection = (StatusCode, &'static str);
+
+/// Checks an upgrade request and takes its key and upgrade handle.
+///
+/// Every rule reads only the first value of its header. An offered
+/// `Sec-WebSocket-Protocol` or `Sec-WebSocket-Extensions` is neither refused
+/// nor echoed: no subprotocol or extension is negotiated.
+fn upgrade_request(request: &mut Request) -> Result<(HeaderValue, OnUpgrade), UpgradeRejection> {
+    // Above HTTP/1.1 a WebSocket is opened with CONNECT, which the `get`
+    // route this handler is mounted on never passes here.
+    if request.version() > Version::HTTP_11 {
+        return Err((
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Request method must be `CONNECT`",
+        ));
+    }
+    if request.method() != Method::GET {
+        return Err((
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Request method must be `GET`",
+        ));
+    }
+    let headers = request.headers();
+    let connection_names_upgrade = headers
+        .get(header::CONNECTION)
+        .and_then(|value| std::str::from_utf8(value.as_bytes()).ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("upgrade"));
+    if !connection_names_upgrade {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Connection header did not include 'upgrade'",
+        ));
+    }
+    if !header_is(headers, &header::UPGRADE, "websocket") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "`Upgrade` header did not include 'websocket'",
+        ));
+    }
+    let key = headers.get(header::SEC_WEBSOCKET_KEY).cloned().ok_or((
+        StatusCode::BAD_REQUEST,
+        "`Sec-WebSocket-Key` header missing",
+    ))?;
+    if !header_is(headers, &header::SEC_WEBSOCKET_VERSION, "13") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "`Sec-WebSocket-Version` header did not include '13'",
+        ));
+    }
+    let on_upgrade = request.extensions_mut().remove::<OnUpgrade>().ok_or((
+        StatusCode::UPGRADE_REQUIRED,
+        "WebSocket request couldn't be upgraded since no upgrade state was present",
+    ))?;
+    Ok((key, on_upgrade))
+}
+
+/// Whether the first value of `name` equals `value`, ignoring ASCII case.
+fn header_is(headers: &HeaderMap, name: &HeaderName, value: &str) -> bool {
+    headers
+        .get(name)
+        .is_some_and(|got| got.as_bytes().eq_ignore_ascii_case(value.as_bytes()))
+}
+
+/// The transport settings of a client connection: the connection's four
+/// limits, every other setting at tungstenite's default.
+fn ws_config(connection: &ConnectionConfig) -> WebSocketConfig {
+    WebSocketConfig::default()
+        .write_buffer_size(connection.ws_write_buffer_size)
+        .max_write_buffer_size(connection.ws_max_write_buffer_size)
         // Cap inbound message/frame size so an unauthenticated client cannot force
         // a large allocation (tungstenite defaults are 64 MiB / 16 MiB) and so the
         // depth-checked decoder only ever sees bounded frames.
-        .max_message_size(state.config.connection.ws_max_message_size)
-        .max_frame_size(state.config.connection.ws_max_frame_size)
-        .on_upgrade(|socket| handle_socket(socket, state))
+        .max_message_size(Some(connection.ws_max_message_size))
+        .max_frame_size(Some(connection.ws_max_frame_size))
 }
 
 /// Processes a connected WebSocket: registers it, runs message loops, and
@@ -81,7 +202,7 @@ pub async fn ws_upgrade_handler(
 /// tasks complete before the connection handle (and its outbound sender)
 /// is dropped, allowing the outbound task to flush cleanly.
 #[allow(clippy::too_many_lines)]
-async fn handle_socket(mut socket: WebSocket, state: AppState) {
+async fn handle_socket(mut socket: ServerSocket, state: AppState) {
     let (handle, rx) = state
         .registry
         .register(ConnectionKind::Client, &state.config.connection);
@@ -109,9 +230,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     let (sender, mut receiver) = socket.split();
 
-    // Outbound task owns the write half of the socket and drains
-    // the mpsc channel, coalescing messages when multiple are ready.
-    let outbound_handle = tokio::spawn(outbound_task(sender, rx));
+    // Outbound task owns the write half of the socket and drains the mpsc
+    // channel, one WebSocket message per queued message.
+    let fragment_len = state.config.connection.outbound_fragment_len();
+    let outbound_handle = tokio::spawn(outbound_task(sender, rx, fragment_len));
 
     // Tracks auth state for phase switching. AtomicBool avoids RwLock
     // contention in Phase 2 — set once in Phase 1, read once to decide
@@ -273,8 +395,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         conn_id
                     );
                 }
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {
-                    // Handled automatically by axum/tungstenite.
+                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {
+                    // Ping/Pong are answered by tungstenite, which never yields a
+                    // raw frame on read.
                 }
                 Some(Err(e)) => {
                     debug!(
@@ -475,8 +598,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     conn_id
                 );
             }
-            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {
-                // Ping/Pong are handled automatically by axum/tungstenite.
+            Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {
+                // Ping/Pong are answered by tungstenite, which never yields a
+                // raw frame on read.
             }
             Some(Err(e)) => {
                 debug!("WebSocket error on connection {:?}: {}", conn_id, e);
@@ -1731,12 +1855,6 @@ async fn send_operation_response(resp: OperationResponse, tx: &mpsc::Sender<Outb
     }
 }
 
-/// Drains the outbound mpsc channel and writes messages to the WebSocket.
-///
-/// Implements message coalescing: after receiving the first message, it
-/// checks `try_recv()` for additional ready messages and sends them all
-/// before waiting again. This reduces the number of individual write
-/// syscalls under load.
 /// Awaits the outbound task's clean exit, then aborts it if it is wedged.
 ///
 /// The outbound task can stall on a writer whose TCP send-buffer is full (a
@@ -1753,28 +1871,35 @@ async fn join_outbound_with_timeout(handle: tokio::task::JoinHandle<()>) {
     }
 }
 
-async fn outbound_task(
-    mut sender: SplitSink<WebSocket, Message>,
+/// Drains the outbound mpsc channel and writes each message to the socket.
+///
+/// Each queued message is its own WebSocket message: its frames, from
+/// [`message_frames`], are each written with `send`, which flushes, before the
+/// next message is taken off the queue. So wire order is queue order, no two
+/// messages are ever merged, and a message of any size reaches the client
+/// whole (`TG-WS-001`). Draining ready messages with `try_recv` only saves a
+/// wake-up per message.
+async fn outbound_task<S>(
+    mut sender: S,
     mut rx: mpsc::Receiver<OutboundMessage>,
-) {
+    fragment_len: usize,
+) where
+    S: Sink<Message> + Unpin,
+{
     while let Some(msg) = rx.recv().await {
-        if send_outbound_message(&mut sender, msg).await.is_err() {
+        if send_outbound_message(&mut sender, msg, fragment_len)
+            .await
+            .is_err()
+        {
             break;
         }
-
-        // Coalesce: drain any additional messages that are already buffered
-        // in the channel without blocking. This batches multiple messages
-        // into a burst of writes before flushing.
         while let Ok(msg) = rx.try_recv() {
-            if send_outbound_message(&mut sender, msg).await.is_err() {
+            if send_outbound_message(&mut sender, msg, fragment_len)
+                .await
+                .is_err()
+            {
                 return;
             }
-        }
-
-        // Flush after draining all ready messages to push the batch to
-        // the network in a single write.
-        if sender.flush().await.is_err() {
-            break;
         }
     }
 
@@ -1786,19 +1911,25 @@ async fn outbound_task(
 ///
 /// Returns `Ok(())` on success or `Err(())` when the connection should
 /// be torn down (send error or Close message).
-async fn send_outbound_message(
-    sender: &mut SplitSink<WebSocket, Message>,
+async fn send_outbound_message<S>(
+    sender: &mut S,
     msg: OutboundMessage,
-) -> Result<(), ()> {
+    fragment_len: usize,
+) -> Result<(), ()>
+where
+    S: Sink<Message> + Unpin,
+{
     match msg {
         OutboundMessage::Binary(data) => {
-            if sender.send(Message::Binary(data.into())).await.is_err() {
-                return Err(());
+            for frame in message_frames(Bytes::from(data), fragment_len) {
+                if sender.send(Message::Frame(frame)).await.is_err() {
+                    return Err(());
+                }
             }
         }
         OutboundMessage::Close(reason) => {
             let close_frame = reason.map(|r| CloseFrame {
-                code: axum::extract::ws::close_code::NORMAL,
+                code: CloseCode::Normal,
                 reason: r.into(),
             });
             let _ = sender.send(Message::Close(close_frame)).await;
@@ -1806,6 +1937,52 @@ async fn send_outbound_message(
         }
     }
     Ok(())
+}
+
+/// The frames of one outbound binary message, each carrying at most
+/// `fragment_len` bytes (`TG-WS-001`).
+///
+/// A message of at most `fragment_len` bytes, an empty one included, is one
+/// `Binary` frame with `fin` set: the frame tungstenite builds for
+/// `Message::Binary`, so its bytes on the wire are unchanged, and its payload
+/// is moved rather than sliced. A longer message is a `Binary` frame without
+/// `fin`, then `Continue` frames, the last with `fin` (RFC 6455 section 5.4).
+/// Each payload is a zero-copy view of the one message buffer, and none is
+/// empty, also when the length is an exact multiple of `fragment_len`.
+fn message_frames(payload: Bytes, fragment_len: usize) -> MessageFrames {
+    MessageFrames {
+        rest: Some(payload),
+        // A zero length would never consume the payload.
+        fragment_len: fragment_len.max(1),
+        first: true,
+    }
+}
+
+/// Iterator behind [`message_frames`]; it allocates nothing per message.
+struct MessageFrames {
+    rest: Option<Bytes>,
+    fragment_len: usize,
+    first: bool,
+}
+
+impl Iterator for MessageFrames {
+    type Item = Frame;
+
+    fn next(&mut self) -> Option<Frame> {
+        let mut rest = self.rest.take()?;
+        let opcode = OpCode::Data(if self.first {
+            OpData::Binary
+        } else {
+            OpData::Continue
+        });
+        self.first = false;
+        if rest.len() <= self.fragment_len {
+            return Some(Frame::message(rest, opcode, true));
+        }
+        let head = rest.split_to(self.fragment_len);
+        self.rest = Some(rest);
+        Some(Frame::message(head, opcode, false))
+    }
 }
 
 #[cfg(test)]
@@ -4089,6 +4266,480 @@ mod tests {
             (held, cost, error_codes(&frames), received),
             (0, 8193, vec!["413".to_string()], 0),
             "(messages held, cost, one label per frame queued, operations handed to the domain service)"
+        );
+    }
+}
+
+/// The client writer at every size boundary (`TG-WS-001`): the frames it
+/// builds, the bytes it puts on the wire, and how it behaves under control
+/// frames and a slow reader.
+#[cfg(test)]
+mod writer_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use futures_util::stream::{SplitSink, SplitStream};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+    use tokio::sync::{oneshot, Notify};
+    use tokio::task::JoinHandle;
+
+    use super::*;
+
+    /// The fragment length at the default connection settings.
+    const F: usize = 393_206;
+    /// Every socket buffer in these tests: far below `F`, so the writer meets
+    /// back-pressure inside a message.
+    const DUPLEX: usize = 64 * 1024;
+    const BOUNDARY_LENGTHS: [usize; 15] = [
+        0,
+        1,
+        F - 1,
+        F,
+        F + 1,
+        2 * F,
+        2 * F + 1,
+        523_264,
+        524_278,
+        524_279,
+        524_288,
+        524_289,
+        2_097_152,
+        2_097_153,
+        4_400_000,
+    ];
+
+    const OP_CONTINUE: u8 = 0x0;
+    const OP_BINARY: u8 = 0x2;
+    const OP_CLOSE: u8 = 0x8;
+    const OP_PONG: u8 = 0xA;
+
+    /// A payload whose every byte depends on its message and its position, so
+    /// a lost, doubled or reordered byte is seen.
+    fn payload(message: usize, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|at| u8::try_from((at * 31 + message * 7) % 251).expect("below 251"))
+            .collect()
+    }
+
+    /// `(opcode, fin, payload length)` of each frame.
+    fn shapes(frames: &[Frame]) -> Vec<(OpCode, bool, usize)> {
+        frames
+            .iter()
+            .map(|f| (f.header().opcode, f.header().is_final, f.payload().len()))
+            .collect()
+    }
+
+    /// The frame shapes a message of `len` bytes must have: one `Binary` frame
+    /// with `fin` up to `F`, else `Binary` without `fin`, `Continue` frames,
+    /// and a last `Continue` with `fin`, each of at most `F` bytes.
+    fn expected_shapes(len: usize) -> Vec<(u8, bool, usize)> {
+        if len <= F {
+            return vec![(OP_BINARY, true, len)];
+        }
+        let count = len.div_ceil(F);
+        (0..count)
+            .map(|at| {
+                let opcode = if at == 0 { OP_BINARY } else { OP_CONTINUE };
+                let fin = at + 1 == count;
+                let size = if fin { len - at * F } else { F };
+                (opcode, fin, size)
+            })
+            .collect()
+    }
+
+    fn opcode_byte(opcode: OpCode) -> u8 {
+        u8::from(opcode)
+    }
+
+    #[test]
+    fn frame_builder_shapes_at_every_boundary() {
+        for (message, len) in BOUNDARY_LENGTHS.into_iter().enumerate() {
+            let bytes = payload(message, len);
+            let frames: Vec<Frame> = message_frames(Bytes::from(bytes.clone()), F).collect();
+            let got: Vec<(u8, bool, usize)> = shapes(&frames)
+                .into_iter()
+                .map(|(opcode, fin, size)| (opcode_byte(opcode), fin, size))
+                .collect();
+            assert_eq!(got, expected_shapes(len), "frame shapes for {len} bytes");
+            for frame in &frames {
+                assert!(frame.payload().len() <= F, "{len}: a frame above F");
+                assert!(
+                    len == 0 || !frame.payload().is_empty(),
+                    "{len}: empty frame"
+                );
+            }
+            let joined: Vec<u8> = frames
+                .iter()
+                .flat_map(|f| f.payload().iter().copied())
+                .collect();
+            assert!(joined == bytes, "{len}: payloads do not rejoin the message");
+        }
+    }
+
+    #[test]
+    fn ws_config_carries_every_connection_limit() {
+        let custom = ConnectionConfig {
+            ws_write_buffer_size: 64 * 1024,
+            ws_max_write_buffer_size: 1 << 20,
+            ws_max_message_size: 3 << 20,
+            ws_max_frame_size: (1 << 20) + 1,
+            ..ConnectionConfig::default()
+        };
+        for connection in [ConnectionConfig::default(), custom] {
+            let config = ws_config(&connection);
+            assert_eq!(config.write_buffer_size, connection.ws_write_buffer_size);
+            assert_eq!(
+                config.max_write_buffer_size,
+                connection.ws_max_write_buffer_size
+            );
+            assert_eq!(
+                config.max_message_size,
+                Some(connection.ws_max_message_size)
+            );
+            assert_eq!(config.max_frame_size, Some(connection.ws_max_frame_size));
+            assert_eq!(config.read_buffer_size, 128 * 1024);
+            assert!(!config.accept_unmasked_frames);
+        }
+    }
+
+    /// One frame as the tap saw it on the server-to-client byte stream.
+    #[derive(Debug, Clone)]
+    struct WireFrame {
+        opcode: u8,
+        fin: bool,
+        len: usize,
+        /// Kept for control frames only (at most 125 bytes).
+        control: Vec<u8>,
+    }
+
+    /// Parses the frame at the front of `buf` if it is complete: a server
+    /// frame, so never masked, with a 7-, 16- or 64-bit length.
+    fn parse_frame(buf: &[u8]) -> Option<(WireFrame, usize)> {
+        if buf.len() < 2 {
+            return None;
+        }
+        assert_eq!(buf[1] & 0x80, 0, "a server frame is never masked");
+        let (len, header) = match buf[1] & 0x7F {
+            126 => {
+                let ext = buf.get(2..4)?;
+                (usize::from(u16::from_be_bytes([ext[0], ext[1]])), 4)
+            }
+            127 => {
+                let ext: [u8; 8] = buf.get(2..10)?.try_into().expect("eight bytes");
+                (
+                    usize::try_from(u64::from_be_bytes(ext)).expect("fits usize"),
+                    10,
+                )
+            }
+            short => (usize::from(short), 2),
+        };
+        let body = buf.get(header..header + len)?;
+        let opcode = buf[0] & 0x0F;
+        let frame = WireFrame {
+            opcode,
+            fin: buf[0] & 0x80 != 0,
+            len,
+            control: if opcode >= 0x8 {
+                body.to_vec()
+            } else {
+                Vec::new()
+            },
+        };
+        Some((frame, header + len))
+    }
+
+    /// A relay between the server's socket and the client's that records
+    /// every server frame. With `hold`, it stops reading the server's side
+    /// once it has passed on the first fragment of a fragmented message, and
+    /// reads on when `release` is notified.
+    struct Tap {
+        frames: Arc<parking_lot::Mutex<Vec<WireFrame>>>,
+        held: oneshot::Receiver<()>,
+        release: Arc<Notify>,
+    }
+
+    fn tap(server: DuplexStream, client: DuplexStream, hold: bool) -> Tap {
+        let (mut server_read, mut server_write) = tokio::io::split(server);
+        let (mut client_read, mut client_write) = tokio::io::split(client);
+        tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut client_read, &mut server_write).await;
+            let _ = server_write.shutdown().await;
+        });
+        let frames = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let release = Arc::new(Notify::new());
+        let (signal_held, on_held) = oneshot::channel();
+        let (recorded, released) = (Arc::clone(&frames), Arc::clone(&release));
+        tokio::spawn(async move {
+            let mut held_tx = hold.then_some(signal_held);
+            let mut client_gone = false;
+            let mut buf = Vec::new();
+            let mut chunk = vec![0u8; 16 * 1024];
+            loop {
+                while let Some((frame, size)) = parse_frame(&buf) {
+                    // Record before forwarding, so the record never depends on
+                    // when the client reads.
+                    let first_fragment = frame.opcode == OP_BINARY && !frame.fin;
+                    recorded.lock().push(frame);
+                    // A client that has stopped reading must not stop the
+                    // record of what the server sends.
+                    if !client_gone && client_write.write_all(&buf[..size]).await.is_err() {
+                        client_gone = true;
+                    }
+                    buf.drain(..size);
+                    if first_fragment {
+                        if let Some(tx) = held_tx.take() {
+                            let _ = tx.send(());
+                            released.notified().await;
+                        }
+                    }
+                }
+                match server_read.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let _ = client_write.shutdown().await;
+        });
+        Tap {
+            frames,
+            held: on_held,
+            release,
+        }
+    }
+
+    type ClientSocket = WebSocketStream<DuplexStream>;
+
+    /// The real writer on a server socket, a reader that drains the server
+    /// side as `handle_socket` does, and a client behind a tap.
+    struct Harness {
+        tx: mpsc::Sender<OutboundMessage>,
+        writer: JoinHandle<()>,
+        client_sink: SplitSink<ClientSocket, Message>,
+        client_stream: SplitStream<ClientSocket>,
+        tap: Tap,
+    }
+
+    async fn harness(hold: bool) -> Harness {
+        let connection = ConnectionConfig::default();
+        let (server_io, tap_server) = tokio::io::duplex(DUPLEX);
+        let (tap_client, client_io) = tokio::io::duplex(DUPLEX);
+        let tap = tap(tap_server, tap_client, hold);
+        let server =
+            WebSocketStream::from_raw_socket(server_io, Role::Server, Some(ws_config(&connection)))
+                .await;
+        // A frame above F would fail the client's read, and a message of the
+        // largest tested size must fit.
+        let client_config = WebSocketConfig::default()
+            .max_frame_size(Some(F))
+            .max_message_size(Some(8 << 20));
+        let client =
+            WebSocketStream::from_raw_socket(client_io, Role::Client, Some(client_config)).await;
+        let (sink, mut stream) = server.split();
+        tokio::spawn(async move {
+            while let Some(Ok(message)) = stream.next().await {
+                if matches!(message, Message::Close(_)) {
+                    break;
+                }
+            }
+        });
+        let (tx, rx) = mpsc::channel(256);
+        let writer = tokio::spawn(outbound_task(sink, rx, connection.outbound_fragment_len()));
+        let (client_sink, client_stream) = client.split();
+        Harness {
+            tx,
+            writer,
+            client_sink,
+            client_stream,
+            tap,
+        }
+    }
+
+    /// Reads `count` binary messages, failing on a Close, a read error, or
+    /// silence for `within`.
+    async fn read_messages(
+        stream: &mut SplitStream<ClientSocket>,
+        count: usize,
+        within: Duration,
+    ) -> Vec<Bytes> {
+        let mut got = Vec::with_capacity(count);
+        while got.len() < count {
+            let next = tokio::time::timeout(within, stream.next())
+                .await
+                .unwrap_or_else(|_| panic!("no message within {within:?} after {}", got.len()))
+                .expect("the connection stays open");
+            match next.expect("no read error (a frame above F is one)") {
+                Message::Binary(bytes) => got.push(bytes),
+                Message::Close(frame) => panic!("closed after {} messages: {frame:?}", got.len()),
+                _ => {}
+            }
+        }
+        got
+    }
+
+    /// Groups the data frames the tap saw into messages, as `(opcode, fin,
+    /// len)` per frame.
+    fn wire_messages(frames: &[WireFrame]) -> Vec<Vec<(u8, bool, usize)>> {
+        let mut messages: Vec<Vec<(u8, bool, usize)>> = Vec::new();
+        let mut open = false;
+        for frame in frames.iter().filter(|f| f.opcode < 0x8) {
+            if !open {
+                messages.push(Vec::new());
+            }
+            messages.last_mut().expect("a message is open").push((
+                frame.opcode,
+                frame.fin,
+                frame.len,
+            ));
+            open = !frame.fin;
+        }
+        messages
+    }
+
+    #[tokio::test]
+    async fn writer_delivers_every_size_whole_in_order() {
+        let mut h = harness(false).await;
+        let mut lengths = Vec::new();
+        for len in BOUNDARY_LENGTHS.into_iter().filter(|&len| len > 0) {
+            lengths.push(len);
+            lengths.push(16);
+        }
+        let expected: Vec<Vec<u8>> = lengths
+            .iter()
+            .enumerate()
+            .map(|(message, &len)| payload(message, len))
+            .collect();
+        let sender = h.tx.clone();
+        let to_send = expected.clone();
+        tokio::spawn(async move {
+            for bytes in to_send {
+                sender
+                    .send(OutboundMessage::Binary(bytes))
+                    .await
+                    .expect("queue open");
+            }
+        });
+
+        let got = read_messages(&mut h.client_stream, lengths.len(), Duration::from_secs(30)).await;
+        for (at, (got, want)) in got.iter().zip(&expected).enumerate() {
+            assert!(
+                got[..] == want[..],
+                "message {at} ({} bytes) differs",
+                want.len()
+            );
+        }
+
+        let frames = h.tap.frames.lock().clone();
+        let on_wire = wire_messages(&frames);
+        let want_wire: Vec<Vec<(u8, bool, usize)>> =
+            lengths.iter().map(|&len| expected_shapes(len)).collect();
+        assert_eq!(on_wire, want_wire, "frame shapes on the wire");
+        assert!(frames.iter().all(|f| f.len <= F), "a frame above F");
+        assert!(
+            frames.iter().all(|f| f.opcode != OP_CLOSE),
+            "the server closed the connection"
+        );
+        assert!(!h.writer.is_finished(), "the writer ended");
+    }
+
+    #[tokio::test]
+    async fn writer_answers_ping_between_fragments() {
+        let mut h = harness(true).await;
+        let message = payload(1, 4_400_000);
+        h.tx.send(OutboundMessage::Binary(message.clone()))
+            .await
+            .expect("queue open");
+        let mut client_stream = h.client_stream;
+        let reader = tokio::spawn(async move {
+            read_messages(&mut client_stream, 1, Duration::from_secs(10)).await
+        });
+        tokio::time::timeout(Duration::from_secs(10), &mut h.tap.held)
+            .await
+            .expect("the first fragment within 10 s")
+            .expect("tap alive");
+        h.client_sink
+            .send(Message::Ping(Bytes::from_static(b"mid-message")))
+            .await
+            .expect("ping sent");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        h.tap.release.notify_one();
+
+        let got = reader.await.expect("the client reader does not panic");
+        assert!(got[0][..] == message[..], "the message arrived changed");
+        let frames = h.tap.frames.lock().clone();
+        let pong = frames
+            .iter()
+            .position(|f| f.opcode == OP_PONG && f.control == b"mid-message")
+            .expect("a Pong with the Ping's payload");
+        let last = frames
+            .iter()
+            .position(|f| f.opcode == OP_CONTINUE && f.fin)
+            .expect("the message's last frame");
+        assert!(
+            pong < last,
+            "the Pong came after the last frame ({pong} vs {last})"
+        );
+        assert_eq!(
+            frames.iter().filter(|f| f.opcode < 0x8).count(),
+            4_400_000_usize.div_ceil(F)
+        );
+    }
+
+    #[tokio::test]
+    async fn writer_stops_cleanly_on_close_between_fragments() {
+        let mut h = harness(true).await;
+        h.tx.send(OutboundMessage::Binary(payload(1, 4_400_000)))
+            .await
+            .expect("queue open");
+        // Keep the client reading so the tap can pass on what the server sends.
+        let mut client_stream = h.client_stream;
+        tokio::spawn(async move { while let Some(Ok(_)) = client_stream.next().await {} });
+        tokio::time::timeout(Duration::from_secs(10), &mut h.tap.held)
+            .await
+            .expect("the first fragment within 10 s")
+            .expect("tap alive");
+        h.client_sink
+            .send(Message::Close(None))
+            .await
+            .expect("close sent");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        h.tap.release.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(2), h.writer)
+            .await
+            .expect("the writer ends within 2 s")
+            .expect("the writer does not panic");
+        let frames = h.tap.frames.lock().clone();
+        let close = frames
+            .iter()
+            .position(|f| f.opcode == OP_CLOSE)
+            .expect("the server answers the Close");
+        assert!(
+            frames[close..].iter().all(|f| f.opcode >= 0x8),
+            "a data frame after the server's Close"
+        );
+    }
+
+    #[tokio::test]
+    async fn writer_pends_on_slow_reader_without_closing() {
+        let mut h = harness(false).await;
+        let messages = [payload(0, 4_400_000), payload(1, 16), payload(2, 16)];
+        for bytes in &messages {
+            h.tx.send(OutboundMessage::Binary(bytes.clone()))
+                .await
+                .expect("queue open");
+        }
+        // The client reads nothing for 500 ms: the writer must wait on the
+        // full socket, not give up on it.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!h.writer.is_finished(), "the writer ended on a slow reader");
+
+        let got = read_messages(&mut h.client_stream, 3, Duration::from_secs(10)).await;
+        for (got, want) in got.iter().zip(&messages) {
+            assert!(got[..] == want[..], "a message arrived changed");
+        }
+        assert!(
+            h.tap.frames.lock().iter().all(|f| f.opcode != OP_CLOSE),
+            "the server closed the connection"
         );
     }
 }
