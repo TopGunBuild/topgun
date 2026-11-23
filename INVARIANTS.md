@@ -4985,8 +4985,8 @@ weaker than a test.
   `writer_stops_cleanly_on_close_between_fragments` (inline in `websocket.rs`);
   `connection_config_defaults` (`config.rs`).
 - **Integration tests:** `tests/integration-rust/large-response.test.ts` — a `queryOnce` answer
-  above 512 KB and one above 2 MB, a ~4.4 MB live snapshot and a 4 000-hit search, each 5 of 5
-  with no disconnect.
+  above 512 KB and one above 2 MB, and a ~4.4 MB live snapshot followed by a 4 000-hit search on
+  the same client, each 5 of 5 with no disconnect.
 - **Violation consequence:** a response larger than the write buffer (a query, search or sync
   answer, or a live snapshot) closes the connection instead of reaching the client, and the
   client reconnects into the same failure for as long as it runs.
