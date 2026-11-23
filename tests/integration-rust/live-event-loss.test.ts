@@ -17,7 +17,7 @@
  * then S is released, and W rewrites every key once and removes every eighth
  * (500 keys, 50 of them `needle` keys), so ENTER, UPDATE and LEAVE are all owed
  * also after the reconnect. Once S has settled — connected again after its last
- * disconnect, the query's and the search's resubscribe responses received, no
+ * disconnect and after the server's last loss line, the query's and the search's resubscribe responses received, no
  * overflow pending, and its view unchanged for 1 s — its query rows must equal a
  * fresh `queryOnce` and W's ledger, and its search key set a fresh search's.
  *
@@ -288,8 +288,13 @@ function lastReconnect(changes: Change[]): {
   return { disconnectAt, connectedAt };
 }
 
-/** Why S has not settled yet, or null once it has (main-arm conditions). */
-function unsettled(s: Status | null): string | null {
+/**
+ * Why S has not settled yet, or null once it has (main-arm conditions). `losses`
+ * are the times of the server's loss lines: a loss after S's last CONNECTED has
+ * cancelled that connection, whose socket closes seconds later, while S still
+ * looks connected and its view, which the server no longer feeds, looks stable.
+ */
+function unsettled(s: Status | null, losses: number[]): string | null {
   if (!s) return 'no status from S';
   if (s.state !== SyncState.CONNECTED) return `S is ${s.state}`;
   const { disconnectAt, connectedAt } = lastReconnect(s.changes);
@@ -297,6 +302,9 @@ function unsettled(s: Status | null): string | null {
     return 'S has not reconnected after its last disconnect';
   }
   const since = connectedAt ?? 0;
+  if (losses.some((t) => t >= since)) {
+    return 'a loss after the last CONNECTED is not yet followed by a reconnect';
+  }
   if (s.lastServerResultAt === null || s.lastServerResultAt < since) {
     return "the live query's resubscribe response has not arrived";
   }
@@ -396,7 +404,10 @@ describe('Integration: a subscriber that loses an owed live event resyncs (TG-LI
       let dump: Dump | null = null;
       let stableFor = 0;
       for (;;) {
-        const why = ARM === 'main' || disconnected() ? unsettled(s.status) : null;
+        const lossTimes = lossLines()
+          .map(lineTime)
+          .filter((t): t is number => t !== null);
+        const why = ARM === 'main' || disconnected() ? unsettled(s.status, lossTimes) : null;
         if (why === null) {
           const next = await s.dump();
           if (dump && canonical(next) === canonical(dump)) stableFor += 250;
