@@ -26,7 +26,7 @@ use tokio_tungstenite::WebSocketStream;
 use topgun_server::network::handlers::{ws_upgrade_handler, AppState};
 use tower::ServiceExt;
 
-/// The MsgPack encoding of `{ "type": "AUTH_REQUIRED" }`, the first message an
+/// The `MsgPack` encoding of `{ "type": "AUTH_REQUIRED" }`, the first message an
 /// authenticating server sends.
 const AUTH_REQUIRED_BYTES: &[u8] = b"\x81\xa4type\xadAUTH_REQUIRED";
 
@@ -247,15 +247,15 @@ async fn upgrade_completes_with_the_expected_headers_and_auth_required() {
     assert_eq!(
         headers
             .get(header::SEC_WEBSOCKET_ACCEPT)
-            .map(|v| v.as_bytes()),
+            .map(HeaderValue::as_bytes),
         Some(derive_accept_key(key.as_bytes()).as_bytes())
     );
     assert_eq!(
-        headers.get(header::CONNECTION).map(|v| v.as_bytes()),
+        headers.get(header::CONNECTION).map(HeaderValue::as_bytes),
         Some(&b"upgrade"[..])
     );
     assert_eq!(
-        headers.get(header::UPGRADE).map(|v| v.as_bytes()),
+        headers.get(header::UPGRADE).map(HeaderValue::as_bytes),
         Some(&b"websocket"[..])
     );
     assert!(headers.get(header::SEC_WEBSOCKET_PROTOCOL).is_none());

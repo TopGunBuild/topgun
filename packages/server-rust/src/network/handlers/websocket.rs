@@ -4459,10 +4459,10 @@ mod writer_tests {
         });
         let frames = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let release = Arc::new(Notify::new());
-        let (held_tx, held) = oneshot::channel();
+        let (signal_held, on_held) = oneshot::channel();
         let (recorded, released) = (Arc::clone(&frames), Arc::clone(&release));
         tokio::spawn(async move {
-            let mut held_tx = hold.then_some(held_tx);
+            let mut held_tx = hold.then_some(signal_held);
             let mut client_gone = false;
             let mut buf = Vec::new();
             let mut chunk = vec![0u8; 16 * 1024];
@@ -4492,7 +4492,7 @@ mod writer_tests {
         });
         Tap {
             frames,
-            held,
+            held: on_held,
             release,
         }
     }
