@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server): large answers reach the client.** An outbound WebSocket message larger than
+  512 KB — a query, search or sync answer, or a live snapshot — closed the connection instead of
+  reaching the client, and the client reconnected into the same failure. Such messages are now sent
+  as WebSocket continuation frames (RFC 6455 fragmentation) of at most 393 206 bytes at the default
+  settings, and the client receives them whole; messages up to that size go on the wire as before
+  (`TG-WS-001`). Shown against the TypeScript client in Node: a `queryOnce` answer above 0.5 MB and
+  one above 2 MB, and a ~4.4 MB live query snapshot with a 4 000-hit search, each with no
+  disconnect.
 - **Fixed: a live search no longer misses a write made while it is being set up.** A
   `searchSubscribe`, or the full-text and exact legs of a `hybridSearchSubscribe`, could miss a
   write made while the server built its first result — including on the first live search of a

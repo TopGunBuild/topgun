@@ -32,10 +32,9 @@ pub struct ServerConfig {
 // packages/server-rust/src/network/config.rs
 pub struct ConnectionConfig {
     pub outbound_channel_capacity: usize,  // default 256
-    pub send_timeout: Duration,            // default 5s
     pub idle_timeout: Duration,            // default 60s
-    pub ws_write_buffer_size: usize,       // default 128 KB
-    pub ws_max_write_buffer_size: usize,   // default 512 KB
+    pub ws_write_buffer_size: usize,       // default 128 KB — per-connection write buffer
+    pub ws_max_write_buffer_size: usize,   // default 512 KB — its ceiling; also bounds outbound frames
 }
 
 pub struct NetworkConfig {
@@ -184,10 +183,9 @@ Deeper configuration is controlled via Rust struct fields, not env vars. To chan
 | Field | Default | When to adjust |
 |-------|---------|----------------|
 | `outbound_channel_capacity` | 256 | Increase for slow consumers; decrease if per-connection memory is high |
-| `send_timeout` | 5s | Increase for high-latency clients; decrease to drop slow clients faster |
 | `idle_timeout` | 60s | Decrease to reclaim idle connections; increase if frequent reconnects |
-| `ws_write_buffer_size` | 128 KB | Increase if large messages are being fragmented |
-| `ws_max_write_buffer_size` | 512 KB | Increase for very large payloads |
+| `ws_write_buffer_size` | 128 KB | The per-connection write buffer: once it holds more than this, it is written out to the socket. Messages of any size are delivered; this does not limit them |
+| `ws_max_write_buffer_size` | 512 KB | The most a connection's write buffer may hold, and so its memory. An outbound message larger than `ws_max_write_buffer_size − ws_write_buffer_size − 10` bytes (393 206 at the defaults) is sent as WebSocket continuation frames of at most that size; raising this only makes the frames larger |
 
 ### NetworkConfig fields
 
