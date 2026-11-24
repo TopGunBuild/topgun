@@ -35,6 +35,87 @@ function isReconnectExhaustedError(error: unknown): boolean {
 }
 
 /**
+ * Largest `CHUNK` sequence the client reassembles, in bytes (1 GiB). A message
+ * above it could not be decoded by a JS client anyway (msgpackr materialises
+ * objects several times the wire size); refusing it reconnects visibly instead
+ * of exhausting the tab or process, and it also ends a sequence that never
+ * receives its `last` chunk (TG-WS-002).
+ */
+export const MAX_REASSEMBLY_BYTES = 2 ** 30;
+
+/**
+ * The heartbeat expiry rule (TG-WS-003), shared by the tick and
+ * `isConnectionHealthy` so the two can never disagree. The link is dead only
+ * while a PING is outstanding and more than `timeoutMs` has passed since the
+ * last inbound message: any message proves the server is still delivering, and
+ * with no PING outstanding (every PING answered, e.g. a backgrounded tab whose
+ * timer ticks late) silence alone proves nothing.
+ */
+export function heartbeatExpired(
+  now: number,
+  lastInboundAt: number,
+  pingOutstanding: boolean,
+  timeoutMs: number,
+): boolean {
+  return pingOutstanding && now - lastInboundAt > timeoutMs;
+}
+
+/**
+ * Collects the `data` of one `CHUNK` sequence (TG-WS-002) until its `last`
+ * chunk. Every violation throws and leaves the buffer empty, so a broken
+ * sequence can never prefix a later message.
+ */
+export class ChunkReassembler {
+  private parts: Uint8Array[] = [];
+  private total = 0;
+
+  constructor(private readonly maxBytes: number) {}
+
+  /** True when no sequence is in progress. */
+  isEmpty(): boolean {
+    return this.parts.length === 0;
+  }
+
+  clear(): void {
+    this.parts = [];
+    this.total = 0;
+  }
+
+  /**
+   * Appends one decoded `CHUNK`. Returns the whole original message bytes when
+   * the chunk is the last of its sequence, else `null`. Throws on a malformed
+   * chunk or when the sequence would exceed `maxBytes`.
+   */
+  push(chunk: { last?: unknown; data?: unknown }): Uint8Array | null {
+    try {
+      const { last, data } = chunk;
+      if (!(data instanceof Uint8Array) || typeof last !== 'boolean') {
+        throw new Error('malformed CHUNK: data must be bytes and last a boolean');
+      }
+      if (this.total + data.length > this.maxBytes) {
+        throw new Error(`CHUNK sequence exceeds ${this.maxBytes} bytes`);
+      }
+      this.parts.push(data);
+      this.total += data.length;
+      if (!last) {
+        return null;
+      }
+      const whole = new Uint8Array(this.total);
+      let offset = 0;
+      for (const part of this.parts) {
+        whole.set(part, offset);
+        offset += part.length;
+      }
+      this.clear();
+      return whole;
+    } catch (err) {
+      this.clear();
+      throw err;
+    }
+  }
+}
+
+/**
  * WebSocketManager implements IWebSocketManager.
  *
  * Manages WebSocket connections via IConnectionProvider.
@@ -50,8 +131,12 @@ export class WebSocketManager implements IWebSocketManager {
 
   // Heartbeat state
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-  private lastPongReceived: number = Date.now();
+  private lastInboundAt: number = Date.now();
+  private pingOutstanding: boolean = false;
   private lastRoundTripTime: number | null = null;
+
+  // One CHUNK sequence per node: a cluster provider multiplexes several sockets.
+  private readonly reassemblers: Map<string, ChunkReassembler> = new Map();
 
   constructor(config: WebSocketManagerConfig) {
     this.config = config;
@@ -61,8 +146,12 @@ export class WebSocketManager implements IWebSocketManager {
     // setAuthToken during a disconnect and after resetConnection, and the provider
     // keeps its listeners across close(), so attaching them there would run every
     // handler once more per call (one AUTH and one routed message per listener).
-    this.connectionProvider.on('connected', (_nodeId: string) => {
+    this.connectionProvider.on('connected', (nodeId: string) => {
       logger.info('ConnectionProvider connected.');
+      // Cleared on both events, each on its own, so a partial sequence of a
+      // dropped socket cannot prefix a message of the next one whichever event
+      // the provider emits.
+      this.reassemblers.delete(nodeId);
       // Re-arm the state machine to CONNECTING on every freshly-opened socket.
       // On a RECONNECT the machine sits in DISCONNECTED when this fires, so without
       // this re-arm the following CONNECTING→AUTHENTICATING auth step would instead
@@ -74,8 +163,9 @@ export class WebSocketManager implements IWebSocketManager {
       this.config.onConnected?.();
     });
 
-    this.connectionProvider.on('disconnected', (_nodeId: string) => {
+    this.connectionProvider.on('disconnected', (nodeId: string) => {
       logger.info('ConnectionProvider disconnected.');
+      this.reassemblers.delete(nodeId);
       this.stopHeartbeat();
       this.config.stateMachine.transition(SyncState.DISCONNECTED);
       this.config.onDisconnected?.();
@@ -93,10 +183,15 @@ export class WebSocketManager implements IWebSocketManager {
     });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- WebSocket message data is a raw binary/string payload; type is narrowed after msgpack decode in deserializeMessage
-    this.connectionProvider.on('message', (_nodeId: string, data: any) => {
+    this.connectionProvider.on('message', (nodeId: string, data: any) => {
+      // Liveness comes before decoding: any inbound message, a CHUNK or even
+      // undecodable bytes, proves the server is still delivering. A PONG can sit
+      // behind a long transfer in the server's single outbound queue (TG-WS-003).
+      this.lastInboundAt = Date.now();
+      this.pingOutstanding = false;
       const message = this.deserializeMessage(data);
       if (message) {
-        this.handleMessage(message);
+        this.receive(nodeId, message);
       }
     });
 
@@ -149,6 +244,48 @@ export class WebSocketManager implements IWebSocketManager {
       logger.error({ err: e }, 'Failed to parse message');
       return null;
     }
+  }
+
+  /**
+   * Reassembles `CHUNK` sequences (TG-WS-002) and routes every other message.
+   * A sequence that cannot be reassembled or decoded forces a reconnect: the
+   * message it carried is then recovered by resync rather than silently lost.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message is a deserialized msgpack object; narrowed by message.type
+  private receive(nodeId: string, message: any): void {
+    const pending = this.reassemblers.get(nodeId);
+    if (message.type !== 'CHUNK') {
+      if (pending && !pending.isEmpty()) {
+        this.chunkViolation(nodeId, new Error(`${message.type} arrived inside a CHUNK sequence`));
+        return;
+      }
+      this.handleMessage(message);
+      return;
+    }
+
+    const reassembler = pending ?? new ChunkReassembler(MAX_REASSEMBLY_BYTES);
+    this.reassemblers.set(nodeId, reassembler);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the reassembled bytes decode to any server message
+    let inner: any;
+    try {
+      const whole = reassembler.push(message);
+      if (whole === null) {
+        return;
+      }
+      inner = deserialize(whole);
+    } catch (err) {
+      this.chunkViolation(nodeId, err);
+      return;
+    }
+    if (inner) {
+      this.handleMessage(inner);
+    }
+  }
+
+  private chunkViolation(nodeId: string, err: unknown): void {
+    this.reassemblers.delete(nodeId);
+    logger.error({ err, nodeId }, 'CHUNK sequence violation - reconnecting to resync');
+    this.connectionProvider.forceReconnect();
   }
 
   /**
@@ -283,15 +420,13 @@ export class WebSocketManager implements IWebSocketManager {
     }
 
     this.stopHeartbeat(); // Clear any existing interval
-    this.lastPongReceived = Date.now();
+    this.lastInboundAt = Date.now();
+    this.pingOutstanding = false;
 
     // Unref'd: the interval lives for as long as the connection does, so a
     // client that is never closed would otherwise hold the process open for ever.
     this.heartbeatInterval = unrefTimer(
-      setInterval(() => {
-        this.sendPing();
-        this.checkHeartbeatTimeout();
-      }, this.config.heartbeatConfig.intervalMs),
+      setInterval(() => this.heartbeatTick(), this.config.heartbeatConfig.intervalMs),
     );
 
     logger.info({ intervalMs: this.config.heartbeatConfig.intervalMs }, 'Heartbeat started');
@@ -322,11 +457,11 @@ export class WebSocketManager implements IWebSocketManager {
   }
 
   /**
-   * Handles incoming PONG message from server.
+   * Handles incoming PONG message from server. Liveness is already recorded by
+   * the message listener; a PONG only adds the round-trip time.
    */
   private handlePong(msg: { timestamp: number; serverTime: number }): void {
     const now = Date.now();
-    this.lastPongReceived = now;
     this.lastRoundTripTime = now - msg.timestamp;
 
     logger.debug(
@@ -340,18 +475,19 @@ export class WebSocketManager implements IWebSocketManager {
   }
 
   /**
-   * Checks if heartbeat has timed out and triggers reconnection if needed.
+   * One heartbeat tick: check first, then ping. Checking first means a PING sent
+   * at this tick is never judged by this tick, so expiry needs a PING that went
+   * unanswered for a whole interval. The flag is set even when the socket cannot
+   * send, so a socket that is no longer open but never reported `disconnected`
+   * (a stalled closing handshake) still expires like a dead link (TG-WS-003).
    */
-  private checkHeartbeatTimeout(): void {
+  private heartbeatTick(): void {
     const now = Date.now();
-    const timeSinceLastPong = now - this.lastPongReceived;
+    const { timeoutMs } = this.config.heartbeatConfig;
 
-    if (timeSinceLastPong > this.config.heartbeatConfig.timeoutMs) {
+    if (heartbeatExpired(now, this.lastInboundAt, this.pingOutstanding, timeoutMs)) {
       logger.warn(
-        {
-          timeSinceLastPong,
-          timeoutMs: this.config.heartbeatConfig.timeoutMs,
-        },
+        { timeSinceLastInbound: now - this.lastInboundAt, timeoutMs },
         'Heartbeat timeout - triggering reconnection',
       );
 
@@ -360,18 +496,29 @@ export class WebSocketManager implements IWebSocketManager {
       // Force reconnect — preserves the provider's reconnect behavior
       // (unlike close() which permanently kills the connection)
       this.connectionProvider.forceReconnect();
+      return;
     }
+
+    this.pingOutstanding = true;
+    this.sendPing();
   }
 
   /**
-   * Returns the last measured round-trip time in milliseconds.
+   * Returns the last measured round-trip time in milliseconds. While a PONG
+   * waits behind a long transfer in the server's queue, this reads that
+   * transfer time rather than the link's round trip.
    */
   getLastRoundTripTime(): number | null {
     return this.lastRoundTripTime;
   }
 
   /**
-   * Returns true if the connection is considered healthy based on heartbeat.
+   * Returns true while the connection is online, authenticated and its heartbeat
+   * has not expired under `heartbeatExpired` (TG-WS-003). Expiry needs a PING
+   * outstanding and strictly more than `timeoutMs` since the last inbound
+   * message of any type, so exactly `timeoutMs` still reads healthy, and with
+   * no PING outstanding (the last one was answered, e.g. a backgrounded tab
+   * whose timer has not ticked since) the connection reads healthy at any age.
    */
   isConnectionHealthy(): boolean {
     const state = this.config.stateMachine.getState();
@@ -390,7 +537,11 @@ export class WebSocketManager implements IWebSocketManager {
       return true; // If heartbeat disabled, consider healthy if online
     }
 
-    const timeSinceLastPong = Date.now() - this.lastPongReceived;
-    return timeSinceLastPong < this.config.heartbeatConfig.timeoutMs;
+    return !heartbeatExpired(
+      Date.now(),
+      this.lastInboundAt,
+      this.pingOutstanding,
+      this.config.heartbeatConfig.timeoutMs,
+    );
   }
 }

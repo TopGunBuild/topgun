@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (client and server): the heartbeat no longer reconnects while a large message arrives on
+  a slow link.** A `TopGunClient` on a single-server connection reconnected whenever one server
+  message took longer than about 10–15 s to arrive — a ~4.1 MB live snapshot below about
+  3.5 Mbit/s — because its heartbeat counted only `PONG`s, which wait behind that message; the
+  resubscribe then resent the same snapshot, which never finished. The client now opens `/ws` with
+  `tg_chunks=1`; on such a connection the server sends a message longer than 64 KiB as `CHUNK`
+  messages that the client reassembles (`TG-WS-002`), and the heartbeat counts every inbound message
+  and expires only while a `PING` is outstanding (`TG-WS-003`). Shown against a real server through
+  a bandwidth-capped proxy, with the client in Node: a ~4.1 MB live snapshot at 1 Mbit/s and a
+  ~512 KiB one at 0.4 Mbit/s with no reconnect, and in the recorded evidence ~4.1 MB at 0.3 and
+  3.5 Mbit/s. A dead link is still detected within about 20 s of the last message (measured
+  19.8–19.9 s, idle and in the middle of a transfer). Other reconnects during a long transfer are not
+  ruled out: a subscription receiving more than a few live events per second can still be
+  disconnected by a full outbound queue (`TG-LIVE-003`). Older clients, clients that do not send
+  the pair and cluster-mode clients get whole messages as before.
 - **Fixed (server): large answers reach the client.** An outbound WebSocket message larger than
   512 KB — a query, search or sync answer, or a live snapshot — closed the connection instead of
   reaching the client, and the client reconnected into the same failure. Such messages are now sent

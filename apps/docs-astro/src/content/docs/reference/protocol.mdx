@@ -66,6 +66,21 @@ export const opBatchCode = `{
   }
 }`;
 
+export const chunkCode = `// One CHUNK message (binary MsgPack frame), keys in this order:
+{
+  "type": "CHUNK",
+  "last": false,        // true only on the final CHUNK of the sequence
+  "data": <bin>         // the next at most 65 536 bytes of the original message
+}
+
+// A 150 000-byte message on a connection opened with /ws?tg_chunks=1:
+// CHUNK { last: false, data: bytes 0..65 536 }
+// CHUNK { last: false, data: bytes 65 536..131 072 }
+// CHUNK { last: true,  data: bytes 131 072..150 000 }
+// Concatenating the data gives the original MsgPack message, which is then
+// decoded and handled as if it had arrived whole.
+`;
+
 export const batchCode = `// BATCH wire layout (binary MsgPack frame):
 //
 // ┌──────────────────────────────────────────────┐
@@ -317,7 +332,7 @@ The `BATCH` message type carries multiple inner messages in a single binary fram
     <div className="absolute -left-[9px] top-1 w-4 h-4 rounded-full bg-brand-subtle ring-4 ring-background" />
     <h3 className="font-semibold text-foreground mb-1">1. WebSocket Connect</h3>
     <p className="text-sm text-neutral-600 dark:text-neutral-300">
-      Client opens a WebSocket connection to <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">/ws</code>. Server immediately sends <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">AUTH_REQUIRED</code> as a binary MsgPack frame.
+      Client opens a WebSocket connection to <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">/ws</code>. The TypeScript client opens <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">/ws?tg_chunks=1</code>, its opt-in to <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">CHUNK</code> delivery of large messages (see below); a server that predates it ignores the query. Server immediately sends <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">AUTH_REQUIRED</code> as a binary MsgPack frame.
     </p>
   </div>
   <div className="pl-8 relative">
@@ -342,6 +357,20 @@ The `BATCH` message type carries multiple inner messages in a single binary fram
     </p>
   </div>
 </div>
+
+## Large messages (`CHUNK`)
+
+A client opts in by adding the query pair `tg_chunks=1` to the `/ws` URL; the server fixes the connection's framing when the socket opens. On such a connection, a server message longer than 65 536 bytes (`outbound_chunk_len`) is sent as consecutive `CHUNK` messages, each its own WebSocket message. `CHUNK` `i` carries bytes `[i·65 536, min((i+1)·65 536, n))` of the original MsgPack message of `n` bytes, so none is empty, and only the final one has `last: true`. No other message comes between the `CHUNK`s of one message, so delivery order is unchanged. A message of at most 65 536 bytes goes out whole, exactly as without the pair.
+
+<div className="not-prose">
+  <CodeBlock title="CHUNK" language="json" code={chunkCode} />
+</div>
+
+The receiver concatenates the `data` of one sequence and decodes the result as one message. The TypeScript client treats a malformed `CHUNK`, another message inside a sequence, a sequence above 1 GiB, or a reassembled message that does not decode as a protocol violation and reconnects, so the message is recovered by resync. Clients that do not send the pair, such as a raw WebSocket client or the cluster-mode client, receive every message whole.
+
+## Heartbeat
+
+The TypeScript client sends `PING` every 5 s (`heartbeat.intervalMs`) and the server answers `PONG`. Every inbound WebSocket message counts as liveness, not only `PONG`: a `PONG` waits in the server's single outbound queue behind whatever was queued before it, and on a slow link a large response, sent as `CHUNK`s, keeps the connection alive while it arrives. The client reconnects only while a `PING` is outstanding and more than 15 s (`heartbeat.timeoutMs`) has passed since the last inbound message, so a dead link is detected at most about 20 s (`timeoutMs + intervalMs`) after the last message. The server closes an authenticated connection whose last `PING` is older than 60 s (`idle_timeout`).
 
 ## Message Types
 
@@ -635,7 +664,7 @@ See the <a href="/docs/guides/write-concern" className="text-brand hover:underli
 
 ### Full Message Type Reference
 
-The Rust `Message` enum defines 77 message types across 7 domains. The most common types are documented above. The complete list of `type` discriminants:
+The Rust `Message` enum defines 77 message types across 7 domains. The most common types are documented above. The complete list of `type` discriminants, followed by `CHUNK`, which the connection writer builds and which is not a `Message` variant:
 
 <div className="overflow-x-auto not-prose mb-6">
   <table className="w-full text-sm">
@@ -670,9 +699,13 @@ The Rust `Message` enum defines 77 message types across 7 domains. The most comm
         <td className="py-2 px-3 font-semibold text-neutral-600 dark:text-neutral-300">Cluster</td>
         <td className="py-2 px-3 font-mono text-xs text-neutral-600 dark:text-neutral-300">PARTITION_MAP_REQUEST, PARTITION_MAP, CLUSTER_SUB_REGISTER, CLUSTER_SUB_ACK, CLUSTER_SUB_UPDATE, CLUSTER_SUB_UNREGISTER, CLUSTER_SEARCH_REQ, CLUSTER_SEARCH_RESP, CLUSTER_SEARCH_SUBSCRIBE, CLUSTER_SEARCH_UNSUBSCRIBE, CLUSTER_SEARCH_UPDATE</td>
       </tr>
-      <tr>
+      <tr className="border-b border-card-border">
         <td className="py-2 px-3 font-semibold text-neutral-600 dark:text-neutral-300">Events</td>
         <td className="py-2 px-3 font-mono text-xs text-neutral-600 dark:text-neutral-300">SERVER_EVENT, SERVER_BATCH_EVENT, GC_PRUNE, ERROR, SYNC_RESET_REQUIRED</td>
+      </tr>
+      <tr>
+        <td className="py-2 px-3 font-semibold text-neutral-600 dark:text-neutral-300">Framing</td>
+        <td className="py-2 px-3 font-mono text-xs text-neutral-600 dark:text-neutral-300">CHUNK (server to client, only on connections opened with tg_chunks=1)</td>
       </tr>
     </tbody>
   </table>

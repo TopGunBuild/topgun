@@ -36,6 +36,7 @@ pub struct ConnectionConfig {
     pub idle_timeout: Duration,            // default 60s
     pub ws_write_buffer_size: usize,       // default 128 KB — per-connection write buffer
     pub ws_max_write_buffer_size: usize,   // default 512 KB — its ceiling; also bounds outbound frames
+    pub outbound_chunk_len: usize,         // default 64 KiB — CHUNK size for clients that opt in
 }
 
 pub struct NetworkConfig {
@@ -188,6 +189,7 @@ Deeper configuration is controlled via Rust struct fields, not env vars. To chan
 | `idle_timeout` | 60s | Decrease to reclaim idle connections; increase if frequent reconnects |
 | `ws_write_buffer_size` | 128 KB | The per-connection write buffer: once it holds more than this, it is written out to the socket. Messages of any size are delivered; this does not limit them. Raising it shortens the outbound fragment (`ws_max_write_buffer_size − ws_write_buffer_size − 10` bytes), and it must stay below `ws_max_write_buffer_size` |
 | `ws_max_write_buffer_size` | 512 KB | The most a connection's write buffer may hold, and so its memory. An outbound message larger than `ws_max_write_buffer_size − ws_write_buffer_size − 10` bytes (393 206 at the defaults) is sent as WebSocket continuation frames of at most that size; raising this only makes the frames larger |
+| `outbound_chunk_len` | 64 KiB | On a connection opened with `tg_chunks=1` (the TypeScript client's single-server connection), a message longer than this is sent as `CHUNK` messages of at most this many bytes, so a client on a slow link sees one complete every 64 KiB and its heartbeat does not reconnect while a large response arrives. Capped at `ws_max_write_buffer_size − ws_write_buffer_size − 42`; below a 33-byte frame budget no connection is chunked. Not read from the environment |
 
 ### NetworkConfig fields
 

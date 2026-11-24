@@ -185,6 +185,20 @@ pub struct ConnectionConfig {
     /// ops acceptable instantaneously after an idle period). Defaults to 40 000
     /// (2× the sustained rate).
     pub data_plane_ops_burst: u32,
+    /// Longest `CHUNK` payload, in bytes, on a connection that opted in to
+    /// chunked delivery with `tg_chunks=1` (`TG-WS-002`). There, a dequeued
+    /// message longer than the effective length is sent as consecutive `CHUNK`
+    /// messages, so a client on a slow link sees a message complete every
+    /// effective-length bytes and its heartbeat counts each one as liveness
+    /// (`TG-WS-003`); a shorter message goes out whole, as on any connection.
+    ///
+    /// The effective length is fixed once per connection: this value raised to
+    /// at least 1 and capped at
+    /// [`outbound_fragment_len`](Self::outbound_fragment_len) − 32, so a
+    /// `CHUNK`'s header (at most 32 bytes) and its data fit one frame budget.
+    /// When `outbound_fragment_len` is below 33 no `CHUNK` fits, and every
+    /// connection uses whole messages. Not read from the environment.
+    pub outbound_chunk_len: usize,
 }
 
 impl Default for ConnectionConfig {
@@ -201,6 +215,7 @@ impl Default for ConnectionConfig {
             slow_consumer_drop_threshold: 256,    // == default outbound capacity
             data_plane_max_ops_per_sec: 20_000,   // generous; bounds a flooding peer
             data_plane_ops_burst: 40_000,         // 2× sustained
+            outbound_chunk_len: 65_536,           // 1.75 s per CHUNK at 0.3 Mbit/s
         }
     }
 }
@@ -267,6 +282,8 @@ mod tests {
         assert_eq!(config.data_plane_max_ops_per_sec, 20_000);
         assert_eq!(config.data_plane_ops_burst, 40_000);
         assert_eq!(config.outbound_fragment_len(), 393_206);
+        assert_eq!(config.outbound_chunk_len, 65_536);
+        assert!(config.outbound_chunk_len + 32 <= config.outbound_fragment_len());
         assert!(
             config.outbound_fragment_len() + 10 + config.ws_write_buffer_size
                 <= config.ws_max_write_buffer_size

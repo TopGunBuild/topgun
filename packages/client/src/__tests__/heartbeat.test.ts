@@ -2,6 +2,7 @@ import { SyncEngine, SyncEngineConfig } from '../SyncEngine';
 import { IStorageAdapter } from '../IStorageAdapter';
 import { serialize, deserialize } from '@topgunbuild/core';
 import { SingleServerProvider } from '../connection/SingleServerProvider';
+import { heartbeatExpired } from '../sync/WebSocketManager';
 
 // --- Mock WebSocket ---
 class MockWebSocket {
@@ -373,6 +374,169 @@ describe('Heartbeat', () => {
       // At this point, the connection should be closed and isOnline should be false
       // due to the heartbeat timeout
       expect(syncEngine.isConnectionHealthy()).toBe(false);
+    });
+  });
+
+  // TG-WS-003: any inbound message is liveness, and the heartbeat expires only
+  // while a PING is outstanding and more than timeoutMs has passed since the
+  // last inbound message.
+  describe('Liveness (TG-WS-003)', () => {
+    const INTERVAL = 5000;
+    const TIMEOUT = 15000;
+    let syncEngine: SyncEngine;
+    let provider: SingleServerProvider;
+    let forceReconnect: jest.SpyInstance;
+    let config: SyncEngineConfig;
+
+    beforeEach(() => {
+      jest.useFakeTimers();
+      MockWebSocket.reset();
+      uuidCounter = 0;
+      provider = new SingleServerProvider({ url: 'ws://localhost:8080' });
+      forceReconnect = jest.spyOn(provider, 'forceReconnect');
+      config = {
+        nodeId: 'test-node',
+        connectionProvider: provider,
+        storageAdapter: createMockStorageAdapter(),
+        reconnectInterval: 1000,
+        heartbeat: { intervalMs: INTERVAL, timeoutMs: TIMEOUT, enabled: true },
+      };
+    });
+
+    afterEach(() => {
+      syncEngine?.close();
+      jest.restoreAllMocks();
+      jest.useRealTimers();
+    });
+
+    /** Moves the clock by `ms` without firing timers, so the next tick comes that much later. */
+    function suspend(ms: number): void {
+      jest.setSystemTime(Date.now() + ms);
+    }
+
+    describe('T1: predicate boundaries', () => {
+      it('expires only past timeoutMs, and never without an outstanding PING', () => {
+        expect(heartbeatExpired(15000, 0, true, TIMEOUT)).toBe(false);
+        expect(heartbeatExpired(15001, 0, true, TIMEOUT)).toBe(true);
+        expect(heartbeatExpired(15001, 0, false, TIMEOUT)).toBe(false);
+        expect(heartbeatExpired(1e12, 0, false, TIMEOUT)).toBe(false);
+      });
+
+      it('reads healthy at exactly timeoutMs since the last inbound message', async () => {
+        ({ syncEngine } = await setupAuthenticatedEngine(config));
+        await jest.advanceTimersByTimeAsync(TIMEOUT);
+        expect(forceReconnect).not.toHaveBeenCalled();
+        expect(syncEngine.isConnectionHealthy()).toBe(true);
+        await jest.advanceTimersByTimeAsync(1);
+        expect(syncEngine.isConnectionHealthy()).toBe(false);
+      });
+
+      it('a message and then a tick in the same millisecond leave the PING outstanding', async () => {
+        let ws: MockWebSocket;
+        ({ syncEngine, ws } = await setupAuthenticatedEngine(config));
+        await jest.advanceTimersByTimeAsync(INTERVAL - 1);
+        const due = Date.now() + 1;
+
+        // Message and tick share one Date.now(): the message first, then the tick.
+        const now = jest.spyOn(Date, 'now').mockReturnValue(due);
+        ws.simulateMessage({ type: 'QUERY_UPDATE', payload: {} });
+        await jest.advanceTimersByTimeAsync(1);
+        now.mockRestore();
+        expect(ws.sentMessages.filter((m) => m.type === 'PING')).toHaveLength(1);
+        expect(forceReconnect).not.toHaveBeenCalled();
+
+        // Silence, and the next tick 60 s after the message.
+        suspend(60_000 - INTERVAL);
+        await jest.advanceTimersByTimeAsync(INTERVAL);
+        expect(forceReconnect).toHaveBeenCalledTimes(1);
+      });
+
+      it('a tick and then a message in the same millisecond clear the PING', async () => {
+        let ws: MockWebSocket;
+        ({ syncEngine, ws } = await setupAuthenticatedEngine(config));
+        await jest.advanceTimersByTimeAsync(INTERVAL);
+        expect(ws.sentMessages.filter((m) => m.type === 'PING')).toHaveLength(1);
+        ws.simulateMessage({ type: 'QUERY_UPDATE', payload: {} });
+
+        // The late tick only pings: nothing was outstanding.
+        suspend(60_000 - INTERVAL);
+        await jest.advanceTimersByTimeAsync(INTERVAL);
+        expect(forceReconnect).not.toHaveBeenCalled();
+
+        // Its own PING goes unanswered, so the tick after it reconnects.
+        await jest.advanceTimersByTimeAsync(INTERVAL);
+        expect(forceReconnect).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('T2: throttled ticks', () => {
+      it('does not reconnect at a late tick when the last PING was answered', async () => {
+        let ws: MockWebSocket;
+        ({ syncEngine, ws } = await setupAuthenticatedEngine(config));
+        await jest.advanceTimersByTimeAsync(INTERVAL);
+        const ping = ws.sentMessages.find((m) => m.type === 'PING');
+        expect(ping).toBeDefined();
+        await jest.advanceTimersByTimeAsync(50);
+        ws.simulateMessage({ type: 'PONG', timestamp: ping.timestamp, serverTime: Date.now() });
+
+        suspend(60_000 - INTERVAL);
+        await jest.advanceTimersByTimeAsync(INTERVAL);
+        expect(forceReconnect).not.toHaveBeenCalled();
+        expect(ws.sentMessages.filter((m) => m.type === 'PING')).toHaveLength(2);
+      });
+
+      it('reconnects at the late tick when the last PING was not answered', async () => {
+        ({ syncEngine } = await setupAuthenticatedEngine(config));
+        await jest.advanceTimersByTimeAsync(INTERVAL);
+
+        suspend(60_000 - INTERVAL);
+        await jest.advanceTimersByTimeAsync(INTERVAL);
+        expect(forceReconnect).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('T3: a stream of CHUNKs with no PONG', () => {
+      it('keeps the connection for 60 s, then reconnects at the first tick more than timeoutMs after the last message', async () => {
+        let ws: MockWebSocket;
+        ({ syncEngine, ws } = await setupAuthenticatedEngine(config));
+        const inner = serialize({ type: 'QUERY_UPDATE', payload: { pad: 'x'.repeat(600) } });
+        const parts = 30;
+        const size = Math.ceil(inner.length / parts);
+
+        for (let i = 0; i < parts; i++) {
+          await jest.advanceTimersByTimeAsync(2000);
+          ws.simulateMessage({
+            type: 'CHUNK',
+            last: i === parts - 1,
+            data: inner.slice(i * size, (i + 1) * size),
+          });
+        }
+        expect(forceReconnect).not.toHaveBeenCalled();
+
+        // The last message came at 60 s, together with a tick that ran before it.
+        // Ticks follow at 65, 70, 75 (exactly 15 s: not yet) and 80 s.
+        await jest.advanceTimersByTimeAsync(TIMEOUT + INTERVAL - 1);
+        expect(forceReconnect).not.toHaveBeenCalled();
+        await jest.advanceTimersByTimeAsync(1);
+        expect(forceReconnect).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('T9: a socket that can no longer send', () => {
+      it('still expires: every tick leaves a PING outstanding, sent or not', async () => {
+        let ws: MockWebSocket;
+        ({ syncEngine, ws } = await setupAuthenticatedEngine(config));
+        ws.sentMessages = [];
+        // CLOSING with a stalled closing handshake: not OPEN, and no close event.
+        ws.readyState = 2;
+        expect(provider.isConnected()).toBe(false);
+
+        await jest.advanceTimersByTimeAsync(TIMEOUT + INTERVAL - 1);
+        expect(forceReconnect).not.toHaveBeenCalled();
+        await jest.advanceTimersByTimeAsync(1);
+        expect(forceReconnect).toHaveBeenCalledTimes(1);
+        expect(ws.sentMessages.filter((m) => m.type === 'PING')).toHaveLength(0);
+      });
     });
   });
 });

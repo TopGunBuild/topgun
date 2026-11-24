@@ -3302,7 +3302,9 @@ export class SyncEngine {
 
   /**
    * Returns the last measured round-trip time in milliseconds.
-   * Returns null if no PONG has been received yet.
+   * Returns null if no PONG has been received yet. While a PONG waits behind a
+   * long transfer in the server's queue, this reads that transfer time rather
+   * than the link's round trip.
    */
   public getLastRoundTripTime(): number | null {
     return this.webSocketManager.getLastRoundTripTime();
@@ -3310,8 +3312,12 @@ export class SyncEngine {
 
   /**
    * Returns true if the connection is considered healthy based on heartbeat.
-   * A connection is healthy if it's online, authenticated, and has received
-   * a PONG within the timeout window.
+   * A connection is healthy if it's online, authenticated, and its heartbeat has
+   * not expired (TG-WS-003): expiry needs a PING outstanding and strictly more
+   * than the timeout since the last inbound message of any type, not only a
+   * PONG. So exactly the timeout still reads healthy, and with no PING
+   * outstanding (the last one was answered, e.g. a backgrounded tab whose timer
+   * has not ticked since) the connection reads healthy at any age.
    */
   public isConnectionHealthy(): boolean {
     return this.webSocketManager.isConnectionHealthy();
