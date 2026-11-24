@@ -3467,6 +3467,9 @@ weaker than a test.
   - A map clear or reset reaching live subscribers (TODO-1003). A live `QUERY_UPDATE` is not
     dropped silently: an update lost on a full outbound queue disconnects the connection
     (`TG-LIVE-003`); the subscription ends and the client's resubscribe is a new one.
+  - The client delivery order on a chunk-capable connection: `QUERY_UPDATE`s may reach the client
+    before their snapshot; the `QueryManager` hold applies them after it, and frames of a
+    superseded `QUERY_SUB` send are ignored by their wire id (`TG-WS-004`).
   - The order of `SERVER_EVENT` relative to `QUERY_RESP` (TODO-995); the subscriber-path throughput (TODO-996); clients
     older than error routing (TODO-997); window membership after the subscriber's own writes on
     the live path (TODO-999).
@@ -5038,7 +5041,7 @@ weaker than a test.
 - **Discovered by:** TODO-908 (TODO-906 research).
 - **Status:** decided, **enforced**.
 
-### TG-WS-001: An outbound message a client connection's writer dequeues reaches the client whole and in queue order, whatever its size; no frame exceeds the connection's write buffer
+### TG-WS-001: An outbound message a client connection's writer dequeues reaches the client whole and, except as `TG-WS-004` allows on a chunk-capable connection, in queue order, whatever its size; no frame exceeds the connection's write buffer
 
 - **Scope:** `outbound_task` for client WebSocket connections (`network/handlers/websocket.rs`).
 - **Statement:**
@@ -5050,10 +5053,12 @@ weaker than a test.
     one is a `Binary` frame without `fin`, `Continue` frames, and a last `Continue` frame with
     `fin` (RFC 6455 §5.4). Since a frame and its header always fit the write buffer, the transport
     never refuses one.
-  - (b) the frames of one message are written consecutively, each with `send`, before the next
-    message is dequeued, so wire order equals queue order (the order TG-LIVE-001(a) states at
-    enqueue). Control frames tungstenite sends by itself (a Pong, a Close reply) may come between
-    two frames of a message, which RFC 6455 allows.
+  - (b) the frames of one message are written consecutively, so on a connection without the chunk
+    capability wire order equals queue order (the order TG-LIVE-001(a) states at enqueue). On a
+    chunk-capable connection it holds for every pair `TG-WS-004` does not except: a message of at
+    most `C` bytes may be written between the `CHUNK`s of an earlier passable message. Control
+    frames tungstenite sends by itself (a Pong, a Close reply) may come between two frames of a
+    message, which RFC 6455 allows.
   - (c) the writer never ends a connection because of a message's size. It still ends on a send
     error (a closed or broken socket) and on `OutboundMessage::Close`.
 - **Not claimed:**
@@ -5084,7 +5089,7 @@ weaker than a test.
 - **Discovered by:** TODO-1031 (SPEC-423 run).
 - **Status:** decided, **enforced**.
 
-### TG-WS-002: On a client connection opened with `tg_chunks=1`, a dequeued message longer than `outbound_chunk_len` reaches the client as consecutive `CHUNK` messages whose `data` concatenates to it, in queue order
+### TG-WS-002: On a client connection opened with `tg_chunks=1`, a dequeued message longer than `outbound_chunk_len` reaches the client as `CHUNK` messages whose `data` concatenates to it, its `CHUNK`s in order and, except as `TG-WS-004` allows, consecutive and in queue order
 
 - **Scope:** `chunk_capability`, `OutboundFraming::new`, `outbound_frames`, `chunk_frames`,
   `outbound_task` (`network/handlers/websocket.rs`); `ConnectionConfig::outbound_chunk_len`
@@ -5098,29 +5103,33 @@ weaker than a test.
   - (b) the effective chunk length `C` is `min(max(outbound_chunk_len, 1), outbound_fragment_len() − 32)`
     (65 536 at the defaults); when `outbound_fragment_len() < 33` no connection is chunk-capable.
   - (c) on a chunk-capable connection a dequeued `OutboundMessage::Binary` of `n ≤ C` bytes is sent
-    exactly as under `TG-WS-001`; one of `n > C` bytes is sent as `k = ⌈n / C⌉` consecutive `CHUNK`
-    messages, the MsgPack map `{"type": "CHUNK", "last": bool, "data": bin}` with keys in that
+    exactly as under `TG-WS-001`; one of `n > C` bytes is sent as `k = ⌈n / C⌉` `CHUNK` messages,
+    in order; they are consecutive except that, for a passable message, messages of at most `C`
+    bytes may be written between them (`TG-WS-004`). A `CHUNK` is the MsgPack map `{"type": "CHUNK", "last": bool, "data": bin}` with keys in that
     order, `CHUNK` `i` carrying bytes `[i·C, min((i+1)·C, n))`, none empty, `last = true` only on
     the final one. Each `CHUNK` is two frames: a `Binary` header frame without `fin` and a
     `Continue` frame with `fin` whose payload is a zero-copy view of the message buffer; one flush
     per `CHUNK`.
   - (d) every `CHUNK` of a message is written before the next queued message, a queued
-    `OutboundMessage::Close` included; tungstenite's own control frames may come between frames,
-    as in `TG-WS-001`(b).
+    `OutboundMessage::Close` included, except that on a chunk-capable connection messages of at
+    most `C` bytes may be written between the `CHUNK`s of a passable message (`TG-WS-004`);
+    tungstenite's own control frames may come between frames, as in `TG-WS-001`(b).
   - (e) the TS client (`SingleServerProvider`) opens its socket with `tg_chunks=1` added to the
     configured URL as text (every other byte kept, never twice; `getUrl()` unchanged), and
-    `WebSocketManager` reassembles a sequence before routing; no `CHUNK` is routed. A malformed
-    `CHUNK`, another message inside a sequence, a sequence above `MAX_REASSEMBLY_BYTES` (2^30
-    bytes) and a reassembled message that does not decode each discard the sequence and force a
-    reconnect, so the message is recovered by resync, never silently dropped. The buffers are
-    cleared on the provider's `connected` and on its `disconnected`, each on its own.
+    `WebSocketManager` reassembles a sequence before routing; no `CHUNK` is routed. A whole message
+    that arrives inside a sequence is routed at once and the sequence goes on (`TG-WS-004`). A
+    malformed `CHUNK`, a sequence above `MAX_REASSEMBLY_BYTES` (2^30 bytes) and a reassembled
+    message that does not decode each discard the sequence and force a reconnect, so the message
+    is recovered by resync, never silently dropped. No guard is lost by routing a message inside a
+    sequence: WebSocket over TCP delivers frames reliably, in order and once, so a lost or doubled
+    `CHUNK` can only be a server bug, and every message the writer chunks reassembles byte for
+    byte (S2, S3 of `TG-WS-004`). The buffers are cleared on the provider's `connected` and on its
+    `disconnected`, each on its own.
 - **Not claimed:**
   - clients that do not send the pair (raw `ws`, custom providers, `ConnectionPool`): they get the
     `TG-WS-001` framing;
   - servers built before this change: they ignore the query, and the client gets whole messages;
-  - overtaking: a message queued behind a chunked one (an ack, a live event, a `queryOnce` answer)
-    waits for its last `CHUNK`, up to ~117 s for 4.4 MB at 0.3 Mbit/s, so `queryOnce`'s 5 s
-    default can time out on a healthy connection (TODO-1036);
+  - overtaking: see `TG-WS-004`;
   - client memory during reassembly: up to about twice the message, at most about 2 GiB; a device
     with less memory can still fail on a legal message below the cap;
   - a message above 1 GiB (possible at default settings with 10 000 rows averaging more than
@@ -5136,11 +5145,13 @@ weaker than a test.
   - compression of large messages (TODO-1037).
 - **Maintaining code:** see Scope.
 - **Enforcing test:** `chunk_capability_needs_the_exact_pair`, `chunk_builder_shapes_at_every_boundary`,
-  `outbound_framing_clamps_the_chunk_length`, `chunked_writer_sends_every_chunk_before_the_next_message`,
-  `chunked_writer_sends_a_queued_close_after_the_last_chunk`, `chunked_writer_answers_ping_between_chunks`,
-  `whole_message_writer_keeps_the_legacy_frames` (inline in `websocket.rs`);
+  `outbound_framing_clamps_the_chunk_length`, `whole_message_writer_keeps_the_legacy_frames`;
+  for (c)–(d) on ordered messages `chunked_writer_sends_every_chunk_before_the_next_message`,
+  `chunked_writer_sends_a_queued_close_after_the_last_chunk`,
+  `chunked_writer_answers_ping_between_chunks`, `nothing_passes_an_ordered_message` and
+  `an_ordered_message_waits_for_the_answer_and_holds_what_follows` (inline in `websocket.rs`);
   `connection_config_defaults` (`config.rs`); on the client,
-  `packages/client/src/__tests__/ChunkReassembly.test.ts` (T5–T7, T10, T11) and the "chunk opt-in
+  `packages/client/src/__tests__/ChunkReassembly.test.ts` (T5, T6, T7', T7'', T10, T11) and the "chunk opt-in
   on the opened URL" cases of `packages/client/src/__tests__/SingleServerProviderReconnect.test.ts`.
 - **Integration tests:** `tests/integration-rust/slow-link-heartbeat.test.ts` A and B (a ~4.1 MB
   live snapshot at 1 Mbit/s and a ~512 KiB one at 0.4 Mbit/s reach a `TopGunClient` in another
@@ -5172,10 +5183,10 @@ weaker than a test.
   - links on which a single `CHUNK` (64 KiB + header) or a single message ≤ `C` takes longer than
     `timeoutMs`: by arithmetic below about 35 kbit/s, not measured; the measured floor is
     0.3 Mbit/s;
-  - reconnects not caused by the heartbeat: during a long transfer more than ~7 live events/s for
-    the subscription at 1 Mbit/s (~2/s at 0.3 Mbit/s) fill the ~250 free queue slots, the
-    `TG-LIVE-003` owed-loss disconnect fires, and the resubscribe resends the snapshot — the same
-    livelock with another trigger (TODO-1036);
+  - reconnects not caused by the heartbeat: the `TG-LIVE-003` owed-loss disconnect still fires
+    when live traffic exceeds the link's rate, and while an ordered large message (a large live
+    event, a sync response) is sent, since nothing passes it (`TG-WS-004`); a query or search
+    answer no longer holds live events behind it;
   - an asymmetric failure (client→server dead, server→client delivering): the client stays
     connected while messages arrive, and the server's reaper closes the connection within
     `idle_timeout + reaper_interval` (70 s at defaults);
@@ -5200,4 +5211,117 @@ weaker than a test.
 - **Violation consequence:** a slow but live link reconnects while a long message arrives and the
   resubscribe resends it (livelock), or a dead link is never detected.
 - **Discovered by:** TODO-1033.
+- **Status:** decided, **enforced**.
+
+### TG-WS-004: On a chunk-capable connection, a message queued after another reaches the client first only when the earlier one is a passable answer (`QUERY_RESP`, `SEARCH_RESP`, `HYBRID_SEARCH_RESP`) longer than `C` and the later one is at most `C` bytes; the TS client applies a live query's updates and its overflow answer after that query's snapshot, and ignores every frame of a superseded send
+
+- **Scope:** `passable`, `PASSABLE_TYPES`, `outbound_task`, `interleaving_writer`,
+  `MAX_WAITING_LARGE`, `CLIENT_NOTSENT_LOWAT`, `tune_client_socket`
+  (`network/handlers/websocket.rs`) and its call sites (`bin/topgun_server.rs`, `network/module.rs`
+  `serve_plain`); `WebSocketManager.receive`; `QueryManager`'s wire ids and hold
+  (`packages/client/src/sync/QueryManager.ts`); the existing `SearchHandle` / `HybridSearchHandle`
+  pre-response holds.
+- **Statement:**
+  - (a) *Passable.* A message is passable iff its bytes start with a MsgPack map header, then
+    `0xa4 "type"`, then a fixstr equal to `QUERY_RESP`, `SEARCH_RESP` or `HYBRID_SEARCH_RESP`.
+    Anything else, a truncated or differently encoded prefix included, is ordered. The writer
+    reads at most these bytes, and only of a dequeued message longer than `C`.
+  - (b) *Writer.* With no passable message in flight the writer behaves as under `TG-WS-002`. A
+    passable message longer than `C` is sent one `CHUNK` at a time; after each `CHUNK` the writer
+    takes at most the messages that were ready at that moment (`rx.len()`): a message of at most
+    `C` bytes is written whole at once, a passable one waits, an ordered one longer than `C` waits
+    and stops dequeuing, and a `Close` is remembered and stops dequeuing. At most
+    `MAX_WAITING_LARGE` = 8 messages wait; when 8 wait, dequeuing stops. Waiting messages are sent
+    in queue order once the one in flight completes, an ordered one with nothing between its
+    `CHUNK`s. A remembered `Close` is written after the message in flight and every waiting one.
+    While a message is in flight the writer awaits only the socket, never the queue.
+  - (c) *Order.* For messages `a` queued before `b`, `b`'s last frame is written before `a`'s only
+    if `a` is passable, longer than `C`, and `b` is at most `C` bytes. Messages of at most `C`
+    bytes keep queue order among themselves, passable messages keep queue order among
+    themselves, and nothing passes an ordered message or a `Close`. Connections without the
+    capability run the `TG-WS-001` writer unchanged.
+  - (d) *Client.* `WebSocketManager` routes a whole message that arrives inside a `CHUNK`
+    sequence at once and keeps the sequence. Every `QUERY_SUB` a `QueryManager` sends carries a
+    new wire id (a UUID; `QueryHandle.id` is never sent); `QUERY_UNSUB` and `QUERY_SYNC_INIT`
+    carry the current one, and a second subscribe without an unsubscribe first unsubscribes the
+    earlier send. `QUERY_RESP` and `QUERY_UPDATE` are routed only to the handle whose current wire
+    id they carry, so every frame of a superseded or unknown send is ignored. From a live
+    handle's send until that send's first `QUERY_RESP`, its `QUERY_UPDATE`s are held, and a
+    `QUERY_SNAPSHOT_OVERFLOW` answer that arrives first is held too; both are applied, in
+    arrival order, right after that `QUERY_RESP`. The overflow resubscribe therefore starts only
+    after the old snapshot arrived.
+  - (e) *Kernel bytes.* On Linux every accepted client socket gets `TCP_NOTSENT_LOWAT` =
+    `CLIENT_NOTSENT_LOWAT` (16 384 bytes), so the server's socket holds at most that plus one
+    send's segment of unsent bytes ahead of a small message. A failed `setsockopt` logs one `WARN`
+    per process and the connection is served as before.
+  - Arguments (stated, not tested separately): an `OP_ACK` passing a snapshot changes no row, since
+    it carries no data and rows come only from `QUERY_RESP` / `QUERY_UPDATE`; a small `SYNC_RESP_*`
+    passing a large `QUERY_RESP` is safe, since a `QUERY_RESP` does not touch a map's apply
+    coverage; a small `SERVER_EVENT` never passes a large sync response, because sync responses
+    are ordered; a large live event keeps its place, so a later write of the same key never
+    completes before it (`TG-LIVE-001`(b)).
+- **Bounds:**
+  - server memory per connection: at most 256 queued + 1 in flight + 8 waiting messages;
+  - a small message waits at the writer for at most the rest of one `CHUNK` plus the small
+    messages queued before it; on Linux the server's socket holds at most `L` + one segment of
+    unsent bytes ahead of it;
+  - a passable answer advances one `CHUNK` per gap; a gap writes at most the messages ready at its
+    start (at most 256);
+  - a `Close` queued during a transfer is written after the rest of the message in flight and the
+    waiting ones; where the handler awaits the writer, that wait is still capped at 2 s.
+- **Not claimed:**
+  - buffering below the server's socket (reverse proxies, the network's bottleneck queue, the
+    client's receive buffer), and on platforms other than Linux the server's send buffer too:
+    `TCP_NOTSENT_LOWAT` is set only on Linux (on macOS neither socket2 0.6.2 nor libc 0.2.182
+    exposes it);
+  - end-to-end order on macOS: the writer's order (c) holds there too, but the server's send
+    buffer and the receiving side's buffers are auto-tuned up to 4 MiB and can hold most or all of
+    an answer, so a passed message can still reach the client after it (in 1 of 4 runs of R8 G on
+    a Mac, a write 8 s into a ~4.1 MB transfer arrived after the whole answer); the end-to-end
+    predicates are asserted on Linux only;
+  - `NetworkModule`'s TLS serving path (`serve_tls`, through `axum_server`), which the binary does
+    not use;
+  - `queryOnce`'s 5 s default at 0.3 Mbit/s through the test proxy, whose derived bound is ~10.1 s;
+  - an ordered large message (a large live event, a sync response, a topic or journal push) still
+    holds every message behind it, so a large sync response during a reconnect on a slow link can
+    still trigger the owed-loss livelock (TODO-1038: passable sync responses need an
+    apply-coverage ordering argument first);
+  - 9 or more large answers queued at once: dequeuing stops until one completes;
+  - clients that do not send `tg_chunks=1`, cluster-mode clients (TODO-1035), and HTTP `/sync`;
+  - a client built from main between `677fe8b7` and this change: it treats the first passing
+    message as a protocol violation and reconnects;
+  - live traffic above the link's rate: still disconnected by `TG-LIVE-003`, by design;
+  - an answer's transfer time while small messages take a large share of the link: it grows by
+    `1 / (1 − f)` for a sustained share `f`, and to one `CHUNK` per 256 small messages when the
+    queue is kept full;
+  - a `loadMore` page that arrives during a resubscribe's hold is applied at once (its rows are
+    replaced by the new snapshot, as without the hold);
+  - compression (TODO-1037).
+- **Maintaining code:** see Scope.
+- **Enforcing test:** inline in `websocket.rs`: `passable_is_true_only_for_the_three_answer_types`
+  (S1); `small_messages_pass_an_answer_between_its_chunks`, `nothing_passes_an_ordered_message`,
+  `an_ordered_message_waits_for_the_answer_and_holds_what_follows`,
+  `answers_are_sent_one_after_another_in_queue_order`,
+  `a_full_waiting_list_stops_dequeuing_until_an_answer_completes`,
+  `a_close_is_written_after_the_answer_and_nothing_after_it`,
+  `small_messages_streamed_during_an_answer_are_all_written_in_order`,
+  `an_answer_completes_against_a_producer_that_awaits_a_slot`,
+  `a_gap_takes_only_the_messages_ready_when_it_began`,
+  `chunked_writer_answers_ping_between_the_chunks_of_an_answer` (S2);
+  `the_writer_keeps_every_order_but_small_after_answer` (S3, a property test);
+  `whole_message_writer_keeps_the_legacy_frames_for_an_answer` (S4);
+  `a_tuned_client_socket_carries_bytes_both_ways` (S5; reads the option on Linux). On the client,
+  `packages/client/src/__tests__/QueryManager.test.ts` "pre-response hold and wire ids
+  (TG-WS-004)" (Q1–Q11) and `ChunkReassembly.test.ts` (T7', T7'').
+- **Integration tests:** `tests/integration-rust/slow-link-overtake.test.ts` E (live writes at 7
+  and 20 writes/s during a ~4.1 MB snapshot at 1 Mbit/s: no disconnect, rows equal a fresh
+  query), F (a `queryOnce` during the transfer settles before it completes), G (a live event of
+  another query arrives during it) and H (a client that stops reading is still disconnected by
+  `TG-LIVE-003`); F's and G's end-to-end order, their latency bound and H are asserted on Linux
+  only, and recorded elsewhere.
+- **Violation consequence:** a live query whose update arrives before its snapshot ends on a stale
+  row; a superseded send's snapshot reverts a live query's rows; a large live event passed by a
+  later write of the same key leaves the older value; or a slow link reconnects through the
+  owed-loss disconnect and resends the snapshot (livelock).
+- **Discovered by:** TODO-1036 (SPEC-428 Audit v1).
 - **Status:** decided, **enforced**.

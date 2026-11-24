@@ -360,13 +360,21 @@ The `BATCH` message type carries multiple inner messages in a single binary fram
 
 ## Large messages (`CHUNK`)
 
-A client opts in by adding the query pair `tg_chunks=1` to the `/ws` URL; the server fixes the connection's framing when the socket opens. On such a connection, a server message longer than 65 536 bytes (`outbound_chunk_len`) is sent as consecutive `CHUNK` messages, each its own WebSocket message. `CHUNK` `i` carries bytes `[i·65 536, min((i+1)·65 536, n))` of the original MsgPack message of `n` bytes, so none is empty, and only the final one has `last: true`. No other message comes between the `CHUNK`s of one message, so delivery order is unchanged. A message of at most 65 536 bytes goes out whole, exactly as without the pair.
+A client opts in by adding the query pair `tg_chunks=1` to the `/ws` URL; the server fixes the connection's framing when the socket opens. On such a connection, a server message longer than 65 536 bytes (`outbound_chunk_len`) is sent as `CHUNK` messages, each its own WebSocket message. `CHUNK` `i` carries bytes `[i·65 536, min((i+1)·65 536, n))` of the original MsgPack message of `n` bytes, so none is empty, and only the final one has `last: true`. A message of at most 65 536 bytes goes out whole, exactly as without the pair.
+
+Small messages may pass a long answer. While the server sends a `QUERY_RESP`, `SEARCH_RESP` or `HYBRID_SEARCH_RESP` as `CHUNK`s, it writes the messages of at most 65 536 bytes that are ready between those `CHUNK`s, so acknowledgements, live events and other answers are not held behind it. Every other order is kept: for two messages `a` queued before `b`, `b` arrives before `a` completes only if `a` is one of those three answers, longer than 65 536 bytes, and `b` is at most 65 536 bytes. Long answers are sent one after another, never mixed, so the `CHUNK`s that arrive always belong to one message; and nothing passes any other long message, such as a large live event or a sync response.
 
 <div className="not-prose">
   <CodeBlock title="CHUNK" language="json" code={chunkCode} />
 </div>
 
-The receiver concatenates the `data` of one sequence and decodes the result as one message. The TypeScript client treats a malformed `CHUNK`, another message inside a sequence, a sequence above 1 GiB, or a reassembled message that does not decode as a protocol violation and reconnects, so the message is recovered by resync. Clients that do not send the pair, such as a raw WebSocket client or the cluster-mode client, receive every message whole.
+The receiver concatenates the `data` of one sequence and decodes the result as one message. A client that sends `tg_chunks=1` must therefore:
+
+- accept other messages between the `CHUNK`s of a sequence, handle them as they arrive, and keep the sequence open;
+- hold the updates of a subscription (`QUERY_UPDATE`, `SEARCH_UPDATE`, `HYBRID_SEARCH_UPDATE`) that arrive before the subscription's answer, and apply them after it;
+- use a new `queryId` for every `QUERY_SUB` it sends on one socket, and ignore frames of an id it no longer uses, because a later small answer can arrive before an earlier large one.
+
+The TypeScript client does all three. It treats a malformed `CHUNK`, a sequence above 1 GiB, or a reassembled message that does not decode as a protocol violation and reconnects, so the message is recovered by resync. Clients that do not send the pair, such as a raw WebSocket client or the cluster-mode client, receive every message whole.
 
 ## Heartbeat
 
