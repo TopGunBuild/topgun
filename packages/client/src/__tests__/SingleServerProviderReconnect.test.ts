@@ -10,7 +10,11 @@
  *   a typed terminal ReconnectExhaustedError instead of failing silently.
  */
 
-import { SingleServerProvider, ReconnectExhaustedError } from '../connection/SingleServerProvider';
+import {
+  SingleServerProvider,
+  ReconnectExhaustedError,
+  chunkCapability,
+} from '../connection/SingleServerProvider';
 
 // --- Controllable mock WebSocket -------------------------------------------
 // mode 'success' → the socket opens shortly after construction.
@@ -272,5 +276,66 @@ describe('SingleServerProvider closed while connecting', () => {
     expect(events).toEqual([]);
     expect(provider.isConnected()).toBe(false);
     expect(MockWebSocket.instances).toHaveLength(1);
+  });
+});
+
+// The opened URL carries the client's chunk opt-in `tg_chunks=1` (TG-WS-002),
+// added as text so every other byte of the configured URL is kept.
+describe('SingleServerProvider chunk opt-in on the opened URL', () => {
+  beforeEach(() => {
+    MockWebSocket.reset();
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    MockWebSocket.reset();
+  });
+
+  async function openedUrl(url: string): Promise<string> {
+    const provider = new SingleServerProvider({ url, listenNetworkEvents: false });
+    await provider.connect();
+    const opened = MockWebSocket.last().url;
+    await provider.close();
+    return opened;
+  }
+
+  it.each([
+    ['ws://h:1/ws', 'ws://h:1/ws?tg_chunks=1'],
+    ['ws://h/ws?token=a%20b~', 'ws://h/ws?token=a%20b~&tg_chunks=1'],
+    ['ws://h/ws?tg_chunks=0&x=1', 'ws://h/ws?tg_chunks=1&x=1'],
+    ['ws://h/ws#f', 'ws://h/ws?tg_chunks=1#f'],
+    ['ws://h/ws?a=1#f?tg_chunks=0', 'ws://h/ws?a=1&tg_chunks=1#f?tg_chunks=0'],
+    ['ws://h/ws?', 'ws://h/ws?tg_chunks=1'],
+  ])('opens %s as %s', async (configured, expected) => {
+    expect(await openedUrl(configured)).toBe(expected);
+  });
+
+  it('never duplicates the pair across reconnects, and getUrl() returns the configured URL', async () => {
+    const provider = new SingleServerProvider({
+      url: 'ws://h:1/ws',
+      reconnectDelayMs: 2,
+      maxReconnectDelayMs: 8,
+      listenNetworkEvents: false,
+    });
+    await provider.connect();
+    for (let i = 0; i < 2; i++) {
+      MockWebSocket.last().serverDrop();
+      await waitUntil(() => MockWebSocket.instances.length === i + 2 && provider.isConnected());
+    }
+
+    expect(MockWebSocket.instances.map((ws) => ws.url)).toEqual([
+      'ws://h:1/ws?tg_chunks=1',
+      'ws://h:1/ws?tg_chunks=1',
+      'ws://h:1/ws?tg_chunks=1',
+    ]);
+    expect(provider.getUrl()).toBe('ws://h:1/ws');
+    await provider.close();
+  });
+
+  it('opens the configured URL unchanged when the rewrite throws', async () => {
+    jest.spyOn(chunkCapability, 'withChunkCapability').mockImplementation(() => {
+      throw new Error('rewrite failed');
+    });
+    expect(await openedUrl('ws://h:1/ws?a=1')).toBe('ws://h:1/ws?a=1');
   });
 });
