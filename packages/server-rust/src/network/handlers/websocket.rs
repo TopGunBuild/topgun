@@ -2032,7 +2032,7 @@ impl Iterator for OutboundFrames {
 ///
 /// `CHUNK` `i` carries bytes `[i·chunk_len, min((i+1)·chunk_len, n))` of the
 /// message, so none is empty, also at an exact multiple, and only the last
-/// has `last = true`. Each `CHUNK` is the MsgPack map
+/// has `last = true`. Each `CHUNK` is the `MsgPack` map
 /// `{"type": "CHUNK", "last": bool, "data": bin}` written as two frames: a
 /// `Binary` frame without `fin` holding everything up to the `data` bytes,
 /// then a `Continue` frame with `fin` whose payload is a zero-copy view of the
@@ -2075,7 +2075,7 @@ impl Iterator for ChunkFrames {
     }
 }
 
-/// The MsgPack bytes of a `CHUNK` up to its `data` bytes, with the smallest
+/// The `MsgPack` bytes of a `CHUNK` up to its `data` bytes, with the smallest
 /// `bin` length header that fits `len`.
 fn chunk_header(last: bool, len: usize) -> Bytes {
     let mut header = Vec::with_capacity(CHUNK_HEADER_MAX);
