@@ -54,6 +54,42 @@ export class ReconnectExhaustedError extends Error {
 }
 
 /**
+ * Adds the `tg_chunks=1` query pair, the client's opt-in to `CHUNK` framing of
+ * large server messages (TG-WS-002), to a WebSocket URL. It works on the text
+ * rather than through `URL`/`searchParams`, which would re-encode the other
+ * pairs (`%20` to `+`, `~` to `%7E`) and could break a gateway that reads its own
+ * parameter: every other byte is kept, the first existing `tg_chunks` pair is
+ * replaced, and the pair is never added twice. A server built before chunking
+ * ignores the query.
+ */
+export function withChunkCapability(url: string): string {
+  const hash = url.indexOf('#');
+  const base = hash === -1 ? url : url.slice(0, hash);
+  const fragment = hash === -1 ? '' : url.slice(hash);
+  const question = base.indexOf('?');
+
+  if (question !== -1) {
+    const pairs = base.slice(question + 1).split('&');
+    const existing = pairs.findIndex(
+      (pair) => pair === 'tg_chunks' || pair.startsWith('tg_chunks='),
+    );
+    if (existing !== -1) {
+      pairs[existing] = 'tg_chunks=1';
+      return `${base.slice(0, question + 1)}${pairs.join('&')}${fragment}`;
+    }
+  }
+
+  const separator = question === -1 ? '?' : base.endsWith('?') || base.endsWith('&') ? '' : '&';
+  return `${base}${separator}tg_chunks=1${fragment}`;
+}
+
+/**
+ * The rewrite `connect()` calls, reached through an object so a test can
+ * replace it (a direct call inside this module cannot be intercepted).
+ */
+export const chunkCapability = { withChunkCapability };
+
+/**
  * SingleServerProvider implements IConnectionProvider for single-server mode.
  *
  * This is an adapter that wraps direct WebSocket connection handling,
@@ -137,7 +173,16 @@ export class SingleServerProvider implements IConnectionProvider {
       };
 
       try {
-        const ws = new WebSocket(this.url);
+        // The opened URL carries the chunk opt-in; getUrl() keeps returning the
+        // configured one. A rewrite that throws (an exotic URL) falls back to the
+        // configured URL, i.e. to whole-message framing, rather than failing.
+        let openUrl = this.url;
+        try {
+          openUrl = chunkCapability.withChunkCapability(this.url);
+        } catch (err) {
+          logger.debug({ err, url: this.url }, 'Chunk opt-in not added to the URL');
+        }
+        const ws = new WebSocket(openUrl);
         this.ws = ws;
         ws.binaryType = 'arraybuffer';
 

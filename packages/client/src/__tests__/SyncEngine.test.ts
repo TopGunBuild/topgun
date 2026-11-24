@@ -149,7 +149,7 @@ describe('SyncEngine', () => {
       syncEngine = new SyncEngine(config);
 
       expect(MockWebSocket.instances).toHaveLength(1);
-      expect(MockWebSocket.instances[0].url).toBe('ws://localhost:8080');
+      expect(MockWebSocket.instances[0].url).toBe('ws://localhost:8080?tg_chunks=1');
     });
 
     test('should load pending ops from storage on init', async () => {
