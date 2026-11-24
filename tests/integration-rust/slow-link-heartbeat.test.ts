@@ -12,7 +12,8 @@
  * - A: a ~4.4 MB snapshot (4 000 rows of ~1 KiB) at 1 Mbit/s, 3 runs: it
  *   completes within 120 s with no disconnect, and it took at least 0.8 of the
  *   time the capped bytes need, so the cap was real.
- * - B: a ~512 KiB snapshot (450 rows) at 0.4 Mbit/s, 3 runs, the same checks.
+ * - B: a ~512 KiB snapshot (510 rows, at least 512 000 bytes) at 0.4 Mbit/s, 3
+ *   runs, the same checks.
  * - C: a dead idle link. With the snapshot complete on an unthrottled proxy,
  *   the path is blackholed at B0; the client disconnects within
  *   [B0 + 10 s, B0 + 21 s] (its last inbound message is a PONG of the last 5 s)
@@ -42,7 +43,7 @@ import { spawnRustServer, createRustTestClient, TestClient } from './helpers';
 import { startThrottleProxy, ThrottleProxy } from './helpers/throttle-proxy';
 
 const MAP_4000 = 'slow-link-4000';
-const MAP_450 = 'slow-link-450';
+const MAP_510 = 'slow-link-510';
 const PAD = 'x'.repeat(1000);
 const RUNS = Number(process.env.SLOW_LINK_RUNS ?? 3);
 const A_RATES = (process.env.SLOW_LINK_RATES ?? '1')
@@ -157,7 +158,7 @@ describe('Integration: client heartbeat on a slow link (Rust Server)', () => {
     });
     await writer.waitForMessage('AUTH_ACK', 10_000);
     await writeRows(writer, MAP_4000, 4000);
-    await writeRows(writer, MAP_450, 450);
+    await writeRows(writer, MAP_510, 510);
   }, 120_000);
 
   afterEach(async () => {
@@ -243,7 +244,7 @@ describe('Integration: client heartbeat on a slow link (Rust Server)', () => {
     `B: a ~512 KiB live snapshot at 0.4 Mbit/s completes with no disconnect, ${RUNS} of ${RUNS}`,
     async () => {
       for (let run = 0; run < RUNS; run++) {
-        await snapshotRun('B', run, 0.4, MAP_450, 450, 512_000, 120_000);
+        await snapshotRun('B', run, 0.4, MAP_510, 510, 512_000, 120_000);
       }
     },
     RUNS * 165_000,
