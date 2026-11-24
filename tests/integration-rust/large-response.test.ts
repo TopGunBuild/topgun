@@ -8,6 +8,10 @@
  * same failure. Each case uses a fresh client, counts every transition into a
  * disconnected state, and checks that what arrived really is above the case's
  * size boundary, so a test that silently shrank below it would fail.
+ *
+ * TopGunClient opts in to CHUNK delivery (TG-WS-002), so A–C run through the
+ * chunked path; D checks that a raw client without the opt-in still gets one
+ * whole WebSocket message, the framing of TG-WS-001.
  */
 
 import { pack } from 'msgpackr';
@@ -206,4 +210,31 @@ describe('Integration: responses above the WebSocket write buffer (Rust Server)'
       }
     }
   }, 240_000);
+
+  test('D: a client without tg_chunks=1 gets a >4 MB answer as one WebSocket message, never a CHUNK, 3 of 3', async () => {
+    for (let run = 0; run < 3; run++) {
+      const raw = await createRustTestClient(port, {
+        nodeId: `large-resp-raw-${run}`,
+        userId: `large-resp-raw-${run}`,
+        roles: ['ADMIN'],
+      });
+      try {
+        const sizes: number[] = [];
+        raw.ws.on('message', (data: ArrayBuffer | Buffer) => {
+          sizes.push(data instanceof ArrayBuffer ? data.byteLength : data.length);
+        });
+        await raw.waitForMessage('AUTH_ACK', 10_000);
+        raw.send({
+          type: 'QUERY_SUB',
+          payload: { queryId: `large-resp-raw-q-${run}`, mapName: MAP_C, query: {} },
+        });
+        const response = await raw.waitForMessage('QUERY_RESP', 30_000);
+        expect(response.payload.results).toHaveLength(4000);
+        expect(sizes.filter((size) => size > 4_000_000)).toHaveLength(1);
+        expect(raw.messages.some((m) => m.type === 'CHUNK')).toBe(false);
+      } finally {
+        raw.close();
+      }
+    }
+  }, 120_000);
 });
