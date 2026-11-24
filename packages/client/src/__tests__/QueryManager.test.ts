@@ -984,6 +984,23 @@ describe('pre-response hold and wire ids (TG-WS-004)', () => {
     expect(rows(q)).toEqual({ other: 'o' });
   });
 
+  test("Q5: a new send holds its own early overflow although a superseded send's overflow was held", () => {
+    const q = live();
+    const w1 = wireIdOf(q);
+    overflowFrame(w1);
+    manager.resubscribeAll();
+    const w2 = wireIdOf(q);
+    overflowFrame(w2);
+    jest.advanceTimersByTime(60_000);
+    expect(wireIdsOf(q)).toEqual([w1, w2]);
+    expect(q.getError()).toBeNull();
+
+    snapshot(w2, { a: '1' });
+    expect(rows(q)).toEqual({ a: '1' });
+    jest.advanceTimersByTime(250);
+    expect(wireIdsOf(q)).toHaveLength(3);
+  });
+
   test('Q6: after the snapshot an update is applied at once', () => {
     const q = live();
     const w = wireIdOf(q);
