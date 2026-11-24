@@ -155,6 +155,8 @@ class Subscriber {
   /** Per CONNECTED transition: whether that socket saw a DEVICE_ACK first. */
   connectedAfterDeviceAck: boolean[] = [];
   private deviceAckOnSocket = false;
+  /** The query handle a wire id belongs to: every QUERY_SUB send carries a new id. */
+  private readonly handleOf: (wireId: unknown) => unknown;
 
   constructor(port: number, withToken: boolean) {
     this.client = makeClient(port, withToken, 'restore-subscriber');
@@ -162,9 +164,13 @@ class Subscriber {
     // The engine is private to the client; its message bus is what a handle sees.
     const engine = (
       this.client as unknown as {
-        syncEngine: { on(event: 'message', handler: (message: unknown) => void): void };
+        syncEngine: {
+          on(event: 'message', handler: (message: unknown) => void): void;
+          queryManager: { handleOf(wireId: unknown): unknown };
+        };
       }
     ).syncEngine;
+    this.handleOf = (wireId) => engine.queryManager.handleOf(wireId);
     engine.on('message', (raw) => {
       const message = raw as Frame;
       this.frames.push(message);
@@ -225,7 +231,7 @@ class Subscriber {
     await waitUntil(
       () =>
         this.client.getConnectionState() === SyncState.CONNECTED &&
-        this.answeredIds.has(this.query.id) &&
+        [...this.answeredIds].some((id) => this.handleOf(id) === this.query) &&
         this.answeredIds.has(subscriptionId(this.search)) &&
         this.answeredIds.has(subscriptionId(this.hybrid)),
       WAIT_MS,
@@ -250,15 +256,17 @@ class Subscriber {
    * frame for `key` must still carry the handle's current id.
    */
   entersFor(key: string): Record<string, number> {
-    const count = (type: string, idField: string, id: string): number => {
+    const count = (type: string, idField: string, current: (id: unknown) => boolean): number => {
       const frames = this.frames.filter((f) => f.type === type && f.payload?.key === key);
-      expect(frames.map((f) => f.payload?.[idField])).toEqual(frames.map(() => id));
+      expect(frames.map((f) => current(f.payload?.[idField]))).toEqual(frames.map(() => true));
       return frames.filter((f) => f.payload?.changeType === 'ENTER').length;
     };
+    const searchId = subscriptionId(this.search);
+    const hybridId = subscriptionId(this.hybrid);
     return {
-      query: count('QUERY_UPDATE', 'queryId', this.query.id),
-      search: count('SEARCH_UPDATE', 'subscriptionId', subscriptionId(this.search)),
-      hybrid: count('HYBRID_SEARCH_UPDATE', 'subscriptionId', subscriptionId(this.hybrid)),
+      query: count('QUERY_UPDATE', 'queryId', (id) => this.handleOf(id) === this.query),
+      search: count('SEARCH_UPDATE', 'subscriptionId', (id) => id === searchId),
+      hybrid: count('HYBRID_SEARCH_UPDATE', 'subscriptionId', (id) => id === hybridId),
     };
   }
 

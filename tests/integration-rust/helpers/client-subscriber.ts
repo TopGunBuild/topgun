@@ -14,7 +14,10 @@
  * - `overflowResults` / `lastOverflowAt` — `QUERY_RESP`s of the live query that
  *   carry an error code (a snapshot overflow), seen on the engine's message bus;
  * - `searchResults` / `lastSearchResultAt` — `SEARCH_RESP`s of the live search
- *   (`search` command) for its current subscription id.
+ *   (`search` command) for its current subscription id;
+ * - `keys2` — the number of distinct keys of the second live query (`watch2`);
+ * - `prefixKeys` — after `countPrefix`, the number of distinct keys of the live
+ *   view that start with the prefix.
  *
  * Commands from the parent:
  *
@@ -26,8 +29,15 @@
  *   `{ type: 'unblocked', found }`;
  * - `{ type: 'hog', busyMs, periodMs }` / `{ type: 'hog', off: true }` — steals
  *   the event loop for `busyMs` every `periodMs`, or stops doing so;
- * - `{ type: 'dump' }` — answers `{ type: 'rows', rows, searchRows }`: the live
- *   query's `[key, value]` pairs and the live search's sorted key set;
+ * - `{ type: 'queryOnce', map, timeoutMs? }` — runs `client.queryOnce(map, {})`
+ *   (with `timeoutMs` when given) and answers `{ type: 'queryOnceResult', ok,
+ *   ms, rows | error }`, `ms` from the command's receipt to settlement;
+ * - `{ type: 'watch2', map }` — opens a second live query, of `map`;
+ * - `{ type: 'countPrefix', prefix }` — from then on the status carries
+ *   `prefixKeys`;
+ * - `{ type: 'dump' }` — answers `{ type: 'rows', rows, searchRows, rows2 }`:
+ *   the live query's `[key, value]` pairs, the live search's sorted key set and
+ *   the second live query's `[key, value]` pairs;
  * - `{ type: 'exit' }` — closes the client and ends the process.
  */
 import * as fs from 'fs';
@@ -60,6 +70,10 @@ let lastSearchResultAt: number | null = null;
 let handle: QueryHandle<any> | null = null;
 let search: SearchHandle<unknown> | null = null;
 let hog: ReturnType<typeof setInterval> | null = null;
+let keys2 = 0;
+let rows2: Array<[string, unknown]> = [];
+let prefix: string | null = null;
+let prefixKeys = 0;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the helper reaches into the client's engine
 const engine = (client as any).syncEngine;
@@ -83,6 +97,8 @@ const report = () =>
     lastOverflowAt,
     searchResults,
     lastSearchResultAt,
+    keys2,
+    prefixKeys,
   });
 
 function watch(): void {
@@ -102,7 +118,7 @@ function watch(): void {
   engine.on('message', (message: any) => {
     if (
       message?.type === 'QUERY_RESP' &&
-      message.payload?.queryId === live.id &&
+      engine.queryManager.handleOf(message.payload?.queryId) === live &&
       message.payload?.code !== undefined
     ) {
       overflowResults += 1;
@@ -115,7 +131,42 @@ function watch(): void {
       const { _key, ...value } = row;
       return [String(_key), value];
     });
+    if (prefix !== null) countPrefix();
   });
+}
+
+function countPrefix(): void {
+  const p = prefix ?? '';
+  prefixKeys = new Set(rows.map(([key]) => key).filter((key) => key.startsWith(p))).size;
+}
+
+function watch2(map: string): void {
+  client.query(map, {}).subscribe((results) => {
+    keys2 = new Set(results.map((row) => row._key)).size;
+    rows2 = results.map((row) => {
+      const { _key, ...value } = row;
+      return [String(_key), value];
+    });
+  });
+}
+
+async function queryOnce(map: string, timeoutMs: number | undefined): Promise<void> {
+  const started = Date.now();
+  try {
+    const result = await client.queryOnce(
+      map,
+      {},
+      timeoutMs === undefined ? undefined : { timeoutMs },
+    );
+    process.send?.({ type: 'queryOnceResult', ok: true, ms: Date.now() - started, rows: result });
+  } catch (err) {
+    process.send?.({
+      type: 'queryOnceResult',
+      ok: false,
+      ms: Date.now() - started,
+      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    });
+  }
 }
 
 function openSearch(query: string, limit: number): void {
@@ -151,6 +202,9 @@ process.on(
     busyMs?: number;
     periodMs?: number;
     off?: boolean;
+    map?: string;
+    timeoutMs?: number;
+    prefix?: string;
   }) => {
     switch (message?.type) {
       case 'search':
@@ -177,11 +231,22 @@ process.on(
           hog = setInterval(() => busyFor(busyMs), message.periodMs ?? 10);
         }
         break;
+      case 'queryOnce':
+        void queryOnce(message.map ?? mapName, message.timeoutMs);
+        break;
+      case 'watch2':
+        watch2(message.map ?? mapName);
+        break;
+      case 'countPrefix':
+        prefix = message.prefix ?? '';
+        countPrefix();
+        break;
       case 'dump':
         process.send?.({
           type: 'rows',
           rows,
           searchRows: (search?.getResults() ?? []).map((r) => r.key).sort(),
+          rows2,
         });
         break;
       case 'exit':
