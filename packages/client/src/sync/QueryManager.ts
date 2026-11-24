@@ -8,7 +8,7 @@
  */
 
 import { evaluatePredicate } from '@topgunbuild/core';
-import type { QueryRespPayload } from '@topgunbuild/core';
+import type { QueryRespPayload, QueryUpdatePayload } from '@topgunbuild/core';
 import { logger } from '../utils/logger';
 import { QueryError } from '../errors/QueryError';
 import type { QueryErrorCode } from '../errors/QueryError';
@@ -51,6 +51,19 @@ interface QueryErrorState {
 }
 
 /**
+ * What a live handle holds from the moment it sends QUERY_SUB until that
+ * send's first answer: its QUERY_UPDATEs, and an overflow answer that arrived
+ * before the snapshot it follows. The server may deliver a small message
+ * before a large snapshot that was queued ahead of it (TG-WS-004); applying
+ * the held messages after the snapshot gives the rows the order of the
+ * server's queue.
+ */
+interface QueryHold {
+  updates: QueryUpdatePayload[];
+  overflow: QueryRespPayload | null;
+}
+
+/**
  * QueryManager handles all query-related operations for SyncEngine.
  * It owns the queries and hybridQueries Maps (single source of truth).
  */
@@ -72,6 +85,21 @@ export class QueryManager implements IQueryManager {
   // the handle does, across unsubscribe/subscribe cycles.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased in the manager registry
   private errorStates: WeakMap<QueryHandle<any>, QueryErrorState> = new WeakMap();
+
+  /**
+   * The id each QUERY_SUB carries is new at every send, so the frames of a
+   * superseded send of the same handle carry an id nobody owns and are
+   * ignored: a later snapshot may arrive before an earlier one (TG-WS-004).
+   * `wireIds` maps a handle's id to its current send's id, `byWireId` the
+   * reverse.
+   */
+  private wireIds: Map<string, string> = new Map();
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased in the manager registry
+  private byWireId: Map<string, QueryHandle<any>> = new Map();
+
+  /** The hold of each live handle whose current send has not been answered, by handle id. */
+  private holds: Map<string, QueryHold> = new Map();
 
   constructor(config: QueryManagerConfig) {
     this.config = config;
@@ -117,6 +145,12 @@ export class QueryManager implements IQueryManager {
   public subscribeToQuery(query: QueryHandle<any>): void {
     this.queries.set(query.id, query);
     if (this.config.isAuthenticated()) {
+      // A second subscribe without an unsubscribe (StrictMode) would leave the
+      // earlier send registered on the server under its own id.
+      const previous = this.wireIds.get(query.id);
+      if (previous !== undefined) {
+        this.config.sendMessage({ type: 'QUERY_UNSUB', payload: { queryId: previous } });
+      }
       this.startChain(query);
       this.sendQuerySubscription(query);
     }
@@ -155,20 +189,35 @@ export class QueryManager implements IQueryManager {
       }
     }
     this.queries.delete(queryId);
+    this.holds.delete(queryId);
+    const wireId = this.wireIds.get(queryId);
+    if (wireId === undefined) return;
+    this.wireIds.delete(queryId);
+    this.byWireId.delete(wireId);
     if (this.config.isAuthenticated()) {
       this.config.sendMessage({
         type: 'QUERY_UNSUB',
-        payload: { queryId },
+        payload: { queryId: wireId },
       });
     }
   }
 
   /**
-   * Send query subscription message to server.
+   * The handle whose current QUERY_SUB send carried `wireId`; undefined for
+   * an unknown id and for a superseded send's.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased at the routing layer
+  public handleOf(wireId: string): QueryHandle<any> | undefined {
+    return this.byWireId.get(wireId);
+  }
+
+  /**
+   * Send query subscription message to server, under a new wire id; a live
+   * handle's hold starts over, discarding what an earlier send held.
    * Includes field projection when specified in the query filter.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased at the routing layer; only the filter and map name are needed for the subscription message
-  private sendQuerySubscription(query: QueryHandle<any>): void {
+  private sendQuerySubscription(query: QueryHandle<any>): string {
     const filter = query.getFilter();
     // Serialize sort as an ordered array so the Rust server receives Vec<SortField>
     // rather than a plain object (whose key iteration order is not guaranteed on the wire).
@@ -179,10 +228,20 @@ export class QueryManager implements IQueryManager {
           sort: Object.entries(filter.sort).map(([field, direction]) => ({ field, direction })),
         }
       : filter;
+    const previous = this.wireIds.get(query.id);
+    if (previous !== undefined) this.byWireId.delete(previous);
+    const wireId = crypto.randomUUID();
+    this.wireIds.set(query.id, wireId);
+    this.byWireId.set(wireId, query);
+    if (query.isSnapshotOnly()) {
+      this.holds.delete(query.id);
+    } else {
+      this.holds.set(query.id, { updates: [], overflow: null });
+    }
     this.config.sendMessage({
       type: 'QUERY_SUB',
       payload: {
-        queryId: query.id,
+        queryId: wireId,
         mapName: query.getMapName(),
         query: wireQuery,
         fields: filter.fields,
@@ -190,6 +249,7 @@ export class QueryManager implements IQueryManager {
         ...(query.isSnapshotOnly() ? { snapshotOnly: true } : {}),
       },
     });
+    return wireId;
   }
 
   /**
@@ -198,9 +258,44 @@ export class QueryManager implements IQueryManager {
    * times per chain, with backoff), anything else raises a QueryError.
    */
   public handleQueryResp(payload: QueryRespPayload): void {
-    const query = this.queries.get(payload.queryId);
+    const query = this.handleOf(payload.queryId);
     if (!query) return;
 
+    const hold = this.holds.get(query.id);
+    if (hold) {
+      // The server sends an overflow answer right after its snapshot, so an
+      // overflow seen first means the snapshot is still on its way.
+      if (payload.code === SNAPSHOT_OVERFLOW && hold.overflow === null) {
+        hold.overflow = payload;
+        return;
+      }
+      this.holds.delete(query.id);
+    }
+    this.applyQueryResp(query, payload);
+    if (hold) {
+      for (const update of hold.updates) this.handleQueryUpdate(update);
+      if (hold.overflow) this.handleQueryResp(hold.overflow);
+    }
+  }
+
+  /**
+   * Route a QUERY_UPDATE to its handle: held while the handle's current send
+   * is unanswered, applied otherwise; an update of an unknown or superseded
+   * send is ignored.
+   */
+  public handleQueryUpdate(payload: QueryUpdatePayload): void {
+    const query = this.handleOf(payload.queryId);
+    if (!query) return;
+    const hold = this.holds.get(query.id);
+    if (hold) {
+      hold.updates.push(payload);
+      return;
+    }
+    query.onUpdate(payload.key, payload.changeType === 'LEAVE' ? null : payload.value);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased at the routing layer
+  private applyQueryResp(query: QueryHandle<any>, payload: QueryRespPayload): void {
     if (payload.error !== undefined || payload.code !== undefined) {
       this.handleQueryError(query, payload.error, payload.code);
       return;
@@ -589,7 +684,7 @@ export class QueryManager implements IQueryManager {
     // transition.
     this.eachLogged(this.queries.values(), (query) => {
       this.startChain(query);
-      this.sendQuerySubscription(query);
+      const wireId = this.sendQuerySubscription(query);
 
       // Delta reconnect for field-projected queries: send QUERY_SYNC_INIT when we have
       // a stored Merkle root hash so the server can diff and send only changed records
@@ -598,7 +693,7 @@ export class QueryManager implements IQueryManager {
         this.config.sendMessage({
           type: 'QUERY_SYNC_INIT',
           payload: {
-            queryId: query.id,
+            queryId: wireId,
             rootHash: query.merkleRootHash,
           },
         });

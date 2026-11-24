@@ -36,16 +36,56 @@ function createMockStorageAdapter(): jest.Mocked<IStorageAdapter> {
   };
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A sendMessage mock that records which handle each QUERY_SUB was sent for.
+ * Every QUERY_SUB carries a new wire id rather than the handle's id, so the
+ * owner is resolved through `handleOf` at the moment of the send, while that
+ * id is still the handle's current one.
+ */
+function wireRecordingSend(manager: () => QueryManager): {
+  send: jest.Mock;
+  wireIdsOf: (handle: QueryHandle<any>) => string[];
+  wireIdOf: (handle: QueryHandle<any>) => string;
+} {
+  const owners = new Map<string, QueryHandle<any>>();
+  const send = jest.fn((message: any) => {
+    if (message.type === 'QUERY_SUB') {
+      const owner = manager().handleOf(message.payload.queryId);
+      if (owner) owners.set(message.payload.queryId, owner);
+    }
+    return true;
+  });
+  const wireIdsOf = (handle: QueryHandle<any>): string[] =>
+    send.mock.calls
+      .map(([message]) => message)
+      .filter((message) => message.type === 'QUERY_SUB')
+      .map((message) => message.payload.queryId as string)
+      .filter((id) => owners.get(id) === handle);
+  const wireIdOf = (handle: QueryHandle<any>): string => {
+    const ids = wireIdsOf(handle);
+    if (ids.length === 0) throw new Error(`no QUERY_SUB was sent for ${handle.id}`);
+    return ids[ids.length - 1];
+  };
+  return { send, wireIdsOf, wireIdOf };
+}
+
 describe('QueryManager', () => {
   let queryManager: QueryManager;
   let mockStorage: jest.Mocked<IStorageAdapter>;
   let mockSendMessage: jest.Mock;
   let mockIsAuthenticated: jest.Mock;
   let config: QueryManagerConfig;
+  let wireIdOf: (handle: QueryHandle<any>) => string;
+  let wireIdsOf: (handle: QueryHandle<any>) => string[];
 
   beforeEach(() => {
     mockStorage = createMockStorageAdapter();
-    mockSendMessage = jest.fn().mockReturnValue(true);
+    const recording = wireRecordingSend(() => queryManager);
+    mockSendMessage = recording.send;
+    wireIdOf = recording.wireIdOf;
+    wireIdsOf = recording.wireIdsOf;
     mockIsAuthenticated = jest.fn().mockReturnValue(false);
 
     config = {
@@ -74,10 +114,13 @@ describe('QueryManager', () => {
 
       queryManager.subscribeToQuery(query);
 
+      const wireId = wireIdOf(query);
+      expect(wireId).toMatch(UUID);
+      expect(wireId).not.toBe(query.id);
       expect(mockSendMessage).toHaveBeenCalledWith({
         type: 'QUERY_SUB',
         payload: {
-          queryId: query.id,
+          queryId: wireId,
           mapName: 'test-map',
           query: { where: { status: 'active' } },
         },
@@ -96,7 +139,7 @@ describe('QueryManager', () => {
       expect(mockSendMessage).toHaveBeenCalledWith({
         type: 'QUERY_SUB',
         payload: {
-          queryId: query.id,
+          queryId: wireIdOf(query),
           mapName: 'test-map',
           // sort is serialized as ordered array, not a plain object
           query: {
@@ -132,13 +175,16 @@ describe('QueryManager', () => {
       mockIsAuthenticated.mockReturnValue(true);
       const query = new QueryHandle<any>(mockSyncEngine, 'test-map', {});
       queryManager.subscribeToQuery(query);
+      const wireId = wireIdOf(query);
       mockSendMessage.mockClear();
 
       queryManager.unsubscribeFromQuery(query.id);
 
+      // The server knows the subscription only by the id its QUERY_SUB carried.
+      expect(wireId).not.toBe(query.id);
       expect(mockSendMessage).toHaveBeenCalledWith({
         type: 'QUERY_UNSUB',
-        payload: { queryId: query.id },
+        payload: { queryId: wireId },
       });
     });
   });
@@ -345,20 +391,29 @@ describe('QueryManager', () => {
       // Subscribe while authenticated
       queryManager.subscribeToQuery(query1);
       queryManager.subscribeToQuery(query2);
+      const first1 = wireIdOf(query1);
+      const first2 = wireIdOf(query2);
       mockSendMessage.mockClear();
 
       // Resubscribe
       queryManager.resubscribeAll();
 
       expect(mockSendMessage).toHaveBeenCalledTimes(2);
-      expect(mockSendMessage).toHaveBeenCalledWith({
-        type: 'QUERY_SUB',
-        payload: expect.objectContaining({ queryId: query1.id }),
-      });
-      expect(mockSendMessage).toHaveBeenCalledWith({
-        type: 'QUERY_SUB',
-        payload: expect.objectContaining({ queryId: query2.id }),
-      });
+      // Each resubscribe is a new send under a new wire id of the same handle.
+      expect(wireIdsOf(query1)).toHaveLength(1);
+      expect(wireIdsOf(query2)).toHaveLength(1);
+      for (const [query, first] of [
+        [query1, first1],
+        [query2, first2],
+      ] as const) {
+        const wireId = wireIdOf(query);
+        expect(wireId).toMatch(UUID);
+        expect([first, query.id]).not.toContain(wireId);
+        expect(mockSendMessage).toHaveBeenCalledWith({
+          type: 'QUERY_SUB',
+          payload: expect.objectContaining({ queryId: wireId, mapName: query.getMapName() }),
+        });
+      }
     });
 
     it('should resubscribe hybrid queries with FTS predicates', () => {
@@ -392,13 +447,18 @@ describe('QueryManager error QUERY_RESP routing', () => {
 
   let manager: QueryManager;
   let sent: jest.Mock;
+  let wireIdOf: (handle: QueryHandle<any>) => string;
+  let wireIdsOf: (handle: QueryHandle<any>) => string[];
   let authenticated: boolean;
   let random: jest.SpyInstance;
 
   beforeEach(() => {
     jest.useFakeTimers();
     random = jest.spyOn(Math, 'random').mockReturnValue(1);
-    sent = jest.fn(() => true);
+    const recording = wireRecordingSend(() => manager);
+    sent = recording.send;
+    wireIdOf = recording.wireIdOf;
+    wireIdsOf = recording.wireIdsOf;
     authenticated = true;
     manager = new QueryManager({
       storageAdapter: createMockStorageAdapter(),
@@ -417,7 +477,7 @@ describe('QueryManager error QUERY_RESP routing', () => {
     const handle = new QueryHandle<any>(mockSyncEngine, 'm', {}, options);
     manager.subscribeToQuery(handle);
     manager.handleQueryResp({
-      queryId: handle.id,
+      queryId: wireIdOf(handle),
       results: ROWS,
       nextCursor: 'c1',
       hasMore: true,
@@ -427,26 +487,34 @@ describe('QueryManager error QUERY_RESP routing', () => {
   }
 
   function querySubs(handle: QueryHandle<any>): number {
-    return sent.mock.calls.filter(
-      ([message]) => message.type === 'QUERY_SUB' && message.payload.queryId === handle.id,
-    ).length;
+    return wireIdsOf(handle).length;
   }
 
-  function overflow(handle: QueryHandle<any>): void {
+  /** The overflow answer alone, to the handle's current send. */
+  function overflowFrame(handle: QueryHandle<any>): void {
     manager.handleQueryResp({
-      queryId: handle.id,
+      queryId: wireIdOf(handle),
       results: [],
       error: 'buffer overflowed',
       code: OVERFLOW,
     });
   }
 
+  /**
+   * The server's answer to a send whose delta buffer overflowed: its snapshot,
+   * then the overflow answer, in the order the server writes them.
+   */
+  function overflow(handle: QueryHandle<any>): void {
+    clean(handle);
+    overflowFrame(handle);
+  }
+
   function refuse(handle: QueryHandle<any>, code: string = REFUSAL): void {
-    manager.handleQueryResp({ queryId: handle.id, results: [], error: 'refused', code });
+    manager.handleQueryResp({ queryId: wireIdOf(handle), results: [], error: 'refused', code });
   }
 
   function clean(handle: QueryHandle<any>): void {
-    manager.handleQueryResp({ queryId: handle.id, results: ROWS });
+    manager.handleQueryResp({ queryId: wireIdOf(handle), results: ROWS });
   }
 
   /** Overflow until the bound runs out; the handle ends with the overflow error. */
@@ -456,6 +524,22 @@ describe('QueryManager error QUERY_RESP routing', () => {
       jest.advanceTimersByTime(4000);
     }
     overflow(handle);
+    expect(handle.getError()?.code).toBe(OVERFLOW);
+  }
+
+  /**
+   * Exhaust the bound with no snapshot at all, so the error comes before
+   * settlement. A live handle's overflow normally follows its snapshot, which
+   * settles it; the hold keeps one overflow answer, so a second one during
+   * the same hold is applied at once, and then the held one after it.
+   */
+  function exhaustBeforeSettlement(handle: QueryHandle<any>): void {
+    overflowFrame(handle);
+    overflowFrame(handle);
+    jest.advanceTimersByTime(4000);
+    overflowFrame(handle);
+    overflowFrame(handle);
+    expect(handle.isSettled).toBe(false);
     expect(handle.getError()?.code).toBe(OVERFLOW);
   }
 
@@ -477,7 +561,7 @@ describe('QueryManager error QUERY_RESP routing', () => {
       const pagination = handle.getPaginationInfo();
 
       for (const code of [OVERFLOW, REFUSAL]) {
-        manager.handleQueryResp({ queryId: handle.id, results, error: 'e', code });
+        manager.handleQueryResp({ queryId: wireIdOf(handle), results, error: 'e', code });
       }
 
       expect(callback).not.toHaveBeenCalled();
@@ -506,7 +590,10 @@ describe('QueryManager error QUERY_RESP routing', () => {
         jest.advanceTimersByTime(1);
         expect(querySubs(handle)).toBe(2 + i);
         const resub = sent.mock.calls[sent.mock.calls.length - 1][0];
-        expect(resub.payload.queryId).toBe(handle.id);
+        expect(resub.type).toBe('QUERY_SUB');
+        // A resubscribe is a new send: a new wire id, never the handle's id.
+        expect(resub.payload.queryId).toBe(wireIdOf(handle));
+        expect(new Set([...wireIdsOf(handle), handle.id]).size).toBe(querySubs(handle) + 1);
         expect(handle.getError()).toBeNull();
       }
       overflow(handle);
@@ -581,7 +668,7 @@ describe('QueryManager error QUERY_RESP routing', () => {
 
     test('an error without a code becomes QUERY_FAILED', () => {
       const handle = liveHandleWithRows();
-      manager.handleQueryResp({ queryId: handle.id, results: [], error: 'refused' });
+      manager.handleQueryResp({ queryId: wireIdOf(handle), results: [], error: 'refused' });
       expect(handle.getError()?.code).toBe('QUERY_FAILED');
       expect(handle.getError()?.message).toBe('QUERY_FAILED: refused');
     });
@@ -589,7 +676,7 @@ describe('QueryManager error QUERY_RESP routing', () => {
     test('an overflow on a one-shot handle is terminal', () => {
       const handle = new QueryHandle<any>(mockSyncEngine, 'm', {}, { snapshotOnly: true });
       manager.subscribeToQuery(handle);
-      overflow(handle);
+      overflowFrame(handle);
       jest.advanceTimersByTime(60_000);
       expect(querySubs(handle)).toBe(1);
       expect(handle.getError()?.code).toBe(OVERFLOW);
@@ -755,7 +842,7 @@ describe('QueryManager error QUERY_RESP routing', () => {
 
     test('overflow error: the next chain gives new awaiters a promise its snapshot resolves', async () => {
       const handle = unsettledHandle();
-      exhaust(handle);
+      exhaustBeforeSettlement(handle);
       await expect(handle.whenSettled()).rejects.toMatchObject({ code: OVERFLOW });
       manager.resubscribeAll();
       const settled = handle.whenSettled();
@@ -773,5 +860,222 @@ describe('QueryManager error QUERY_RESP routing', () => {
       expect(handle.getError()).toBeNull();
       await expect(handle.whenSettled()).resolves.toBeUndefined();
     });
+  });
+});
+
+describe('pre-response hold and wire ids (TG-WS-004)', () => {
+  const OVERFLOW = 'QUERY_SNAPSHOT_OVERFLOW';
+
+  let manager: QueryManager;
+  let sent: jest.Mock;
+  let wireIdOf: (handle: QueryHandle<any>) => string;
+  let wireIdsOf: (handle: QueryHandle<any>) => string[];
+  let random: jest.SpyInstance;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    random = jest.spyOn(Math, 'random').mockReturnValue(1);
+    const recording = wireRecordingSend(() => manager);
+    sent = recording.send;
+    wireIdOf = recording.wireIdOf;
+    wireIdsOf = recording.wireIdsOf;
+    manager = new QueryManager({
+      storageAdapter: createMockStorageAdapter(),
+      sendMessage: sent,
+      isAuthenticated: () => true,
+    });
+  });
+
+  afterEach(() => {
+    random.mockRestore();
+    jest.useRealTimers();
+  });
+
+  function live(): QueryHandle<any> {
+    const handle = new QueryHandle<any>(mockSyncEngine, 'm', {});
+    manager.subscribeToQuery(handle);
+    return handle;
+  }
+
+  /** The handle's rows as key -> value of `v`. */
+  function rows(handle: QueryHandle<any>): Record<string, unknown> {
+    return Object.fromEntries(handle.getSnapshot().map((row) => [row._key, row.v]));
+  }
+
+  function snapshot(wireId: string, entries: Record<string, string>): void {
+    manager.handleQueryResp({
+      queryId: wireId,
+      results: Object.entries(entries).map(([key, v]) => ({ key, value: { v } })),
+    });
+  }
+
+  function update(wireId: string, key: string, v: string): void {
+    manager.handleQueryUpdate({ queryId: wireId, key, value: { v }, changeType: 'UPDATE' });
+  }
+
+  function leave(wireId: string, key: string): void {
+    manager.handleQueryUpdate({ queryId: wireId, key, value: null, changeType: 'LEAVE' });
+  }
+
+  function overflowFrame(wireId: string): void {
+    manager.handleQueryResp({ queryId: wireId, results: [], error: 'overflowed', code: OVERFLOW });
+  }
+
+  function messages(): Array<{ type: string; payload: { queryId: string } }> {
+    return sent.mock.calls.map(([message]) => message);
+  }
+
+  test('Q1: an update before the snapshot is applied after it, so its newer value wins', () => {
+    const q = live();
+    const w = wireIdOf(q);
+    update(w, 'k', 'v2');
+    expect(rows(q)).toEqual({});
+    snapshot(w, { k: 'v1' });
+    expect(rows(q)).toEqual({ k: 'v2' });
+  });
+
+  test('Q2: a LEAVE before the snapshot removes the row the snapshot holds', () => {
+    const q = live();
+    const w = wireIdOf(q);
+    leave(w, 'k');
+    snapshot(w, { k: 'v1', other: 'o' });
+    expect(rows(q)).toEqual({ other: 'o' });
+  });
+
+  test('Q3: a row added before the snapshot survives a snapshot without it', () => {
+    const q = live();
+    const w = wireIdOf(q);
+    update(w, 'n', 'new');
+    snapshot(w, { k: 'v1' });
+    expect(rows(q)).toEqual({ k: 'v1', n: 'new' });
+  });
+
+  test('Q4: an overflow answer before its snapshot is handled after it; the resubscribe follows the snapshot and the backoff', () => {
+    const q = live();
+    const w = wireIdOf(q);
+    overflowFrame(w);
+    jest.advanceTimersByTime(60_000);
+    expect(wireIdsOf(q)).toEqual([w]);
+    expect(q.getError()).toBeNull();
+
+    snapshot(w, { a: '1', b: '2' });
+    expect(rows(q)).toEqual({ a: '1', b: '2' });
+    expect(q.getError()).toBeNull();
+    // The first overflow backs off 250 ms (full jitter pinned at 1).
+    jest.advanceTimersByTime(249);
+    expect(wireIdsOf(q)).toEqual([w]);
+    jest.advanceTimersByTime(1);
+    const ids = wireIdsOf(q);
+    expect(ids).toHaveLength(2);
+    expect(ids[1]).toMatch(UUID);
+    expect([w, q.id]).not.toContain(ids[1]);
+    jest.advanceTimersByTime(60_000);
+    expect(wireIdsOf(q)).toHaveLength(2);
+  });
+
+  test('Q5: an update held for a superseded send is dropped with that send', () => {
+    const q = live();
+    const w1 = wireIdOf(q);
+    update(w1, 'k', 'stale');
+    manager.resubscribeAll();
+    const w2 = wireIdOf(q);
+    expect(w2).not.toBe(w1);
+    snapshot(w2, { other: 'o' });
+    expect(rows(q)).toEqual({ other: 'o' });
+  });
+
+  test('Q6: after the snapshot an update is applied at once', () => {
+    const q = live();
+    const w = wireIdOf(q);
+    snapshot(w, { k: 'v1' });
+    update(w, 'k', 'v2');
+    expect(rows(q)).toEqual({ k: 'v2' });
+  });
+
+  test("Q7: another handle's frames neither wait for q's hold nor end it", () => {
+    const p = live();
+    const wp = wireIdOf(p);
+    snapshot(wp, { x: 'x0' });
+    const q = live();
+    const wq = wireIdOf(q);
+
+    update(wp, 'x', 'x1');
+    expect(rows(p)).toEqual({ x: 'x1' });
+
+    snapshot(wp, { x: 'x2' });
+    update(wq, 'k', 'v2');
+    expect(rows(q)).toEqual({});
+    snapshot(wq, { k: 'v1' });
+    expect(rows(q)).toEqual({ k: 'v2' });
+    expect(rows(p)).toEqual({ x: 'x2' });
+  });
+
+  test('Q8: the snapshot of an unsubscribed send arriving late does not replace the current one', () => {
+    const q = live();
+    const w1 = wireIdOf(q);
+    manager.unsubscribeFromQuery(q.id);
+    manager.subscribeToQuery(q);
+    const w2 = wireIdOf(q);
+    expect(w2).not.toBe(w1);
+
+    snapshot(w2, { a: 'A' });
+    snapshot(w1, { b: 'B' });
+    expect(rows(q)).toEqual({ a: 'A' });
+    expect(messages().filter((m) => m.type === 'QUERY_UNSUB')).toEqual([
+      { type: 'QUERY_UNSUB', payload: { queryId: w1 } },
+    ]);
+  });
+
+  test("Q9: an unsubscribed send's snapshot does not end the current send's hold", () => {
+    const q = live();
+    const w1 = wireIdOf(q);
+    manager.unsubscribeFromQuery(q.id);
+    manager.subscribeToQuery(q);
+    const w2 = wireIdOf(q);
+
+    update(w2, 'k', 'v2');
+    snapshot(w1, { k: 'v0', b: 'B' });
+    expect(rows(q)).toEqual({});
+    snapshot(w2, { k: 'v1', a: 'A' });
+    expect(rows(q)).toEqual({ k: 'v2', a: 'A' });
+  });
+
+  test('Q10: frames of a superseded send are ignored, and every send carries a new id', () => {
+    const q = live();
+    const w1 = wireIdOf(q);
+    snapshot(w1, { k: 'v1' });
+    manager.resubscribeAll();
+    const w2 = wireIdOf(q);
+    snapshot(w2, { k: 'v1' });
+
+    update(w1, 'k', 'stale');
+    overflowFrame(w1);
+    expect(rows(q)).toEqual({ k: 'v1' });
+    jest.advanceTimersByTime(60_000);
+    expect(wireIdsOf(q)).toEqual([w1, w2]);
+    expect(q.getError()).toBeNull();
+
+    // An overflow of the current send resubscribes under yet another id.
+    overflowFrame(w2);
+    jest.advanceTimersByTime(250);
+    manager.unsubscribeFromQuery(q.id);
+    manager.subscribeToQuery(q);
+    const ids = wireIdsOf(q);
+    expect(ids).toHaveLength(4);
+    for (const id of ids) expect(id).toMatch(UUID);
+    expect(new Set([...ids, q.id]).size).toBe(ids.length + 1);
+  });
+
+  test('Q11: a second subscribeToQuery without unsubscribe first unsubscribes the earlier send', () => {
+    const q = live();
+    const w1 = wireIdOf(q);
+    manager.subscribeToQuery(q);
+    const w2 = wireIdOf(q);
+    expect(w2).not.toBe(w1);
+    expect(messages().map((m) => [m.type, m.payload.queryId])).toEqual([
+      ['QUERY_SUB', w1],
+      ['QUERY_UNSUB', w1],
+      ['QUERY_SUB', w2],
+    ]);
   });
 });

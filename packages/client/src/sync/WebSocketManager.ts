@@ -248,20 +248,20 @@ export class WebSocketManager implements IWebSocketManager {
 
   /**
    * Reassembles `CHUNK` sequences (TG-WS-002) and routes every other message.
-   * A sequence that cannot be reassembled or decoded forces a reconnect: the
+   * A whole message is routed when it arrives, also inside an open sequence:
+   * the server writes small messages between the `CHUNK`s of a query or
+   * search answer (TG-WS-004), and the sequence goes on after them. A
+   * sequence that cannot be reassembled or decoded forces a reconnect: the
    * message it carried is then recovered by resync rather than silently lost.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- message is a deserialized msgpack object; narrowed by message.type
   private receive(nodeId: string, message: any): void {
-    const pending = this.reassemblers.get(nodeId);
     if (message.type !== 'CHUNK') {
-      if (pending && !pending.isEmpty()) {
-        this.chunkViolation(nodeId, new Error(`${message.type} arrived inside a CHUNK sequence`));
-        return;
-      }
       this.handleMessage(message);
       return;
     }
+
+    const pending = this.reassemblers.get(nodeId);
 
     const reassembler = pending ?? new ChunkReassembler(MAX_REASSEMBLY_BYTES);
     this.reassemblers.set(nodeId, reassembler);

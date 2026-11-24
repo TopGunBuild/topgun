@@ -559,10 +559,24 @@ describe('one-shot reads on a server error QUERY_RESP', () => {
       .map((message) => message.payload);
   }
 
-  /** Answer the one subscribed handle with an error frame. */
-  async function refuse(manager: QueryManager, code: string): Promise<string> {
+  /**
+   * The id the handle's current QUERY_SUB carried: the server answers and is
+   * unsubscribed by that id, never by the handle's own.
+   */
+  function wireIdOf(sent: jest.Mock, manager: QueryManager, handle: QueryHandle<unknown>): string {
+    const wireId = sentOfType(sent, 'QUERY_SUB')
+      .map((payload) => payload.queryId)
+      .find((id) => manager.handleOf(id) === handle);
+    expect(wireId).toBeDefined();
+    expect(wireId).not.toBe(handle.id);
+    return wireId!;
+  }
+
+  /** Answer the one subscribed handle with an error frame; returns the wire id answered. */
+  async function refuse(sent: jest.Mock, manager: QueryManager, code: string): Promise<string> {
     await Promise.resolve();
-    const [queryId] = Array.from(manager.getQueries().keys());
+    const [handle] = Array.from(manager.getQueries().values());
+    const queryId = wireIdOf(sent, manager, handle);
     manager.handleQueryResp({ queryId, results: [], error: 'refused here', code });
     return queryId;
   }
@@ -570,7 +584,7 @@ describe('one-shot reads on a server error QUERY_RESP', () => {
   test('queryOnce rejects with the QueryError and unsubscribes', async () => {
     const { client, sent, manager } = makeRoutedClient();
     const promise = client.queryOnce('orders', {});
-    const queryId = await refuse(manager, 'QUERY_LIVE_AGGREGATE_UNSUPPORTED');
+    const queryId = await refuse(sent, manager, 'QUERY_LIVE_AGGREGATE_UNSUPPORTED');
     const error = await promise.then(
       () => null,
       (err: unknown) => err,
@@ -584,7 +598,7 @@ describe('one-shot reads on a server error QUERY_RESP', () => {
   test('queryOncePaged rejects with the QueryError and unsubscribes', async () => {
     const { client, sent, manager } = makeRoutedClient();
     const promise = client.queryOncePaged('orders', { limit: 5 });
-    const queryId = await refuse(manager, 'QUERY_SNAPSHOT_OVERFLOW');
+    const queryId = await refuse(sent, manager, 'QUERY_SNAPSHOT_OVERFLOW');
     await expect(promise).rejects.toMatchObject({
       name: 'QueryError',
       code: 'QUERY_SNAPSHOT_OVERFLOW',
@@ -602,7 +616,8 @@ describe('one-shot reads on a server error QUERY_RESP', () => {
 
     const more = live.loadMore();
     await Promise.resolve();
-    const pageId = Array.from(manager.getQueries().keys()).find((id) => id !== live.id)!;
+    const page = Array.from(manager.getQueries().values()).find((h) => h.id !== live.id)!;
+    const pageId = wireIdOf(sent, manager, page);
     manager.handleQueryResp({ queryId: pageId, results: [], error: 'x', code: 'SOMETHING_NEW' });
 
     await expect(more).rejects.toMatchObject({ name: 'QueryError', code: 'QUERY_FAILED' });

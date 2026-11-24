@@ -399,6 +399,38 @@ describe('SyncEngine', () => {
   });
 
   describe('Query subscriptions', () => {
+    /** An engine whose socket has answered AUTH_ACK. */
+    async function authenticatedSocket(): Promise<MockWebSocket> {
+      syncEngine = new SyncEngine(config);
+      syncEngine.setAuthToken('test-token');
+      await jest.runAllTimersAsync();
+      const ws = MockWebSocket.getLastInstance()!;
+      ws.simulateMessage({ type: 'AUTH_ACK' });
+      await jest.runAllTimersAsync();
+      return ws;
+    }
+
+    /** The id the last QUERY_SUB for `mapName` carried: the server knows the send only by it. */
+    function wireIdOf(ws: MockWebSocket, mapName: string): string {
+      const subs = ws.sentMessages.filter(
+        (m) => m.type === 'QUERY_SUB' && m.payload?.mapName === mapName,
+      );
+      expect(subs.length).toBeGreaterThan(0);
+      return subs[subs.length - 1].payload.queryId;
+    }
+
+    function mockQuery() {
+      return {
+        id: 'query-1',
+        getMapName: () => 'users',
+        isSnapshotOnly: () => false,
+        getFilter: () => ({}),
+        onResult: jest.fn(),
+        onUpdate: jest.fn(),
+        updatePaginationInfo: jest.fn(),
+      };
+    }
+
     test('should send QUERY_SUB after AUTH_ACK', async () => {
       syncEngine = new SyncEngine(config);
       syncEngine.setAuthToken('test-token');
@@ -422,31 +454,21 @@ describe('SyncEngine', () => {
 
       const querySub = ws.sentMessages.find((m) => m.type === 'QUERY_SUB');
       expect(querySub).toBeDefined();
-      expect(querySub?.payload?.queryId).toBe('query-1');
+      // Each send carries a new wire id, never the handle's id.
+      expect(typeof querySub?.payload?.queryId).toBe('string');
+      expect(querySub?.payload?.queryId).not.toBe('query-1');
       expect(querySub?.payload?.mapName).toBe('users');
     });
 
     test('should handle QUERY_RESP message with server source', async () => {
-      syncEngine = new SyncEngine(config);
-      await jest.runAllTimersAsync();
+      const ws = await authenticatedSocket();
+      const query = mockQuery();
+      syncEngine!.subscribeToQuery(query as any);
 
-      const mockQuery = {
-        id: 'query-1',
-        getMapName: () => 'users',
-        isSnapshotOnly: () => false,
-        getFilter: () => ({}),
-        onResult: jest.fn(),
-        onUpdate: jest.fn(),
-        updatePaginationInfo: jest.fn(),
-      };
-
-      syncEngine.subscribeToQuery(mockQuery as any);
-
-      const ws = MockWebSocket.getLastInstance()!;
       ws.simulateMessage({
         type: 'QUERY_RESP',
         payload: {
-          queryId: 'query-1',
+          queryId: wireIdOf(ws, 'users'),
           results: [{ key: 'user1', value: { name: 'Alice' } }],
           nextCursor: 'cursor123',
           hasMore: true,
@@ -456,14 +478,14 @@ describe('SyncEngine', () => {
       await jest.runAllTimersAsync();
 
       // Verify onResult is called with 'server' source parameter and optional merkleRootHash
-      expect(mockQuery.onResult).toHaveBeenCalledWith(
+      expect(query.onResult).toHaveBeenCalledWith(
         [{ key: 'user1', value: { name: 'Alice' } }],
         'server',
         undefined,
       );
 
       // Verify pagination info is updated
-      expect(mockQuery.updatePaginationInfo).toHaveBeenCalledWith({
+      expect(query.updatePaginationInfo).toHaveBeenCalledWith({
         nextCursor: 'cursor123',
         hasMore: true,
         cursorStatus: 'none',
@@ -471,25 +493,17 @@ describe('SyncEngine', () => {
     });
 
     test('should handle QUERY_UPDATE message', async () => {
-      syncEngine = new SyncEngine(config);
-      await jest.runAllTimersAsync();
+      const ws = await authenticatedSocket();
+      const query = mockQuery();
+      syncEngine!.subscribeToQuery(query as any);
+      const wireId = wireIdOf(ws, 'users');
 
-      const mockQuery = {
-        id: 'query-1',
-        getMapName: () => 'users',
-        isSnapshotOnly: () => false,
-        getFilter: () => ({}),
-        onResult: jest.fn(),
-        onUpdate: jest.fn(),
-      };
-
-      syncEngine.subscribeToQuery(mockQuery as any);
-
-      const ws = MockWebSocket.getLastInstance()!;
+      // The snapshot first: updates that arrive before it are held until it.
+      ws.simulateMessage({ type: 'QUERY_RESP', payload: { queryId: wireId, results: [] } });
       ws.simulateMessage({
         type: 'QUERY_UPDATE',
         payload: {
-          queryId: 'query-1',
+          queryId: wireId,
           key: 'user1',
           value: { name: 'Bob' },
           type: 'UPDATE',
@@ -497,29 +511,21 @@ describe('SyncEngine', () => {
       });
       await jest.runAllTimersAsync();
 
-      expect(mockQuery.onUpdate).toHaveBeenCalledWith('user1', { name: 'Bob' });
+      expect(query.onUpdate).toHaveBeenCalledWith('user1', { name: 'Bob' });
     });
 
     test('should handle QUERY_UPDATE with LEAVE type', async () => {
-      syncEngine = new SyncEngine(config);
-      await jest.runAllTimersAsync();
+      const ws = await authenticatedSocket();
+      const query = mockQuery();
+      syncEngine!.subscribeToQuery(query as any);
+      const wireId = wireIdOf(ws, 'users');
 
-      const mockQuery = {
-        id: 'query-1',
-        getMapName: () => 'users',
-        isSnapshotOnly: () => false,
-        getFilter: () => ({}),
-        onResult: jest.fn(),
-        onUpdate: jest.fn(),
-      };
-
-      syncEngine.subscribeToQuery(mockQuery as any);
-
-      const ws = MockWebSocket.getLastInstance()!;
+      // The snapshot first: updates that arrive before it are held until it.
+      ws.simulateMessage({ type: 'QUERY_RESP', payload: { queryId: wireId, results: [] } });
       ws.simulateMessage({
         type: 'QUERY_UPDATE',
         payload: {
-          queryId: 'query-1',
+          queryId: wireId,
           key: 'user1',
           value: null,
           changeType: 'LEAVE',
@@ -527,24 +533,21 @@ describe('SyncEngine', () => {
       });
       await jest.runAllTimersAsync();
 
-      expect(mockQuery.onUpdate).toHaveBeenCalledWith('user1', null);
+      expect(query.onUpdate).toHaveBeenCalledWith('user1', null);
     });
 
     test('should send QUERY_UNSUB when unsubscribing', async () => {
-      syncEngine = new SyncEngine(config);
-      syncEngine.setAuthToken('test-token');
-      await jest.runAllTimersAsync();
-
-      const ws = MockWebSocket.getLastInstance()!;
-      ws.simulateMessage({ type: 'AUTH_ACK' });
-      await jest.runAllTimersAsync();
+      const ws = await authenticatedSocket();
+      syncEngine!.subscribeToQuery(mockQuery() as any);
+      const wireId = wireIdOf(ws, 'users');
 
       ws.sentMessages = [];
-      syncEngine.unsubscribeFromQuery('query-1');
+      syncEngine!.unsubscribeFromQuery('query-1');
 
       const queryUnsub = ws.sentMessages.find((m) => m.type === 'QUERY_UNSUB');
       expect(queryUnsub).toBeDefined();
-      expect(queryUnsub?.payload?.queryId).toBe('query-1');
+      expect(wireId).not.toBe('query-1');
+      expect(queryUnsub?.payload?.queryId).toBe(wireId);
     });
   });
 
@@ -562,23 +565,27 @@ describe('SyncEngine', () => {
       const results: unknown[] = [];
       handle.subscribe((rows) => results.push(rows));
       await jest.runAllTimersAsync();
+      // The server knows the subscription only by the id its QUERY_SUB carried.
+      const sub = ws.sentMessages.filter((m) => m.type === 'QUERY_SUB').pop();
+      const wireId: string = sub.payload.queryId;
+      expect(wireId).not.toBe(handle.id);
       ws.simulateMessage({
         type: 'QUERY_RESP',
-        payload: { queryId: handle.id, results: [{ key: 'user1', value: { name: 'Alice' } }] },
+        payload: { queryId: wireId, results: [{ key: 'user1', value: { name: 'Alice' } }] },
       });
       await jest.runAllTimersAsync();
       expect(handle.getSnapshot().map((row) => row._key)).toEqual(['user1']);
-      return { ws, handle, results };
+      return { ws, handle, results, wireId };
     }
 
     test('keeps the rows, calls no result callback and sets the error', async () => {
-      const { ws, handle, results } = await handleShowingRows();
+      const { ws, handle, results, wireId } = await handleShowingRows();
       results.length = 0;
 
       ws.simulateMessage({
         type: 'QUERY_RESP',
         payload: {
-          queryId: handle.id,
+          queryId: wireId,
           results: [],
           error: 'live grouped query',
           code: 'QUERY_LIVE_AGGREGATE_UNSUPPORTED',
@@ -592,11 +599,11 @@ describe('SyncEngine', () => {
     });
 
     test('close() cancels a pending overflow resubscribe', async () => {
-      const { ws, handle } = await handleShowingRows();
+      const { ws, wireId } = await handleShowingRows();
       ws.simulateMessage({
         type: 'QUERY_RESP',
         payload: {
-          queryId: handle.id,
+          queryId: wireId,
           results: [],
           error: 'overflow',
           code: 'QUERY_SNAPSHOT_OVERFLOW',
