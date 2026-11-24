@@ -56,6 +56,7 @@ anyhow = "1"
 axum = "0.8"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net"] }
+socket2 = { version = "0.6", features = ["all"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "timeout", "request-id", "compression-gzip", "fs", "limit"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
