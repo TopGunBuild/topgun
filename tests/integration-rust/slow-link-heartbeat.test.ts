@@ -9,7 +9,7 @@
  * connection's server-to-client byte rate. A disconnect is any transition into
  * DISCONNECTED, BACKOFF or ERROR after the client first reached CONNECTED.
  *
- * - A: a ~4.4 MB snapshot (4 000 rows of ~1 KiB) at 1 Mbit/s, 3 runs: it
+ * - A: a ~4.1 MB snapshot (4 000 rows of ~1 KiB) at 1 Mbit/s, 3 runs: it
  *   completes within 120 s with no disconnect, and it took at least 0.8 of the
  *   time the capped bytes need, so the cap was real.
  * - B: a ~512 KiB snapshot (510 rows, at least 512 000 bytes) at 0.4 Mbit/s, 3
@@ -230,7 +230,7 @@ describe('Integration: client heartbeat on a slow link (Rust Server)', () => {
     // 120 s at 1 Mbit/s, the transfer time twice over on slower links.
     const withinMs = Math.max(120_000, (2 * 4_400_000 * 8 * 1000) / (mbps * 1e6));
     test(
-      `A: a ~4.4 MB live snapshot at ${mbps} Mbit/s completes with no disconnect, ${RUNS} of ${RUNS}`,
+      `A: a ~4.1 MB live snapshot at ${mbps} Mbit/s completes with no disconnect, ${RUNS} of ${RUNS}`,
       async () => {
         for (let run = 0; run < RUNS; run++) {
           await snapshotRun('A', run, mbps, MAP_4000, 4000, 4_000_000, withinMs);

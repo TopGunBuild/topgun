@@ -5142,7 +5142,7 @@ weaker than a test.
   `connection_config_defaults` (`config.rs`); on the client,
   `packages/client/src/__tests__/ChunkReassembly.test.ts` (T5–T7, T10, T11) and the "chunk opt-in
   on the opened URL" cases of `packages/client/src/__tests__/SingleServerProviderReconnect.test.ts`.
-- **Integration tests:** `tests/integration-rust/slow-link-heartbeat.test.ts` A and B (a ~4.4 MB
+- **Integration tests:** `tests/integration-rust/slow-link-heartbeat.test.ts` A and B (a ~4.1 MB
   live snapshot at 1 Mbit/s and a ~512 KiB one at 0.4 Mbit/s reach a `TopGunClient` in another
   process with no disconnect); `tests/integration-rust/large-response.test.ts` D (a client without
   the pair gets a >4 MB answer as one WebSocket message and never a `CHUNK`).
