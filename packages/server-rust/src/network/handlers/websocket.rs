@@ -82,6 +82,7 @@ pub async fn ws_upgrade_handler(State(state): State<AppState>, mut request: Requ
         Ok(parts) => parts,
         Err(rejection) => return rejection.into_response(),
     };
+    let chunked = chunk_capability(request.uri().query());
     let config = ws_config(&state.config.connection);
     tokio::spawn(async move {
         let upgraded = match on_upgrade.await {
@@ -94,7 +95,7 @@ pub async fn ws_upgrade_handler(State(state): State<AppState>, mut request: Requ
         let socket =
             WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(config))
                 .await;
-        handle_socket(socket, state).await;
+        handle_socket(socket, state, chunked).await;
     });
 
     let mut response = Response::new(Body::empty());
@@ -169,6 +170,15 @@ fn upgrade_request(request: &mut Request) -> Result<(HeaderValue, OnUpgrade), Up
     Ok((key, on_upgrade))
 }
 
+/// Whether the upgrade request opted in to chunked delivery (`TG-WS-002`):
+/// its query holds, as one `&`-separated pair, exactly `tg_chunks=1`.
+///
+/// The client sends the pair literally, so nothing is percent-decoded, and
+/// any other value or spelling leaves the connection on whole messages.
+fn chunk_capability(query: Option<&str>) -> bool {
+    query.is_some_and(|query| query.split('&').any(|pair| pair == "tg_chunks=1"))
+}
+
 /// Whether the first value of `name` equals `value`, ignoring ASCII case.
 fn header_is(headers: &HeaderMap, name: &HeaderName, value: &str) -> bool {
     headers
@@ -202,7 +212,7 @@ fn ws_config(connection: &ConnectionConfig) -> WebSocketConfig {
 /// tasks complete before the connection handle (and its outbound sender)
 /// is dropped, allowing the outbound task to flush cleanly.
 #[allow(clippy::too_many_lines)]
-async fn handle_socket(mut socket: ServerSocket, state: AppState) {
+async fn handle_socket(mut socket: ServerSocket, state: AppState, chunked: bool) {
     let (handle, rx) = state
         .registry
         .register(ConnectionKind::Client, &state.config.connection);
@@ -231,9 +241,10 @@ async fn handle_socket(mut socket: ServerSocket, state: AppState) {
     let (sender, mut receiver) = socket.split();
 
     // Outbound task owns the write half of the socket and drains the mpsc
-    // channel, one WebSocket message per queued message.
-    let fragment_len = state.config.connection.outbound_fragment_len();
-    let outbound_handle = tokio::spawn(outbound_task(sender, rx, fragment_len));
+    // channel in queue order. Its framing is fixed here for the connection's
+    // whole lifetime.
+    let framing = OutboundFraming::new(&state.config.connection, chunked);
+    let outbound_handle = tokio::spawn(outbound_task(sender, rx, framing));
 
     // Tracks auth state for phase switching. AtomicBool avoids RwLock
     // contention in Phase 2 — set once in Phase 1, read once to decide
@@ -1873,28 +1884,29 @@ async fn join_outbound_with_timeout(handle: tokio::task::JoinHandle<()>) {
 
 /// Drains the outbound mpsc channel and writes each message to the socket.
 ///
-/// Each queued message is its own WebSocket message: its frames, from
-/// [`message_frames`], are each written with `send`, which flushes, before the
-/// next message is taken off the queue. So wire order is queue order, no two
-/// messages are ever merged, and a message of any size reaches the client
-/// whole (`TG-WS-001`). Draining ready messages with `try_recv` only saves a
-/// wake-up per message.
+/// Every frame of a queued message, from [`outbound_frames`], is written
+/// before the next message is taken off the queue. So wire order is queue
+/// order and no two messages are ever merged. On whole-message framing each
+/// queued message is one WebSocket message of any size (`TG-WS-001`); on a
+/// chunk-capable connection a message longer than the chunk length is a run
+/// of `CHUNK` messages instead (`TG-WS-002`). Draining ready messages with
+/// `try_recv` only saves a wake-up per message.
 async fn outbound_task<S>(
     mut sender: S,
     mut rx: mpsc::Receiver<OutboundMessage>,
-    fragment_len: usize,
+    framing: OutboundFraming,
 ) where
     S: Sink<Message> + Unpin,
 {
     while let Some(msg) = rx.recv().await {
-        if send_outbound_message(&mut sender, msg, fragment_len)
+        if send_outbound_message(&mut sender, msg, framing)
             .await
             .is_err()
         {
             break;
         }
         while let Ok(msg) = rx.try_recv() {
-            if send_outbound_message(&mut sender, msg, fragment_len)
+            if send_outbound_message(&mut sender, msg, framing)
                 .await
                 .is_err()
             {
@@ -1914,15 +1926,20 @@ async fn outbound_task<S>(
 async fn send_outbound_message<S>(
     sender: &mut S,
     msg: OutboundMessage,
-    fragment_len: usize,
+    framing: OutboundFraming,
 ) -> Result<(), ()>
 where
     S: Sink<Message> + Unpin,
 {
     match msg {
         OutboundMessage::Binary(data) => {
-            for frame in message_frames(Bytes::from(data), fragment_len) {
-                if sender.send(Message::Frame(frame)).await.is_err() {
+            for (frame, flush) in outbound_frames(Bytes::from(data), framing) {
+                let written = if flush {
+                    sender.send(Message::Frame(frame)).await
+                } else {
+                    sender.feed(Message::Frame(frame)).await
+                };
+                if written.is_err() {
                     return Err(());
                 }
             }
@@ -1937,6 +1954,147 @@ where
         }
     }
     Ok(())
+}
+
+/// The most bytes a `CHUNK`'s header can take: a three-entry map, its keys,
+/// `"CHUNK"`, the flag and a `bin32` length header are 28 bytes.
+const CHUNK_HEADER_MAX: usize = 32;
+
+/// How a client connection's writer frames what it dequeues, fixed when the
+/// writer is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutboundFraming {
+    /// Largest payload of one frame (`TG-WS-001`).
+    fragment_len: usize,
+    /// The effective chunk length on a chunk-capable connection, `None` for
+    /// whole messages (`TG-WS-002`).
+    chunk_len: Option<usize>,
+}
+
+impl OutboundFraming {
+    /// The framing of a connection, from its settings and whether it opted in
+    /// to chunked delivery.
+    ///
+    /// The chunk length is clamped so that it is never 0 (which would never
+    /// consume a message) and so that a `CHUNK`'s header and data each fit one
+    /// frame budget: every `CHUNK` is then exactly two frames. When the budget
+    /// cannot hold a header (`outbound_fragment_len() < 33`), no connection is
+    /// chunked. The `bin32` cap only matters for a write buffer above 4 GiB.
+    fn new(connection: &ConnectionConfig, chunked: bool) -> Self {
+        let fragment_len = connection.outbound_fragment_len();
+        let chunk_len = (chunked && fragment_len > CHUNK_HEADER_MAX).then(|| {
+            connection
+                .outbound_chunk_len
+                .clamp(1, fragment_len - CHUNK_HEADER_MAX)
+                .min(u32::MAX as usize)
+        });
+        Self {
+            fragment_len,
+            chunk_len,
+        }
+    }
+}
+
+/// The frames of one outbound binary message under `framing`, each with
+/// whether it ends a flush.
+///
+/// A message of at most the chunk length, and every message on whole-message
+/// framing, gives the frames of [`message_frames`], each flushed: the bytes
+/// of `TG-WS-001`. A longer message on a chunk-capable connection gives its
+/// `CHUNK`s from [`chunk_frames`], one flush per `CHUNK`.
+fn outbound_frames(payload: Bytes, framing: OutboundFraming) -> OutboundFrames {
+    match framing.chunk_len {
+        Some(chunk_len) if payload.len() > chunk_len => {
+            OutboundFrames::Chunked(chunk_frames(payload, chunk_len))
+        }
+        _ => OutboundFrames::Whole(message_frames(payload, framing.fragment_len)),
+    }
+}
+
+/// Iterator behind [`outbound_frames`].
+enum OutboundFrames {
+    Whole(MessageFrames),
+    Chunked(ChunkFrames),
+}
+
+impl Iterator for OutboundFrames {
+    type Item = (Frame, bool);
+
+    fn next(&mut self) -> Option<(Frame, bool)> {
+        match self {
+            Self::Whole(frames) => frames.next().map(|frame| (frame, true)),
+            Self::Chunked(frames) => frames.next(),
+        }
+    }
+}
+
+/// The `CHUNK` messages of one outbound message (`TG-WS-002`), as frames.
+///
+/// `CHUNK` `i` carries bytes `[i·chunk_len, min((i+1)·chunk_len, n))` of the
+/// message, so none is empty, also at an exact multiple, and only the last
+/// has `last = true`. Each `CHUNK` is the MsgPack map
+/// `{"type": "CHUNK", "last": bool, "data": bin}` written as two frames: a
+/// `Binary` frame without `fin` holding everything up to the `data` bytes,
+/// then a `Continue` frame with `fin` whose payload is a zero-copy view of the
+/// message buffer. The header frame is not flushed on its own, so each `CHUNK`
+/// costs one flush.
+fn chunk_frames(payload: Bytes, chunk_len: usize) -> ChunkFrames {
+    ChunkFrames {
+        rest: payload,
+        chunk_len,
+        data: None,
+    }
+}
+
+/// Iterator behind [`chunk_frames`]; per `CHUNK` it allocates only the
+/// header.
+struct ChunkFrames {
+    rest: Bytes,
+    chunk_len: usize,
+    /// The data frame of the `CHUNK` whose header was just yielded.
+    data: Option<Frame>,
+}
+
+impl Iterator for ChunkFrames {
+    type Item = (Frame, bool);
+
+    fn next(&mut self) -> Option<(Frame, bool)> {
+        if let Some(data) = self.data.take() {
+            return Some((data, true));
+        }
+        if self.rest.is_empty() {
+            return None;
+        }
+        let data = self.rest.split_to(self.chunk_len.min(self.rest.len()));
+        let header = chunk_header(self.rest.is_empty(), data.len());
+        self.data = Some(Frame::message(data, OpCode::Data(OpData::Continue), true));
+        Some((
+            Frame::message(header, OpCode::Data(OpData::Binary), false),
+            false,
+        ))
+    }
+}
+
+/// The MsgPack bytes of a `CHUNK` up to its `data` bytes, with the smallest
+/// `bin` length header that fits `len`.
+fn chunk_header(last: bool, len: usize) -> Bytes {
+    let mut header = Vec::with_capacity(CHUNK_HEADER_MAX);
+    header.push(0x83); // fixmap, three entries
+    header.extend_from_slice(b"\xa4type\xa5CHUNK\xa4last");
+    header.push(if last { 0xc3 } else { 0xc2 });
+    header.extend_from_slice(b"\xa4data");
+    if let Ok(len) = u8::try_from(len) {
+        header.push(0xc4);
+        header.push(len);
+    } else if let Ok(len) = u16::try_from(len) {
+        header.push(0xc5);
+        header.extend_from_slice(&len.to_be_bytes());
+    } else {
+        let len = u32::try_from(len).expect("the chunk length is capped at u32::MAX");
+        header.push(0xc6);
+        header.extend_from_slice(&len.to_be_bytes());
+    }
+    Bytes::from(header)
 }
 
 /// The frames of one outbound binary message, each carrying at most
@@ -4520,6 +4678,12 @@ mod writer_tests {
     }
 
     async fn harness(hold: bool) -> Harness {
+        harness_with(hold, false).await
+    }
+
+    /// The harness on a connection that opted in to chunked delivery when
+    /// `chunked`, with the default settings.
+    async fn harness_with(hold: bool, chunked: bool) -> Harness {
         let connection = ConnectionConfig::default();
         let (server_io, tap_server) = tokio::io::duplex(DUPLEX);
         let (tap_client, client_io) = tokio::io::duplex(DUPLEX);
@@ -4543,7 +4707,8 @@ mod writer_tests {
             }
         });
         let (tx, rx) = mpsc::channel(256);
-        let writer = tokio::spawn(outbound_task(sink, rx, connection.outbound_fragment_len()));
+        let framing = OutboundFraming::new(&connection, chunked);
+        let writer = tokio::spawn(outbound_task(sink, rx, framing));
         let (client_sink, client_stream) = client.split();
         Harness {
             tx,
