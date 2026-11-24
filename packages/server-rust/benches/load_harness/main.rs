@@ -175,6 +175,10 @@ async fn main() {
                 fire_and_forget = true;
                 i += 1;
             }
+            "--chunked" => {
+                connection_pool::CHUNKED.store(true, std::sync::atomic::Ordering::Relaxed);
+                i += 1;
+            }
             "--json-output" => {
                 if i + 1 < args.len() {
                     json_output = Some(args[i + 1].clone());
@@ -984,8 +988,13 @@ async fn serve(
     // sweep; once serving has ended the reaper goes, the sweep is awaited
     // within the drain's own bound (its removals are writes, so none may
     // follow the drain), and then the store is drained.
+    // Tuned as the binary tunes its client sockets, so the chunked arm
+    // measures the production path.
     axum::serve(
-        listener,
+        axum::serve::ListenerExt::tap_io(
+            listener,
+            topgun_server::network::handlers::websocket::tune_client_socket,
+        ),
         built
             .router
             .into_make_service_with_connect_info::<SocketAddr>(),

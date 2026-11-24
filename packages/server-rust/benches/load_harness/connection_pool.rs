@@ -34,6 +34,10 @@ struct LoadTestClaims {
 /// Connections are opened in batches to avoid overwhelming the server with
 /// simultaneous SYN packets, and each connection completes the full auth
 /// handshake before being considered ready.
+/// Whether connections opt in to chunked delivery (`--chunked`), as every
+/// `TopGunClient` does, so the run measures the chunk-capable writer.
+pub static CHUNKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub struct ConnectionPool {
     connections: Vec<Connection>,
 }
@@ -190,7 +194,11 @@ fn generate_jwt(idx: usize, jwt_secret: &str) -> Result<String> {
 
 /// Establish a single WebSocket connection with full auth handshake and retry on 429.
 async fn connect_and_auth(addr: SocketAddr, idx: usize, jwt_secret: &str) -> Result<Connection> {
-    let url = format!("ws://{addr}/ws");
+    let url = if CHUNKED.load(std::sync::atomic::Ordering::Relaxed) {
+        format!("ws://{addr}/ws?tg_chunks=1")
+    } else {
+        format!("ws://{addr}/ws")
+    };
     let max_retries = 3;
 
     let ws_stream = connect_with_backpressure_retry(&url, idx, max_retries).await?;
