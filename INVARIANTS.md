@@ -5042,8 +5042,9 @@ weaker than a test.
 
 - **Scope:** `outbound_task` for client WebSocket connections (`network/handlers/websocket.rs`).
 - **Statement:**
-  - (a) every `OutboundMessage::Binary` the writer dequeues is sent as one WebSocket message whose
-    frames each carry at most `ConnectionConfig::outbound_fragment_len()` bytes
+  - (a) on a connection without the chunk capability, and on a chunk-capable connection for a
+    message of at most `outbound_chunk_len` bytes (`TG-WS-002`), every dequeued
+    `OutboundMessage::Binary` is sent as one WebSocket message whose frames each carry at most `ConnectionConfig::outbound_fragment_len()` bytes
     (`ws_max_write_buffer_size − ws_write_buffer_size − 10`, 393 206 at the defaults). A message
     of at most that length is one `Binary` frame with `fin` set, the frame it was before; a longer
     one is a `Binary` frame without `fin`, `Continue` frames, and a last `Continue` frame with
@@ -5062,25 +5063,141 @@ weaker than a test.
     (TODO-931 (c));
   - the cluster link: `LengthDelimitedCodec::new()` in `cluster/formation.rs` keeps tokio-util's
     default 8 MiB frame limit, and a forwarded response above it is not covered (TODO-1032);
-  - the client's heartbeat on a slow link: the server's application `PONG` is queued behind a
-    large message, and the TS client reconnects when no `PONG` has arrived for 15 s, checked every
-    5 s. A message that takes more than about 10 s to transmit (4.4 MB below about 3.5 Mbit/s)
-    can therefore trip it; the bytes on the wire, and so the time, are the same with or without
-    fragmentation (TODO-1033);
+  - the client heartbeat: see `TG-WS-003`;
   - HTTP `/sync`;
   - client memory.
 - **Maintaining code:** `ConnectionConfig::outbound_fragment_len` (`network/config.rs`);
-  `ws_config`, `message_frames`, `outbound_task`, `send_outbound_message`
+  `ws_config`, `message_frames`, `outbound_frames`, `outbound_task`, `send_outbound_message`
   (`network/handlers/websocket.rs`).
 - **Enforcing test:** `frame_builder_shapes_at_every_boundary`, `writer_delivers_every_size_whole_in_order`,
+  `whole_message_writer_keeps_the_legacy_frames`,
   `writer_pends_on_slow_reader_without_closing`, `writer_answers_ping_between_fragments`,
   `writer_stops_cleanly_on_close_between_fragments` (inline in `websocket.rs`);
   `connection_config_defaults` (`config.rs`).
 - **Integration tests:** `tests/integration-rust/large-response.test.ts` — a `queryOnce` answer
   above 512 KB and one above 2 MB, and a ~4.4 MB live snapshot followed by a 4 000-hit search on
-  the same client, each 5 of 5 with no disconnect.
+  the same client, each 5 of 5 with no disconnect (through `CHUNK`s, since `TopGunClient` opts in);
+  case D, a raw client without the opt-in receiving a >4 MB answer as one WebSocket message.
 - **Violation consequence:** a response larger than the write buffer (a query, search or sync
   answer, or a live snapshot) closes the connection instead of reaching the client, and the
   client reconnects into the same failure for as long as it runs.
 - **Discovered by:** TODO-1031 (SPEC-423 run).
+- **Status:** decided, **enforced**.
+
+### TG-WS-002: On a client connection opened with `tg_chunks=1`, a dequeued message longer than `outbound_chunk_len` reaches the client as consecutive `CHUNK` messages whose `data` concatenates to it, in queue order
+
+- **Scope:** `chunk_capability`, `OutboundFraming::new`, `outbound_frames`, `chunk_frames`,
+  `outbound_task` (`network/handlers/websocket.rs`); `ConnectionConfig::outbound_chunk_len`
+  (`network/config.rs`); the `CHUNK` reassembly in `packages/client/src/sync/WebSocketManager.ts`
+  (`ChunkReassembler`, `MAX_REASSEMBLY_BYTES`); `withChunkCapability`
+  (`packages/client/src/connection/SingleServerProvider.ts`).
+- **Statement:**
+  - (a) a connection is chunk-capable iff its upgrade request's query holds, as one `&`-separated
+    pair, exactly `tg_chunks=1` (no percent-decoding, any other value or case is not). The framing
+    is fixed when the writer is built and never changes for the connection.
+  - (b) the effective chunk length `C` is `min(max(outbound_chunk_len, 1), outbound_fragment_len() − 32)`
+    (65 536 at the defaults); when `outbound_fragment_len() < 33` no connection is chunk-capable.
+  - (c) on a chunk-capable connection a dequeued `OutboundMessage::Binary` of `n ≤ C` bytes is sent
+    exactly as under `TG-WS-001`; one of `n > C` bytes is sent as `k = ⌈n / C⌉` consecutive `CHUNK`
+    messages, the MsgPack map `{"type": "CHUNK", "last": bool, "data": bin}` with keys in that
+    order, `CHUNK` `i` carrying bytes `[i·C, min((i+1)·C, n))`, none empty, `last = true` only on
+    the final one. Each `CHUNK` is two frames: a `Binary` header frame without `fin` and a
+    `Continue` frame with `fin` whose payload is a zero-copy view of the message buffer; one flush
+    per `CHUNK`.
+  - (d) every `CHUNK` of a message is written before the next queued message, a queued
+    `OutboundMessage::Close` included; tungstenite's own control frames may come between frames,
+    as in `TG-WS-001`(b).
+  - (e) the TS client (`SingleServerProvider`) opens its socket with `tg_chunks=1` added to the
+    configured URL as text (every other byte kept, never twice; `getUrl()` unchanged), and
+    `WebSocketManager` reassembles a sequence before routing; no `CHUNK` is routed. A malformed
+    `CHUNK`, another message inside a sequence, a sequence above `MAX_REASSEMBLY_BYTES` (2^30
+    bytes) and a reassembled message that does not decode each discard the sequence and force a
+    reconnect, so the message is recovered by resync, never silently dropped. The buffers are
+    cleared on the provider's `connected` and on its `disconnected`, each on its own.
+- **Not claimed:**
+  - clients that do not send the pair (raw `ws`, custom providers, `ConnectionPool`): they get the
+    `TG-WS-001` framing;
+  - servers built before this change: they ignore the query, and the client gets whole messages;
+  - overtaking: a message queued behind a chunked one (an ack, a live event, a `queryOnce` answer)
+    waits for its last `CHUNK`, up to ~117 s for 4.4 MB at 0.3 Mbit/s, so `queryOnce`'s 5 s
+    default can time out on a healthy connection (TODO-1036);
+  - client memory during reassembly: up to about twice the message, at most about 2 GiB; a device
+    with less memory can still fail on a legal message below the cap;
+  - a message above 1 GiB (possible at default settings with 10 000 rows averaging more than
+    ~107 KB, or with a raised `max_query_records` or a producer it does not clamp; the server has
+    no outbound bound, TODO-532) is never delivered to a chunked client: it reconnects with
+    backoff each time the message is resent;
+  - a server configured with `outbound_fragment_len() < 33`: every connection uses the
+    `TG-WS-001` framing, so a large message is one invisible WebSocket message and the client
+    heartbeat behaves for it as without chunking;
+  - a deterministic server bug that sends an undecodable reassembled message makes the client
+    reconnect with its existing backoff for as long as the bug lasts (visible, not a silent stale
+    view);
+  - compression of large messages (TODO-1037).
+- **Maintaining code:** see Scope.
+- **Enforcing test:** `chunk_capability_needs_the_exact_pair`, `chunk_builder_shapes_at_every_boundary`,
+  `outbound_framing_clamps_the_chunk_length`, `chunked_writer_sends_every_chunk_before_the_next_message`,
+  `chunked_writer_sends_a_queued_close_after_the_last_chunk`, `chunked_writer_answers_ping_between_chunks`,
+  `whole_message_writer_keeps_the_legacy_frames` (inline in `websocket.rs`);
+  `connection_config_defaults` (`config.rs`); on the client,
+  `packages/client/src/__tests__/ChunkReassembly.test.ts` (T5–T7, T10, T11) and the "chunk opt-in
+  on the opened URL" cases of `packages/client/src/__tests__/SingleServerProviderReconnect.test.ts`.
+- **Integration tests:** `tests/integration-rust/slow-link-heartbeat.test.ts` A and B (a ~4.4 MB
+  live snapshot at 1 Mbit/s and a ~512 KiB one at 0.4 Mbit/s reach a `TopGunClient` in another
+  process with no disconnect); `tests/integration-rust/large-response.test.ts` D (a client without
+  the pair gets a >4 MB answer as one WebSocket message and never a `CHUNK`).
+- **Violation consequence:** on a slow link a large message is invisible to the client until it
+  completes, the heartbeat reconnects, and the resubscribe resends it (livelock); or a chunked
+  message reaches the client changed, reordered or not at all.
+- **Discovered by:** TODO-1033 (SPEC-427 review).
+- **Status:** decided, **enforced**.
+
+### TG-WS-003: The TS client's heartbeat reconnects only while a `PING` is outstanding and more than `timeoutMs` has passed since the last inbound message; every inbound WebSocket message counts
+
+- **Scope:** `packages/client/src/sync/WebSocketManager.ts`: the provider `message` listener,
+  `heartbeatTick`, `sendPing`, `heartbeatExpired`, `startHeartbeat`, `isConnectionHealthy`.
+- **Statement:**
+  - (a) every inbound WebSocket message (a `CHUNK`, a `PONG`, any message, undecodable bytes)
+    sets the last-inbound time and clears the outstanding-`PING` flag, before it is decoded.
+  - (b) each heartbeat tick first checks `heartbeatExpired(now, lastInbound, pingOutstanding,
+    timeoutMs) = pingOutstanding && now − lastInbound > timeoutMs` and forces a reconnect when it
+    holds; otherwise it sets the flag and then sends a `PING` if the socket can send. A tick at
+    which the socket cannot send still leaves a `PING` outstanding.
+  - (c) `isConnectionHealthy` is online, authenticated and not `heartbeatExpired`, so exactly
+    `timeoutMs` reads healthy and, with no `PING` outstanding, any age does.
+  - (d) bound: with ticks on time the reconnect comes at the first tick more than `timeoutMs`
+    after the last inbound message, at most `last inbound + timeoutMs + intervalMs` (20 s at the
+    defaults 15 000 / 5 000), plus timer drift.
+- **Not claimed:**
+  - links on which a single `CHUNK` (64 KiB + header) or a single message ≤ `C` takes longer than
+    `timeoutMs`: by arithmetic below about 35 kbit/s, not measured; the measured floor is
+    0.3 Mbit/s;
+  - reconnects not caused by the heartbeat: during a long transfer more than ~7 live events/s for
+    the subscription at 1 Mbit/s (~2/s at 0.3 Mbit/s) fill the ~250 free queue slots, the
+    `TG-LIVE-003` owed-loss disconnect fires, and the resubscribe resends the snapshot — the same
+    livelock with another trigger (TODO-1036);
+  - an asymmetric failure (client→server dead, server→client delivering): the client stays
+    connected while messages arrive, and the server's reaper closes the connection within
+    `idle_timeout + reaper_interval` (70 s at defaults);
+  - detection while timers are throttled: after a suspension whose last `PING` was answered, the
+    late tick only pings, and the reconnect comes at the tick after it, one `intervalMs` (~5 s)
+    later than a rule that ignores the flag;
+  - the server-side reap of a hidden tab whose throttled timer sends `PING` less than once per
+    `idle_timeout` (TODO-973): this rule removes only the client-side false reconnect;
+  - `getLastRoundTripTime` while a `PONG` waits behind `CHUNK`s: it reads the transfer time, not
+    the link's RTT;
+  - cluster mode (`ConnectionPool` consumes `PONG`; TODO-1035).
+- **Maintaining code:** see Scope.
+- **Enforcing test:** on the server, the `CHUNK` cadence the rule relies on:
+  `chunk_builder_shapes_at_every_boundary` (`websocket.rs`); on the client,
+  `packages/client/src/__tests__/heartbeat.test.ts`, "Liveness (TG-WS-003)": T1 (predicate
+  boundaries and the same-millisecond tie), T2 (throttled ticks), T3 (a stream of `CHUNK`s with no
+  `PONG`), T9 (a socket that can no longer send), and the existing 20 s timeout and 16 s unhealthy
+  cases (T4).
+- **Integration tests:** `tests/integration-rust/slow-link-heartbeat.test.ts` C (a dead idle link
+  is detected within [B0 + 10 s, B0 + 21 s], then a fresh server result arrives) and D (a link that
+  dies mid-transfer is detected within [B0 + 14 s, B0 + 21 s], then the snapshot completes).
+- **Violation consequence:** a slow but live link reconnects while a long message arrives and the
+  resubscribe resends it (livelock), or a dead link is never detected.
+- **Discovered by:** TODO-1033.
 - **Status:** decided, **enforced**.
