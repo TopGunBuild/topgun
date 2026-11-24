@@ -4907,4 +4907,359 @@ mod writer_tests {
             "the server closed the connection"
         );
     }
+
+    /// The default effective chunk length.
+    const C: usize = 65_536;
+
+    /// Decodes one whole `CHUNK` message, checking its encoding: a map of
+    /// exactly `type`, `last` and `data`, in that order, and nothing after it.
+    fn decode_chunk(message: &[u8]) -> (bool, Vec<u8>) {
+        let mut cursor = std::io::Cursor::new(message);
+        let value = rmpv::decode::read_value(&mut cursor).expect("a CHUNK decodes");
+        assert_eq!(
+            usize::try_from(cursor.position()).expect("fits usize"),
+            message.len(),
+            "bytes after the CHUNK map"
+        );
+        let rmpv::Value::Map(entries) = value else {
+            panic!("a CHUNK is a map: {value:?}");
+        };
+        let keys: Vec<&str> = entries
+            .iter()
+            .map(|(key, _)| key.as_str().expect("a string key"))
+            .collect();
+        assert_eq!(keys, ["type", "last", "data"], "CHUNK keys and their order");
+        assert_eq!(entries[0].1.as_str(), Some("CHUNK"));
+        let last = entries[1].1.as_bool().expect("last is a bool");
+        let rmpv::Value::Binary(data) = &entries[2].1 else {
+            panic!("data is bin: {:?}", entries[2].1);
+        };
+        (last, data.clone())
+    }
+
+    /// Checks the frames `outbound_frames` gives for `input` under a framing
+    /// whose chunk length is `chunk_len`, and returns how many `CHUNK`s there
+    /// are (0 for the whole-message frames).
+    fn check_chunk_frames(input: &Bytes, framing: OutboundFraming) -> usize {
+        let chunk_len = framing.chunk_len.expect("a chunked framing");
+        let frames: Vec<(Frame, bool)> = outbound_frames(input.clone(), framing).collect();
+        let len = input.len();
+        if len <= chunk_len {
+            let got: Vec<(u8, bool, usize, bool)> = frames
+                .iter()
+                .map(|(f, flush)| {
+                    (
+                        opcode_byte(f.header().opcode),
+                        f.header().is_final,
+                        f.payload().len(),
+                        *flush,
+                    )
+                })
+                .collect();
+            assert_eq!(got, [(OP_BINARY, true, len, true)], "{len}: whole frame");
+            assert!(frames[0].0.payload()[..] == input[..], "{len}: payload");
+            return 0;
+        }
+        assert_eq!(frames.len() % 2, 0, "{len}: every CHUNK is two frames");
+        let count = frames.len() / 2;
+        assert_eq!(count, len.div_ceil(chunk_len), "{len}: CHUNK count");
+        let base = input.as_ptr() as usize;
+        let mut joined = Vec::with_capacity(len);
+        for (at, pair) in frames.chunks(2).enumerate() {
+            let ((header, header_flush), (data, data_flush)) = (&pair[0], &pair[1]);
+            assert_eq!(opcode_byte(header.header().opcode), OP_BINARY);
+            assert!(!header.header().is_final, "{len}: header frame with fin");
+            assert!(!header_flush, "{len}: the header frame flushes alone");
+            assert!(header.payload().len() <= CHUNK_HEADER_MAX, "{len}: header");
+            assert!(header.payload().len() <= framing.fragment_len);
+            assert_eq!(opcode_byte(data.header().opcode), OP_CONTINUE);
+            assert!(data.header().is_final, "{len}: data frame without fin");
+            assert!(data_flush, "{len}: the data frame does not flush");
+            assert!(!data.payload().is_empty(), "{len}: empty CHUNK {at}");
+            assert!(data.payload().len() <= chunk_len, "{len}: CHUNK above C");
+            assert!(data.payload().len() <= framing.fragment_len);
+            let at_ptr = data.payload().as_ptr() as usize;
+            assert!(
+                at_ptr >= base && at_ptr + data.payload().len() <= base + len,
+                "{len}: CHUNK {at} is a copy, not a view of the message"
+            );
+            let mut message = header.payload().to_vec();
+            message.extend_from_slice(data.payload());
+            let (last, bytes) = decode_chunk(&message);
+            assert_eq!(last, at + 1 == count, "{len}: last on CHUNK {at}");
+            joined.extend_from_slice(&bytes);
+        }
+        assert!(joined[..] == input[..], "{len}: CHUNKs do not rejoin");
+        count
+    }
+
+    #[test]
+    fn chunk_capability_needs_the_exact_pair() {
+        let cases = [
+            (None, false),
+            (Some(""), false),
+            (Some("tg_chunks=1"), true),
+            (Some("a=b&tg_chunks=1"), true),
+            (Some("tg_chunks=1&a=b"), true),
+            (Some("tg_chunks=0"), false),
+            (Some("tg_chunks=1x"), false),
+            (Some("tg_chunks"), false),
+            (Some("TG_CHUNKS=1"), false),
+            (Some("xtg_chunks=1"), false),
+        ];
+        for (query, want) in cases {
+            assert_eq!(chunk_capability(query), want, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn chunk_builder_shapes_at_every_boundary() {
+        for chunk_len in [C, 16] {
+            let framing = OutboundFraming {
+                fragment_len: F,
+                chunk_len: Some(chunk_len),
+            };
+            let lengths = [
+                0,
+                1,
+                chunk_len - 1,
+                chunk_len,
+                chunk_len + 1,
+                2 * chunk_len - 1,
+                2 * chunk_len,
+                2 * chunk_len + 1,
+                4_400_000,
+            ];
+            for (message, len) in lengths.into_iter().enumerate() {
+                let input = Bytes::from(payload(message, len));
+                let count = check_chunk_frames(&input, framing);
+                let want = if len <= chunk_len {
+                    0
+                } else {
+                    len.div_ceil(chunk_len)
+                };
+                assert_eq!(count, want, "C = {chunk_len}, {len} bytes");
+            }
+        }
+    }
+
+    #[test]
+    fn outbound_framing_clamps_the_chunk_length() {
+        let default = ConnectionConfig::default();
+        let f = default.outbound_fragment_len();
+        assert_eq!(
+            OutboundFraming::new(&default, false),
+            OutboundFraming {
+                fragment_len: f,
+                chunk_len: None
+            }
+        );
+        assert_eq!(OutboundFraming::new(&default, true).chunk_len, Some(C));
+
+        let zero = ConnectionConfig {
+            outbound_chunk_len: 0,
+            ..ConnectionConfig::default()
+        };
+        let framing = OutboundFraming::new(&zero, true);
+        assert_eq!(framing.chunk_len, Some(1), "a chunk length of 0");
+        assert_eq!(check_chunk_frames(&Bytes::from_static(b"abc"), framing), 3);
+
+        for configured in [f, usize::MAX] {
+            let oversized = ConnectionConfig {
+                outbound_chunk_len: configured,
+                ..ConnectionConfig::default()
+            };
+            let framing = OutboundFraming::new(&oversized, true);
+            assert_eq!(
+                framing.chunk_len,
+                Some(f - CHUNK_HEADER_MAX),
+                "{configured}"
+            );
+            let input = Bytes::from(payload(3, 4_400_000));
+            assert_eq!(
+                check_chunk_frames(&input, framing),
+                4_400_000_usize.div_ceil(f - CHUNK_HEADER_MAX)
+            );
+        }
+
+        let tight = |budget: usize| ConnectionConfig {
+            ws_write_buffer_size: 1_000,
+            ws_max_write_buffer_size: 1_010 + budget,
+            ..ConnectionConfig::default()
+        };
+        let thirty_two = tight(32);
+        assert_eq!(thirty_two.outbound_fragment_len(), 32);
+        let framing = OutboundFraming::new(&thirty_two, true);
+        assert_eq!(framing.chunk_len, None, "no CHUNK fits a 32-byte frame");
+        let frames: Vec<(Frame, bool)> =
+            outbound_frames(Bytes::from(payload(4, 4_400_000)), framing).collect();
+        assert_eq!(frames.len(), 4_400_000_usize.div_ceil(32));
+        assert!(frames
+            .iter()
+            .all(|(f, flush)| *flush && f.payload().len() == 32));
+        assert_eq!(opcode_byte(frames[0].0.header().opcode), OP_BINARY);
+        assert!(frames[1..]
+            .iter()
+            .all(|(f, _)| opcode_byte(f.header().opcode) == OP_CONTINUE));
+
+        let thirty_three = tight(33);
+        assert_eq!(thirty_three.outbound_fragment_len(), 33);
+        assert_eq!(OutboundFraming::new(&thirty_three, true).chunk_len, Some(1));
+    }
+
+    /// Reads messages until the server's Close, failing on a read error or
+    /// silence for `within`.
+    async fn read_until_close(
+        stream: &mut SplitStream<ClientSocket>,
+        within: Duration,
+    ) -> Vec<Bytes> {
+        let mut got = Vec::new();
+        loop {
+            let next = tokio::time::timeout(within, stream.next())
+                .await
+                .unwrap_or_else(|_| panic!("no message within {within:?} after {}", got.len()));
+            match next {
+                Some(Ok(Message::Binary(bytes))) => got.push(bytes),
+                Some(Ok(Message::Close(_))) | None => return got,
+                Some(Ok(_)) => {}
+                Some(Err(e)) => panic!("read error after {} messages: {e}", got.len()),
+            }
+        }
+    }
+
+    /// The `CHUNK`s of `messages`, which must rejoin `want`.
+    fn rejoin_chunks(messages: &[Bytes], want: &[u8]) {
+        let mut joined = Vec::with_capacity(want.len());
+        for (at, message) in messages.iter().enumerate() {
+            let (last, data) = decode_chunk(message);
+            assert_eq!(last, at + 1 == messages.len(), "last on CHUNK {at}");
+            assert!(!data.is_empty(), "empty CHUNK {at}");
+            joined.extend_from_slice(&data);
+        }
+        assert!(
+            joined[..] == want[..],
+            "the CHUNKs do not rejoin the message"
+        );
+    }
+
+    #[tokio::test]
+    async fn chunked_writer_sends_every_chunk_before_the_next_message() {
+        let mut h = harness_with(false, true).await;
+        let big = payload(1, 4_400_000);
+        let small = payload(2, 10);
+        for bytes in [&big, &small] {
+            h.tx.send(OutboundMessage::Binary(bytes.clone()))
+                .await
+                .expect("queue open");
+        }
+        let k = 4_400_000_usize.div_ceil(C);
+        let got = read_messages(&mut h.client_stream, k + 1, Duration::from_secs(30)).await;
+        rejoin_chunks(&got[..k], &big);
+        assert!(got[k][..] == small[..], "the small message arrived changed");
+
+        let frames = h.tap.frames.lock().clone();
+        let on_wire = wire_messages(&frames);
+        assert_eq!(on_wire.len(), k + 1, "WebSocket messages on the wire");
+        for (at, message) in on_wire[..k].iter().enumerate() {
+            let data = if at + 1 == k { 4_400_000 - at * C } else { C };
+            assert_eq!(message.len(), 2, "CHUNK {at} is two frames");
+            assert_eq!((message[0].0, message[0].1), (OP_BINARY, false));
+            assert!(message[0].2 <= CHUNK_HEADER_MAX);
+            assert_eq!(message[1], (OP_CONTINUE, true, data), "CHUNK {at}");
+        }
+        assert_eq!(on_wire[k], expected_shapes(10));
+        assert!(frames.iter().all(|f| f.opcode != OP_CLOSE), "closed");
+        assert!(!h.writer.is_finished(), "the writer ended");
+    }
+
+    #[tokio::test]
+    async fn chunked_writer_sends_a_queued_close_after_the_last_chunk() {
+        let mut h = harness_with(false, true).await;
+        let big = payload(1, 4_400_000);
+        h.tx.send(OutboundMessage::Binary(big.clone()))
+            .await
+            .expect("queue open");
+        h.tx.send(OutboundMessage::Close(None))
+            .await
+            .expect("queue open");
+        let got = read_until_close(&mut h.client_stream, Duration::from_secs(30)).await;
+        assert_eq!(
+            got.len(),
+            4_400_000_usize.div_ceil(C),
+            "CHUNKs before the Close"
+        );
+        rejoin_chunks(&got, &big);
+        let frames = h.tap.frames.lock().clone();
+        let close = frames
+            .iter()
+            .position(|f| f.opcode == OP_CLOSE)
+            .expect("the server's Close");
+        assert!(
+            frames[close..].iter().all(|f| f.opcode >= 0x8),
+            "a data frame after the Close"
+        );
+    }
+
+    #[tokio::test]
+    async fn chunked_writer_answers_ping_between_chunks() {
+        let mut h = harness_with(true, true).await;
+        let big = payload(1, 4_400_000);
+        h.tx.send(OutboundMessage::Binary(big.clone()))
+            .await
+            .expect("queue open");
+        let k = 4_400_000_usize.div_ceil(C);
+        let mut client_stream = h.client_stream;
+        let reader = tokio::spawn(async move {
+            read_messages(&mut client_stream, k, Duration::from_secs(10)).await
+        });
+        tokio::time::timeout(Duration::from_secs(10), &mut h.tap.held)
+            .await
+            .expect("the first CHUNK within 10 s")
+            .expect("tap alive");
+        h.client_sink
+            .send(Message::Ping(Bytes::from_static(b"mid-chunks")))
+            .await
+            .expect("ping sent");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        h.tap.release.notify_one();
+
+        let got = reader.await.expect("the client reader does not panic");
+        rejoin_chunks(&got, &big);
+        let frames = h.tap.frames.lock().clone();
+        let pong = frames
+            .iter()
+            .position(|f| f.opcode == OP_PONG && f.control == b"mid-chunks")
+            .expect("a Pong with the Ping's payload");
+        let last = frames
+            .iter()
+            .rposition(|f| f.opcode == OP_CONTINUE && f.fin)
+            .expect("the last CHUNK's data frame");
+        assert!(
+            pong < last,
+            "the Pong came after the last CHUNK ({pong} vs {last})"
+        );
+    }
+
+    #[tokio::test]
+    async fn whole_message_writer_keeps_the_legacy_frames() {
+        let mut h = harness(false).await;
+        let big = payload(1, 4_400_000);
+        let small = payload(2, 10);
+        for bytes in [&big, &small] {
+            h.tx.send(OutboundMessage::Binary(bytes.clone()))
+                .await
+                .expect("queue open");
+        }
+        h.tx.send(OutboundMessage::Close(None))
+            .await
+            .expect("queue open");
+        let got = read_until_close(&mut h.client_stream, Duration::from_secs(30)).await;
+        assert_eq!(got.len(), 2, "whole messages, no CHUNK");
+        assert!(got[0][..] == big[..] && got[1][..] == small[..]);
+        let frames = h.tap.frames.lock().clone();
+        assert_eq!(
+            wire_messages(&frames),
+            vec![expected_shapes(4_400_000), expected_shapes(10)]
+        );
+    }
 }
