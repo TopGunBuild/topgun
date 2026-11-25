@@ -36,9 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on a Mac: a ~4.1 MB live snapshot with live writes to its own map at 7 and 20 writes/s, 3 runs
   each, completes with no reconnect and ends equal to a fresh query; before this change 20
   writes/s reconnected. A client built from `main` between the large-message change and this one
-  reconnects at the first passed message. Large live events and sync responses still hold the
-  messages behind them, and buffers below the server's socket (the network, reverse proxies, and
-  on macOS the server's own send buffer) still delay a passed message.
+  reconnects at the first passed message. On Linux (Hetzner ccx33, 8 vCPU AMD EPYC-Milan, kernel
+  6.1, `net.ipv4.tcp_moderate_rcvbuf=0`), at 1 Mbit/s, 3 runs each: a `queryOnce` of a 10-row map
+  sent 8 s into that transfer settled in 1.90–1.95 s, with about 1.25 MB of it passed, and a write
+  to a second live query of the same client arrived 1.96–2.01 s after its acknowledgement, before
+  any row of the snapshot; before this change the `queryOnce` did not settle within its 5 s
+  timeout and the write arrived after the whole snapshot (one run each). Nothing is claimed at
+  lower rates. Large live events and sync responses still hold the messages behind them, and
+  buffers below the server's socket (the network, reverse proxies, receive buffers that Linux
+  auto-tunes up to megabytes by default, and on macOS the server's own send buffer) still delay a
+  passed message.
 - **Fixed (server): large answers reach the client.** An outbound WebSocket message larger than
   512 KB — a query, search or sync answer, or a live snapshot — closed the connection instead of
   reaching the client, and the client reconnected into the same failure. Such messages are now sent
