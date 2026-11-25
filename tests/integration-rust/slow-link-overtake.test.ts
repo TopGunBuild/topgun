@@ -28,8 +28,9 @@
  * Latency bound. In the worst case the bytes ahead of a small message queued at
  * the server are the rest of one CHUNK (C + 64), the server socket's unsent
  * bytes (L + G: 16 384 + 65 536 on Linux, where TCP_NOTSENT_LOWAT is set), the
- * proxy's upstream receive buffer R_p (the middle value of tcp_rmem) and the
- * proxy's queue (16 384 + one 65 536-byte read):
+ * proxy's upstream receive buffer R_p (at most the middle value of tcp_rmem:
+ * the kernel charges each packet's overhead to it, so it holds fewer data
+ * bytes) and the proxy's queue (16 384 + one 65 536-byte read):
  * D(rate) = (C + 64 + L + G + R_p + 16 384 + 65 536) × 8 / rate + 0.5 s, the
  * 0.5 s for the child's event loop, its 100 ms status interval and IPC. F's and
  * G's latencies are asserted against D only on Linux. So are F's and G's
@@ -40,6 +41,15 @@
  * Elsewhere the values are recorded, beside the Linux figure. On Linux each F
  * and G record carries `ss -tmi` of the server's and the proxy's sockets at
  * that moment.
+ *
+ * On Linux the file needs `net.ipv4.tcp_moderate_rcvbuf=0` and fails at start
+ * without it: receive auto-tuning would grow the proxy's and the child's
+ * receive buffers from tcp_rmem[1] towards tcp_rmem[2] (megabytes), which hold
+ * most of the answer, so the setup would model a deep buffer rather than a
+ * link. F and H also check the buffer itself: the `rb` of the proxy's
+ * upstream socket in `ss -tmi` must stay at most 262 144 bytes. The file is
+ * opt-in (`pnpm test:integration-rust:slow-link`); CI runs it in a job that
+ * sets the sysctl.
  *
  * Environment:
  *
@@ -148,6 +158,47 @@ function bound(mbps: number): number {
 }
 
 const LINUX = process.platform === 'linux';
+
+/** The largest upstream `rb` the setup still counts as a link: twice Linux's default `tcp_rmem[1]`. */
+const UPSTREAM_RB_MAX = 262_144;
+
+/** Fails the file on Linux while receive auto-tuning is on (see the header). */
+function requireFixedReceiveBuffers(): void {
+  if (!LINUX) return;
+  const value = fs.readFileSync('/proc/sys/net/ipv4/tcp_moderate_rcvbuf', 'utf8').trim();
+  if (value !== '0') {
+    throw new Error(
+      `net.ipv4.tcp_moderate_rcvbuf is ${value}: receive auto-tuning grows the proxy's receive ` +
+        'buffer to megabytes, so this file would model a deep buffer, not a slow link. Run it with ' +
+        '`sudo sysctl -w net.ipv4.tcp_moderate_rcvbuf=0` and restore the value afterwards.',
+    );
+  }
+}
+
+interface BufferSample {
+  rb: number;
+  ss: string;
+}
+
+/** The largest `rb` in `ss -tmi` of the proxy's open upstream sockets, with the output; null when none is open. */
+function upstreamBuffer(p: ThrottleProxy): BufferSample | null {
+  const ports = p.upstreamPorts();
+  if (ports.length === 0) return null;
+  const filter = ports.map((port) => `sport = :${port}`).join(' or ');
+  const ss = child_process.execFileSync('ss', ['-tmi', `( ${filter} )`], { encoding: 'utf8' });
+  const rbs = [...ss.matchAll(/\brb(\d+)/g)].map((m) => Number(m[1]));
+  return rbs.length === 0 ? null : { rb: Math.max(...rbs), ss };
+}
+
+/** Fails unless the proxy's upstream `rb` was read and is at most UPSTREAM_RB_MAX (see the header). */
+function checkUpstreamBuffer(sample: BufferSample | null): void {
+  if (sample === null || sample.rb > UPSTREAM_RB_MAX) {
+    throw new Error(
+      `the proxy's upstream receive buffer is ${sample?.rb ?? 'unread'}, not at most ` +
+        `${UPSTREAM_RB_MAX} bytes, so the setup does not model the link:\n${sample?.ss ?? ''}`,
+    );
+  }
+}
 
 /** `ss -tmi` of the sockets of `ports` on Linux, else null; null too where `ss` is missing. */
 function socketStats(ports: number[]): string | null {
@@ -298,6 +349,7 @@ describe('Integration: small messages pass a long answer on a slow link (Rust Se
   let tracer: ReturnType<typeof setInterval> | null = null;
 
   beforeAll(async () => {
+    requireFixedReceiveBuffers();
     const server = await spawnRustServer();
     port = server.port;
     cleanup = server.cleanup;
@@ -460,6 +512,7 @@ describe('Integration: small messages pass a long answer on a slow link (Rust Se
     const result = (await reply) as QueryOnceResult;
     const bytesAtSettle = proxy!.bytesDownstream();
     const sockets = socketStats([port, proxy!.port]);
+    const upstream = LINUX ? upstreamBuffer(proxy!) : null;
     const withinMs = Math.max(120_000, (2 * 4_400_000 * 8 * 1000) / (mbps * 1e6));
     const complete = await poll(() => (s.status?.prefixKeys ?? 0) >= SEED_ROWS, withinMs, 100);
     const finalBytes = proxy!.bytesDownstream();
@@ -476,11 +529,13 @@ describe('Integration: small messages pass a long answer on a slow link (Rust Se
       bytesAtSettle,
       finalBytes,
       complete,
+      upstreamRb: upstream?.rb ?? null,
       trace,
       sockets,
     });
     expect(complete).toBe(true);
     if (LINUX) {
+      checkUpstreamBuffer(upstream);
       expect(result.ok).toBe(true);
       expect(result.rows).toHaveLength(SMALL_ROWS);
       expect(bytesAtSettle).toBeLessThan(0.9 * finalBytes);
@@ -576,7 +631,11 @@ describe('Integration: small messages pass a long answer on a slow link (Rust Se
       s.send({ type: 'block', sentinel, maxMs: 45_000 });
       const blockedAt = Date.now();
       let lossAt: number | null = null;
+      // The largest upstream buffer seen while the blocked connection is open.
+      let worst: BufferSample | null = null;
       while (Date.now() < blockedAt + 30_000) {
+        const sample = LINUX ? upstreamBuffer(proxy!) : null;
+        if (sample !== null && (worst === null || sample.rb > worst.rb)) worst = sample;
         if ((await lossCount(port)) > lossBefore) {
           lossAt = Date.now();
           break;
@@ -600,12 +659,14 @@ describe('Integration: small messages pass a long answer on a slow link (Rust Se
         written,
         found,
         lossMs: lossAt === null ? null : lossAt - blockedAt,
+        upstreamRb: worst?.rb ?? null,
         reconnected,
         converged,
       });
       // On macOS the child's receive buffer is auto-tuned too, so a child that
       // stops reading can absorb the live traffic of the whole block.
       if (LINUX) {
+        checkUpstreamBuffer(worst);
         expect(lossAt).not.toBeNull();
         expect(lossAt! - blockedAt).toBeLessThanOrEqual(30_000);
         expect(reconnected).toBe(true);

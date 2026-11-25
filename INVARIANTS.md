@@ -5321,7 +5321,11 @@ weaker than a test.
   query), F (a `queryOnce` during the transfer settles before it completes), G (a live event of
   another query arrives during it) and H (a client that stops reading is still disconnected by
   `TG-LIVE-003`); F's and G's end-to-end order, their latency bound and H are asserted on Linux
-  only, and recorded elsewhere.
+  only, and recorded elsewhere. The file is opt-in (`pnpm test:integration-rust:slow-link`): on
+  Linux it fails unless `net.ipv4.tcp_moderate_rcvbuf` is `0`, so that the proxy's and the child's
+  receive buffers stay at `tcp_rmem[1]` instead of growing to megabytes, and F and H fail when the
+  proxy's upstream socket holds a receive buffer (`rb` in `ss -tmi`) above 262 144 bytes; CI runs it
+  in a job that sets the value and restores it.
 - **Violation consequence:** a live query whose update arrives before its snapshot ends on a stale
   row; a superseded send's snapshot reverts a live query's rows; a large live event passed by a
   later write of the same key leaves the older value; or a slow link reconnects through the

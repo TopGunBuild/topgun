@@ -30,6 +30,8 @@ export interface ThrottleProxy {
   port: number;
   /** Server-to-client bytes written to clients so far, over every connection. */
   bytesDownstream(): number;
+  /** The local ports of the open connections' upstream sockets, to find them in `ss`. */
+  upstreamPorts(): number[];
   /** Sets the cap of existing and later connections; `Infinity` is unthrottled. */
   setRate(bitsPerSecond: number): void;
   blackhole(): void;
@@ -164,6 +166,8 @@ export async function startThrottleProxy(options: {
   return {
     port: address.port,
     bytesDownstream: () => downstream,
+    upstreamPorts: () =>
+      [...links].map((link) => link.upstream.localPort).filter((p): p is number => p !== undefined),
     setRate: (bitsPerSecond: number) => {
       rate = bitsPerSecond;
     },
