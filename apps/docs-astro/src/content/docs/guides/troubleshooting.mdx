@@ -348,14 +348,14 @@ Run the server under a supervisor that restarts it on a non-zero exit code (syst
 
 **Solutions:**
 - For `cause="io"` or `cause="corrupted"`, check the disk of the data directory: free space, permissions (a directory that became read-only), and the system log for I/O errors. When the cause is gone, one restart brings the node back with every acknowledged write.
-- For `cause="inconsistent"`, a restart does not heal the node: at the next start the server keeps that record's write-ahead-log entry unapplied (its line carries `cause="inconsistent"`), replays everything else, and stops again at the next write of that key. Restore the data directory and the WAL directory from the same backup.
+- For `cause="inconsistent"`, what the next start does depends on what the store met. A record version or registry row that does not decode: the server keeps that record's write-ahead-log entry unapplied (its line carries `cause="prepare"`), replays everything else, and stops again at the next write of that key. A version that went backwards: the entry is at or below the stored version, so the server skips it as already applied and runs on. A malformed next-map-id row, a watermark that went backwards, or an entry above the 4 GiB limit: the entry is kept unapplied with `cause="inconsistent"`. Where an entry is kept unapplied, a restart does not heal the node: restore the data directory and the WAL directory from the same backup.
 - If every restart exits with code 1 and `store engine: cannot open …`, the cause is still there, or the store is damaged: fix the disk, or restore the data directory and the WAL directory from the same backup.
 
 ### A write is refused with `record too large` or `map id space exhausted`
 
 **Symptom:** A write fails with the temporary `internal` error (code 500) and the text `record too large: … bytes would exceed the per-record limit of 67108864 bytes`, or `map id space exhausted: no new map can be created in this store`; the client keeps the write and keeps sending it again.
 
-**Cause:** The server refuses, before it acknowledges anything, a write it could not store. One record is limited to 64 MiB of estimated size, its key included, and a key to 64 MiB; a single client message never reaches that, but an OR-Map key that accumulates many entries can. A store gives out 2³² − 1 map ids over its whole life and never reuses one, also after a map or a tenant is dropped; once all are given out, a write to a map that does not exist yet is refused. Both refusals are counted in `topgun_write_behind_capacity_refusals_total` (`bound="record"` for the record limit).
+**Cause:** The server refuses, before it acknowledges anything, a write it could not store. One record is limited to 64 MiB of estimated size, its key included, and a key to 64 MiB; a single client message never reaches that, but an OR-Map key that accumulates many entries can. A store gives out 2³² − 1 map ids over its whole life and never reuses one, also after a map or a tenant is dropped; once all are given out, a write to a map that does not exist yet is refused. Only the record limit is counted, in `topgun_write_behind_capacity_refusals_total{bound="record"}`; a map-id refusal is visible only in the error text.
 
 **Solutions:**
 - Split a record that large across several keys.

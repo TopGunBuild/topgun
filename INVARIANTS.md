@@ -1908,9 +1908,15 @@ weaker than a test.
   caller). redb's `ValueTooLarge` and `TableTypeMismatch` are `Unknown` too; redb is only the
   source of the one-time engine migration. An unencodable value is still retried by the halving
   (TODO-824).
-- **An inconsistency crash-loops on its key.** `inconsistent` stops the node; at the next start
-  recovery holds that frame (statement 8) and the next write of the key stops the node again. A
-  restart does not heal it; the operator's remedy is a restore from backup.
+- **An inconsistency can crash-loop on its key, by cause.** `inconsistent` stops the node; what
+  the next start does depends on the site. A version or registry row that does not decode is met
+  first by recovery's version read (`prepare_entry`), so the frame is held with `cause="prepare"`
+  and the next write of the key stops the node again. A version regression is not met at all: the
+  frame's sequence is at or below the stored version, so the gate skips it as applied and the node
+  runs on. Statement 8's `cause="inconsistent"` hold applies only when recovery's own commit is
+  refused (a malformed next-map-id met by a new map, an applied-watermark refusal, an entry above
+  RocksDB's size limit). Where a frame is held a restart does not heal the node; the operator's
+  remedy is a restore from backup.
 - **`inconsistent` out of process** is not shown by a process-level test; the exit code does not
   depend on the cause, and is shown for `io` by `store-broken.test.ts`.
 - **A panic inside redb** (its own `.lock().unwrap()`) is the `TG-WB-006` path, not this one.

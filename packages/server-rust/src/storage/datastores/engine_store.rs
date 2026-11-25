@@ -939,7 +939,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     /// only [`Self::open_sealed`] opens (`TG-ENC-006`); an engine error.
     pub fn open(engine: Arc<E>) -> anyhow::Result<Self> {
         let metadata = read_store_metadata(&*engine.snapshot()?)?;
-        let applied = match metadata {
+        let (committed, next_map_id) = match metadata {
             Some(StoreMetadata {
                 keyring: Some(_), ..
             }) => {
@@ -971,7 +971,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                 next_map_id,
             ),
         };
-        Ok(Self::over(engine, &applied.0, applied.1, None))
+        Ok(Self::over(engine, &committed, next_map_id, None))
     }
 
     /// Opens the store over `engine` with the keys of `encryption`,
@@ -2401,10 +2401,12 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
             // the largest put, the likeliest to pass the engine's size limit.
             // The engine's error stays in the chain (TG-WB-010).
             Err(err)
-                if matches!(
-                    err.downcast_ref::<KvError>(),
-                    Some(KvError::InvalidArgument(_))
-                ) =>
+                if err.chain().any(|e| {
+                    matches!(
+                        e.downcast_ref::<KvError>(),
+                        Some(KvError::InvalidArgument(_))
+                    )
+                }) =>
             {
                 let largest = commit
                     .writes

@@ -907,7 +907,7 @@ mod tests {
         );
     }
 
-    /// AC24 (engine arm): an entry above the engine's size limits — a
+    /// An entry above the engine's size limits — a
     /// value, a put key, a delete key — refuses the whole batch with
     /// `InvalidArgument`, and nothing of it is written.
     #[test]
@@ -964,7 +964,7 @@ mod tests {
         let outcome = engine.write(batch, SYNC);
         let small = engine.get(b"small").unwrap();
         let large = engine.get(b"large").unwrap().map(|v| v.len());
-        println!("AC24h outcome={outcome:?} small={small:?} large_len={large:?}");
+        println!("outcome={outcome:?} small={small:?} large_len={large:?}");
         assert!(
             matches!(outcome, Err(KvError::InvalidArgument(_))),
             "write returned {outcome:?}"

@@ -2887,7 +2887,7 @@ mod admission {
         );
     }
 
-    /// AC2: with two ids left two new maps are promised and a third is
+    /// With two ids left two new maps are promised and a third is
     /// refused; a promise is idempotent, a map with an id is admitted, and
     /// committing the promised puts releases them.
     #[test]
@@ -2921,7 +2921,7 @@ mod admission {
         assert_eq!(id_of(&*engine, "b"), Some(u32::MAX - 1));
     }
 
-    /// AC4: concurrent admissions of distinct new maps promise exactly the
+    /// Concurrent admissions of distinct new maps promise exactly the
     /// ids that are left.
     #[test]
     fn concurrent_admissions_never_promise_more_ids_than_are_left() {
@@ -2947,7 +2947,7 @@ mod admission {
         assert_eq!(store.reservation().1.len(), 3);
     }
 
-    /// AC5: a tenant drop releases its promised names; a failed commit
+    /// A tenant drop releases its promised names; a failed commit
     /// releases nothing; the settled fast path releases its names; a
     /// delete-only commit keeps the promise of the put still buffered.
     #[test]
@@ -3002,7 +3002,7 @@ mod admission {
         assert!(block_on(store.load("m", "k2")).expect("load").is_some());
     }
 
-    /// AC22: a direct inner-store write cannot take an id promised to a
+    /// A direct inner-store write cannot take an id promised to a
     /// buffered put, sequentially or while its batch is in flight.
     #[test]
     fn a_direct_write_cannot_take_an_id_promised_to_a_buffered_put() {
@@ -3043,7 +3043,7 @@ mod admission {
         assert_eq!(id_of(&*engine, promised), Some(u32::MAX - 1));
     }
 
-    /// AC6: the store's own consistency refusals are fatal `inconsistent`;
+    /// The store's own consistency refusals are fatal `inconsistent`;
     /// a refused name and an exhausted id space are not.
     #[test]
     fn the_stores_own_consistency_refusals_are_inconsistent() {
@@ -3133,7 +3133,7 @@ mod admission {
         Arc::new(engine)
     }
 
-    /// AC24 (commit arm): an engine refusal of an entry above its size limit
+    /// An engine refusal of an entry above its size limit
     /// is `inconsistent` at the commit, names the largest put, and writes
     /// none of the batch.
     #[test]

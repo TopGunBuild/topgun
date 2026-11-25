@@ -33,10 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regression, or a malformed next-map-id row was retried for ever; it now stops the node with exit
   72 and the new cause `inconsistent` (`topgun_write_behind_store_broken_total{cause="inconsistent"}`,
   rendered at 0 from the first scrape). The fatal line's `map` and `key` name the failing record and
-  its `error` field carries the whole error chain. A restart does not heal this cause: at the next
-  start WAL recovery holds that record's frame — logged with `cause="inconsistent"`; every line of a
-  frame recovery leaves unapplied now has a `cause` field (`prepare`, `inconsistent` or `refused`) —
-  and replays the rest of its partition; the remedy is a restore from backup (`TG-WB-010`).
+  its `error` field carries the whole error chain. Every line of a frame recovery leaves unapplied
+  now has a `cause` field (`prepare`, `inconsistent` or `refused`). What the next start does depends
+  on what the store met: a version row or registry row that does not decode is met when recovery
+  reads the key's version, so the frame is held with `cause="prepare"` and the next write of that key
+  stops the node again; a version regression's frame is at or below the stored version, so recovery
+  skips it as already applied and the node runs on; `cause="inconsistent"` is logged only when the
+  recovery commit itself is refused (a malformed next-map-id met by the first write of a new map, an
+  applied-watermark refusal, an entry above RocksDB's size limit), and the frame is held. Where the
+  frame is held a restart does not heal the node; the remedy is a restore from backup
+  (`TG-WB-010`).
 - **Fixed (client and server): the heartbeat no longer reconnects while a large message arrives on
   a slow link.** A `TopGunClient` on a single-server connection reconnected whenever one server
   message took longer than about 10–15 s to arrive — a ~4.1 MB live snapshot below about

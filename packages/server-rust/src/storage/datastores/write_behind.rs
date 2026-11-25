@@ -1947,8 +1947,6 @@ fn register_retry_metrics() {
     metrics::gauge!(STORE_HOLD_GAUGE).set(0.0);
 }
 
-/// The byte bound's refusal, counted once under `bound="bytes"`. Its text
-/// differs from the key refusal's so a reader and a test can tell them apart.
 /// Refuses a map name the store would refuse (`TG-WB-012`), so no write of it
 /// is acknowledged; the length bound is an ingress rule only, and long names
 /// the store already holds stay writable.
@@ -1961,6 +1959,8 @@ fn refuse_store_refused_name(map: &str) -> anyhow::Result<()> {
     }
 }
 
+/// The byte bound's refusal, counted once under `bound="bytes"`. Its text
+/// differs from the key refusal's so a reader and a test can tell them apart.
 fn refuse_bytes() -> anyhow::Error {
     metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "bytes").increment(1);
     anyhow::anyhow!("Write-behind byte capacity exceeded")
@@ -5870,18 +5870,21 @@ impl MapDataStore for WriteBehindDataStore {
         // One write path, not two: the same code the witness-bearing callers
         // run with the witness set. A second body would let the two drift. The
         // write is admitted here, before its only mutation, the queue insert;
-        // `add_with_witness` decides no bound.
+        // `add_with_witness` decides neither the key nor the byte bound.
         self.admit_value(map, key, value)?;
         self.add_with_witness(map, key, WriteSource::Value(value), now, None)
             .await
     }
 
     /// Every refusal of a plain write that can be decided before it changes
-    /// anything: the store failed or shutting down, its tenant closed, and
-    /// both bounds by `admit_write` at the value's charge. The write-through
-    /// that follows decides no bound again, so a write admitted here is not
-    /// refused at a bound after its mutation; the store's state and a tenant
-    /// close are checked again there, because either can change in between.
+    /// anything: the store failed or shutting down, its tenant closed, the map
+    /// name, the record size and both bounds by `admit_write` at the value's
+    /// charge, and last the map's id (`admit_map`, `TG-WB-012`). The
+    /// write-through that follows decides neither bound again, so a write
+    /// admitted here is not refused at a bound after its mutation; the store's
+    /// state and a tenant close are checked again there, because either can
+    /// change in between, and so are the name, the size and the id, which give
+    /// the same answer for a write admitted here.
     fn admit_value(&self, map: &str, key: &str, value: &RecordValue) -> anyhow::Result<()> {
         self.refuse_unless_running(map, key)?;
         // A fast refusal only: a tenant drop that begins after this check is
@@ -5967,10 +5970,11 @@ impl MapDataStore for WriteBehindDataStore {
         // insert is done, so a tenant drop waits for this write (`TG-TEN-002`).
         let _in_flight = self.tenant_closes.enter(map)?;
 
-        // The memory this write adds to the buffer. No bound is decided here:
-        // the caller admitted the write before its mutation (`admit_value`,
-        // `admit_in_place`), and deciding it again now would refuse only the
-        // acknowledgement of a change that has already happened. For a value
+        // The memory this write adds to the buffer. Neither the key nor the
+        // byte bound is decided here: the caller admitted the write before its
+        // mutation (`admit_value`, `admit_in_place`), and deciding them again
+        // now would refuse only the acknowledgement of a change that has
+        // already happened. For a value
         // this computes the same charge `admit_value` computed from the same
         // arguments, a second walk of the value.
         let charge = charge_of(&src, key);
@@ -19741,7 +19745,7 @@ mod store_broken_tests {
                 .is_some_and(|e| e.downcast_ref::<E>().is_some())
         }
 
-        /// AC1: a map name the store refuses is refused at every entry, before
+        /// A map name the store refuses is refused at every entry, before
         /// the WAL append, for any origin; a long name is the ingress's rule
         /// only.
         #[test]
@@ -19804,7 +19808,7 @@ mod store_broken_tests {
             });
         }
 
-        /// AC3: a put to a new map once no id can be promised is refused at
+        /// A put to a new map once no id can be promised is refused at
         /// `add`, before the WAL append; the promised map is stored.
         #[test]
         fn a_put_to_a_map_that_cannot_get_an_id_is_refused_before_the_ack() {
@@ -19830,7 +19834,7 @@ mod store_broken_tests {
             });
         }
 
-        /// AC29: once the id space is exhausted, an existing map whose registry
+        /// Once the id space is exhausted, an existing map whose registry
         /// row is not cached is admitted by one point read and stored; a new
         /// map is refused before the WAL append.
         #[test]
@@ -19861,7 +19865,7 @@ mod store_broken_tests {
             });
         }
 
-        /// AC25: a plain record above the per-record cap, and a key longer than
+        /// A plain record above the per-record cap, and a key longer than
         /// it, are refused before the WAL append and counted only under
         /// `bound="record"`, a series present before any refusal; a record at
         /// exactly the cap is admitted.
@@ -19964,7 +19968,7 @@ mod store_broken_tests {
 
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(2_000))]
-            /// AC27: an OR slot encodes below three times its charge, so a
+            /// An OR slot encodes below three times its charge, so a
             /// record admitted at the cap encodes below 192 MiB.
             #[test]
             fn an_or_slot_encodes_below_three_times_its_charge(
@@ -20096,7 +20100,7 @@ mod store_broken_tests {
             }
         }
 
-        /// AC7: the store's inconsistency stops the write-behind as a broken
+        /// The store's inconsistency stops the write-behind as a broken
         /// store does, under a cause whose series is present before it.
         #[test]
         fn a_store_inconsistency_stops_the_node_like_a_broken_store() {
@@ -20129,7 +20133,7 @@ mod store_broken_tests {
             );
         }
 
-        /// AC28: the fatal line names the record the store found inconsistent,
+        /// The fatal line names the record the store found inconsistent,
         /// not the first entry of the commit, and carries the whole chain.
         #[test]
         fn the_store_broken_line_names_the_failing_record_and_the_whole_chain() {
