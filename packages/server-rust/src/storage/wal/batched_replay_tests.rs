@@ -1280,61 +1280,60 @@ fn c08_batched_replay_equals_per_frame_replay_under_refusals() {
         .enable_all()
         .build()
         .expect("runtime");
-    for refusal in [Refusal::Commit] {
-        let window = Window {
-            seed: vec![(0, or_value(&[("t0", "s")], &[]))],
-            frames: vec![
-                GenFrame::OrAdd {
-                    key: 0,
-                    tag: 1,
-                    text: "poison-a".into(),
-                },
-                GenFrame::Lww {
-                    key: 1,
-                    millis: 5,
-                    text: "h1".into(),
-                },
-                GenFrame::OrAdd {
-                    key: 0,
-                    tag: 2,
-                    text: "v".into(),
-                },
-                GenFrame::Lww {
-                    key: 2,
-                    millis: 5,
-                    text: "poison-b".into(),
-                },
-                GenFrame::Lww {
-                    key: 2,
-                    millis: 4,
-                    text: "older".into(),
-                },
-                GenFrame::Lww {
-                    key: 3,
-                    millis: 5,
-                    text: "h2".into(),
-                },
-            ],
-            batch_frames: 6,
-            refusal: Some(refusal),
-        };
-        let entries: Vec<WalEntry> = window
-            .frames
-            .iter()
-            .zip(1u64..)
-            .map(|(f, seq)| to_entry(f, seq))
-            .collect();
-        let (batched, per_frame) = runtime.block_on(async {
-            (
-                batched_outcome(&window, &entries, window.batch_frames).await,
-                per_frame_outcome(&window, &entries).await,
-            )
-        });
-        assert_eq!(
-            batched, per_frame,
-            "the hand case under {refusal:?}: batched against per-frame replay"
-        );
-    }
+    let refusal = Refusal::Commit;
+    let window = Window {
+        seed: vec![(0, or_value(&[("t0", "s")], &[]))],
+        frames: vec![
+            GenFrame::OrAdd {
+                key: 0,
+                tag: 1,
+                text: "poison-a".into(),
+            },
+            GenFrame::Lww {
+                key: 1,
+                millis: 5,
+                text: "h1".into(),
+            },
+            GenFrame::OrAdd {
+                key: 0,
+                tag: 2,
+                text: "v".into(),
+            },
+            GenFrame::Lww {
+                key: 2,
+                millis: 5,
+                text: "poison-b".into(),
+            },
+            GenFrame::Lww {
+                key: 2,
+                millis: 4,
+                text: "older".into(),
+            },
+            GenFrame::Lww {
+                key: 3,
+                millis: 5,
+                text: "h2".into(),
+            },
+        ],
+        batch_frames: 6,
+        refusal: Some(refusal),
+    };
+    let entries: Vec<WalEntry> = window
+        .frames
+        .iter()
+        .zip(1u64..)
+        .map(|(f, seq)| to_entry(f, seq))
+        .collect();
+    let (batched, per_frame) = runtime.block_on(async {
+        (
+            batched_outcome(&window, &entries, window.batch_frames).await,
+            per_frame_outcome(&window, &entries).await,
+        )
+    });
+    assert_eq!(
+        batched, per_frame,
+        "the hand case under {refusal:?}: batched against per-frame replay"
+    );
     drop(runtime);
     run_equivalence(64, true);
 }

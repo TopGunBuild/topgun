@@ -19980,7 +19980,7 @@ mod store_broken_tests {
 
         /// A key of `map` in the same WAL partition as `key`, other than it.
         fn partition_mate(map: &str, key: &str) -> String {
-            (0..)
+            (0..100_000)
                 .map(|i| format!("mate-{i}"))
                 .find(|mate| partition_for(map, mate) == partition_for(map, key))
                 .expect("a key in the partition")

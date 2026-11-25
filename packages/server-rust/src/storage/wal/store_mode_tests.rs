@@ -4221,8 +4221,7 @@ impl MapDataStore for ArmedStore {
             commit
                 .writes
                 .iter()
-                .enumerate()
-                .filter_map(|(_, write)| {
+                .filter_map(|write| {
                     let (map, key, seq) = match write {
                         StoreWrite::Put { map, key, seq, .. }
                         | StoreWrite::Remove { map, key, seq, .. } => (*map, *key, *seq),

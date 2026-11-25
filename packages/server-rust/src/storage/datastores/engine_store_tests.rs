@@ -3075,8 +3075,7 @@ mod admission {
         commit(&store, vec![], vec![(0, 5)]).expect("watermark");
         let err = commit(&store, vec![], vec![(0, 3)]).expect_err("lower");
         assert_eq!(store.classify_error(&err), INCONSISTENT, "{err:#}");
-        let out_of_range = u32::try_from(PARTITION_COUNT).expect("u32");
-        let err = commit(&store, vec![], vec![(out_of_range, 1)]).expect_err("range");
+        let err = commit(&store, vec![], vec![(PARTITION_COUNT, 1)]).expect_err("range");
         assert_eq!(store.classify_error(&err), INCONSISTENT, "{err:#}");
 
         // A malformed registry row of the commit's map.

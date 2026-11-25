@@ -3504,78 +3504,73 @@ impl WalRecovery {
                     .await
                 }
             };
-            loop {
-                let writes = batch_writes(&frames[lo..hi], &part, now);
-                let frontier = progress.frontier_after(&frames[lo..hi], &part);
-                let applied = if frontier > progress.row {
-                    vec![(partition, frontier)]
-                } else {
-                    Vec::new()
-                };
-                if writes.is_empty() && applied.is_empty() {
-                    progress.settle(&frames[lo..hi], &part);
-                    break;
-                }
-                let commit = crate::storage::map_data_store::FlushCommit {
-                    writes,
-                    applied: applied.clone(),
-                };
-                let err = match inner_store.commit(&commit).await {
-                    Ok(()) => {
-                        progress.settle(&frames[lo..hi], &part);
-                        progress.release(&frames[lo..hi], &part);
-                        if let Some(&(_, row)) = applied.first() {
-                            progress.row = row;
-                            if let Err(err) = self.wal.mark_applied(partition, row).await {
-                                tracing::warn!(
-                                    partition,
-                                    frontier = row,
-                                    error = %err,
-                                    "WAL recovery: failed to mark entries applied; \
-                                     next restart will re-replay (safe but redundant)"
-                                );
-                            }
-                        }
-                        break;
-                    }
-                    Err(err) => err,
-                };
-                let class = inner_store.classify_error(&err);
-                let inconsistent = class
-                    == crate::storage::map_data_store::StoreErrorClass::StoreBroken(
-                        crate::storage::map_data_store::StoreBrokenCause::Inconsistent,
-                    );
-                if let (
-                    false,
-                    crate::storage::map_data_store::StoreErrorClass::StoreBroken(cause),
-                ) = (inconsistent, class)
-                {
-                    tracing::error!(
-                        partition,
-                        cause = cause.as_str(),
-                        error = %err,
-                        "WAL recovery: the durable store is broken; the replay of this \
-                         partition stops and its frames stay replayable"
-                    );
-                    progress.broken = true;
-                    return;
-                }
-                if hi - lo == 1 {
-                    let cause = if inconsistent {
-                        "inconsistent"
-                    } else {
-                        "refused"
-                    };
-                    log_unreplayed(&mut progress.held, partition, &frames[lo], cause, &err);
-                    refused[lo] = true;
-                    progress.settle(&frames[lo..hi], &[Prepared::Failed]);
-                    break;
-                }
-                let mid = lo + (hi - lo) / 2;
-                parts.push((mid, hi));
-                parts.push((lo, mid));
-                break;
+            let writes = batch_writes(&frames[lo..hi], &part, now);
+            let frontier = progress.frontier_after(&frames[lo..hi], &part);
+            let applied = if frontier > progress.row {
+                vec![(partition, frontier)]
+            } else {
+                Vec::new()
+            };
+            if writes.is_empty() && applied.is_empty() {
+                progress.settle(&frames[lo..hi], &part);
+                continue;
             }
+            let commit = crate::storage::map_data_store::FlushCommit {
+                writes,
+                applied: applied.clone(),
+            };
+            let err = match inner_store.commit(&commit).await {
+                Ok(()) => {
+                    progress.settle(&frames[lo..hi], &part);
+                    progress.release(&frames[lo..hi], &part);
+                    if let Some(&(_, row)) = applied.first() {
+                        progress.row = row;
+                        if let Err(err) = self.wal.mark_applied(partition, row).await {
+                            tracing::warn!(
+                                partition,
+                                frontier = row,
+                                error = %err,
+                                "WAL recovery: failed to mark entries applied; \
+                                 next restart will re-replay (safe but redundant)"
+                            );
+                        }
+                    }
+                    continue;
+                }
+                Err(err) => err,
+            };
+            let class = inner_store.classify_error(&err);
+            let inconsistent = class
+                == crate::storage::map_data_store::StoreErrorClass::StoreBroken(
+                    crate::storage::map_data_store::StoreBrokenCause::Inconsistent,
+                );
+            if let (false, crate::storage::map_data_store::StoreErrorClass::StoreBroken(cause)) =
+                (inconsistent, class)
+            {
+                tracing::error!(
+                    partition,
+                    cause = cause.as_str(),
+                    error = %err,
+                    "WAL recovery: the durable store is broken; the replay of this \
+                     partition stops and its frames stay replayable"
+                );
+                progress.broken = true;
+                return;
+            }
+            if hi - lo == 1 {
+                let cause = if inconsistent {
+                    "inconsistent"
+                } else {
+                    "refused"
+                };
+                log_unreplayed(&mut progress.held, partition, &frames[lo], cause, &err);
+                refused[lo] = true;
+                progress.settle(&frames[lo..hi], &[Prepared::Failed]);
+                continue;
+            }
+            let mid = lo + (hi - lo) / 2;
+            parts.push((mid, hi));
+            parts.push((lo, mid));
         }
     }
 }

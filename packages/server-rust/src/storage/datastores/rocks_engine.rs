@@ -935,7 +935,7 @@ mod tests {
         batch.put(b"a", b"small");
         batch.delete(vec![b'k'; 17]);
         refused(batch);
-        let long = vec![b'k'; 17];
+        let long = [b'k'; 17];
         for key in [&b"a"[..], &b"big"[..], &b"b"[..], &long[..]] {
             assert_eq!(engine.get(key).unwrap(), None, "{key:?} was written");
         }
@@ -946,7 +946,7 @@ mod tests {
         assert!(engine.get(&[b'k'; 16]).unwrap().is_some());
     }
 
-    /// AC24h: a real value of `u32::MAX + 1` bytes beside a small put. Before
+    /// The size check at RocksDB's real limit: a value of `u32::MAX + 1` bytes beside a small put. Before
     /// the size check RocksDB dropped the large put and wrote the small one,
     /// and the write returned `Ok`: an acknowledged write was lost.
     #[test]
