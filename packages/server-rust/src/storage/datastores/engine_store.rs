@@ -86,8 +86,8 @@
 //! covers, and a row never moves below the value it holds.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
@@ -99,9 +99,9 @@ use topgun_core::types::tenant_owns;
 use super::kv_engine::{KeyRange, KvEngine, KvError, KvSnapshot, WriteBatch, WriteOptions};
 use crate::storage::map_data_store::{
     check_map_name, check_tenant, merkle_leaf_hash, wal_partition, AppliedWatermarks,
-    CommitDurability, DropOutcome, FlushCommit, KeyVersion, LeafSink, MapDataStore, MerkleLeaf,
-    PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder, StoreErrorClass, StoreSyncFailed,
-    StoreWrite,
+    CommitDurability, DropOutcome, FlushCommit, KeyVersion, LeafSink, MapAdmission, MapDataStore,
+    MapIdSpaceExhausted, MerkleLeaf, PutValue, ScanBatch, ScanCursor, ScanOrder, StoreBrokenCause,
+    StoreErrorClass, StoreInconsistent, StoreSyncFailed, StoreWrite,
 };
 use crate::storage::record::RecordValue;
 use crate::storage::sealing::{
@@ -512,6 +512,39 @@ fn partition_then_key_cursor_position(cursor: &ScanCursor) -> anyhow::Result<Vec
     Ok(position)
 }
 
+/// The id `rows` plans for a put to `(map, key)`. A plan gives a put's map
+/// an id or refuses the call, so a put without one is the store's own
+/// inconsistency.
+pub(super) fn planned_id(
+    rows: &HashMap<&str, Option<(u32, u8)>>,
+    map: &str,
+    key: &str,
+) -> anyhow::Result<u32> {
+    match rows.get(map).copied().flatten() {
+        Some((map_id, _)) => Ok(map_id),
+        None => Err(inconsistent(
+            Some(map),
+            Some(key),
+            format!("map {map:?} has no registry row after its plan"),
+        )),
+    }
+}
+
+/// A count as `u64`, for sums that must not wrap at `u32::MAX`.
+fn len_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+/// The store's own inconsistency (`TG-WB-010`), naming the record where the
+/// failing site knows it.
+fn inconsistent(map: Option<&str>, key: Option<&str>, detail: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(StoreInconsistent {
+        map: map.map(str::to_string),
+        key: key.map(str::to_string),
+        detail: detail.into(),
+    })
+}
+
 /// Refuses exactly the names the shared rule makes a store refuse, with the
 /// redb store's text, before anything touches the engine.
 fn check_name(map: &str) -> anyhow::Result<()> {
@@ -523,11 +556,17 @@ fn check_name(map: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The next map id of a store this binary formats: 0 is never issued.
+const FIRST_MAP_ID: u32 = 1;
+
 /// The metadata rows of a store this binary formats.
 fn format_rows() -> [(Vec<u8>, Vec<u8>); 3] {
     [
         (meta_key(META_FORMAT), FORMAT_VERSION.to_be_bytes().to_vec()),
-        (meta_key(META_NEXT_MAP_ID), 1u32.to_be_bytes().to_vec()),
+        (
+            meta_key(META_NEXT_MAP_ID),
+            FIRST_MAP_ID.to_be_bytes().to_vec(),
+        ),
         (meta_key(META_ACK_MODE), vec![ACK_MODE_LOCAL]),
     ]
 }
@@ -553,6 +592,8 @@ struct StoreMetadata {
     keyring: Option<KeyringRow>,
     /// The `max_version` row; an absent row is 0.
     max_version: u64,
+    /// The next map id the store issues.
+    next_map_id: u32,
 }
 
 /// Refuses a one-byte mark whose value is not `[0x01]`.
@@ -681,11 +722,11 @@ fn read_store_metadata(snapshot: &dyn KvSnapshot) -> anyhow::Result<Option<Store
         Some([ACK_MODE_LOCAL]) => {}
         Some(v) => bail!("{REFUSAL} ack mode {v:?} is not local"),
     }
-    match next_map_id.as_deref() {
+    let next_map_id = match next_map_id.as_deref() {
         None => bail!("{REFUSAL} no next map id metadata"),
-        Some(v) if v.len() == 4 && be_u32(v) >= 1 => {}
+        Some(v) if v.len() == 4 && be_u32(v) >= 1 => be_u32(v),
         Some(v) => bail!("{REFUSAL} next map id {v:?} is not a u32 of at least 1"),
-    }
+    };
     let imported = check_flag_mark("import", marker.as_deref())?;
     let import_pending = check_flag_mark("import-pending", pending.as_deref())?;
     if imported && import_pending {
@@ -722,6 +763,7 @@ fn read_store_metadata(snapshot: &dyn KvSnapshot) -> anyhow::Result<Option<Store
         applied,
         keyring,
         max_version,
+        next_map_id,
     }))
 }
 
@@ -842,6 +884,16 @@ pub struct EngineMapDataStore<E: KvEngine> {
     registry_lock: Mutex<()>,
     /// `name → (map_id, flags)`, filled only from rows that exist.
     cache: RwLock<HashMap<String, (u32, u8)>>,
+    /// The next map id as issued or planned (`TG-WB-012`): set at open from
+    /// the stored row and raised by a plan before its engine write, never
+    /// lowered, so an id is counted from the moment it is planned. A failed
+    /// batch leaves it above the stored row until a later plan or a restart.
+    issued_next: AtomicU32,
+    /// The reservation mutex: names without an id that an admitted put was
+    /// promised one (`TG-WB-012`). A name leaves it once a batch has given it
+    /// an id and the cache holds that id. No engine call is made under it,
+    /// and it is taken after `registry_lock`, never before.
+    promised: Mutex<HashSet<String>>,
     /// The `0x20` row of every WAL partition and the `max_version` row as
     /// the last returned commit left them (durable once a later sync covers
     /// it, `TG-WAL-003`), loaded at open and updated only after the engine
@@ -869,21 +921,6 @@ pub struct EngineMapDataStore<E: KvEngine> {
     registry_park: Mutex<Option<RegistryPark>>,
 }
 
-/// A first write of a map could not be given an id: every id is issued.
-#[derive(Debug)]
-struct MapIdSpaceExhausted {
-    /// The maps left without an id.
-    maps: Vec<String>,
-}
-
-impl std::fmt::Display for MapIdSpaceExhausted {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "map id space exhausted: no id for {:?}", self.maps)
-    }
-}
-
-impl std::error::Error for MapIdSpaceExhausted {}
-
 /// A one-shot blocking park inside `write_records`.
 #[cfg(test)]
 struct RegistryPark {
@@ -902,7 +939,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     /// only [`Self::open_sealed`] opens (`TG-ENC-006`); an engine error.
     pub fn open(engine: Arc<E>) -> anyhow::Result<Self> {
         let metadata = read_store_metadata(&*engine.snapshot()?)?;
-        let applied = match metadata {
+        let (committed, next_map_id) = match metadata {
             Some(StoreMetadata {
                 keyring: Some(_), ..
             }) => {
@@ -914,7 +951,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                     batch.put(key, value);
                 }
                 engine.write(batch, WriteOptions { sync: true })?;
-                Committed::EMPTY
+                (Committed::EMPTY, FIRST_MAP_ID)
             }
             Some(StoreMetadata {
                 migration: Some(_), ..
@@ -924,13 +961,17 @@ impl<E: KvEngine> EngineMapDataStore<E> {
             Some(StoreMetadata {
                 applied,
                 max_version,
+                next_map_id,
                 ..
-            }) => Committed {
-                applied,
-                max_version,
-            },
+            }) => (
+                Committed {
+                    applied,
+                    max_version,
+                },
+                next_map_id,
+            ),
         };
-        Ok(Self::over(engine, &applied, None))
+        Ok(Self::over(engine, &committed, next_map_id, None))
     }
 
     /// Opens the store over `engine` with the keys of `encryption`,
@@ -950,12 +991,12 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     pub fn open_sealed(engine: Arc<E>, encryption: &Encryption) -> anyhow::Result<Self> {
         let metadata = read_store_metadata(&*engine.snapshot()?)?;
         let mut batch = WriteBatch::new();
-        let (committed, row) = match metadata {
+        let (committed, next_map_id, row) = match metadata {
             None => {
                 for (key, value) in format_rows() {
                     batch.put(key, value);
                 }
-                (Committed::EMPTY, None)
+                (Committed::EMPTY, FIRST_MAP_ID, None)
             }
             Some(StoreMetadata {
                 migration: Some(_), ..
@@ -966,12 +1007,14 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                 applied,
                 keyring,
                 max_version,
+                next_map_id,
                 ..
             }) => (
                 Committed {
                     applied,
                     max_version,
                 },
+                next_map_id,
                 keyring,
             ),
         };
@@ -1031,7 +1074,12 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         if !batch.is_empty() {
             engine.write(batch, WriteOptions { sync: true })?;
         }
-        Ok(Self::over(engine, &committed, keyring.map(Arc::new)))
+        Ok(Self::over(
+            engine,
+            &committed,
+            next_map_id,
+            keyring.map(Arc::new),
+        ))
     }
 
     /// Runs a present `seal_pass` to its end (`TG-ENC-004`): walks `0x10` then
@@ -1158,11 +1206,20 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         Ok(open_value(self.keyring.as_deref(), engine_key, value)?)
     }
 
-    fn over(engine: Arc<E>, committed: &Committed, keyring: Option<Arc<Keyring>>) -> Self {
+    /// `next_map_id` is the stored next-map-id row, which every constructor
+    /// has read (or formatted) before it calls this.
+    fn over(
+        engine: Arc<E>,
+        committed: &Committed,
+        next_map_id: u32,
+        keyring: Option<Arc<Keyring>>,
+    ) -> Self {
         Self {
             engine,
             registry_lock: Mutex::new(()),
             cache: RwLock::new(HashMap::new()),
+            issued_next: AtomicU32::new(next_map_id),
+            promised: Mutex::new(HashSet::new()),
             applied: Mutex::new(*committed),
             returned: AtomicU64::new(0),
             durable: AtomicU64::new(0),
@@ -1215,7 +1272,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         initial_mark: &[u8],
     ) -> anyhow::Result<(Self, Vec<u8>)> {
         let metadata = read_store_metadata(&*engine.snapshot()?)?;
-        let (mark, applied) = match metadata {
+        let (mark, applied, next_map_id) = match metadata {
             None => {
                 // One batch, so no crash point leaves a formatted store
                 // without its mark.
@@ -1225,12 +1282,13 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                 }
                 batch.put(meta_key(META_MIGRATION), initial_mark.to_vec());
                 engine.write(batch, WriteOptions { sync: true })?;
-                (initial_mark.to_vec(), Committed::EMPTY)
+                (initial_mark.to_vec(), Committed::EMPTY, FIRST_MAP_ID)
             }
             Some(StoreMetadata {
                 migration: Some(mark),
                 applied,
                 max_version,
+                next_map_id,
                 ..
             }) => (
                 mark,
@@ -1238,6 +1296,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                     applied,
                     max_version,
                 },
+                next_map_id,
             ),
             Some(StoreMetadata {
                 migration: None, ..
@@ -1245,7 +1304,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                 "store format: refusing to resume a migration: the store has no migration mark"
             ),
         };
-        Ok((Self::over(engine, &applied, None), mark))
+        Ok((Self::over(engine, &applied, next_map_id, None), mark))
     }
 
     /// The migration mark of `engine`, read from one snapshot; writes nothing.
@@ -1263,11 +1322,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         if let Some(row) = self.cache.read().get(name) {
             return Ok(Some(*row));
         }
-        let row = self
-            .engine
-            .get(&map_by_name_key(name))?
-            .map(|value| decode_map_by_name_value(&value))
-            .transpose()?;
+        let row = self.registry_row(name)?;
         if let Some(row) = row {
             self.cache.write().insert(name.to_string(), row);
         }
@@ -1285,6 +1340,40 @@ impl<E: KvEngine> EngineMapDataStore<E> {
             self.cache.write().insert(name.to_string(), row);
         }
         Ok(row.map(|(map_id, _)| map_id))
+    }
+
+    /// The registry row of `name` read from the engine, uncached. A row this
+    /// store wrote that does not decode is the store's own inconsistency.
+    fn registry_row(&self, name: &str) -> anyhow::Result<Option<(u32, u8)>> {
+        self.engine
+            .get(&map_by_name_key(name))?
+            .map(|value| {
+                decode_map_by_name_value(&value).map_err(|e| {
+                    e.context(StoreInconsistent {
+                        map: Some(name.to_string()),
+                        key: None,
+                        detail: format!("the registry row of map {name:?} does not decode"),
+                    })
+                })
+            })
+            .transpose()
+    }
+
+    /// Removes from the promises the names of a written batch that hold an
+    /// id now (`TG-WB-012`). Called after the cache holds them, so no name is
+    /// at any instant neither cached nor promised; a name the batch left
+    /// without an id (only a delete or a version op named it) keeps its
+    /// promise for the put still buffered.
+    fn release_promises(&self, rows: &HashMap<&str, Option<(u32, u8)>>) {
+        let mut promised = self.promised.lock();
+        if promised.is_empty() {
+            return;
+        }
+        for (name, row) in rows {
+            if row.is_some() {
+                promised.remove(*name);
+            }
+        }
     }
 
     /// Plans the registry rows a call needs (`TG-ENG-005`). A call whose
@@ -1317,13 +1406,11 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         let guard = self.registry_lock.lock();
         let mut puts = Vec::new();
         let mut next_map_id: Option<u32> = None;
-        let mut exhausted = Vec::new();
+        let mut exhausted = None;
+        // Every name this plan issues an id, in the order the ids rise.
+        let mut issued: Vec<(&str, u32)> = Vec::new();
         for (&name, &need) in needs {
-            let current = self
-                .engine
-                .get(&map_by_name_key(name))?
-                .map(|value| decode_map_by_name_value(&value))
-                .transpose()?;
+            let current = self.registry_row(name)?;
             let planned = match current {
                 Some((map_id, flags)) => {
                     if flags | need != flags {
@@ -1341,26 +1428,50 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                         None => self.stored_next_map_id()?,
                     };
                     // `u32::MAX` is never issued, so `map_id + 1` — the end
-                    // of a map's partition range — never overflows. Every
-                    // map left without an id is named, so a commit can
-                    // refuse exactly its writes.
+                    // of a map's partition range — never overflows.
                     if map_id == u32::MAX {
-                        exhausted.push(name.to_string());
+                        exhausted.get_or_insert(name);
                         next_map_id = Some(map_id);
                         continue;
                     }
                     puts.push((map_by_name_key(name), map_by_name_value(map_id, need)));
                     puts.push((map_by_id_key(map_id), name.as_bytes().to_vec()));
                     next_map_id = Some(map_id + 1);
+                    issued.push((name, map_id));
                     Some((map_id, need))
                 }
             };
             rows.insert(name, planned);
         }
-        if !exhausted.is_empty() {
-            return Err(MapIdSpaceExhausted { maps: exhausted }.into());
-        }
         if let Some(next) = next_map_id {
+            // One section of the reservation mutex, after every engine read
+            // of the plan: an id promised to a buffered put is not issued to
+            // another name, and the ids this plan issues are counted before
+            // any admission can promise them (`TG-WB-012`).
+            let promised = self.promised.lock();
+            if let Some(map) = exhausted {
+                return Err(MapIdSpaceExhausted {
+                    map: map.to_string(),
+                }
+                .into());
+            }
+            // The highest id issued to a name no admission promised decides:
+            // a lower one passes whenever it does.
+            let unpromised = issued
+                .iter()
+                .rev()
+                .find(|(map, _)| !promised.contains(*map));
+            if let Some(&(map, map_id)) = unpromised {
+                if u64::from(map_id).saturating_add(len_u64(promised.len())) >= u64::from(u32::MAX)
+                {
+                    return Err(MapIdSpaceExhausted {
+                        map: map.to_string(),
+                    }
+                    .into());
+                }
+            }
+            self.issued_next.fetch_max(next, Ordering::AcqRel);
+            drop(promised);
             puts.push((meta_key(META_NEXT_MAP_ID), next.to_be_bytes().to_vec()));
             self.registry_park_point();
         }
@@ -1374,7 +1485,11 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     fn stored_next_map_id(&self) -> anyhow::Result<u32> {
         match self.engine.get(&meta_key(META_NEXT_MAP_ID))? {
             Some(value) if value.len() == 4 => Ok(be_u32(&value)),
-            _ => bail!("next map id metadata is missing or malformed"),
+            _ => Err(inconsistent(
+                None,
+                None,
+                "next map id metadata is missing or malformed",
+            )),
         }
     }
 
@@ -1422,10 +1537,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                     key,
                     bytes,
                 } => {
-                    let (map_id, _) =
-                        plan.rows.get(map).copied().flatten().ok_or_else(|| {
-                            anyhow!("map {map:?} has no registry row after its plan")
-                        })?;
+                    let map_id = planned_id(&plan.rows, map, key)?;
                     let engine_key = RecordKey::encode(RecordSpace::of(backup), map_id, key);
                     // The one place a record value enters a batch, so the
                     // one place it is sealed (TG-ENC-002).
@@ -1504,6 +1616,9 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                 }
             }
         }
+        // After the cache, on the settled path too, whose rows `cached_row`
+        // has cached already.
+        self.release_promises(&plan.rows);
         Ok(max_version.unwrap_or(0))
     }
 
@@ -1686,7 +1801,15 @@ impl<E: KvEngine> EngineMapDataStore<E> {
         let Some(value) = self.engine.get(&version_row_key(map, map_id, key))? else {
             return Ok(());
         };
-        let held = decode_version_value(&value)?.seq;
+        let held = decode_version_value(&value)
+            .map_err(|e| {
+                e.context(StoreInconsistent {
+                    map: Some(map.to_string()),
+                    key: Some(key.to_string()),
+                    detail: format!("the record version row of {map}/{key} does not decode"),
+                })
+            })?
+            .seq;
         // Lower would let a replay apply frames the store already holds.
         if seq < held {
             let refusal = format!(
@@ -1694,7 +1817,7 @@ impl<E: KvEngine> EngineMapDataStore<E> {
                  {seq}"
             );
             tracing::error!("{refusal}");
-            bail!(refusal);
+            return Err(inconsistent(Some(map), Some(key), refusal));
         }
         Ok(())
     }
@@ -1774,6 +1897,20 @@ impl<E: KvEngine> EngineMapDataStore<E> {
     #[cfg(test)]
     pub(crate) fn registry_cache_len(&self) -> usize {
         self.cache.read().len()
+    }
+
+    /// Whether the registry cache holds `name`.
+    #[cfg(test)]
+    pub(crate) fn registry_cache_holds(&self, name: &str) -> bool {
+        self.cache.read().contains_key(name)
+    }
+
+    /// The next map id as issued or planned, and the promised names.
+    #[cfg(test)]
+    pub(crate) fn reservation(&self) -> (u32, Vec<String>) {
+        let mut promised: Vec<String> = self.promised.lock().iter().cloned().collect();
+        promised.sort();
+        (self.issued_next.load(Ordering::Acquire), promised)
     }
 }
 
@@ -1879,9 +2016,47 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         let engine_error = err
             .downcast_ref::<KvError>()
             .or_else(|| err.chain().find_map(|e| e.downcast_ref::<KvError>()));
-        match engine_error {
-            Some(KvError::Broken { cause, .. }) => StoreErrorClass::StoreBroken(*cause),
-            _ => StoreErrorClass::Unknown,
+        if let Some(KvError::Broken { cause, .. }) = engine_error {
+            return StoreErrorClass::StoreBroken(*cause);
+        }
+        let inconsistent = err.downcast_ref::<StoreInconsistent>().is_some()
+            || err
+                .chain()
+                .any(|e| e.downcast_ref::<StoreInconsistent>().is_some());
+        if inconsistent {
+            return StoreErrorClass::StoreBroken(StoreBrokenCause::Inconsistent);
+        }
+        StoreErrorClass::Unknown
+    }
+
+    /// Promises an id to a map that has none, counting it against the ids
+    /// left (`TG-WB-012`). A cached map answers under the cache's read lock
+    /// alone. Only once the ids are (about to be) exhausted is the name's
+    /// registry row read, once, outside the reservation mutex: a read changes
+    /// nothing, so the admission is still decided before the write changes
+    /// anything (`TG-WB-011`), and an existing map whose row is not cached
+    /// stays writable.
+    fn admit_map(&self, map: &str) -> anyhow::Result<MapAdmission> {
+        if self.cache.read().contains_key(map) {
+            return Ok(MapAdmission::HasId);
+        }
+        {
+            let mut promised = self.promised.lock();
+            if promised.contains(map) {
+                return Ok(MapAdmission::Promised);
+            }
+            let issued = u64::from(self.issued_next.load(Ordering::Acquire));
+            if issued.saturating_add(len_u64(promised.len())) < u64::from(u32::MAX) {
+                promised.insert(map.to_string());
+                return Ok(MapAdmission::Promised);
+            }
+        }
+        match self.cached_row(map)? {
+            Some(_) => Ok(MapAdmission::HasId),
+            None => Err(MapIdSpaceExhausted {
+                map: map.to_string(),
+            }
+            .into()),
         }
     }
 
@@ -2109,6 +2284,11 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
                 Err(err) => failed.push((name, format!("{err:#}"))),
             }
         }
+        // A promise of a tenant's map that never got an id: the write-behind
+        // keeps the tenant closed, so no put of it will commit.
+        self.promised
+            .lock()
+            .retain(|name| !tenant_owns(tenant, name));
         Ok(DropOutcome::Done { dropped, failed })
     }
 
@@ -2132,22 +2312,6 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
     }
 
     async fn commit(&self, commit: &FlushCommit<'_>) -> anyhow::Result<()> {
-        // Refused writes are named before anything is written, so the caller
-        // can tell them from a store that refuses everything.
-        let mut refused = Vec::new();
-        let mut reasons = Vec::new();
-        for (index, write) in commit.writes.iter().enumerate() {
-            if let Err(reason) = check_name(write_map(write)) {
-                refused.push(index);
-                reasons.push(reason.to_string());
-            }
-        }
-        if !refused.is_empty() {
-            return Err(
-                anyhow::Error::new(RecordRefused { indices: refused }).context(reasons.join("; "))
-            );
-        }
-
         // The bytes `add` stores for a value, encoded before the lock.
         let encoded = commit
             .writes
@@ -2187,10 +2351,14 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         let mut next = held.applied;
         for &(partition, sequence) in &commit.applied {
             let Some(slot) = next.get_mut(partition as usize) else {
-                bail!(
-                    "applied watermark of WAL partition {partition} refused: there are \
-                     {PARTITION_COUNT} partitions"
-                );
+                return Err(inconsistent(
+                    None,
+                    None,
+                    format!(
+                        "applied watermark of WAL partition {partition} refused: there are \
+                         {PARTITION_COUNT} partitions"
+                    ),
+                ));
             };
             // Equal is a re-commit of the same frontier; lower would let a
             // later restart replay frames the store already holds.
@@ -2200,7 +2368,7 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
                      {slot}, the commit carries {sequence}"
                 );
                 tracing::error!("{refusal}");
-                bail!(refusal);
+                return Err(inconsistent(None, None, refusal));
             }
             *slot = sequence;
             ops.push(RecordOp::SetAppliedWatermark {
@@ -2228,25 +2396,39 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
                 }
                 Ok(())
             }
-            Err(err) => match err.downcast_ref::<MapIdSpaceExhausted>() {
-                Some(exhausted) => {
-                    let indices = commit
-                        .writes
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, write)| {
-                            matches!(write, StoreWrite::Put { map, .. }
-                                if exhausted.maps.iter().any(|m| m == map))
-                        })
-                        .map(|(index, _)| index)
-                        .collect();
-                    let reason = err.to_string();
-                    Err(anyhow::Error::new(RecordRefused { indices }).context(reason))
-                }
-                // Returned as it is, so `classify_error` still finds the
-                // engine's error in the chain (TG-WB-010).
-                None => Err(err),
-            },
+            // Every argument of the batch is built by this store, so the
+            // engine refusing one is the store's own inconsistency; it names
+            // the largest put, the likeliest to pass the engine's size limit.
+            // The engine's error stays in the chain (TG-WB-010).
+            Err(err)
+                if err.chain().any(|e| {
+                    matches!(
+                        e.downcast_ref::<KvError>(),
+                        Some(KvError::InvalidArgument(_))
+                    )
+                }) =>
+            {
+                let largest = commit
+                    .writes
+                    .iter()
+                    .zip(&encoded)
+                    .filter_map(|(write, encoded)| match write {
+                        StoreWrite::Put { map, key, .. } => {
+                            Some((encoded.len() + key.len(), *map, *key))
+                        }
+                        StoreWrite::Remove { .. } => None,
+                    })
+                    .max_by_key(|(size, _, _)| *size);
+                let (map, key) = largest.map(|(_, map, key)| (map, key)).unzip();
+                Err(err.context(StoreInconsistent {
+                    map: map.map(str::to_string),
+                    key: key.map(str::to_string),
+                    detail: "the engine refused an argument of the commit's batch".to_string(),
+                }))
+            }
+            // Returned as it is, so `classify_error` still finds the engine's
+            // error in the chain (TG-WB-010).
+            Err(err) => Err(err),
         }
     }
 
@@ -2416,13 +2598,6 @@ impl<E: KvEngine> MapDataStore for EngineMapDataStore<E> {
         self.write_records(&ops, WriteOptions { sync: true })?;
         held.applied = next;
         Ok(())
-    }
-}
-
-/// The map a commit write names.
-fn write_map<'a>(write: &StoreWrite<'a>) -> &'a str {
-    match write {
-        StoreWrite::Put { map, .. } | StoreWrite::Remove { map, .. } => map,
     }
 }
 

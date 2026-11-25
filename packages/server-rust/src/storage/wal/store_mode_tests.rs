@@ -49,8 +49,8 @@ use crate::storage::datastores::{
 };
 use crate::storage::map_data_store::{
     AppliedWatermarks, CommitDurability, FlushCommit, KeyVersion, LeafSink, Loaded, MapDataStore,
-    PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder, StoreErrorClass, StoreWrite,
-    WriteSource,
+    PutValue, ScanBatch, ScanCursor, ScanOrder, StoreBrokenCause, StoreErrorClass,
+    StoreInconsistent, StoreWrite, WriteSource,
 };
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::sealing::Keyring;
@@ -4042,8 +4042,9 @@ async fn c12_finish_unlinks_below_the_store_read_and_keeps_what_it_cannot_unlink
 
 /// A [`MapDataStore`] that forwards every call to the engine store and can be
 /// armed to fail chosen record version reads of a key — a prepare failure of
-/// whichever replay frame of that key makes the read — or to refuse by name
-/// (`RecordRefused`) every committed write of a chosen sequence or key.
+/// whichever replay frame of that key makes the read — or to refuse every
+/// commit that holds a write of a chosen sequence or key, with an untyped
+/// error or as the store's own inconsistency.
 struct ArmedStore {
     inner: Arc<EngineMapDataStore<CountingEngine>>,
     /// The `load_version` calls made so far, by key.
@@ -4054,6 +4055,8 @@ struct ArmedStore {
     refused_seqs: Mutex<BTreeSet<u64>>,
     /// Committed writes of these keys are refused by name.
     refused_keys: Mutex<BTreeSet<String>>,
+    /// A refusal is a [`StoreInconsistent`] naming the refused write.
+    refuse_as_inconsistent: Mutex<bool>,
 }
 
 impl ArmedStore {
@@ -4076,6 +4079,10 @@ impl ArmedStore {
 
     fn refuse_keys(&self, keys: &[&str]) {
         *self.refused_keys.lock() = keys.iter().map(|k| (*k).to_string()).collect();
+    }
+
+    fn refuse_as_inconsistent(&self) {
+        *self.refuse_as_inconsistent.lock() = true;
     }
 }
 
@@ -4208,29 +4215,32 @@ impl MapDataStore for ArmedStore {
     }
 
     async fn commit(&self, commit: &FlushCommit<'_>) -> anyhow::Result<()> {
-        let refused: Vec<usize> = {
+        let refused: Vec<(&str, &str)> = {
             let seqs = self.refused_seqs.lock();
             let keys = self.refused_keys.lock();
             commit
                 .writes
                 .iter()
-                .enumerate()
-                .filter(|(_, write)| {
-                    let (key, seq) = match write {
-                        StoreWrite::Put { key, seq, .. } | StoreWrite::Remove { key, seq, .. } => {
-                            (*key, *seq)
-                        }
+                .filter_map(|write| {
+                    let (map, key, seq) = match write {
+                        StoreWrite::Put { map, key, seq, .. }
+                        | StoreWrite::Remove { map, key, seq, .. } => (*map, *key, *seq),
                     };
-                    seqs.contains(&seq) || keys.contains(key)
+                    (seqs.contains(&seq) || keys.contains(key)).then_some((map, key))
                 })
-                .map(|(index, _)| index)
                 .collect()
         };
-        if refused.is_empty() {
+        let Some(&(map, key)) = refused.first() else {
             return self.inner.commit(commit).await;
+        };
+        if *self.refuse_as_inconsistent.lock() {
+            return Err(anyhow::Error::new(StoreInconsistent {
+                map: Some(map.to_string()),
+                key: Some(key.to_string()),
+                detail: "injected: the store finds this record inconsistent".to_string(),
+            }));
         }
-        Err(anyhow::Error::new(RecordRefused { indices: refused })
-            .context("injected: the store refuses these records"))
+        Err(anyhow::anyhow!("injected: the store refuses these records"))
     }
 
     fn keeps_applied_watermarks(&self) -> bool {
@@ -4301,6 +4311,7 @@ impl ArmedNode {
             failing_version_reads: Mutex::new(HashMap::new()),
             refused_seqs: Mutex::new(BTreeSet::new()),
             refused_keys: Mutex::new(BTreeSet::new()),
+            refuse_as_inconsistent: Mutex::new(false),
         });
         let wal = WalWriter::open_over_store(
             root.wal_dir(),
@@ -4815,15 +4826,17 @@ async fn v11c_a_refused_store_of_a_held_key_holds_the_delta_prepared_after_it() 
     for frame in [&f1, &f2, &f3, &f4, &f5] {
         node.append(frame).await;
     }
-    // K's version reads: frame 1 (fails), frame 2, frame 4; after the commit
-    // refuses frame 2 the part is prepared again, frame 1 first (fails
-    // again), and frame 4 is held before it reads.
-    node.store.fail_version_reads(k, &[1, 4]);
+    // K's version reads: frame 1 (fails), frame 2, frame 4; the commit is
+    // refused and halved: the half of frames 1–2 reads frame 1 (fails again)
+    // and frame 2, is refused and halved again, frame 1 alone (fails a third
+    // time), frame 2 alone (refused, held); the half of frames 3–4 holds
+    // frame 4 before it reads.
+    node.store.fail_version_reads(k, &[1, 4, 6]);
     node.store.refuse_seqs(&[2]);
     node.recover(Some(4)).await;
     assert_eq!(
         node.store.version_reads(k),
-        4,
+        7,
         "frame 4 was held when prepared again"
     );
     assert_eq!(
@@ -4913,14 +4926,16 @@ async fn v11e_a_store_refused_after_a_delta_does_not_hold_that_delta_on_the_seco
         node.append(frame).await;
     }
     // K's version reads, one batch: frames 1 (fails), 2, 3, 4, 5; the commit
-    // refuses frame 4 by name, and the part prepared again reads frames
-    // 1 (fails again), 2 and 3, while frame 5 is held before it reads.
+    // is refused and halved: frames 1 (fails again) and 2, committed; frames
+    // 3, 4 and 5, refused and halved: frame 3, committed; frames 4 and 5,
+    // refused and halved: frame 4 alone (refused, held), while frame 5 is held
+    // before it reads.
     node.store.fail_version_reads(k, &[1, 6]);
     node.store.refuse_seqs(&[4]);
     node.recover(None).await;
     assert_eq!(
         node.store.version_reads(k),
-        8,
+        14,
         "frame 3 was prepared again and frame 5 was held"
     );
     assert_eq!(
@@ -5095,4 +5110,68 @@ async fn v13_a_frame_failed_at_boot_is_discarded_once_a_live_write_of_its_key_is
         "frame 1 is discarded: the store equals what the node served"
     );
     node.close().await;
+}
+
+/// A commit the store refuses as its own inconsistency, met by recovery: the
+/// frame is held with `cause="inconsistent"`, the frames after it in its
+/// partition are replayed, and the replay of the partition does not stop.
+#[test]
+fn recovery_holds_an_inconsistent_frame_and_replays_the_rest_of_its_partition() {
+    let root = Root::new();
+    let keys = keys_in(P, 5);
+    let ((stored, unapplied, class), events) = run_captured(async {
+        let node = ArmedNode::open(&root);
+        for (key, seq) in keys.iter().zip(1u64..) {
+            node.append(&store_frame(key, &lww(key, 1), seq)).await;
+        }
+        node.store.refuse_seqs(&[3]);
+        node.store.refuse_as_inconsistent();
+        let probe = anyhow::Error::new(StoreInconsistent {
+            map: None,
+            key: None,
+            detail: String::new(),
+        });
+        let class = node.store.classify_error(&probe);
+        node.recover(None).await;
+        let mut stored = Vec::new();
+        for key in &keys {
+            stored.push(node.value(key).await.is_some());
+        }
+        let unapplied = node.unapplied().await;
+        node.close().await;
+        (stored, unapplied, class)
+    });
+    assert_eq!(
+        class,
+        StoreErrorClass::StoreBroken(StoreBrokenCause::Inconsistent),
+        "the injected error classifies as the inner store classifies it"
+    );
+    assert_eq!(
+        stored,
+        vec![true, true, false, true, true],
+        "the frames after the held one are replayed"
+    );
+    assert_eq!(
+        unapplied,
+        vec![3, 4, 5],
+        "the held frame stops the frontier"
+    );
+    let held: Vec<&CapturedEvent> = events
+        .iter()
+        .filter(|e| {
+            e.field("message")
+                .is_some_and(|m| m.starts_with("WAL recovery: replay failed"))
+        })
+        .collect();
+    assert_eq!(held.len(), 1, "{events:?}");
+    assert_eq!(
+        (held[0].field("seq"), held[0].field("cause")),
+        (Some("3"), Some("inconsistent"))
+    );
+    assert!(
+        !events.iter().any(|e| e
+            .field("message")
+            .is_some_and(|m| m.contains("the durable store is broken"))),
+        "the replay of the partition stopped: {events:?}"
+    );
 }

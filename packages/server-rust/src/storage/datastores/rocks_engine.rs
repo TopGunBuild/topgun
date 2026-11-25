@@ -132,7 +132,16 @@ pub struct RocksKvEngine {
     options: Options,
     read_only: bool,
     shut: AtomicBool,
+    /// `(key, value)` limits a test lowers in place of RocksDB's own.
+    #[cfg(test)]
+    entry_limits: (u64, u64),
 }
+
+/// The longest value of one write-batch entry RocksDB takes.
+const MAX_VALUE_BYTES: u64 = u32::MAX as u64;
+/// The longest key of one write-batch entry RocksDB takes
+/// (`kMaxWriteBatchKeySize`).
+const MAX_KEY_BYTES: u64 = u32::MAX as u64 - 8;
 
 impl RocksKvEngine {
     /// Opens the store in the directory `path`.
@@ -166,7 +175,21 @@ impl RocksKvEngine {
             options,
             read_only: mode == OpenMode::ReadOnly,
             shut: AtomicBool::new(false),
+            #[cfg(test)]
+            entry_limits: (MAX_KEY_BYTES, MAX_VALUE_BYTES),
         })
+    }
+
+    /// The `(key, value)` limits of one batch entry.
+    #[cfg(test)]
+    fn entry_limits(&self) -> (u64, u64) {
+        self.entry_limits
+    }
+
+    #[cfg(not(test))]
+    #[allow(clippy::unused_self)]
+    fn entry_limits(&self) -> (u64, u64) {
+        (MAX_KEY_BYTES, MAX_VALUE_BYTES)
     }
 
     /// Engine debt and memory (`RocksStats`).
@@ -343,12 +366,27 @@ impl KvEngine for RocksKvEngine {
     fn write(&self, batch: WriteBatch, opts: WriteOptions) -> KvResult<()> {
         self.writable()?;
         let operations = batch.into_ops();
-        // Validated first, so a refused batch leaves nothing behind.
+        // Validated first, so a refused batch leaves nothing behind. RocksDB
+        // drops an entry above its size limits from the batch with a status
+        // the binding does not return, and would then write the rest: the
+        // limits are checked here so the batch has one status.
+        let (max_key, max_value) = self.entry_limits();
+        let fits = |bytes: &[u8], max: u64| bytes.len() as u64 <= max;
         for op in &operations {
-            if let BatchOp::DeleteRange { start, end } = op {
-                if start > end {
-                    return Err(KvError::InvalidArgument("delete range start > end"));
+            let fits = match op {
+                BatchOp::Put { key, value } => fits(key, max_key) && fits(value, max_value),
+                BatchOp::Delete { key } => fits(key, max_key),
+                BatchOp::DeleteRange { start, end } => {
+                    if start > end {
+                        return Err(KvError::InvalidArgument("delete range start > end"));
+                    }
+                    fits(start, max_key) && fits(end, max_key)
                 }
+            };
+            if !fits {
+                return Err(KvError::InvalidArgument(
+                    "key or value above RocksDB's size limit",
+                ));
             }
         }
         let mut rocks = rocksdb::WriteBatch::default();
@@ -447,6 +485,11 @@ impl KvSnapshot for RocksSnapshot<'_> {
 
 #[cfg(test)]
 impl RocksKvEngine {
+    /// Lowers the `(key, value)` limits of one batch entry for this engine.
+    pub(crate) fn set_entry_limits(&mut self, max_key: u64, max_value: u64) {
+        self.entry_limits = (max_key, max_value);
+    }
+
     /// Stops RocksDB's flush and compaction threads and waits for them, so no
     /// file of the directory is created or deleted until the engine is
     /// dropped; the crash suite copies the directory after it.
@@ -862,5 +905,70 @@ mod tests {
             memtables <= (config.memory_budget_bytes / 2 + config.write_buffer_size) as u64,
             "memtables {memtables} over the manager's limit"
         );
+    }
+
+    /// An entry above the engine's size limits — a
+    /// value, a put key, a delete key — refuses the whole batch with
+    /// `InvalidArgument`, and nothing of it is written.
+    #[test]
+    fn an_entry_above_the_engine_limit_refuses_the_whole_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine =
+            RocksKvEngine::open(&dir.path().join("db"), OpenMode::CreateNew, &small()).unwrap();
+        engine.set_entry_limits(16, 1024);
+        let refused = |batch: WriteBatch| {
+            assert!(
+                matches!(engine.write(batch, SYNC), Err(KvError::InvalidArgument(_))),
+                "the batch was not refused"
+            );
+        };
+        let mut batch = WriteBatch::new();
+        batch.put(b"a", b"small");
+        batch.put(b"big", vec![0u8; 2048]);
+        batch.put(b"b", b"small");
+        refused(batch);
+        let mut batch = WriteBatch::new();
+        batch.put(b"a", b"small");
+        batch.put(vec![b'k'; 17], b"small");
+        refused(batch);
+        let mut batch = WriteBatch::new();
+        batch.put(b"a", b"small");
+        batch.delete(vec![b'k'; 17]);
+        refused(batch);
+        let long = [b'k'; 17];
+        for key in [&b"a"[..], &b"big"[..], &b"b"[..], &long[..]] {
+            assert_eq!(engine.get(key).unwrap(), None, "{key:?} was written");
+        }
+        // At the limits exactly, the batch is written.
+        let mut batch = WriteBatch::new();
+        batch.put(vec![b'k'; 16], vec![1u8; 1024]);
+        engine.write(batch, SYNC).unwrap();
+        assert!(engine.get(&[b'k'; 16]).unwrap().is_some());
+    }
+
+    /// The size check at RocksDB's real limit: a value of `u32::MAX + 1` bytes beside a small put. Before
+    /// the size check RocksDB dropped the large put and wrote the small one,
+    /// and the write returned `Ok`: an acknowledged write was lost.
+    #[test]
+    #[ignore = "allocates a 4 GiB value; run on its own"]
+    fn a_value_above_u32_max_is_refused_not_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine =
+            RocksKvEngine::open(&dir.path().join("db"), OpenMode::CreateNew, &small()).unwrap();
+        let mut batch = WriteBatch::new();
+        batch.put(
+            b"large",
+            vec![0u8; usize::try_from(u64::from(u32::MAX) + 1).unwrap()],
+        );
+        batch.put(b"small", b"v");
+        let outcome = engine.write(batch, SYNC);
+        let small = engine.get(b"small").unwrap();
+        let large = engine.get(b"large").unwrap().map(|v| v.len());
+        println!("outcome={outcome:?} small={small:?} large_len={large:?}");
+        assert!(
+            matches!(outcome, Err(KvError::InvalidArgument(_))),
+            "write returned {outcome:?}"
+        );
+        assert_eq!((small, large), (None, None));
     }
 }

@@ -601,7 +601,11 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     itself. A committed frame releases `K` only when it subsumes the key, was written (not
     discarded by the gate) and lies above `F(K)` read when its commit returned. The decision is
     made in `prepare_frame`, the one path of the first preparation and of `reprepare`, so a part
-    prepared again after a refusal decides against the refused frames.
+    prepared again after a refusal decides against the refused frames. A frame the store refuses
+    as its own inconsistency (`StoreBroken(Inconsistent)`, `TG-WB-010`) is such a refused frame:
+    it is refused alone and held, its line carries `cause="inconsistent"` (`prepare` for a frame
+    that failed or was held in prepare, `refused` for any other refusal), and the replay of its
+    partition goes on; only the other `StoreBroken` causes end it.
   - **Reclamation.** The collection tick, after the store made the watermarks durable, drops the
     version rows at or below their partition's durable watermark: candidates are read from a
     snapshot, then each is read again under the commit lock and deleted only while still at or
@@ -654,7 +658,8 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   `v11e_a_store_refused_after_a_delta_does_not_hold_that_delta_on_the_second_preparation` (the
   hold is decided by the unresolved frames of the key below the frame),
   `v11f_a_frame_written_on_the_second_preparation_holds_its_key_no_longer`,
-  `v12_a_frame_failed_in_prepare_holds_the_later_delta_of_its_key` and
+  `v12_a_frame_failed_in_prepare_holds_the_later_delta_of_its_key`,
+  `recovery_holds_an_inconsistent_frame_and_replays_the_rest_of_its_partition` and
   `v13_a_frame_failed_at_boot_is_discarded_once_a_live_write_of_its_key_is_flushed_above_it`;
   the flush order, `write_behind_batch_tests.rs::b20_a_key_commits_in_wal_order_across_passes_and_a_coalesced_survivor_stores_its_own_wal_sequence`;
   reclamation, `wal/durable_collect_tests.rs` —
@@ -1728,7 +1733,20 @@ weaker than a test.
      `LockPoisoned`. The answer is decided from the error's type, never from its message. Every
      other error — `ValueTooLarge`, `TableTypeMismatch`, the map-name refusal, any non-redb error
      — is `Unknown`. `StoreBroken` means an error the store treats as fatal for this process; it
-     is not a proof that no later call could succeed (see "Not claimed").
+     is not a proof that no later call could succeed (see "Not claimed"). **The store's own
+     inconsistency** is a fifth cause, `Inconsistent`, the same on every engine: the engine
+     store's `commit` returns a `StoreInconsistent` error when it meets a row it wrote itself in a
+     state it never writes — a record version row that does not decode, a version regression, a
+     registry row that does not decode, a put whose map has no registry row after its plan, a
+     next-map-id row that does not decode, an applied watermark of a partition out of range or
+     below the one the store holds — and when its engine refuses an argument of the batch it
+     built (`KvError::InvalidArgument`: an entry above RocksDB's size limit, `TG-WB-012`), naming
+     the map and key wherever the site knows them. `EngineMapDataStore::classify_error` answers
+     `StoreBroken(cause)` when the first `KvError` of the chain is `Broken { cause }`, else
+     `StoreBroken(Inconsistent)` when a `StoreInconsistent` is anywhere in the chain, else
+     `Unknown`. A map name the store refuses and an exhausted map-id space are `Unknown`: both are
+     refused at write-behind admission (`TG-WB-012`), so a commit meets them only for a write no
+     admission checked (WAL recovery, a direct inner-store write).
   2. **The reaction is the failed state of `TG-WB-006`.** When an inner-store call of the flush
      task or of the shutdown drain returns an error classified `StoreBroken`, the store, in one
      synchronous stretch with no await, records the failure (cause `StoreBroken`, task `Flush`),
@@ -1739,7 +1757,9 @@ weaker than a test.
   3. **Nothing it holds is resolved.** On a `StoreBroken` commit every entry of the pass not
      stored goes back to its queue **untouched** — no retry count, no backoff, no first-refusal
      time: a broken store says nothing about a record, so no entry is singled out for a retry
-     state. The error line names the first entry of the failing commit. The drain abandons
+     state. The error line names the record a `StoreInconsistent` in the error's chain names,
+     else the first entry of the failing commit, and its `error` field is the whole chain. The
+     drain abandons
      every entry it has not stored; their WAL sequences are abandoned, never resolved. On a
      WAL-backed store every acknowledged write the store did not take stays in the unapplied
      window and is replayed at the next start.
@@ -1759,6 +1779,13 @@ weaker than a test.
      `TG-WB-009`: in the flush task by the halving of the refused commit, the store-wide hold
      and the per-entry schedule; in the shutdown drain by the split to single entries until the
      drain deadline.
+  8. **Recovery holds an inconsistent frame.** WAL recovery (`TG-WAL-015`) ends the replay of a
+     partition on `StoreBroken` with cause `io`, `previous_io`, `corrupted` or `lock_poisoned`.
+     `StoreBroken(Inconsistent)` concerns the frame's own rows, so recovery treats it as any other
+     refusal: the part is halved down to single frames, the frame refused alone is held and logged
+     with `cause="inconsistent"`, and the replay of the partition goes on past it. The asymmetry
+     is deliberate: at runtime the same error stops the node (exit 72); at boot one bad frame
+     neither crash-loops the start nor stops the replay of every later frame of its partition.
 - **Mechanical predicate:** on a write-behind store over an engine store whose engine has
   returned an error it classifies broken (a `RedbDataStore` whose backend returned an I/O error;
   a RocksDB engine whose directory was made read-only): (a) once the flush task's call that returned the error has returned,
@@ -1774,15 +1801,19 @@ weaker than a test.
   conversion of a RocksDB error at the boundary. `redb.rs` — `broken_cause`, the `fault_io` backend
   (`fault-injection` builds and tests only). `redb_engine.rs` — the error mapping
   (`kv_from_storage`, `kv_from_commit`, `kv_from_transaction`, `kv_from_table`) that turns the
-  four causes into `KvError::Broken`. `engine_store.rs` — `classify_error`, and the
-  registry-read rule: a registry read that fails is an error, never "no such map", so a remove
+  four causes into `KvError::Broken`. `engine_store.rs` — `classify_error`, the
+  `StoreInconsistent` sites of `commit` and `write_ops` (`check_version_regression`,
+  `registry_row`, `planned_id`, `stored_next_map_id`, the applied-watermark checks, the
+  `InvalidArgument` arm of `commit`), and the registry-read rule: a registry read that fails is an error, never "no such map", so a remove
   is not reported done on a broken store. `write_behind.rs` — `run_flush_pass`, `commit_resolving_records` and `commit_bisect` (a
   `StoreBroken` commit puts every entry of the pass it did not store back with `put_back`,
   untouched, and is never halved), `flush_loop` (a broken store ends the run of passes for good)
   and the `store_broken` flag of `RetrySchedule`, `record_store_broken` (record, state, line, counter in that order),
   `failed_reason`, the refusal arm of `drain_for_shutdown`, `finish_shutdown`,
-  `BackgroundFailure::{store_broken, cause_label}`. `bin/topgun_server.rs` — `exit_code_for`,
-  `FailureKind`, `failure_kind_after_drain`, `log_store_failure`.
+  `BackgroundFailure::{store_broken, cause_label}`. `wal/mod.rs` — `commit_batch`, which ends a
+  partition's replay on every `StoreBroken` cause but `Inconsistent`, and `log_unreplayed`'s
+  `cause` field. `bin/topgun_server.rs` — `exit_code_for`, `FailureKind`,
+  `failure_kind_after_drain`, `log_store_failure`.
 - **Enforcing test:** `redb.rs::a_latched_redb_store_fails_the_write_behind_store` — over a
   redb store whose backend returned ENOSPC once, the next write is refused, the failure is
   recorded and `hard_flush` returns an error; `rocks_engine.rs::r_a_real_io_error_is_broken_io`,
@@ -1803,8 +1834,8 @@ weaker than a test.
   with `abandoned_entries` and `cause`; the binary's line
   `the durable store is broken; shutting the node down` with `cause` and `exit_code`; the
   counter `topgun_write_behind_store_broken_total{cause}` (`io`, `previous_io`, `corrupted`,
-  `lock_poisoned`, each rendered at 0 from the first scrape; on RocksDB only `io` and
-  `corrupted` move, and `io_kind` is always `Other`); a refused write's sentence
+  `lock_poisoned`, `inconsistent`, each rendered at 0 from the first scrape; on RocksDB only `io`,
+  `corrupted` and `inconsistent` move, and `io_kind` is always `Other`); a refused write's sentence
   `write-behind store has failed (the durable store is broken); write rejected for …`;
   `/health/ready` and `/healthz` at 503 while the stop runs; exit code 72.
 - **Discovered by:** a review of what the retry-until-stored schedule of `TG-WB-009` does on a
@@ -1834,6 +1865,10 @@ weaker than a test.
 | `r_a_broken_cause_covers_every_kind` (`rocks_engine.rs`) | the table over all 16 `ErrorKind`s of the binding: `IOError` → `Io(Other)`, `Corruption` → `Corrupted`, the other 14 → not broken | CI (`cargo test`) |
 | `r_a_real_io_error_is_broken_io` (`rocks_engine.rs`) | a real `IOError`: an engine with small memtables in a directory made read-only (`0555`) is written until a memtable switch must create a file; the binding's `kind()` is `IOError`, the engine answers `Broken { cause: Io(Other) }`, and the next write again; fails, not skips, when run as root | CI (`cargo test`) |
 | `r_a_real_corruption_is_broken_corrupted` (`rocks_engine.rs`) | a real `Corruption`: bytes of a flushed table file's data block flipped, the engine reopened, a read answers `Broken { cause: Corrupted }`; the binding's `kind()` is asserted too | CI (`cargo test`) |
+| `the_stores_own_consistency_refusals_are_inconsistent` (`engine_store_tests.rs`) | statement 1's fifth cause, one arm per site: a malformed version row, a version regression, an applied regression, a partition out of range, a malformed registry row, no registry row after the plan, a malformed next map id are `StoreBroken(Inconsistent)`; a refused name and an exhausted id space at the commit are `Unknown` | CI (`cargo test`) |
+| `an_oversized_put_at_commit_is_inconsistent` (`engine_store_tests.rs`) | an engine `InvalidArgument` at the commit (RocksDB with lowered entry limits): `StoreBroken(Inconsistent)`, the largest put named, the engine's error kept in the chain, nothing of the batch written | CI (`cargo test`) |
+| `a_store_inconsistency_stops_the_node_like_a_broken_store`, `the_store_broken_line_names_the_failing_record_and_the_whole_chain` (`write_behind.rs`) | over the bare engine store, a flush commit meeting a malformed version row of `k2` behind first entry `k1`: the `inconsistent` series at 0 before, 1 after; the next write refused, `hard_flush` `Err`, the frames unapplied; the line names `k2` and carries the whole chain | CI (`cargo test`) |
+| `recovery_holds_an_inconsistent_frame_and_replays_the_rest_of_its_partition` (`store_mode_tests.rs`) | statement 8: a frame refused as `StoreInconsistent` among five is held with `cause="inconsistent"`, the four others replayed, no broken-store line | CI (`cargo test`) |
 | `tests/integration-rust/store-broken.test.ts` | the CONSEQUENCE at process level on the release binary over RocksDB, a client connection open throughout: `engine.rocksdb` made read-only under the running server, so RocksDB meets a real I/O error when it must create a file; the process exits 72 by itself with `cause="io"` and the three lines, `/health/ready` never answers 200 again; after a restart with the modes restored every acknowledged key reads back; a restart while the directory is still read-only exits 1 at the store open, names the permission error and leaves the WAL directory as it was, and a third start reads every key back | the default `pnpm test:integration-rust` run |
 
 **Not claimed.** Each of these is outside the statement, or is in it and rests on something
@@ -1867,7 +1902,23 @@ weaker than a test.
 - **The per-entry drain `warn!` lines** for abandoned entries are still one per entry, so a
   large buffer logs one line per entry; on a broken store each names the broken store and its
   `cause` instead of a timeout.
-- **`ValueTooLarge`, `TableTypeMismatch`, the map-name refusal** are `Unknown` here (TODO-824).
+- **A refused map name and an exhausted map-id space at a commit** are `Unknown` and follow
+  `TG-WB-009`; they reach a commit only for a write no admission checked (WAL recovery isolates
+  and holds such a frame, `TG-WAL-015`; a direct inner-store write returns the error to its
+  caller). redb's `ValueTooLarge` and `TableTypeMismatch` are `Unknown` too; redb is only the
+  source of the one-time engine migration. An unencodable value is still retried by the halving
+  (TODO-824).
+- **An inconsistency can crash-loop on its key, by cause.** `inconsistent` stops the node; what
+  the next start does depends on the site. A version or registry row that does not decode is met
+  first by recovery's version read (`prepare_entry`), so the frame is held with `cause="prepare"`
+  and the next write of the key stops the node again. A version regression is not met at all: the
+  frame's sequence is at or below the stored version, so the gate skips it as applied and the node
+  runs on. Statement 8's `cause="inconsistent"` hold applies only when recovery's own commit is
+  refused (a malformed next-map-id met by a new map, an applied-watermark refusal, an entry above
+  RocksDB's size limit). Where a frame is held a restart does not heal the node; the operator's
+  remedy is a restore from backup.
+- **`inconsistent` out of process** is not shown by a process-level test; the exit code does not
+  depend on the cause, and is shown for `io` by `store-broken.test.ts`.
 - **A panic inside redb** (its own `.lock().unwrap()`) is the `TG-WB-006` path, not this one.
 - **RocksDB's classification is the binding's.** `kind()` comes from `rust-rocksdb`'s mapping of
   RocksDB's status code; the two real-fault tests above assert it on the raw error, so a binding upgrade that
@@ -1912,6 +1963,15 @@ weaker than a test.
     not buffered once the buffer is at its key capacity, as a write of any new key;
   - every refusal is a temporary error (the transient `internal`, 500), counted once under
     `bound="keys"` or `bound="bytes"`, the key bound checked first;
+  - **the admission order:** `admit_write` decides the map name, then one record's size (both
+    `TG-WB-012`, the size counted under `bound="record"`), then the key bound, then the byte
+    bound; `admit_value` and `admit_in_place` ask `MapDataStore::admit_map` last, so a refusal at
+    any bound leaves no promised map id behind;
+  - **one bounded engine read:** acknowledgement never takes the engine store's registry lock and
+    reads no engine row, except that `EngineMapDataStore::admit_map` reads a map's registry row
+    once — a point read, outside its reservation mutex, changing nothing but its cache — when the
+    map is not in the registry cache and the map-id space is, with the outstanding promises,
+    exhausted (`TG-WB-012`); the admission is still decided before the write changes anything;
   - **a write refused at a bound leaves no trace** at the record store: a `put`, `remove` or
     in-place write of `Client` or `CrdtMerge` provenance refused at either bound leaves the engine
     (the key's value, residency, dirty flag and write token), the mutation observers (no call), the
@@ -1988,6 +2048,126 @@ weaker than a test.
   delayed write rate; not measured.
 - **Exactness of the charge.** It is a structural estimate of the stored encoding (for an LWW
   value between half and seven thirds of it), not a heap measurement.
+
+### TG-WB-012: A write the store could refuse on its own, or drop, is refused before the acknowledgement: map names, map ids and one plain record's size
+
+- **Scope:** `WriteBehindDataStore` admission — `admit_write` (shared by `admit_value`,
+  `admit_in_place`, `remove` and `remove_all`), `admit_value`, `admit_in_place`, and the
+  write-through `add_with_witness`; `MapDataStore::admit_map` and its one override,
+  `EngineMapDataStore::admit_map`, with the engine store's map-id reservation (`plan_registry`,
+  `write_ops`, `drop_tenant`); and, as the backstop, `RocksKvEngine::write`.
+- **Statement:**
+  1. **Names.** A write of any origin whose map name violates a clause the store refuses (empty,
+     ending in `__backup`, containing U+0000: `MapNameViolation::refused_by_store`) is refused by
+     `admit_write` with `MapNameRefused` (`Invalid map name {map:?}: {violation}`, the name cut
+     to 128 bytes), and again by the write-through before its WAL sequence is assigned. Nothing is
+     appended to the WAL, no sequence is assigned, no capacity refusal is counted and no map id is
+     promised. The length bound stays an ingress rule (`TG-NAME-002`): the store keeps accepting
+     long names.
+  2. **Map ids.** A put to a map that has no id is admitted only if an id can be promised to it.
+     `admit_map` is the last step of `admit_value` and `admit_in_place`, after every bound, and is
+     asked again (idempotent) at the write-through of a `WriteSource::Value` put; a remove takes
+     no promise (a delete of a map without an id writes nothing), and the write-through of an
+     in-place write asks nothing again, its admission having been decided in full before its
+     mutation. The engine store answers `HasId` for a map in its registry cache, `Promised` for a
+     name already promised, and otherwise promises the name while `issued_next + promised <
+     u32::MAX`, under a reservation mutex taken without the registry lock and with no engine call
+     under it. `issued_next` counts an id from the moment a plan issues it: the plan raises it
+     before its engine write and nothing lowers it. Once no id is left it reads the name's
+     registry row once, outside the mutex: a row found is `HasId` (and cached), none is
+     `MapIdSpaceExhausted` (`map id space exhausted: no new map can be created in this store`).
+     Every issuer honours the promises: `plan_registry` issues an id to a name nobody was promised
+     only while `id + promised < u32::MAX`, so `DurablePolicyStore`, the backup pass-throughs and
+     WAL recovery cannot take an id promised to a buffered put. A promise is released after every
+     successful batch — on the locked and on the settled path — once the batch has given the name
+     an id and the cache holds it; a batch that gave it none (only a delete or a version op named
+     the map) keeps it; `drop_tenant` releases the tenant's names.
+  3. **One plain record's size.** A write whose charge (the structural estimate the byte bound
+     uses, key included) is above `MAX_RECORD_CHARGE_BYTES` = 64 MiB, or a write of any kind whose
+     key is longer than that, is refused by `admit_write` with `RecordTooLarge` (`record too large:
+     {charge} bytes would exceed the per-record limit of {max} bytes`), and again at the
+     write-through of a `WriteSource::Value` write. It is counted in
+     `topgun_write_behind_capacity_refusals_total{bound="record"}`, rendered at 0 from
+     construction, and in no other series. One client message (at most 2 MiB) is charged below
+     5 MiB, so the cap never refuses a single client value. An LWW value encodes below twice its
+     charge and an OR slot below three times it, so an admitted record encodes below 192 MiB, far
+     below RocksDB's per-entry limit and the WAL frame's `u32` length.
+  4. **Order and no trace.** `admit_write` decides name, record size, key bound, byte bound
+     (`TG-WB-011`); `admit_map` comes last. A refusal at any of them changes nothing and leaves no
+     promise behind; to the client it is the transient `internal` error (500), with no new wire
+     kind.
+  5. **The engine's backstop.** `RocksKvEngine::write` checks every key (at most `u32::MAX − 8`
+     bytes, RocksDB's `kMaxWriteBatchKeySize`) and every value (at most `u32::MAX` bytes) of a
+     batch before it builds the batch, and refuses the whole batch with
+     `KvError::InvalidArgument`; RocksDB's `WriteBatch::put` drops an oversized entry with a status
+     the binding does not return, and would write the rest. The engine store's `commit` turns that
+     refusal into `StoreInconsistent` naming its largest put, so on the flush path it stops the
+     node (`TG-WB-010`, cause `inconsistent`) and is never silent.
+- **Mechanical predicate:** a write of a refused name, a put of a new map once no id can be
+  promised, a plain record charged above the cap and a remove of a key longer than it each return
+  their error from `add` / `remove`, with the WAL showing no append and no sequence assigned; with
+  `k` ids left, concurrent admissions of distinct new maps admit exactly `k`; a direct inner-store
+  add of a new map is refused while the last id is promised, also while its own batch is in
+  flight; an engine batch holding an entry above the limit returns `InvalidArgument` with none of
+  its keys written.
+- **Maintaining code:** `map_data_store.rs` — `MapDataStore::admit_map`, `MapAdmission`,
+  `MapNameRefused`, `MapIdSpaceExhausted`, `RecordTooLarge`, `MAX_RECORD_CHARGE_BYTES`;
+  `write_behind.rs` — `admit_write`, `refuse_store_refused_name`, `refuse_oversized`,
+  `admit_value`, `admit_in_place`, the write-through re-checks of `add_with_witness`, the
+  `bound="record"` registration; `engine_store.rs` — `admit_map`, `issued_next`, `promised`,
+  `plan_registry` (the promise check and the plan-time raise), `release_promises` (called by
+  `write_ops` after the cache fill), `drop_tenant`; `rocks_engine.rs` — the size check of `write`.
+- **Enforcing test:** `write_behind.rs::a_store_refused_map_name_is_refused_before_the_wal_append`,
+  `engine_store_tests.rs::concurrent_admissions_never_promise_more_ids_than_are_left` and
+  `rocks_engine.rs::an_entry_above_the_engine_limit_refuses_the_whole_batch`. All run in CI
+  (`cargo test`). The table below lists the others.
+- **Violation consequence:** an acknowledged write the store refuses for ever — retried for the
+  life of the process while it stops tombstone pruning and fills the buffer — or, for an entry
+  above RocksDB's limit, dropped from its batch while the key's version row and the advanced
+  applied watermark are written, so the write is lost for good and its WAL frame collected.
+- **Visible to an operator:** the refusal texts above in the failed operation's error;
+  `topgun_write_behind_capacity_refusals_total{bound="record"}`; an exit 72 with
+  `cause="inconsistent"` should the engine's backstop fire on the flush path.
+- **Discovered by:** the store-error classification of TODO-824 and the silent drop of TODO-1040;
+  SPEC-430a.
+- **Status:** decided, **enforced** for names, map ids and plain records; an in-place OR write is
+  not capped yet (see "Not claimed"; SPEC-430b extends this row).
+
+| Enforcer | What it covers | Where it runs |
+|----------|----------------|---------------|
+| `a_store_refused_map_name_is_refused_before_the_wal_append` (`write_behind.rs`) | statement 1: `add`, `remove`, `remove_all`, `admit_in_place` (its own return) and a direct `add_with_witness` refuse the three names; no WAL append, nothing buffered, no capacity refusal counted; a 600-byte name admitted | CI (`cargo test`) |
+| `admission_promises_at_most_the_ids_left` (`engine_store_tests.rs`) | statement 2 at two ids left: two new maps promised, a third refused, a promise idempotent, a map with an id `HasId`, a remove admitted; the commits release the promises and the mirror is `u32::MAX` | CI (`cargo test`) |
+| `concurrent_admissions_never_promise_more_ids_than_are_left` (`engine_store_tests.rs`) | 64 concurrent admissions with three ids left: exactly three | CI (`cargo test`) |
+| `a_tenant_drop_a_failed_commit_and_the_fast_path_leave_the_promises_exact` (`engine_store_tests.rs`) | the release: a tenant drop releases its names, a failed commit nothing, the settled path its names, a delete-only commit keeps the promise of the buffered put | CI (`cargo test`) |
+| `a_direct_write_cannot_take_an_id_promised_to_a_buffered_put` (`engine_store_tests.rs`) | every issuer honours the promises, also with the direct write parked between its plan and its engine write | CI (`cargo test`) |
+| `a_put_to_a_map_that_cannot_get_an_id_is_refused_before_the_ack`, `an_existing_uncached_map_stays_writable_once_the_id_space_is_exhausted` (`write_behind.rs`) | statement 2 through the write-behind over the bare engine store: the refused put reaches no WAL; an existing map whose row is not cached stays writable at `u32::MAX` | CI (`cargo test`) |
+| `a_record_above_the_size_cap_is_refused_before_the_wal_append` (`write_behind.rs`) | statement 3 with a test-sized cap: the `record` series at 0 first, a value above the cap and a key longer than it refused under `bound="record"` only, with no WAL append and no sequence; a value at exactly the cap admitted | CI (`cargo test`) |
+| `an_or_slot_encodes_below_three_times_its_charge` (`write_behind.rs`), `structural_size_is_within_the_fidelity_band` (`record.rs`) | the encoded-to-charge factors of statement 3: below 3 for an OR slot, below 2 for an LWW value | CI (`cargo test`) |
+| `an_entry_above_the_engine_limit_refuses_the_whole_batch` (`rocks_engine.rs`), `an_oversized_put_at_commit_is_inconsistent` (`engine_store_tests.rs`) | statement 5 with lowered limits: a value, a put key and a delete key above them refuse the whole batch; at the commit the refusal is `inconsistent` and names the largest put | CI (`cargo test`) |
+| `a_value_above_u32_max_is_refused_not_dropped` (`rocks_engine.rs`, `#[ignore]`) | statement 5 at RocksDB's real limit: a value of `u32::MAX + 1` bytes beside a small put; before the check the small put was stored, the large one absent and the write `Ok` | by hand, recorded with each change to the check |
+
+**Not claimed.**
+
+- **An in-place OR write is not capped.** An OR slot can grow past the cap through in-place
+  writes (SPEC-430b). Should its encoding pass RocksDB's limit, statement 5 stops the node with
+  exit 72, `cause="inconsistent"`, instead of losing the write. With `TOPGUN_OR_DELTA_WAL=false`
+  an OR write on a slot past 4 GiB meets the WAL's `payload too large` after its in-place mutation
+  (TODO-992).
+- **To the client both refusals are temporary** (the transient `internal`): it keeps resending a
+  doomed op. A permanent error kind is out of scope.
+- **Early exhaustion.** A promise whose write is refused after admission (a WAL append failure, a
+  store failure, a tenant close), a put coalesced into a remove before its flush, and the ids a
+  failed batch planned stay counted until a later plan re-plans them or the node restarts, so
+  exhaustion can be reported that many maps early, only at the boundary. Below the boundary an
+  existing map whose row is not cached is promised without a read; at `u32::MAX − 1` that promise
+  makes a new map be refused until the existing map's put commits, although an id is free.
+- **The map-id space is a lifetime limit** of 2³² − 1 ids per store; a tenant or map drop returns
+  none.
+- **A direct inner-store write near exhaustion** (`DurablePolicyStore`, `add_backup`) is refused
+  rather than take a promised id; its caller sees the error. The backup pass-throughs are not
+  admitted by the write-behind; the inner store checks their names in `write_ops`.
+- **The charge is an estimate.** The cap bounds the charge; the encoded size is bounded through
+  the factors above, not measured on the acknowledgement path.
 
 ### TG-EVI-001: An acknowledged write the store has not taken is readable on a running node
 
@@ -2871,7 +3051,10 @@ weaker than a test.
      engine). The reason this set is kept in the new format is **compatibility of the
      input contract** (`TG-NAME-002`): every client and every older store refuse the same names, so a
      name one of them accepts is accepted by all. It is **not** a table-name collision, which the
-     registry no longer has.
+     registry no longer has. The write-behind refuses the same names at its admission, for every
+     origin, before the WAL append (`TG-WB-012`), so the store's check is the last line only for
+     writes no admission checked: WAL recovery of a frame an older binary acknowledged, and direct
+     inner-store writes.
   2. *Legacy decode.* A legacy table name decodes by exactly one of four rules: `mapr__X` →
      `(X, primary)`; `maprb__X` → `(X, backup)`; `map__X__backup` with `X ∈ V` → `(X, backup)`;
      `map__X` with `X ∈ V` not ending in `__backup` → `(X, primary)` — the four ranges
@@ -2945,8 +3128,12 @@ weaker than a test.
   authorization bypass group (`JournalRead`, `UnregisterResolver`, `ListResolvers`) are in the
   same position. `TopicPublish` and `CounterSync` carry a topic / counter name, not a map name.
 - **Stated boundaries:** (a) Trusted origins (`Forwarded`, `Backup`, `Wan`, `System`) early-return
-  in `AuthorizationService::call`; for them the store's own check (TG-NAME-001, `check_map_name`
-  in `EngineMapDataStore`) is the last line. (b) HTTP `/sync` **queries** do not pass through the pipeline; they read
+  in `AuthorizationService::call`. Those that write through the write-behind are refused at its
+  admission, before the WAL append and the ack (`TG-WB-012`). Backup-space writes go through
+  `add_backup` / `remove_backup`, which are synchronous and checked by the inner store
+  (`write_ops`, `check_map_name`) before anything is acknowledged, not through write-behind
+  admission. The store's own check (TG-NAME-001) remains the last line for WAL recovery and
+  direct inner-store writes. (b) HTTP `/sync` **queries** do not pass through the pipeline; they read
   resident records only and write nothing. HTTP `/sync` **operations** do pass through it, by the
   same per-op fold as an `OpBatch`, and are covered. (c) The invariant states what the server
   does, not what the client is told: on the single-message WebSocket path a refusal produces no

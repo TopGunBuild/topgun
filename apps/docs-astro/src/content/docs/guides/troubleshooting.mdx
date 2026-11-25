@@ -342,13 +342,24 @@ Run the server under a supervisor that restarts it on a non-zero exit code (syst
 
 ### Exit code 72: the store is broken
 
-**Symptom:** The server stops by itself with exit code 72. Before it stops it logs `write-behind store: the durable store is broken and stores nothing more in this process; writes are refused from now on and the node stops` (with `cause="io"` or `cause="corrupted"`) and `the durable store is broken; shutting the node down`, and `/health/ready` stops answering 200.
+**Symptom:** The server stops by itself with exit code 72. Before it stops it logs `write-behind store: the durable store is broken and stores nothing more in this process; writes are refused from now on and the node stops` (with `cause="io"`, `cause="corrupted"` or `cause="inconsistent"`) and `the durable store is broken; shutting the node down`, and `/health/ready` stops answering 200.
 
-**Cause:** RocksDB reported an I/O error or corruption. After either, RocksDB refuses every further write on that handle, so the server stops instead of acknowledging writes it can no longer store. Writes it acknowledged but did not store are kept in the write-ahead log and replayed at the next start. The `error` field carries RocksDB's own text; `io_kind` is always `"Other"`, so a full disk looks like any other I/O error.
+**Cause:** With `cause="io"` or `cause="corrupted"`, RocksDB reported an I/O error or corruption. After either, RocksDB refuses every further write on that handle, so the server stops instead of acknowledging writes it can no longer store. The `error` field carries RocksDB's own text; `io_kind` is always `"Other"`, so a full disk looks like any other I/O error. With `cause="inconsistent"`, the store found rows it wrote itself in a state it never writes (a record version or a registry row that does not decode, a version or watermark that went backwards, a malformed next-map-id row), or RocksDB refused an entry the store built because it was above RocksDB's 4 GiB per-entry limit; the line's `map` and `key` name that record and its `error` field carries the whole error chain. In every case the writes the server acknowledged but did not store are kept in the write-ahead log and replayed at the next start.
 
 **Solutions:**
-- Check the disk of the data directory: free space, permissions (a directory that became read-only), and the system log for I/O errors. When the cause is gone, one restart brings the node back with every acknowledged write.
+- For `cause="io"` or `cause="corrupted"`, check the disk of the data directory: free space, permissions (a directory that became read-only), and the system log for I/O errors. When the cause is gone, one restart brings the node back with every acknowledged write.
+- For `cause="inconsistent"`, what the next start does depends on what the store met. A record version or registry row that does not decode: the server keeps that record's write-ahead-log entry unapplied (its line carries `cause="prepare"`), replays everything else, and stops again at the next write of that key. A version that went backwards: the entry is at or below the stored version, so the server skips it as already applied and runs on. A malformed next-map-id row, a watermark that went backwards, or an entry above the 4 GiB limit: the entry is kept unapplied with `cause="inconsistent"`. Where an entry is kept unapplied, a restart does not heal the node: restore the data directory and the WAL directory from the same backup.
 - If every restart exits with code 1 and `store engine: cannot open …`, the cause is still there, or the store is damaged: fix the disk, or restore the data directory and the WAL directory from the same backup.
+
+### A write is refused with `record too large` or `map id space exhausted`
+
+**Symptom:** A write fails with the temporary `internal` error (code 500) and the text `record too large: … bytes would exceed the per-record limit of 67108864 bytes`, or `map id space exhausted: no new map can be created in this store`; the client keeps the write and keeps sending it again.
+
+**Cause:** The server refuses, before it acknowledges anything, a write it could not store. One record is limited to 64 MiB of estimated size, its key included, and a key to 64 MiB; a single client message never reaches that, but an OR-Map key that accumulates many entries can. A store gives out 2³² − 1 map ids over its whole life and never reuses one, also after a map or a tenant is dropped; once all are given out, a write to a map that does not exist yet is refused. Only the record limit is counted, in `topgun_write_behind_capacity_refusals_total{bound="record"}`; a map-id refusal is visible only in the error text.
+
+**Solutions:**
+- Split a record that large across several keys.
+- Map ids: write into existing maps rather than creating one map per document; a store that has given out every id cannot create a new map.
 
 ### Exit code 134: `WAL fail-stop`
 

@@ -10,6 +10,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Fixed (server): an acknowledged write whose stored value exceeded 4 GiB is no longer lost
+  silently.** RocksDB drops a batch entry above its per-entry limit with a status its Rust binding
+  does not return, and wrote the rest of the batch — the key's version row and the advanced
+  write-ahead-log watermark included — so such a write was acknowledged and then lost for good. An
+  OR-Map key has no size limit of its own, so a slot that accumulated enough adds could get there.
+  The engine now checks every key and value against RocksDB's limits before it builds a batch and
+  refuses the whole batch; on the flush path that stops the node with exit 72,
+  `cause="inconsistent"`, and the write stays in the write-ahead log (`TG-WB-012`).
+- **Changed (server): writes the store could refuse on its own are refused before they are
+  acknowledged, for every origin (`TG-WB-012`).** A map name the store refuses (empty, ending in
+  `__backup`, containing U+0000) is refused at write-behind admission also for trusted origins,
+  which skipped the ingress check; a put to a new map is refused once the store has no map id left
+  to give (2³² − 1 per store, never reissued; `map id space exhausted: no new map can be created in
+  this store`); and one plain record is limited to 64 MiB of estimated size, its key included
+  (`record too large: …`, counted in `topgun_write_behind_capacity_refusals_total{bound="record"}`).
+  Each is the temporary `internal` error (500); before, such a write was acknowledged and then
+  retried by the flush for the life of the process. An in-place OR-Map write is not checked against
+  the record limit yet.
+- **Changed (server): the store's own consistency failures stop the node.** A flush commit that
+  meets a record version row or a registry row that does not decode, a version or applied-watermark
+  regression, or a malformed next-map-id row was retried for ever; it now stops the node with exit
+  72 and the new cause `inconsistent` (`topgun_write_behind_store_broken_total{cause="inconsistent"}`,
+  rendered at 0 from the first scrape). The fatal line's `map` and `key` name the failing record and
+  its `error` field carries the whole error chain. Every line of a frame recovery leaves unapplied
+  now has a `cause` field (`prepare`, `inconsistent` or `refused`). What the next start does depends
+  on what the store met: a version row or registry row that does not decode is met when recovery
+  reads the key's version, so the frame is held with `cause="prepare"` and the next write of that key
+  stops the node again; a version regression's frame is at or below the stored version, so recovery
+  skips it as already applied and the node runs on; `cause="inconsistent"` is logged only when the
+  recovery commit itself is refused (a malformed next-map-id met by the first write of a new map, an
+  applied-watermark refusal, an entry above RocksDB's size limit), and the frame is held. Where the
+  frame is held a restart does not heal the node; the remedy is a restore from backup
+  (`TG-WB-010`).
 - **Fixed (client and server): the heartbeat no longer reconnects while a large message arrives on
   a slow link.** A `TopGunClient` on a single-server connection reconnected whenever one server
   message took longer than about 10–15 s to arrive — a ~4.1 MB live snapshot below about

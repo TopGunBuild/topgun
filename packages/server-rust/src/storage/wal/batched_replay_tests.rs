@@ -34,8 +34,8 @@ use super::tests::delta_frame;
 use super::{OrDelta, Wal, WalEntry, WalFsyncPolicy, WalOp, WalRecovery, WalWriter};
 use crate::storage::datastores::engine_store::{EngineMapDataStore, KS_PARTITION_META, KS_PRIMARY};
 use crate::storage::map_data_store::{
-    FlushCommit, KeyVersion, LeafSink, MapDataStore, PutValue, RecordRefused, ScanBatch,
-    ScanCursor, StoreBrokenCause, StoreErrorClass, StoreWrite,
+    FlushCommit, KeyVersion, LeafSink, MapDataStore, PutValue, ScanBatch, ScanCursor,
+    StoreBrokenCause, StoreErrorClass, StoreWrite,
 };
 use crate::storage::record::{OrMapEntry, RecordValue};
 
@@ -46,9 +46,6 @@ use crate::storage::record::{OrMapEntry, RecordValue};
 /// How a [`FaultStore`] refuses a commit that holds a poisoned put.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Refusal {
-    /// `RecordRefused` naming the poisoned writes: the store takes the rest
-    /// once they are left out.
-    Record,
     /// The whole commit is refused, as an engine error with no class.
     Commit,
 }
@@ -300,21 +297,14 @@ impl MapDataStore for FaultStore {
                 *left = left.saturating_sub(1);
                 broken
             };
-            let poisoned: Vec<usize> = commit
+            let poisoned = commit
                 .writes
                 .iter()
-                .enumerate()
-                .filter(|(_, w)| write_value(w).is_some_and(|v| self.refuses(&v)))
-                .map(|(i, _)| i)
-                .collect();
-            let refusal = *self.refusal.lock();
+                .any(|w| write_value(w).is_some_and(|v| self.refuses(&v)));
             if broken {
                 Err(anyhow::Error::new(InjectedBroken))
-            } else if poisoned.is_empty() {
+            } else if !poisoned {
                 self.inner.commit(commit).await
-            } else if refusal == Some(Refusal::Record) {
-                Err(anyhow::Error::new(RecordRefused { indices: poisoned })
-                    .context("injected: poisoned records"))
             } else {
                 Err(anyhow::anyhow!(
                     "injected: the store refuses a commit holding a poisoned record"
@@ -686,7 +676,7 @@ fn seed_strategy() -> impl Strategy<Value = Vec<(usize, RecordValue)>> {
 
 fn window_strategy(poison: bool) -> impl Strategy<Value = Window> {
     let refusal = if poison {
-        prop_oneof![Just(Some(Refusal::Record)), Just(Some(Refusal::Commit))].boxed()
+        Just(Some(Refusal::Commit)).boxed()
     } else {
         Just(None).boxed()
     };
@@ -1290,61 +1280,60 @@ fn c08_batched_replay_equals_per_frame_replay_under_refusals() {
         .enable_all()
         .build()
         .expect("runtime");
-    for refusal in [Refusal::Record, Refusal::Commit] {
-        let window = Window {
-            seed: vec![(0, or_value(&[("t0", "s")], &[]))],
-            frames: vec![
-                GenFrame::OrAdd {
-                    key: 0,
-                    tag: 1,
-                    text: "poison-a".into(),
-                },
-                GenFrame::Lww {
-                    key: 1,
-                    millis: 5,
-                    text: "h1".into(),
-                },
-                GenFrame::OrAdd {
-                    key: 0,
-                    tag: 2,
-                    text: "v".into(),
-                },
-                GenFrame::Lww {
-                    key: 2,
-                    millis: 5,
-                    text: "poison-b".into(),
-                },
-                GenFrame::Lww {
-                    key: 2,
-                    millis: 4,
-                    text: "older".into(),
-                },
-                GenFrame::Lww {
-                    key: 3,
-                    millis: 5,
-                    text: "h2".into(),
-                },
-            ],
-            batch_frames: 6,
-            refusal: Some(refusal),
-        };
-        let entries: Vec<WalEntry> = window
-            .frames
-            .iter()
-            .zip(1u64..)
-            .map(|(f, seq)| to_entry(f, seq))
-            .collect();
-        let (batched, per_frame) = runtime.block_on(async {
-            (
-                batched_outcome(&window, &entries, window.batch_frames).await,
-                per_frame_outcome(&window, &entries).await,
-            )
-        });
-        assert_eq!(
-            batched, per_frame,
-            "the hand case under {refusal:?}: batched against per-frame replay"
-        );
-    }
+    let refusal = Refusal::Commit;
+    let window = Window {
+        seed: vec![(0, or_value(&[("t0", "s")], &[]))],
+        frames: vec![
+            GenFrame::OrAdd {
+                key: 0,
+                tag: 1,
+                text: "poison-a".into(),
+            },
+            GenFrame::Lww {
+                key: 1,
+                millis: 5,
+                text: "h1".into(),
+            },
+            GenFrame::OrAdd {
+                key: 0,
+                tag: 2,
+                text: "v".into(),
+            },
+            GenFrame::Lww {
+                key: 2,
+                millis: 5,
+                text: "poison-b".into(),
+            },
+            GenFrame::Lww {
+                key: 2,
+                millis: 4,
+                text: "older".into(),
+            },
+            GenFrame::Lww {
+                key: 3,
+                millis: 5,
+                text: "h2".into(),
+            },
+        ],
+        batch_frames: 6,
+        refusal: Some(refusal),
+    };
+    let entries: Vec<WalEntry> = window
+        .frames
+        .iter()
+        .zip(1u64..)
+        .map(|(f, seq)| to_entry(f, seq))
+        .collect();
+    let (batched, per_frame) = runtime.block_on(async {
+        (
+            batched_outcome(&window, &entries, window.batch_frames).await,
+            per_frame_outcome(&window, &entries).await,
+        )
+    });
+    assert_eq!(
+        batched, per_frame,
+        "the hand case under {refusal:?}: batched against per-frame replay"
+    );
     drop(runtime);
     run_equivalence(64, true);
 }
