@@ -140,7 +140,7 @@ async fn version(node: &FaultNode, key: &str) -> Option<KeyVersion> {
 async fn restart(node: FaultNode, root: &Root) -> FaultNode {
     node.close().await;
     let node = FaultNode::open(root);
-    node.store.refuse_poisoned(Some(Refusal::Record));
+    node.store.refuse_poisoned(Some(Refusal::Commit));
     node
 }
 

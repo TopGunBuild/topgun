@@ -432,6 +432,11 @@ pub enum StoreBrokenCause {
     Corrupted,
     /// A lock inside the store was poisoned by a panic.
     LockPoisoned,
+    /// The store met rows it wrote itself in a state it never writes (a
+    /// malformed version, registry or next-map-id row, a version or applied
+    /// watermark regression), or the engine refused an argument the store
+    /// built. Nothing outside the store can make the next attempt succeed.
+    Inconsistent,
 }
 
 impl StoreBrokenCause {
@@ -443,6 +448,7 @@ impl StoreBrokenCause {
             Self::PreviousIo => "previous_io",
             Self::Corrupted => "corrupted",
             Self::LockPoisoned => "lock_poisoned",
+            Self::Inconsistent => "inconsistent",
         }
     }
 }
@@ -550,6 +556,144 @@ impl std::fmt::Display for RecordRefused {
 }
 
 impl std::error::Error for RecordRefused {}
+
+/// Longest part of a refused map name or key an admission error repeats, in
+/// bytes: the error reaches log lines and a client's error text, so it never
+/// carries a whole name or key an attacker chose the size of.
+const ADMISSION_ECHO_BYTES: usize = 128;
+
+fn echo(text: &str) -> String {
+    let mut end = text.len().min(ADMISSION_ECHO_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+/// A write refused at admission because its map name is one the store
+/// refuses (`TG-WB-012`, `TG-NAME-002`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapNameRefused {
+    /// The name, cut to its first 128 bytes.
+    pub map: String,
+    /// The clause the name violates; always one the store refuses.
+    pub violation: MapNameViolation,
+}
+
+impl MapNameRefused {
+    /// The refusal of `map` for `violation`.
+    #[must_use]
+    pub fn new(map: &str, violation: MapNameViolation) -> Self {
+        Self {
+            map: echo(map),
+            violation,
+        }
+    }
+}
+
+impl std::fmt::Display for MapNameRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Invalid map name {:?}: {}", self.map, self.violation)
+    }
+}
+
+impl std::error::Error for MapNameRefused {}
+
+/// A put to a map the store cannot give an id: every id is issued or
+/// promised (`TG-WB-012`). Ids are never reissued, so this lasts for the
+/// store's life.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapIdSpaceExhausted {
+    /// The map left without an id.
+    pub map: String,
+}
+
+impl std::fmt::Display for MapIdSpaceExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("map id space exhausted: no new map can be created in this store")
+    }
+}
+
+impl std::error::Error for MapIdSpaceExhausted {}
+
+/// The store found rows it wrote itself in a state it never writes, or the
+/// engine refused an argument the store built; classified
+/// [`StoreBrokenCause::Inconsistent`] (`TG-WB-010`). `map` and `key` name the
+/// record wherever the failing site knows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreInconsistent {
+    /// The map of the failing record, when the site knows it.
+    pub map: Option<String>,
+    /// The key of the failing record, when the site knows it.
+    pub key: Option<String>,
+    /// What is inconsistent.
+    pub detail: String,
+}
+
+impl std::fmt::Display for StoreInconsistent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for StoreInconsistent {}
+
+/// The largest charge one plain record may have, its key included, in bytes
+/// (`TG-WB-012`). The charge is the structural estimate the byte bound uses;
+/// an LWW value encodes below twice it and an OR slot below three times it,
+/// so an admitted record encodes below 192 MiB — far below RocksDB's
+/// per-entry limit and the WAL frame's `u32` length — while one client
+/// message (at most 2 MiB) is charged below 5 MiB and is never refused.
+pub const MAX_RECORD_CHARGE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A write refused at admission because one record would exceed
+/// [`MAX_RECORD_CHARGE_BYTES`] (`TG-WB-012`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordTooLarge {
+    /// The map, cut to its first 128 bytes.
+    pub map: String,
+    /// The key, cut to its first 128 bytes.
+    pub key: String,
+    /// The record's charge, or the key's length for a key over the limit.
+    pub charge: u64,
+    /// The limit.
+    pub max: u64,
+}
+
+impl RecordTooLarge {
+    /// The refusal of `(map, key)` at `charge` over `max`.
+    #[must_use]
+    pub fn new(map: &str, key: &str, charge: u64, max: u64) -> Self {
+        Self {
+            map: echo(map),
+            key: echo(key),
+            charge,
+            max,
+        }
+    }
+}
+
+impl std::fmt::Display for RecordTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "record too large: {} bytes would exceed the per-record limit of {} bytes",
+            self.charge, self.max
+        )
+    }
+}
+
+impl std::error::Error for RecordTooLarge {}
+
+/// Whether a map a put names has an id, or has been promised one
+/// ([`MapDataStore::admit_map`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapAdmission {
+    /// The map holds an id.
+    HasId,
+    /// The map has no id yet; one is reserved for its first commit.
+    Promised,
+}
 
 /// How far the commits of a store are durable, read without its commit lock.
 ///
@@ -711,6 +855,20 @@ pub trait MapDataStore: Send + Sync {
     /// must then leave the key unchanged.
     fn admit_in_place(&self, _map: &str, _key: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    /// Whether a put to `map` can be stored: the map holds an id, or one is
+    /// promised to it, reserved against every issuer until its first commit
+    /// gives it one (`TG-WB-012`). Asked at admission, before anything is
+    /// acknowledged; idempotent. A store that gives maps no ids answers
+    /// `HasId`.
+    ///
+    /// # Errors
+    ///
+    /// [`MapIdSpaceExhausted`] when no id is left to promise; a store error,
+    /// which the caller surfaces as a temporary refusal.
+    fn admit_map(&self, _map: &str) -> anyhow::Result<MapAdmission> {
+        Ok(MapAdmission::HasId)
     }
 
     /// The order in which a value scan of this store walks a map, or `None`.
@@ -946,13 +1104,23 @@ pub trait MapDataStore: Send + Sync {
     /// Stores the writes of `commit` and its applied watermark rows.
     ///
     /// A store that keeps applied watermarks stores both as one engine batch
-    /// (`TG-WAL-003`). Any other store refuses a commit that carries rows and stores the
-    /// writes one at a time, in order, through its per-record methods.
+    /// (`TG-WAL-003`).
+    ///
+    /// An error concerns the store, not one of the writes. A store that could
+    /// refuse one write while it accepts others must refuse that write at
+    /// [`admit_map`](MapDataStore::admit_map) / admission. A store that
+    /// returns an untyped error for one write is outside this contract, and
+    /// the write-behind treats it as a store that refuses everything.
+    ///
+    /// The default refuses a commit that carries rows and stores the writes
+    /// one at a time, in order, through the per-record methods, so its error
+    /// can follow writes it already stored. A re-commit of the same writes
+    /// stores the same records again, so a caller that commits a refused
+    /// commit again is not harmed by the writes that went before the error.
     ///
     /// # Errors
     ///
-    /// A refused write (its chain may hold [`RecordRefused`]); rows on a store
-    /// that keeps no watermark; a store error.
+    /// Rows on a store that keeps no watermark; a store error.
     async fn commit(&self, commit: &FlushCommit<'_>) -> anyhow::Result<()> {
         // Refused before any write: a row stored nowhere must not look stored.
         if !commit.applied.is_empty() {

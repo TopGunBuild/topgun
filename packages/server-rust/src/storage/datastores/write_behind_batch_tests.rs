@@ -1197,32 +1197,9 @@ async fn b06_refused_records_in_both_halves_start_a_hold_the_documented_false_po
 
 #[tokio::test(start_paused = true)]
 async fn b07_record_level_refusals_are_handled_per_entry_without_halving() {
-    const BAD_MAP: &str = "bad__backup";
-
     let dir = tempfile::tempdir().expect("tempdir");
     let node = Node::open(dir.path());
     let wb = node.write_behind(config()).await;
-
-    // A map name the store refuses, in the middle of the pass: the commit is
-    // refused for that write alone, nothing written, and the rest is
-    // committed again in one engine write.
-    let named = keys("h", 5);
-    fill(&wb, &named[..2], 1, |i| lww(&format!("v{i}"), 1)).await;
-    wb.add(BAD_MAP, "r", &lww("bad", 1), 3).await.expect("add");
-    fill(&wb, &named[2..], 4, |i| lww(&format!("v{i}"), 1)).await;
-    let (engine_mark, spy_mark) = (node.engine.mark(), node.spy.mark());
-    one_pass(&wb).await;
-    let refused_name = (
-        record_counts(&node.engine.writes_since(engine_mark)),
-        node.spy
-            .commits_since(spy_mark)
-            .iter()
-            .map(|c| (c.writes.len(), c.ok))
-            .collect::<Vec<_>>(),
-        wb.test_retry_state(BAD_MAP, "r").map(|(count, _)| count),
-        node.stored(&named).await.len(),
-        wb.test_store_hold_active(),
-    );
 
     // A `Store` entry whose encoding fails: refused alone, in no commit.
     let plain = keys("e", 5);
@@ -1315,15 +1292,8 @@ async fn b07_record_level_refusals_are_handled_per_entry_without_halving() {
         })
         .collect();
     assert_eq!(
+        (unencodable_store, unencodable_cell, by_encoded_bytes, forms),
         (
-            refused_name,
-            unencodable_store,
-            unencodable_cell,
-            by_encoded_bytes,
-            forms
-        ),
-        (
-            (vec![5], vec![(6, false), (5, true)], Some(1), 5, false),
             (
                 vec![4],
                 vec![(4, true)],
@@ -2153,21 +2123,16 @@ async fn b15_a_half_committed_after_its_sibling_plans_its_rows_after_the_sibling
 
 #[tokio::test(start_paused = true)]
 async fn b16_a_recommit_never_marks_a_refused_entry_applied() {
-    const BAD_MAP: &str = "bad__backup";
-    const BAD_KEY: &str = "x";
-
     let dir = tempfile::tempdir().expect("tempdir");
     let node = Node::open(dir.path());
     let wb = node.write_behind(config()).await;
-    // Every entry in one WAL partition: `x` is refused by the store on its
-    // own (a map name it does not take), `y` by the engine.
-    let partition = super::partition_for(BAD_MAP, BAD_KEY);
-    let ours = keys_in_partition(MAP, "a", partition, 4);
-    let (key_a, key_b, key_y, key_c) = (&ours[0], &ours[1], &ours[2], &ours[3]);
+    // Every entry in one WAL partition; the engine refuses every commit that
+    // holds `x` or `y`.
+    let partition = super::partition_for(MAP, "x");
+    let ours = keys_in_partition(MAP, "a", partition, 5);
+    let (key_a, key_x, key_b, key_y, key_c) = (&ours[0], &ours[1], &ours[2], &ours[3], &ours[4]);
     add_at(&wb, key_a, 1).await;
-    wb.add(BAD_MAP, BAD_KEY, &lww("bad", 1), 2)
-        .await
-        .expect("add");
+    add_at(&wb, key_x, 2).await;
     add_at(&wb, key_b, 3).await;
     add_at(&wb, key_y, 4).await;
     add_at(&wb, key_c, 5).await;
@@ -2177,6 +2142,7 @@ async fn b16_a_recommit_never_marks_a_refused_entry_applied() {
         .map(|(seq, _)| seq)
         .collect();
     let (seq_x, seq_y) = (2, 4);
+    node.engine.refuse_writes_holding(key_x, Refusal::Unknown);
     node.engine.refuse_writes_holding(key_y, Refusal::Unknown);
 
     let (engine_mark, spy_mark) = (node.engine.mark(), node.spy.mark());
@@ -2192,6 +2158,7 @@ async fn b16_a_recommit_never_marks_a_refused_entry_applied() {
         .engine
         .writes_since(engine_mark)
         .iter()
+        .filter(|w| w.ok)
         .filter_map(|w| w.rows().get(&partition).copied())
         .collect();
     node.close().await;
@@ -2213,18 +2180,15 @@ async fn b16_a_recommit_never_marks_a_refused_entry_applied() {
             pending,
             commits,
             rows.iter().all(|row| *row < seq_x.min(seq_y)),
-            replayed.contains(BAD_KEY) && replayed.contains(key_y),
+            replayed.contains(key_x) && replayed.contains(key_y),
             stored,
         ),
         (
             vec![1, 2, 3, 4, 5],
             vec![
-                (set(&[key_a, BAD_KEY, key_b, key_y, key_c]), false),
-                (set(&[key_a, key_b, key_y, key_c]), false),
-                (set(&[key_a, key_b]), true),
+                (set(&[key_a, key_x, key_b, key_y, key_c]), false),
+                (set(&[key_a, key_x, key_b]), false),
                 (set(&[key_y, key_c]), false),
-                (set(&[key_y]), false),
-                (set(&[key_c]), true),
             ],
             true,
             true,

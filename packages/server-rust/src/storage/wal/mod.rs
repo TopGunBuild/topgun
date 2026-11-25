@@ -3295,7 +3295,7 @@ impl WalRecovery {
                 "frame {unresolved} of this key is unresolved and no frame written since covers \
                  it, so this frame is held"
             );
-            log_unreplayed(held, partition, entry, &err);
+            log_unreplayed(held, partition, entry, "prepare", &err);
             return (Prepared::Failed, None);
         }
         let prepared =
@@ -3309,7 +3309,7 @@ impl WalRecovery {
             Err(err) => Err(err),
         };
         encoded.unwrap_or_else(|err| {
-            log_unreplayed(held, partition, entry, &err);
+            log_unreplayed(held, partition, entry, "prepare", &err);
             (Prepared::Failed, None)
         })
     }
@@ -3461,20 +3461,21 @@ impl WalRecovery {
 
     /// Commits one replay batch, its row inside.
     ///
-    /// A commit refused with [`RecordRefused`] leaves out the refused writes —
-    /// their frames block the frontier and hold their keys — and commits the
-    /// rest again; a commit refused otherwise is halved, each half committed
-    /// in order, down to single frames, at most `2n − 1` commits for a batch
-    /// of `n`. A frame refused alone blocks the frontier, holds its key, and
-    /// the frames after it are still committed, as per-frame replay does;
-    /// there is no hold to protect at start, so no refusal pattern ends the
-    /// partition. Before a part is committed again its frames are prepared
-    /// again from the store, which by then holds every write of this batch
-    /// committed so far, so a refused write is never read by a later frame,
-    /// and a later non-subsuming frame of the refused key is held rather than
-    /// folded without it (`TG-WAL-015`). A store that reports itself broken
+    /// A refused commit is halved, each half committed in order, down to
+    /// single frames, at most `2n − 1` commits for a batch of `n`. A frame
+    /// refused alone blocks the frontier, holds its key, and the frames after
+    /// it are still committed, as per-frame replay does; there is no hold to
+    /// protect at start, so no refusal pattern ends the partition. Before a
+    /// part is committed again its frames are prepared again from the store,
+    /// which by then holds every write of this batch committed so far, so a
+    /// refused write is never read by a later frame, and a later
+    /// non-subsuming frame of the refused key is held rather than folded
+    /// without it (`TG-WAL-015`). A store that reports itself broken
     /// (`TG-WB-010`) ends the partition's replay: nothing more is committed
-    /// for it.
+    /// for it. The one exception is a store that found itself inconsistent:
+    /// that concerns the frame's own rows, so it is refused like any other
+    /// frame, and one bad frame neither stops the boot nor the replay of the
+    /// frames after it; at runtime the same error stops the node.
     #[allow(clippy::too_many_lines)]
     async fn commit_batch(
         &self,
@@ -3490,7 +3491,7 @@ impl WalRecovery {
         let mut parts = vec![(0, frames.len())];
         let mut first_attempt = Some(prepared);
         while let Some((lo, hi)) = parts.pop() {
-            let mut part = match first_attempt.take() {
+            let part = match first_attempt.take() {
                 Some(prepared) => prepared,
                 None => {
                     self.reprepare(
@@ -3504,7 +3505,7 @@ impl WalRecovery {
                 }
             };
             loop {
-                let (writes, origin) = batch_writes(&frames[lo..hi], &part, now);
+                let writes = batch_writes(&frames[lo..hi], &part, now);
                 let frontier = progress.frontier_after(&frames[lo..hi], &part);
                 let applied = if frontier > progress.row {
                     vec![(partition, frontier)]
@@ -3539,8 +3540,15 @@ impl WalRecovery {
                     }
                     Err(err) => err,
                 };
-                if let crate::storage::map_data_store::StoreErrorClass::StoreBroken(cause) =
-                    inner_store.classify_error(&err)
+                let class = inner_store.classify_error(&err);
+                let inconsistent = class
+                    == crate::storage::map_data_store::StoreErrorClass::StoreBroken(
+                        crate::storage::map_data_store::StoreBrokenCause::Inconsistent,
+                    );
+                if let (
+                    false,
+                    crate::storage::map_data_store::StoreErrorClass::StoreBroken(cause),
+                ) = (inconsistent, class)
                 {
                     tracing::error!(
                         partition,
@@ -3552,34 +3560,13 @@ impl WalRecovery {
                     progress.broken = true;
                     return;
                 }
-                let named: Vec<usize> = err
-                    .chain()
-                    .find_map(|e| e.downcast_ref::<crate::storage::map_data_store::RecordRefused>())
-                    .map(|r| {
-                        r.indices
-                            .iter()
-                            .filter_map(|w| origin.get(*w).copied())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if !named.is_empty() {
-                    for i in named {
-                        log_unreplayed(&mut progress.held, partition, &frames[lo + i], &err);
-                        refused[lo + i] = true;
-                    }
-                    part = self
-                        .reprepare(
-                            inner_store,
-                            &mut progress.held,
-                            partition,
-                            &frames[lo..hi],
-                            &refused[lo..hi],
-                        )
-                        .await;
-                    continue;
-                }
                 if hi - lo == 1 {
-                    log_unreplayed(&mut progress.held, partition, &frames[lo], &err);
+                    let cause = if inconsistent {
+                        "inconsistent"
+                    } else {
+                        "refused"
+                    };
+                    log_unreplayed(&mut progress.held, partition, &frames[lo], cause, &err);
                     refused[lo] = true;
                     progress.settle(&frames[lo..hi], &[Prepared::Failed]);
                     break;
@@ -3596,8 +3583,16 @@ impl WalRecovery {
 /// Logs a frame whose replay failed and holds its key (`TG-WAL-015`): it
 /// blocks the frontier and stays replayable, and its key's version may not
 /// advance past it until a subsuming frame above it is written. Every failed
-/// frame passes here — failed in prepare, held, or refused by the store.
-fn log_unreplayed(held: &mut HeldKeys, partition: u32, entry: &WalEntry, err: &anyhow::Error) {
+/// frame passes here, its `cause` saying how: `prepare` (failed or held in
+/// prepare, before any store call for it), `inconsistent` (the store found
+/// its own rows inconsistent) or `refused` (the store refused it otherwise).
+fn log_unreplayed(
+    held: &mut HeldKeys,
+    partition: u32,
+    entry: &WalEntry,
+    cause: &'static str,
+    err: &anyhow::Error,
+) {
     held.entry((entry.map.clone(), entry.key.clone()))
         .or_default()
         .insert(entry.sequence);
@@ -3606,27 +3601,24 @@ fn log_unreplayed(held: &mut HeldKeys, partition: u32, entry: &WalEntry, err: &a
         map = %entry.map,
         key = %entry.key,
         seq = entry.sequence,
+        cause,
         error = %err,
         "WAL recovery: replay failed for entry; \
          watermark stops below it and it stays replayable"
     );
 }
 
-/// The store writes of a prepared part of a replay batch, and for each write
-/// the index of its frame in the part. Each write carries its frame's
-/// sequence, the record version the store keeps with it (`TG-WAL-015`).
+/// The store writes of a prepared part of a replay batch. Each write carries
+/// its frame's sequence, the record version the store keeps with it
+/// (`TG-WAL-015`).
 fn batch_writes<'a>(
     frames: &'a [WalEntry],
     prepared: &[Prepared],
     now: i64,
-) -> (
-    Vec<crate::storage::map_data_store::StoreWrite<'a>>,
-    Vec<usize>,
-) {
+) -> Vec<crate::storage::map_data_store::StoreWrite<'a>> {
     use crate::storage::map_data_store::{PutValue, StoreWrite};
     let mut writes = Vec::new();
-    let mut origin = Vec::new();
-    for (i, (frame, entry)) in prepared.iter().zip(frames).enumerate() {
+    for (frame, entry) in prepared.iter().zip(frames) {
         let write = match frame {
             Prepared::Put { encoded } => StoreWrite::Put {
                 map: &entry.map,
@@ -3643,10 +3635,9 @@ fn batch_writes<'a>(
             },
             Prepared::Nothing | Prepared::Failed => continue,
         };
-        origin.push(i);
         writes.push(write);
     }
-    (writes, origin)
+    writes
 }
 
 impl ReplayOverlay {

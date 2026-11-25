@@ -2811,3 +2811,381 @@ mod record_versions {
         );
     }
 }
+
+/// Map ids promised at admission (`TG-WB-012`), and the store's own
+/// inconsistencies classified as fatal (`TG-WB-010`).
+mod admission {
+    use std::sync::Barrier;
+
+    use super::super::engine_store::{planned_id, version_row_key};
+    use super::super::rocks_engine::{OpenMode, RocksConfig, RocksKvEngine};
+    use super::*;
+    use crate::storage::map_data_store::{
+        DropOutcome, FlushCommit, MapAdmission, MapIdSpaceExhausted, PutValue, StoreInconsistent,
+        StoreWrite,
+    };
+
+    const INCONSISTENT: StoreErrorClass =
+        StoreErrorClass::StoreBroken(StoreBrokenCause::Inconsistent);
+
+    /// A store over `engine` whose stored next map id is `next`, read at open.
+    fn store_at<E: KvEngine>(engine: &Arc<E>, next: u32) -> EngineMapDataStore<E> {
+        raw_put(&**engine, &meta_rows(FORMAT_VERSION, 0, next));
+        open(engine)
+    }
+
+    fn mem_at(next: u32) -> (Arc<MemKvEngine>, EngineMapDataStore<MemKvEngine>) {
+        let engine = Arc::new(MemKvEngine::new());
+        let store = store_at(&engine, next);
+        (engine, store)
+    }
+
+    fn put_at<'a>(map: &'a str, key: &'a str, value: &'a RecordValue, seq: u64) -> StoreWrite<'a> {
+        StoreWrite::Put {
+            map,
+            key,
+            value: PutValue::Value(value),
+            store_time: 0,
+            seq,
+        }
+    }
+
+    fn remove_at<'a>(map: &'a str, key: &'a str, seq: u64) -> StoreWrite<'a> {
+        StoreWrite::Remove {
+            map,
+            key,
+            store_time: 0,
+            seq,
+        }
+    }
+
+    fn commit<E: KvEngine>(
+        store: &EngineMapDataStore<E>,
+        writes: Vec<StoreWrite<'_>>,
+        applied: Vec<(u32, u64)>,
+    ) -> anyhow::Result<()> {
+        block_on(store.commit(&FlushCommit { writes, applied }))
+    }
+
+    fn exhausted<T: std::fmt::Debug>(result: &anyhow::Result<T>) -> bool {
+        result
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.downcast_ref::<MapIdSpaceExhausted>().is_some())
+    }
+
+    /// Seeds map `name` with id `id` as raw registry rows, uncached.
+    fn seed_map<E: KvEngine + ?Sized>(engine: &E, name: &str, id: u32) {
+        let mut name_value = id.to_be_bytes().to_vec();
+        name_value.push(FLAG_PRIMARY);
+        raw_put(
+            engine,
+            &[
+                (map_by_name_key(name), name_value),
+                (map_by_id_key(id), name.as_bytes().to_vec()),
+            ],
+        );
+    }
+
+    /// AC2: with two ids left two new maps are promised and a third is
+    /// refused; a promise is idempotent, a map with an id is admitted, and
+    /// committing the promised puts releases them.
+    #[test]
+    fn admission_promises_at_most_the_ids_left() {
+        let (engine, store) = mem_at(u32::MAX - 2);
+        seed_map(&*engine, "old", 7);
+        assert_eq!(store.admit_map("a").expect("a"), MapAdmission::Promised);
+        assert_eq!(store.admit_map("b").expect("b"), MapAdmission::Promised);
+        let refused = store.admit_map("c");
+        assert!(exhausted(&refused), "{refused:?}");
+        assert_eq!(
+            refused.expect_err("c").to_string(),
+            "map id space exhausted: no new map can be created in this store"
+        );
+        assert_eq!(
+            store.admit_map("a").expect("a again"),
+            MapAdmission::Promised
+        );
+        assert_eq!(store.admit_map("old").expect("old"), MapAdmission::HasId);
+        block_on(store.remove("c", "k", 0)).expect("a remove takes no id");
+        let value = lww("v", 1);
+        commit(
+            &store,
+            vec![put_at("a", "k", &value, 0), put_at("b", "k", &value, 0)],
+            vec![],
+        )
+        .expect("promised puts");
+        assert_eq!(store.reservation(), (u32::MAX, Vec::new()));
+        assert!(store.registry_cache_holds("a") && store.registry_cache_holds("b"));
+        assert_eq!(id_of(&*engine, "a"), Some(u32::MAX - 2));
+        assert_eq!(id_of(&*engine, "b"), Some(u32::MAX - 1));
+    }
+
+    /// AC4: concurrent admissions of distinct new maps promise exactly the
+    /// ids that are left.
+    #[test]
+    fn concurrent_admissions_never_promise_more_ids_than_are_left() {
+        let (_engine, store) = mem_at(u32::MAX - 3);
+        let start = Barrier::new(64);
+        let admitted = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..64)
+                .map(|i| {
+                    let (store, start) = (&store, &start);
+                    scope.spawn(move || {
+                        start.wait();
+                        store.admit_map(&format!("m{i}")).is_ok()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("join"))
+                .filter(|ok| *ok)
+                .count()
+        });
+        assert_eq!(admitted, 3);
+        assert_eq!(store.reservation().1.len(), 3);
+    }
+
+    /// AC5: a tenant drop releases its promised names; a failed commit
+    /// releases nothing; the settled fast path releases its names; a
+    /// delete-only commit keeps the promise of the put still buffered.
+    #[test]
+    fn a_tenant_drop_a_failed_commit_and_the_fast_path_leave_the_promises_exact() {
+        let value = lww("v", 1);
+
+        // Tenant drop.
+        let (_engine, store) = mem_at(100);
+        for map in ["t1.a", "t1.b", "t2.c"] {
+            assert_eq!(store.admit_map(map).expect(map), MapAdmission::Promised);
+        }
+        match block_on(store.drop_tenant("t1")).expect("drop") {
+            DropOutcome::Done { failed, .. } => assert!(failed.is_empty(), "{failed:?}"),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(store.reservation().1, vec!["t2.c".to_string()]);
+
+        // A failed commit releases nothing; the retried one does.
+        let inner = Arc::new(MemKvEngine::new());
+        let engine = Arc::new(FailingWrites::new(Arc::clone(&inner)));
+        let store = store_at(&engine, 100);
+        assert_eq!(store.admit_map("m").expect("m"), MapAdmission::Promised);
+        engine.arm(1);
+        assert!(commit(&store, vec![put_at("m", "k", &value, 0)], vec![]).is_err());
+        assert_eq!(store.reservation().1, vec!["m".to_string()]);
+        commit(&store, vec![put_at("m", "k", &value, 0)], vec![]).expect("retry");
+        assert!(store.reservation().1.is_empty());
+
+        // The settled fast path: an existing map not cached is promised
+        // conservatively below the boundary, and its first commit plans no
+        // registry row.
+        let (engine, store) = mem_at(100);
+        seed_map(&*engine, "old", 7);
+        assert_eq!(store.admit_map("old").expect("old"), MapAdmission::Promised);
+        commit(&store, vec![put_at("old", "k", &value, 0)], vec![]).expect("fast path");
+        assert!(
+            store.reservation().1.is_empty(),
+            "{:?}",
+            store.reservation()
+        );
+
+        // Delete-only: the put of `m` is still buffered when a pass commits
+        // only its delete.
+        let (_engine, store) = mem_at(u32::MAX - 1);
+        assert_eq!(store.admit_map("m").expect("m"), MapAdmission::Promised);
+        commit(&store, vec![remove_at("m", "k1", 0)], vec![]).expect("delete only");
+        assert_eq!(store.reservation().1, vec!["m".to_string()]);
+        let refused = store.admit_map("n");
+        assert!(exhausted(&refused), "{refused:?}");
+        commit(&store, vec![put_at("m", "k2", &value, 0)], vec![]).expect("put");
+        assert!(store.reservation().1.is_empty());
+        assert!(block_on(store.load("m", "k2")).expect("load").is_some());
+    }
+
+    /// AC22: a direct inner-store write cannot take an id promised to a
+    /// buffered put, sequentially or while its batch is in flight.
+    #[test]
+    fn a_direct_write_cannot_take_an_id_promised_to_a_buffered_put() {
+        let value = lww("v", 1);
+
+        let (engine, store) = mem_at(u32::MAX - 1);
+        assert_eq!(store.admit_map("p").expect("p"), MapAdmission::Promised);
+        let refused = block_on(store.add("q", "k", &value, 0));
+        assert!(exhausted(&refused), "{refused:?}");
+        commit(&store, vec![put_at("p", "k", &value, 0)], vec![]).expect("promised put");
+        assert_eq!(id_of(&*engine, "p"), Some(u32::MAX - 1));
+
+        // Concurrent: the direct add of `q` is parked after its plan and
+        // before its engine write.
+        let (engine, store) = mem_at(u32::MAX - 2);
+        let (reached, release) = store.arm_registry_park();
+        let promised = std::thread::scope(|scope| {
+            let parked = scope.spawn(|| block_on(store.add("q", "k", &value, 0)));
+            reached
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the direct add parks");
+            let a = store.admit_map("a");
+            let b = store.admit_map("b");
+            release.send(()).expect("release");
+            parked.join().expect("join").expect("q is stored");
+            let results = [("a", a), ("b", b)];
+            let promised: Vec<&str> = results
+                .iter()
+                .filter(|(_, r)| matches!(r, Ok(MapAdmission::Promised)))
+                .map(|(m, _)| *m)
+                .collect();
+            let refused = results.iter().filter(|(_, r)| exhausted(r)).count();
+            assert_eq!((promised.len(), refused), (1, 1), "{results:?}");
+            promised[0]
+        });
+        assert_eq!(id_of(&*engine, "q"), Some(u32::MAX - 2));
+        commit(&store, vec![put_at(promised, "k", &value, 0)], vec![]).expect("promised put");
+        assert_eq!(id_of(&*engine, promised), Some(u32::MAX - 1));
+    }
+
+    /// AC6: the store's own consistency refusals are fatal `inconsistent`;
+    /// a refused name and an exhausted id space are not.
+    #[test]
+    fn the_stores_own_consistency_refusals_are_inconsistent() {
+        let value = lww("v", 1);
+
+        // A malformed version row.
+        let (engine, store) = mem_at(1);
+        commit(&store, vec![put_at("m", "a", &value, 5)], vec![]).expect("first");
+        let map_id = id_of(&*engine, "m").expect("id");
+        raw_put(
+            &*engine,
+            &[(version_row_key("m", map_id, "a"), vec![0, 1, 2])],
+        );
+        let err = commit(&store, vec![put_at("m", "a", &value, 6)], vec![]).expect_err("row");
+        assert_eq!(store.classify_error(&err), INCONSISTENT, "{err:#}");
+
+        // A version regression.
+        let (_engine, store) = mem_at(1);
+        commit(&store, vec![put_at("m", "a", &value, 9)], vec![]).expect("first");
+        let err = commit(&store, vec![put_at("m", "a", &value, 7)], vec![]).expect_err("lower");
+        assert_eq!(store.classify_error(&err), INCONSISTENT, "{err:#}");
+        assert_eq!(
+            err.to_string(),
+            "record version regression refused: m/a holds 9, the commit carries 7"
+        );
+
+        // An applied regression, and a partition out of range.
+        let (_engine, store) = mem_at(1);
+        commit(&store, vec![], vec![(0, 5)]).expect("watermark");
+        let err = commit(&store, vec![], vec![(0, 3)]).expect_err("lower");
+        assert_eq!(store.classify_error(&err), INCONSISTENT, "{err:#}");
+        let out_of_range = u32::try_from(PARTITION_COUNT).expect("u32");
+        let err = commit(&store, vec![], vec![(out_of_range, 1)]).expect_err("range");
+        assert_eq!(store.classify_error(&err), INCONSISTENT, "{err:#}");
+
+        // A malformed registry row of the commit's map.
+        let (engine, store) = mem_at(1);
+        raw_put(&*engine, &[(map_by_name_key("bad"), vec![0, 0, 1])]);
+        let err = commit(&store, vec![put_at("bad", "k", &value, 0)], vec![]).expect_err("row");
+        assert_eq!(store.classify_error(&err), INCONSISTENT, "{err:#}");
+
+        // No registry row after the plan: the one site that reads the plan.
+        let err = planned_id(&HashMap::new(), "m", "k").expect_err("no row");
+        assert_eq!(store.classify_error(&err), INCONSISTENT, "{err:#}");
+        let named = err.downcast_ref::<StoreInconsistent>().expect("typed");
+        assert_eq!(
+            (named.map.as_deref(), named.key.as_deref()),
+            (Some("m"), Some("k"))
+        );
+
+        // A malformed next map id, met by the commit of a new map.
+        let (engine, store) = mem_at(1);
+        raw_put(&*engine, &[(meta(b"next_map_id"), vec![0, 0, 1])]);
+        let err = commit(&store, vec![put_at("new", "k", &value, 0)], vec![]).expect_err("next");
+        assert_eq!(store.classify_error(&err), INCONSISTENT, "{err:#}");
+
+        // Not inconsistent: a name the store refuses, and no id left.
+        let (_engine, store) = mem_at(1);
+        let err =
+            commit(&store, vec![put_at("x__backup", "k", &value, 0)], vec![]).expect_err("name");
+        assert_eq!(
+            store.classify_error(&err),
+            StoreErrorClass::Unknown,
+            "{err:#}"
+        );
+        let (_engine, store) = mem_at(u32::MAX);
+        let err = commit(&store, vec![put_at("new", "k", &value, 0)], vec![]).expect_err("ids");
+        assert!(
+            err.downcast_ref::<MapIdSpaceExhausted>().is_some(),
+            "{err:#}"
+        );
+        assert_eq!(
+            store.classify_error(&err),
+            StoreErrorClass::Unknown,
+            "{err:#}"
+        );
+    }
+
+    /// A RocksDB engine whose entry limits are lowered to `(key, value)`.
+    fn small_rocks(dir: &std::path::Path, max_key: u64, max_value: u64) -> Arc<RocksKvEngine> {
+        let mut engine = RocksKvEngine::open(
+            &dir.join("db"),
+            OpenMode::CreateNew,
+            &RocksConfig::production(64 * 1024 * 1024, -1),
+        )
+        .expect("open");
+        engine.set_entry_limits(max_key, max_value);
+        Arc::new(engine)
+    }
+
+    /// AC24 (commit arm): an engine refusal of an entry above its size limit
+    /// is `inconsistent` at the commit, names the largest put, and writes
+    /// none of the batch.
+    #[test]
+    fn an_oversized_put_at_commit_is_inconsistent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = small_rocks(dir.path(), 64, 1024);
+        let store = open(&engine);
+        let small = lww("v", 1);
+        let big = lww(&"x".repeat(2048), 1);
+        let err = commit(
+            &store,
+            vec![
+                put_at("m", "s1", &small, 0),
+                put_at("m", "big", &big, 0),
+                put_at("m", "s2", &small, 0),
+            ],
+            vec![],
+        )
+        .expect_err("value above the limit");
+        assert_eq!(store.classify_error(&err), INCONSISTENT, "{err:#}");
+        let named = err.downcast_ref::<StoreInconsistent>().expect("typed");
+        assert_eq!(
+            (named.map.as_deref(), named.key.as_deref()),
+            (Some("m"), Some("big"))
+        );
+        assert!(
+            err.chain().any(|e| matches!(
+                e.downcast_ref::<KvError>(),
+                Some(KvError::InvalidArgument(_))
+            )),
+            "{err:#}"
+        );
+        for key in ["s1", "big", "s2"] {
+            assert!(
+                block_on(store.load("m", key)).expect("load").is_none(),
+                "{key}"
+            );
+        }
+
+        // A key above the limit, in a put and in a delete.
+        commit(&store, vec![put_at("m", "s1", &small, 0)], vec![]).expect("small");
+        let long = "k".repeat(100);
+        let err = commit(&store, vec![put_at("m", &long, &small, 0)], vec![]).expect_err("put");
+        assert_eq!(store.classify_error(&err), INCONSISTENT, "{err:#}");
+        let err = commit(
+            &store,
+            vec![put_at("m", "s2", &small, 0), remove_at("m", &long, 0)],
+            vec![],
+        )
+        .expect_err("delete");
+        assert_eq!(store.classify_error(&err), INCONSISTENT, "{err:#}");
+        assert!(block_on(store.load("m", "s2")).expect("load").is_none());
+    }
+}

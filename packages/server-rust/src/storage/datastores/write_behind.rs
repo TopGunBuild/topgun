@@ -18,9 +18,10 @@ use tracing::{error, info, warn};
 
 use crate::storage::engine::SlotCell;
 use crate::storage::map_data_store::{
-    check_tenant, merkle_leaf_hash, CommitDurability, DropOutcome, FlushCommit, LeafSink, Loaded,
-    MapDataStore, MerkleLeaf, PutValue, RecordRefused, ScanBatch, ScanCursor, ScanOrder,
-    StoreBrokenCause, StoreErrorClass, StoreWrite, WriteSource,
+    check_map_name, check_tenant, merkle_leaf_hash, CommitDurability, DropOutcome, FlushCommit,
+    LeafSink, Loaded, MapDataStore, MapNameRefused, MerkleLeaf, PutValue, RecordRefused,
+    RecordTooLarge, ScanBatch, ScanCursor, ScanOrder, StoreBrokenCause, StoreErrorClass,
+    StoreInconsistent, StoreWrite, WriteSource, MAX_RECORD_CHARGE_BYTES,
 };
 // The one routing function of WAL partitions; the version row key uses it too.
 use crate::storage::map_data_store::wal_partition as partition_for;
@@ -239,6 +240,10 @@ pub struct WriteBehindConfig {
     /// a witness at all, and every write frames the full snapshot exactly as it
     /// did before the seam existed.
     pub or_delta_wal: bool,
+    /// The per-record cap a test lowers in place of
+    /// [`MAX_RECORD_CHARGE_BYTES`].
+    #[cfg(test)]
+    pub max_record_charge: u64,
 }
 
 /// Absolute lower clamp on [`WriteBehindConfig::reconfirm_delay_ms`].
@@ -293,6 +298,8 @@ impl Default for WriteBehindConfig {
             wal_fsync_policy: WalFsyncPolicy::Batched,
             wal_watermark_stall_bound_ms: 60_000,
             or_delta_wal: true,
+            #[cfg(test)]
+            max_record_charge: MAX_RECORD_CHARGE_BYTES,
         }
     }
 }
@@ -1811,7 +1818,7 @@ fn register_background_task_panic_metrics() {
 /// Counts stores whose inner store reported itself broken, by `cause` label.
 const STORE_BROKEN_COUNTER: &str = "topgun_write_behind_store_broken_total";
 
-/// Registers the broken-store counter with all four of its series at zero,
+/// Registers the broken-store counter with all five of its series at zero,
 /// for the reason the panic counter is registered at zero.
 fn register_store_broken_metrics() {
     metrics::describe_counter!(
@@ -1824,6 +1831,7 @@ fn register_store_broken_metrics() {
         StoreBrokenCause::PreviousIo,
         StoreBrokenCause::Corrupted,
         StoreBrokenCause::LockPoisoned,
+        StoreBrokenCause::Inconsistent,
     ] {
         metrics::counter!(STORE_BROKEN_COUNTER, "cause" => cause.as_str()).increment(0);
     }
@@ -1907,7 +1915,8 @@ fn register_retry_metrics() {
          bound=\"keys\" for keys that were not buffered at TOPGUN_WRITEBEHIND_CAPACITY, \
          bound=\"bytes\" for writes that would grow the buffered values at \
          TOPGUN_WRITEBEHIND_CAPACITY_MB (plain writes that grow their key, every in-place OR \
-         write); each is a temporary error, so the client keeps the write and sends it again"
+         write), bound=\"record\" for one plain record or key above the per-record limit; each \
+         is a temporary error, so the client keeps the write and sends it again"
     );
     metrics::describe_gauge!(
         BUFFERED_BYTES_GAUGE,
@@ -1927,6 +1936,7 @@ fn register_retry_metrics() {
     metrics::counter!(FLUSH_REFUSALS_COUNTER).increment(0);
     metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "keys").increment(0);
     metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "bytes").increment(0);
+    metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "record").increment(0);
     metrics::counter!(FLUSH_PASSES_COUNTER).increment(0);
     metrics::counter!(FLUSH_PASS_ENTRIES_COUNTER).increment(0);
     metrics::gauge!(RETRYING_ENTRIES_GAUGE).set(0.0);
@@ -1939,6 +1949,18 @@ fn register_retry_metrics() {
 
 /// The byte bound's refusal, counted once under `bound="bytes"`. Its text
 /// differs from the key refusal's so a reader and a test can tell them apart.
+/// Refuses a map name the store would refuse (`TG-WB-012`), so no write of it
+/// is acknowledged; the length bound is an ingress rule only, and long names
+/// the store already holds stay writable.
+fn refuse_store_refused_name(map: &str) -> anyhow::Result<()> {
+    match check_map_name(map) {
+        Err(violation) if violation.refused_by_store() => {
+            Err(MapNameRefused::new(map, violation).into())
+        }
+        _ => Ok(()),
+    }
+}
+
 fn refuse_bytes() -> anyhow::Error {
     metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "bytes").increment(1);
     anyhow::anyhow!("Write-behind byte capacity exceeded")
@@ -2694,7 +2716,18 @@ impl WriteBehindDataStore {
         if self.store_broken_seen.swap(true, Ordering::AcqRel) {
             return;
         }
-        let message = err.to_string();
+        // The whole chain: the outer context alone hides what broke.
+        let message = format!("{err:#}");
+        // The record the store named as inconsistent, not the first entry of
+        // the commit that met it.
+        let named = err
+            .downcast_ref::<StoreInconsistent>()
+            .or_else(|| {
+                err.chain()
+                    .find_map(|e| e.downcast_ref::<StoreInconsistent>())
+            })
+            .and_then(|e| e.map.as_deref().zip(e.key.as_deref()));
+        let (map, key) = named.unwrap_or((map, key));
         self.background_failure.send_if_modified(|recorded| {
             if recorded.is_some() {
                 return false;
@@ -5451,6 +5484,10 @@ impl WriteBehindDataStore {
     /// hold are on `WriteBehindConfig::capacity` and
     /// `WriteBehindConfig::capacity_bytes`.
     fn admit_write<K: AsRef<str>>(&self, map: &str, keys: &[K], charge: u64) -> anyhow::Result<()> {
+        refuse_store_refused_name(map)?;
+        for key in keys.iter().map(AsRef::as_ref) {
+            self.refuse_oversized(map, key, charge)?;
+        }
         let capacity = self.config.capacity;
         let current = self.pending_count.load(Ordering::Relaxed);
         let at_most_new = u64::try_from(keys.len()).unwrap_or(u64::MAX);
@@ -5499,6 +5536,31 @@ impl WriteBehindDataStore {
             return Err(refuse_bytes());
         }
         Ok(())
+    }
+
+    /// The per-record cap (`TG-WB-012`): a write whose charge is above it, or
+    /// whose key is longer than it, is refused, counted under
+    /// `bound="record"`. Charged 0, a remove is refused only for its key.
+    fn refuse_oversized(&self, map: &str, key: &str, charge: u64) -> anyhow::Result<()> {
+        let max = self.max_record_charge();
+        let key_len = u64::try_from(key.len()).unwrap_or(u64::MAX);
+        let size = if key_len > max { key_len } else { charge };
+        if size > max {
+            metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "record").increment(1);
+            return Err(RecordTooLarge::new(map, key, size, max).into());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn max_record_charge(&self) -> u64 {
+        self.config.max_record_charge
+    }
+
+    #[cfg(not(test))]
+    #[allow(clippy::unused_self)]
+    fn max_record_charge(&self) -> u64 {
+        MAX_RECORD_CHARGE_BYTES
     }
 
     /// Refuses a write once graceful drain is in progress, so any
@@ -5827,7 +5889,9 @@ impl MapDataStore for WriteBehindDataStore {
         // under the in-flight guard and is the check `TG-TEN-002` rests on.
         self.tenant_closes.refuse_closed(map)?;
         let charge = charge_of(&WriteSource::Value(value), key);
-        self.admit_write(map, &[key], charge)
+        self.admit_write(map, &[key], charge)?;
+        // Last, so a refusal at any bound leaves no promise behind.
+        self.inner.admit_map(map).map(drop)
     }
 
     /// Whether the mutation point should build an OR witness for this store.
@@ -5861,10 +5925,11 @@ impl MapDataStore for WriteBehindDataStore {
         self.tenant_closes.refuse_closed(map)?;
         self.admit_write(map, &[key], 0)?;
         let budget = self.config.capacity_bytes;
-        if budget == 0 || self.buffered_bytes.load(Ordering::Relaxed) < budget {
-            return Ok(());
+        if budget != 0 && self.buffered_bytes.load(Ordering::Relaxed) >= budget {
+            return Err(refuse_bytes());
         }
-        Err(refuse_bytes())
+        // Last, so a refusal at any bound leaves no promise behind.
+        self.inner.admit_map(map).map(drop)
     }
 
     /// # Precondition: one writer per key at a time
@@ -5909,6 +5974,16 @@ impl MapDataStore for WriteBehindDataStore {
         // this computes the same charge `admit_value` computed from the same
         // arguments, a second walk of the value.
         let charge = charge_of(&src, key);
+        // Decided again before the WAL sequence, for a caller that skipped
+        // admission. Only what cannot refuse a change already made in place:
+        // the name rule is deterministic, and the size and the id of a value
+        // are known before any mutation; an in-place write's were decided by
+        // `admit_in_place` (`TG-WB-012`).
+        refuse_store_refused_name(map)?;
+        if matches!(src, WriteSource::Value(_)) {
+            self.refuse_oversized(map, key, charge)?;
+            self.inner.admit_map(map)?;
+        }
 
         let partition_id = partition_for(map, key);
         // Seed before the first sequence of this partition is handed out, so the
@@ -19584,6 +19659,494 @@ mod store_broken_tests {
             );
             assert_eq!(inner.calls(), calls, "the read makes no inner call");
         });
+    }
+
+    /// What the write-behind admits before the acknowledgement
+    /// (`TG-WB-012`), and how it stops at the store's own inconsistency
+    /// (`TG-WB-010`), over the bare engine store.
+    mod admission {
+        use super::*;
+
+        use crate::storage::datastores::engine_store::{
+            map_by_id_key, map_by_name_key, map_id_in, meta_key, version_row_key,
+            EngineMapDataStore, FLAG_PRIMARY, META_NEXT_MAP_ID,
+        };
+        use crate::storage::datastores::kv_engine::{
+            KvEngine, MemKvEngine, WriteBatch, WriteOptions,
+        };
+        use crate::storage::map_data_store::{
+            MapIdSpaceExhausted, MapNameRefused, RecordTooLarge, MAX_RECORD_CHARGE_BYTES,
+        };
+        use crate::storage::record::OrMapEntry;
+        use proptest::prelude::*;
+        use topgun_core::types::Value;
+
+        const SYNC: WriteOptions = WriteOptions { sync: true };
+
+        fn raw_put(engine: &MemKvEngine, rows: Vec<(Vec<u8>, Vec<u8>)>) {
+            let mut batch = WriteBatch::new();
+            for (key, value) in rows {
+                batch.put(key, value);
+            }
+            engine.write(batch, SYNC).expect("raw write");
+        }
+
+        /// A formatted store whose next map id is `next`, opened again so the
+        /// open reads it, with `old` seeded as raw registry rows when asked.
+        fn engine_at(
+            next: u32,
+            seed_old: bool,
+        ) -> (Arc<MemKvEngine>, Arc<EngineMapDataStore<MemKvEngine>>) {
+            let engine = Arc::new(MemKvEngine::new());
+            drop(EngineMapDataStore::open(Arc::clone(&engine)).expect("format"));
+            let mut rows = vec![(meta_key(META_NEXT_MAP_ID), next.to_be_bytes().to_vec())];
+            if seed_old {
+                let mut name_value = 7u32.to_be_bytes().to_vec();
+                name_value.push(FLAG_PRIMARY);
+                rows.push((map_by_name_key("old"), name_value));
+                rows.push((map_by_id_key(7), b"old".to_vec()));
+            }
+            raw_put(&engine, rows);
+            let store = Arc::new(EngineMapDataStore::open(Arc::clone(&engine)).expect("open"));
+            (engine, store)
+        }
+
+        fn over_engine(
+            inner: &Arc<EngineMapDataStore<MemKvEngine>>,
+            wal: &Arc<FrameWal>,
+            config: WriteBehindConfig,
+        ) -> Arc<WriteBehindDataStore> {
+            WriteBehindDataStore::new_with_wal(
+                Arc::clone(inner) as Arc<dyn MapDataStore>,
+                config,
+                Some(WalBootstrap {
+                    wal: Arc::clone(wal) as Arc<dyn Wal>,
+                    sequence_start: 1,
+                }),
+            )
+        }
+
+        fn refusals(rendered: &str, bound: &str) -> Option<f64> {
+            let series = format!("{CAPACITY_REFUSALS_COUNTER}{{bound=\"{bound}\"}} ");
+            rendered
+                .lines()
+                .find_map(|line| line.strip_prefix(series.as_str()))
+                .and_then(|value| value.parse().ok())
+        }
+
+        fn is<E: std::error::Error + Send + Sync + 'static>(result: &anyhow::Result<()>) -> bool {
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|e| e.downcast_ref::<E>().is_some())
+        }
+
+        /// AC1: a map name the store refuses is refused at every entry, before
+        /// the WAL append, for any origin; a long name is the ingress's rule
+        /// only.
+        #[test]
+        fn a_store_refused_map_name_is_refused_before_the_wal_append() {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            run_observed(&recorder, async {
+                let (_engine, inner) = engine_at(1, false);
+                let wal = Arc::new(FrameWal::default());
+                let store = over_engine(&inner, &wal, manual_flush_config());
+                let v = value("v");
+                for map in ["", "x__backup", "a\0b"] {
+                    let outcomes = [
+                        ("add", store.add(map, "k", &v, now_millis()).await),
+                        ("remove", store.remove(map, "k", now_millis()).await),
+                        (
+                            "remove_all",
+                            store.remove_all(map, &["k".to_string()]).await,
+                        ),
+                        ("admit_in_place", store.admit_in_place(map, "k")),
+                        (
+                            "add_with_witness",
+                            store
+                                .add_with_witness(
+                                    map,
+                                    "k",
+                                    WriteSource::Value(&v),
+                                    now_millis(),
+                                    None,
+                                )
+                                .await,
+                        ),
+                    ];
+                    for (entry, outcome) in &outcomes {
+                        assert!(
+                            is::<MapNameRefused>(outcome),
+                            "{entry} of {map:?}: {outcome:?}"
+                        );
+                    }
+                }
+                assert_eq!(
+                    (wal.appends(), store.pending_operation_count()),
+                    (0, 0),
+                    "a refused name reached the WAL or the buffer"
+                );
+                let rendered = handle.render();
+                for bound in ["keys", "bytes", "record"] {
+                    assert_eq!(
+                        refusals(&rendered, bound),
+                        Some(0.0),
+                        "{bound}:\n{rendered}"
+                    );
+                }
+                let long = "a".repeat(600);
+                store
+                    .add(&long, "k", &v, now_millis())
+                    .await
+                    .expect("a long name is the ingress's rule only");
+                assert_eq!(wal.appends(), 1);
+            });
+        }
+
+        /// AC3: a put to a new map once no id can be promised is refused at
+        /// `add`, before the WAL append; the promised map is stored.
+        #[test]
+        fn a_put_to_a_map_that_cannot_get_an_id_is_refused_before_the_ack() {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            run_observed(&recorder, async {
+                let (_engine, inner) = engine_at(u32::MAX - 1, false);
+                let wal = Arc::new(FrameWal::default());
+                let store = over_engine(&inner, &wal, manual_flush_config());
+                store
+                    .add("first", "k", &value("v"), now_millis())
+                    .await
+                    .expect("the last id is promised");
+                let refused = store.add("second", "k", &value("v"), now_millis()).await;
+                assert!(is::<MapIdSpaceExhausted>(&refused), "{refused:?}");
+                assert_eq!(wal.appends(), 1, "the refused put reached the WAL");
+                one_pass(&store).await;
+                assert_eq!(
+                    inner.load("first", "k").await.expect("load"),
+                    Some(value("v")),
+                    "the promised put is stored"
+                );
+                assert_eq!(store.pending_operation_count(), 0);
+            });
+        }
+
+        /// AC29: once the id space is exhausted, an existing map whose registry
+        /// row is not cached is admitted by one point read and stored; a new
+        /// map is refused before the WAL append.
+        #[test]
+        fn an_existing_uncached_map_stays_writable_once_the_id_space_is_exhausted() {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            run_observed(&recorder, async {
+                let (_engine, inner) = engine_at(u32::MAX, true);
+                assert!(!inner.registry_cache_holds("old"), "the cache is cold");
+                let wal = Arc::new(FrameWal::default());
+                let store = over_engine(&inner, &wal, manual_flush_config());
+                store
+                    .add("old", "k", &value("v"), now_millis())
+                    .await
+                    .expect("an existing map stays writable");
+                assert!(
+                    inner.registry_cache_holds("old"),
+                    "the point read cached its row"
+                );
+                let refused = store.add("new", "k", &value("v"), now_millis()).await;
+                assert!(is::<MapIdSpaceExhausted>(&refused), "{refused:?}");
+                assert_eq!(wal.appends(), 1, "the refused put reached the WAL");
+                one_pass(&store).await;
+                assert_eq!(
+                    inner.load("old", "k").await.expect("load"),
+                    Some(value("v")),
+                    "the put to the existing map is stored"
+                );
+            });
+        }
+
+        /// AC25: a plain record above the per-record cap, and a key longer than
+        /// it, are refused before the WAL append and counted only under
+        /// `bound="record"`, a series present before any refusal; a record at
+        /// exactly the cap is admitted.
+        #[test]
+        fn a_record_above_the_size_cap_is_refused_before_the_wal_append() {
+            let at_cap = value(&"x".repeat(1000));
+            let cap = charge_of(&WriteSource::Value(&at_cap), "k");
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            run_observed(&recorder, async {
+                let (_engine, inner) = engine_at(1, false);
+                let wal = Arc::new(FrameWal::default());
+                let store = over_engine(
+                    &inner,
+                    &wal,
+                    WriteBehindConfig {
+                        max_record_charge: cap,
+                        ..manual_flush_config()
+                    },
+                );
+                assert_eq!(
+                    refusals(&handle.render(), "record"),
+                    Some(0.0),
+                    "the record series is not present before a refusal"
+                );
+                let assigned = store.assigned_write_sequence();
+                let over = value(&"x".repeat(1001));
+                let refused = store.add(MAP, "k", &over, now_millis()).await;
+                assert!(is::<RecordTooLarge>(&refused), "{refused:?}");
+                assert_eq!(refusals(&handle.render(), "record"), Some(1.0));
+                let long_key = "k".repeat(usize::try_from(cap).expect("small") + 1);
+                let refused = store.remove(MAP, &long_key, now_millis()).await;
+                assert!(is::<RecordTooLarge>(&refused), "{refused:?}");
+                assert_eq!(
+                    (wal.appends(), store.assigned_write_sequence()),
+                    (0, assigned),
+                    "a refused record reached the WAL or took a sequence"
+                );
+                store
+                    .add(MAP, "k", &at_cap, now_millis())
+                    .await
+                    .expect("a record at exactly the cap is admitted");
+                assert_eq!(wal.appends(), 1);
+                let rendered = handle.render();
+                assert_eq!(
+                    (
+                        refusals(&rendered, "record"),
+                        refusals(&rendered, "keys"),
+                        refusals(&rendered, "bytes")
+                    ),
+                    (Some(2.0), Some(0.0), Some(0.0)),
+                    "{rendered}"
+                );
+            });
+            assert!(cap < MAX_RECORD_CHARGE_BYTES);
+        }
+
+        fn leaf() -> impl Strategy<Value = Value> {
+            prop_oneof![
+                Just(Value::Null),
+                any::<bool>().prop_map(Value::Bool),
+                any::<i64>().prop_map(Value::Int),
+                any::<f64>().prop_map(Value::Float),
+                ".{0,24}".prop_map(Value::String),
+                proptest::collection::vec(any::<u8>(), 0..32).prop_map(Value::Bytes),
+            ]
+        }
+
+        fn nested() -> impl Strategy<Value = Value> {
+            leaf().prop_recursive(3, 32, 6, |inner| {
+                prop_oneof![
+                    proptest::collection::vec(inner.clone(), 0..6).prop_map(Value::Array),
+                    proptest::collection::btree_map(".{0,8}", inner, 0..6).prop_map(Value::Map),
+                ]
+            })
+        }
+
+        fn or_entry() -> impl Strategy<Value = OrMapEntry> {
+            (
+                nested(),
+                ".{0,24}",
+                any::<u64>(),
+                any::<u32>(),
+                "[a-z0-9]{0,40}",
+                proptest::option::of(any::<u64>()),
+            )
+                .prop_map(|(value, tag, millis, counter, node_id, ttl_ms)| {
+                    OrMapEntry {
+                        value,
+                        tag,
+                        timestamp: topgun_core::hlc::Timestamp {
+                            millis,
+                            counter,
+                            node_id,
+                        },
+                        ttl_ms,
+                    }
+                })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(2_000))]
+            /// AC27: an OR slot encodes below three times its charge, so a
+            /// record admitted at the cap encodes below 192 MiB.
+            #[test]
+            fn an_or_slot_encodes_below_three_times_its_charge(
+                records in proptest::collection::vec(or_entry(), 0..8),
+                tombstones in proptest::collection::vec(".{0,24}", 0..8),
+            ) {
+                let slot = RecordValue::OrMap { records, tombstones };
+                let encoded = rmp_serde::to_vec_named(&slot).expect("encode").len() as u64;
+                let charge = crate::storage::record::structural_size(&slot);
+                prop_assert!(encoded < 3 * charge, "encoded {encoded}, charge {charge}: {slot:?}");
+            }
+        }
+
+        /// A key of `map` in the same WAL partition as `key`, other than it.
+        fn partition_mate(map: &str, key: &str) -> String {
+            (0..)
+                .map(|i| format!("mate-{i}"))
+                .find(|mate| partition_for(map, mate) == partition_for(map, key))
+                .expect("a key in the partition")
+        }
+
+        /// What the inconsistency tests observe: the store-broken lines and
+        /// the rendered metrics before the failure and at the end.
+        struct Inconsistency {
+            broken_lines: Vec<CapturedEvent>,
+            rendered_before: String,
+            rendered_after: String,
+            next_add_refused: bool,
+            hard_flush_failed: bool,
+            unapplied_of_k1_k2: (bool, bool),
+            failed_inconsistent: bool,
+        }
+
+        /// A flush commit whose first entry is `k1` meets the malformed version
+        /// row of `k2`. A lower sequence of `k2`'s WAL partition is held back by
+        /// a write parked before its queue insert, so the commit writes `k2`'s
+        /// version row and reads the one it holds.
+        fn meet_a_malformed_version_row() -> Inconsistency {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let (observed, events) = run_observed(&recorder, async {
+                let (engine, inner) = engine_at(1, false);
+                let wal = Arc::new(FrameWal::default());
+                let store = over_engine(&inner, &wal, manual_flush_config());
+                let rendered_before = handle.render();
+                store.add(MAP, "seed", &value("s"), 0).await.expect("seed");
+                one_pass(&store).await;
+                let map_id = map_id_in(&*engine.snapshot().expect("snapshot"), MAP)
+                    .expect("read")
+                    .expect("the map has an id");
+                raw_put(
+                    &engine,
+                    vec![(version_row_key(MAP, map_id, "k2"), vec![0, 1, 2])],
+                );
+
+                let mate = partition_mate(MAP, "k2");
+                let mut park = store.test_park_before_queue_insert(MAP, &mate);
+                let parked = {
+                    let store = Arc::clone(&store);
+                    tokio::spawn(async move { store.add(MAP, &mate, &value("m"), 0).await })
+                };
+                park.wait_parked().await;
+                store.add(MAP, "k1", &value("1"), 1).await.expect("k1");
+                store.add(MAP, "k2", &value("2"), 2).await.expect("k2");
+                let frame_of = |key: &str| {
+                    wal.frames
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .iter()
+                        .find(|(_, entry)| entry.key == key)
+                        .map(|(_, entry)| entry.sequence)
+                        .expect("a frame of the key")
+                };
+                let (k1_seq, k2_seq) = (frame_of("k1"), frame_of("k2"));
+                one_pass(&store).await;
+                let failed_inconsistent =
+                    store
+                        .background_failure()
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|failure| {
+                            matches!(
+                                failure.cause,
+                                FailureCause::StoreBroken(StoreBrokenCause::Inconsistent)
+                            )
+                        });
+                let unapplied: Vec<u64> = wal
+                    .unapplied(partition_for(MAP, "k1"))
+                    .await
+                    .expect("unapplied")
+                    .into_iter()
+                    .chain(
+                        wal.unapplied(partition_for(MAP, "k2"))
+                            .await
+                            .expect("unapplied"),
+                    )
+                    .map(|entry| entry.sequence)
+                    .collect();
+                let next_add_refused = store.add(MAP, "k3", &value("3"), 3).await.is_err();
+                park.release();
+                let _ = parked.await;
+                let hard_flush_failed = bounded_hard_flush(&store).await.is_err();
+                (
+                    rendered_before,
+                    failed_inconsistent,
+                    next_add_refused,
+                    hard_flush_failed,
+                    (unapplied.contains(&k1_seq), unapplied.contains(&k2_seq)),
+                )
+            });
+            let (
+                rendered_before,
+                failed_inconsistent,
+                next_add_refused,
+                hard_flush_failed,
+                unapplied,
+            ) = observed;
+            Inconsistency {
+                broken_lines: events_saying(&events, BROKEN_LINE)
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+                rendered_before,
+                rendered_after: handle.render(),
+                next_add_refused,
+                hard_flush_failed,
+                unapplied_of_k1_k2: unapplied,
+                failed_inconsistent,
+            }
+        }
+
+        /// AC7: the store's inconsistency stops the write-behind as a broken
+        /// store does, under a cause whose series is present before it.
+        #[test]
+        fn a_store_inconsistency_stops_the_node_like_a_broken_store() {
+            let seen = meet_a_malformed_version_row();
+            assert!(
+                renders(&seen.rendered_before, &broken_series("inconsistent", 0)),
+                "the inconsistent series is not present before a failure:\n{}",
+                seen.rendered_before
+            );
+            assert!(
+                seen.failed_inconsistent,
+                "the failure is not a store-broken inconsistent"
+            );
+            assert!(
+                renders(&seen.rendered_after, &broken_series("inconsistent", 1)),
+                "{}",
+                seen.rendered_after
+            );
+            assert_eq!(seen.broken_lines.len(), 1);
+            assert_eq!(seen.broken_lines[0].field("cause"), Some("inconsistent"));
+            assert!(
+                seen.next_add_refused,
+                "a write was admitted after the failure"
+            );
+            assert!(seen.hard_flush_failed, "the shutdown reported no failure");
+            assert_eq!(
+                seen.unapplied_of_k1_k2,
+                (true, true),
+                "a frame of the failing commit left the WAL"
+            );
+        }
+
+        /// AC28: the fatal line names the record the store found inconsistent,
+        /// not the first entry of the commit, and carries the whole chain.
+        #[test]
+        fn the_store_broken_line_names_the_failing_record_and_the_whole_chain() {
+            let seen = meet_a_malformed_version_row();
+            assert_eq!(seen.broken_lines.len(), 1);
+            let line = &seen.broken_lines[0];
+            assert_eq!(
+                (line.field("map"), line.field("key")),
+                (Some(MAP), Some("k2")),
+                "{line:?}"
+            );
+            let error = line.field("error").unwrap_or_default();
+            assert!(
+                error.contains("does not decode") && error.contains("3 bytes, not 9"),
+                "the line lacks the chain: {error}"
+            );
+        }
     }
 }
 
