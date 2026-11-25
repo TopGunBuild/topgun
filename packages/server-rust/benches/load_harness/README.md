@@ -10,6 +10,7 @@ In-process load testing harness for TopGun's Rust server. It boots a full server
 | `--duration` | u64 | 30 | Test duration in seconds |
 | `--interval` | u64 | 50 | Milliseconds between batch sends per connection |
 | `--fire-and-forget` | bool (flag) | false | Send without waiting for OP_ACK |
+| `--chunked` | bool (flag) | false | Open every connection with `tg_chunks=1`, as `TopGunClient` does, so large answers are sent as `CHUNK`s and small messages pass them |
 | `--scenario` | string | `throughput` | Scenario to run (`throughput`, `open_loop` or `vector_search`) |
 | `--json-output` | path | none | Write machine-readable JSON report to this path |
 | `--vector-mode` | string | `build` | Vector sub-mode: `build`, `query`, `optimize`, or `hybrid` |

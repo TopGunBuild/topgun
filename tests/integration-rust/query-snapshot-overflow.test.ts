@@ -214,7 +214,11 @@ describe('Integration: a live subscribe folds the writes of its scan and overflo
       inbound.push(entry);
     });
     const serverEvents = () => inbound.reduce((sum, f) => sum + f.events, 0);
-    const outboundSubs: string[] = [];
+    // Every QUERY_SUB send carries a new wire id; each is recorded with the
+    // handle it was sent for, read when the send happens.
+    const outboundSubs: Array<{ id: string; handle: unknown }> = [];
+    const idsOf = (handle: unknown) =>
+      new Set(outboundSubs.filter((sub) => sub.handle === handle).map((sub) => sub.id));
     const wsm = engineOf(s).webSocketManager;
     const originalSend = wsm.sendMessage.bind(wsm);
     wsm.sendMessage = (
@@ -222,7 +226,8 @@ describe('Integration: a live subscribe folds the writes of its scan and overflo
       key?: string,
     ) => {
       if (message?.type === 'QUERY_SUB' && message.payload?.queryId) {
-        outboundSubs.push(message.payload.queryId);
+        const id = message.payload.queryId;
+        outboundSubs.push({ id, handle: engineOf(s).queryManager.handleOf(id) });
       }
       return originalSend(message, key);
     };
@@ -269,7 +274,11 @@ describe('Integration: a live subscribe folds the writes of its scan and overflo
       });
       await until(
         `the hold WARN of ${label} (${handle.id})`,
-        () => lines().some((l) => l.includes(HOLD_TEXT) && logField(l, 'query_id') === handle.id),
+        () =>
+          lines().some((l) => {
+            const id = logField(l, 'query_id');
+            return l.includes(HOLD_TEXT) && id !== undefined && idsOf(handle).has(id);
+          }),
         STEP_WAIT_MS,
       );
       return { handle, createdAt, emitted, removes, unsubscribe, rows: () => last };
@@ -280,9 +289,10 @@ describe('Integration: a live subscribe folds the writes of its scan and overflo
       notes.push(`${label}: hold file existed ${heldMs} ms`);
       return heldMs;
     };
-    const framesOf = (queryId: string) => inbound.filter((f) => f.queryId === queryId);
-    const firstFrameOf = (queryId: string) =>
-      framesOf(queryId).find((f) => f.type.startsWith('QUERY_'));
+    const framesOf = (ids: Set<string>) =>
+      inbound.filter((f) => f.queryId !== undefined && ids.has(f.queryId));
+    const firstFrameOf = (ids: Set<string>) =>
+      framesOf(ids).find((f) => f.type.startsWith('QUERY_'));
 
     // ---- Case B: the writes of the hold are folded into the snapshot. ----
     const b = await heldSubscribe('qB');
@@ -292,10 +302,10 @@ describe('Integration: a live subscribe folds the writes of its scan and overflo
       ...foldKeys.map((k, i): [string, { v: number }] => [k, { v: i }]),
     ]);
     const heldB = release('case B', b.createdAt);
-    await until('the qB snapshot', () => firstFrameOf(b.handle.id) !== undefined, STEP_WAIT_MS);
-    const firstB = firstFrameOf(b.handle.id)!;
+    await until('the qB snapshot', () => firstFrameOf(idsOf(b.handle)) !== undefined, STEP_WAIT_MS);
+    const firstB = firstFrameOf(idsOf(b.handle))!;
     notes.push(
-      `case B frames for qB: ${framesOf(b.handle.id)
+      `case B frames for qB: ${framesOf(idsOf(b.handle))
         .map((f) => f.type)
         .join(',')}`,
     );
@@ -329,9 +339,9 @@ describe('Integration: a live subscribe folds the writes of its scan and overflo
       RESUBSCRIBE_WAIT_MS,
     );
 
-    const responses = framesOf(c.handle.id).filter((f) => f.type === 'QUERY_RESP');
+    const responses = framesOf(idsOf(c.handle)).filter((f) => f.type === 'QUERY_RESP');
     notes.push(
-      `case C frames for qC: ${framesOf(c.handle.id)
+      `case C frames for qC: ${framesOf(idsOf(c.handle))
         .map((f) => `${f.type}${f.code ? `(${f.code})` : ''}[${f.results?.size ?? ''}]`)
         .join(',')}`,
     );
@@ -340,13 +350,16 @@ describe('Integration: a live subscribe folds the writes of its scan and overflo
     notes.push(`state changes: ${JSON.stringify(stateChanges)}`);
 
     // The snapshot, then the overflow, then the resubscribe's snapshot.
-    expect(firstFrameOf(c.handle.id)?.type).toBe('QUERY_RESP');
+    expect(firstFrameOf(idsOf(c.handle))?.type).toBe('QUERY_RESP');
     expect(responses.length).toBeGreaterThanOrEqual(3);
     expect(responses[0].code).toBeUndefined();
     expect(responses[1].code).toBe(OVERFLOW_CODE);
     expect(responses[2].code).toBeUndefined();
-    expect(framesOf(c.handle.id).some((f) => f.type === 'QUERY_UPDATE')).toBe(false);
-    expect(outboundSubs.slice(subsBefore)).toEqual([c.handle.id, c.handle.id]);
+    expect(framesOf(idsOf(c.handle)).some((f) => f.type === 'QUERY_UPDATE')).toBe(false);
+    const subsOfC = outboundSubs.slice(subsBefore);
+    expect(subsOfC.map((sub) => sub.handle === c.handle)).toEqual([true, true]);
+    expect(new Set(subsOfC.map((sub) => sub.id)).size).toBe(2);
+    expect(subsOfC.some((sub) => sub.id === c.handle.id)).toBe(false);
     expect(new Set(c.rows().map((r) => r._key))).toEqual(allKeys);
     // Once qC has emitted rows, it never shows fewer.
     const fromFirstRows = c.emitted.slice(c.emitted.findIndex((n) => n > 0));

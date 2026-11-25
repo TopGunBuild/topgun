@@ -26,6 +26,12 @@ const optInSuites = [
       'each needs a server built with the fault-injection cargo feature (FAULT_SERVER_BINARY, FAULT_SERVER_COMMIT)',
     script: 'pnpm test:integration-rust:liveness',
   },
+  {
+    files: ['slow-link-overtake'],
+    reason:
+      'on Linux it needs net.ipv4.tcp_moderate_rcvbuf=0 (set as root), so that its proxy models a slow link rather than a deep buffer; CI runs it in a job that sets it',
+    script: 'pnpm test:integration-rust:slow-link',
+  },
 ];
 
 // Left out only where the environment asks for it. The 3-node suite fails to

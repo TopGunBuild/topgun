@@ -969,8 +969,14 @@ async fn serve_plain(
 ) -> anyhow::Result<()> {
     info!("Serving plain HTTP/WS connections");
 
+    // Bound every client socket's unsent bytes, so a small message the writer
+    // passes ahead of a long answer does not wait behind it in the kernel
+    // (TG-WS-004).
     axum::serve(
-        listener,
+        axum::serve::ListenerExt::tap_io(
+            listener,
+            crate::network::handlers::websocket::tune_client_socket,
+        ),
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown)

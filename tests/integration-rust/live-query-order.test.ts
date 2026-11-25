@@ -171,13 +171,32 @@ describe('Integration: live query order matches the server (client <-> Rust serv
       expect(all).toHaveLength(seed.length);
 
       // Every QUERY_RESP and QUERY_UPDATE S receives, by query id, in arrival order.
+      // Each QUERY_SUB send carries a new wire id: `liveIds` holds every id a
+      // frame of the live handle carried, `liveSends` every id it was sent under.
       const responses = new Map<string, string[][]>();
       const windows = new Map<string, Set<string>>();
+      const liveIds = new Set<string>();
+      const liveSends: string[] = [];
+      let live: unknown = undefined;
+      const handleOf = (id: string): unknown => engineOf(s).queryManager.handleOf(id);
+      const wsm = engineOf(s).webSocketManager;
+      const originalSend = wsm.sendMessage.bind(wsm);
+      wsm.sendMessage = (
+        message: { type?: string; payload?: { queryId?: string } },
+        key?: string,
+      ) => {
+        const id = message?.payload?.queryId;
+        if (message?.type === 'QUERY_SUB' && id && live !== undefined && handleOf(id) === live) {
+          liveSends.push(id);
+        }
+        return originalSend(message, key);
+      };
       engineOf(s).on('message', (raw: unknown) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- inbound frames have no single static shape
         const msg = raw as any;
         const queryId: string | undefined = msg?.payload?.queryId;
         if (!queryId) return;
+        if (live !== undefined && handleOf(queryId) === live) liveIds.add(queryId);
         if (msg.type === 'QUERY_RESP' && !msg.payload.code) {
           const keys = (msg.payload.results ?? []).map((r: { key: string }) => r.key);
           responses.set(queryId, [...(responses.get(queryId) ?? []), keys]);
@@ -191,6 +210,8 @@ describe('Integration: live query order matches the server (client <-> Rust serv
       });
 
       const handle: QueryHandle<Value> = s.query<Value>(mapName, filter);
+      live = handle;
+      const liveId = () => liveSends[liveSends.length - 1] ?? '';
       let shown: string[] = [];
       const unsubscribe = handle.subscribe((rows) => (shown = rows.map((r) => r._key)));
       const held = () => [...(handle as unknown as { rows: Map<string, unknown> }).rows.keys()];
@@ -199,10 +220,10 @@ describe('Integration: live query order matches the server (client <-> Rust serv
       try {
         // The page: QUERY_RESP's keys, in frame order, are the rows the handle shows.
         await waitFor(
-          () => handle.getSnapshotMeta().settled && (responses.get(handle.id)?.length ?? 0) > 0,
+          () => handle.getSnapshotMeta().settled && (responses.get(liveId())?.length ?? 0) > 0,
           () => 'live query settled',
         );
-        const page = responses.get(handle.id)![0];
+        const page = responses.get(liveId())![0];
         expect(page.length).toBe(filter.limit ?? seed.length);
         expect(shown).toEqual(page);
 
@@ -214,12 +235,14 @@ describe('Integration: live query order matches the server (client <-> Rust serv
         const freshPage = async (): Promise<string[]> => {
           const before = new Set(responses.keys());
           await s.queryOnce<Value>(mapName, unlimited, { timeoutMs: 5_000 });
-          const freshId = [...responses.keys()].find((id) => !before.has(id) && id !== handle.id);
+          const freshId = [...responses.keys()].find(
+            (id) => !before.has(id) && !liveIds.has(id) && !liveSends.includes(id),
+          );
           const order = freshId ? responses.get(freshId)![0] : [];
-          const window = windows.get(handle.id) ?? new Set<string>();
+          const window = windows.get(liveId()) ?? new Set<string>();
           return order.filter((key) => window.has(key)).slice(0, filter.limit ?? Infinity);
         };
-        const windowKeys = () => sorted(windows.get(handle.id) ?? []);
+        const windowKeys = () => sorted(windows.get(liveId()) ?? []);
 
         for (const write of writes) {
           apply(write);
@@ -241,6 +264,7 @@ describe('Integration: live query order matches the server (client <-> Rust serv
         }
       } finally {
         unsubscribe();
+        wsm.sendMessage = originalSend;
       }
     },
     90_000,

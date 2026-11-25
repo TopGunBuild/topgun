@@ -187,10 +187,14 @@ pub struct ConnectionConfig {
     pub data_plane_ops_burst: u32,
     /// Longest `CHUNK` payload, in bytes, on a connection that opted in to
     /// chunked delivery with `tg_chunks=1` (`TG-WS-002`). There, a dequeued
-    /// message longer than the effective length is sent as consecutive `CHUNK`
-    /// messages, so a client on a slow link sees a message complete every
+    /// message longer than the effective length is sent as `CHUNK` messages,
+    /// so a client on a slow link sees a message complete every
     /// effective-length bytes and its heartbeat counts each one as liveness
     /// (`TG-WS-003`); a shorter message goes out whole, as on any connection.
+    /// The `CHUNK`s of a query or search answer may have messages of at most
+    /// the effective length written between them, so acknowledgements and
+    /// live events are not held behind a long answer; every other long
+    /// message keeps its `CHUNK`s consecutive (`TG-WS-004`).
     ///
     /// The effective length is fixed once per connection: this value raised to
     /// at least 1 and capped at

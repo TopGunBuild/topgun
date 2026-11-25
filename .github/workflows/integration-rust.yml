@@ -151,6 +151,8 @@ jobs:
         #   and this job builds one binary without it. All three are run locally
         #   (`pnpm test:integration-rust:liveness`). What guards the defects
         #   in CI is the in-process tests in `cargo test` and the clippy gate.
+        # - slow-link-overtake needs a kernel setting this step does not make; it
+        #   is run by the slow-link job below.
         # - cluster-routing is left out by the variable below and gated separately
         #   (non-blocking) in the next job.
         # Each of these files fails, never skips, when what it needs is not given.
@@ -158,6 +160,59 @@ jobs:
           RUST_SERVER_BINARY: ${{ github.workspace }}/target/release/topgun-server
           INTEGRATION_RUST_SKIP_CLUSTER_ROUTING: '1'
         run: pnpm test:integration-rust --runInBand
+
+  # BLOCKING. Small messages passing a long answer on a slow link (TG-WS-004),
+  # through the test's bandwidth-capped proxy. Linux receive auto-tuning would
+  # grow the proxy's receive buffer to megabytes and hide the link from the
+  # server, so this job turns it off for the run (the file fails while it is
+  # on) and restores it afterwards. It runs on the runner VM, where sudo can
+  # change the setting; a container could not.
+  slow-link:
+    name: Slow-link tests (blocking)
+    needs: [build-server]
+    runs-on: ubuntu-latest
+    # The file runs ~8 min, ~12 at its bounds.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download server binary
+        uses: actions/download-artifact@v4
+        with:
+          name: topgun-server-release
+          path: target/release
+
+      - name: Make server binary executable
+        run: chmod +x target/release/topgun-server
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.13.1 --activate
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Turn off receive-buffer auto-tuning
+        run: |
+          echo "TCP_MODERATE_RCVBUF_BEFORE=$(sysctl -n net.ipv4.tcp_moderate_rcvbuf)" >> "$GITHUB_ENV"
+          sudo sysctl -w net.ipv4.tcp_moderate_rcvbuf=0
+
+      - name: Run slow-link-overtake
+        env:
+          RUST_SERVER_BINARY: ${{ github.workspace }}/target/release/topgun-server
+        run: pnpm test:integration-rust:slow-link
+
+      - name: Restore receive-buffer auto-tuning
+        if: always()
+        run: |
+          if [ -n "${TCP_MODERATE_RCVBUF_BEFORE:-}" ]; then
+            sudo sysctl -w net.ipv4.tcp_moderate_rcvbuf="$TCP_MODERATE_RCVBUF_BEFORE"
+          fi
 
   # NON-BLOCKING. The 3-node cluster suite intermittently fails to converge
   # (one node sometimes never joins → nodeCount stuck at 2) even from a cold

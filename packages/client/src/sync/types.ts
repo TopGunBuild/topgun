@@ -22,7 +22,12 @@ import type { QueryHandle, QueryFilter } from '../QueryHandle';
 import type { HybridQueryHandle, HybridQueryFilter } from '../HybridQueryHandle';
 import type { IStorageAdapter } from '../IStorageAdapter';
 import type { TopicHandle } from '../TopicHandle';
-import type { EntryProcessorDef, EntryProcessorResult, QueryRespPayload } from '@topgunbuild/core';
+import type {
+  EntryProcessorDef,
+  EntryProcessorResult,
+  QueryRespPayload,
+  QueryUpdatePayload,
+} from '@topgunbuild/core';
 
 /**
  * Interface for WebSocket connection management.
@@ -342,6 +347,20 @@ export interface IQueryManager {
    * @param payload - The QUERY_RESP payload
    */
   handleQueryResp(payload: QueryRespPayload): void;
+
+  /**
+   * Route a QUERY_UPDATE to its handle: held until the answer of the
+   * handle's current send, applied after it.
+   * @param payload - The QUERY_UPDATE payload
+   */
+  handleQueryUpdate(payload: QueryUpdatePayload): void;
+
+  /**
+   * The handle whose current QUERY_SUB send carried `wireId`.
+   * @param wireId - The queryId of a QUERY_SUB, QUERY_RESP or QUERY_UPDATE
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- query type parameter erased at the routing layer
+  handleOf(wireId: string): QueryHandle<any> | undefined;
 
   /**
    * Cancel every pending timer (called when the engine closes).

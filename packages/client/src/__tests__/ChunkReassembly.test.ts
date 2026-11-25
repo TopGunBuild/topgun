@@ -4,8 +4,11 @@
  * A server sends a message longer than its chunk length to an opted-in client
  * as consecutive `CHUNK` messages whose `data` concatenates to the original
  * bytes. The client must route only the reassembled message, never a `CHUNK`,
- * and must treat every sequence it cannot reassemble or decode as a protocol
- * violation that forces a reconnect, so the message is recovered by resync.
+ * must route a whole message that arrives inside an open sequence at once
+ * (the server writes small messages between the `CHUNK`s of a large answer,
+ * TG-WS-004), and must treat every sequence it cannot reassemble or decode as
+ * a protocol violation that forces a reconnect, so the message is recovered by
+ * resync.
  */
 
 import { serialize } from '@topgunbuild/core';
@@ -151,20 +154,25 @@ describe('CHUNK reassembly (TG-WS-002)', () => {
     });
   });
 
-  describe('T7: a violation forces a reconnect and discards the partial', () => {
-    it('a non-CHUNK message inside a sequence', () => {
+  describe('T7: a whole message inside a sequence is routed; a malformed CHUNK forces a reconnect', () => {
+    it("T7': a whole message inside an open sequence is routed at once, and the sequence completes after it", () => {
       const { provider, onMessage } = setup();
-      provider.deliver(chunk(false, serialize(original).slice(0, 10)));
+      const sequence = chunksOf(serialize(original), [10, 30]);
+      expect(sequence).toHaveLength(3);
+
+      provider.deliver(sequence[0]);
       provider.deliver(whole);
-
-      expect(provider.forceReconnect).toHaveBeenCalledTimes(1);
-      expect(onMessage).not.toHaveBeenCalled();
-
-      // The partial is gone: a fresh sequence reassembles on its own.
-      for (const c of chunksOf(serialize(original), [3, 9])) provider.deliver(c);
+      // Routed when it arrives, not after the sequence ends.
       expect(onMessage).toHaveBeenCalledTimes(1);
-      expect(onMessage).toHaveBeenCalledWith(original);
-      expect(provider.forceReconnect).toHaveBeenCalledTimes(1);
+      expect(onMessage).toHaveBeenCalledWith(whole);
+
+      provider.deliver(sequence[1]);
+      expect(onMessage).toHaveBeenCalledTimes(1);
+      provider.deliver(sequence[2]);
+
+      // The open sequence survived the whole message and its own message follows it.
+      expect(onMessage.mock.calls.map(([m]) => m)).toEqual([whole, original]);
+      expect(provider.forceReconnect).not.toHaveBeenCalled();
     });
 
     it('a CHUNK whose last is not a boolean, inside a sequence', () => {
@@ -188,6 +196,57 @@ describe('CHUNK reassembly (TG-WS-002)', () => {
 
       expect(provider.forceReconnect).toHaveBeenCalledTimes(1);
       expect(onMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("T7'': a whole message inside a sequence, next to a violation", () => {
+    it('(1) CHUNK(last=false), a whole message, CHUNK(last=true): both delivered, the whole one first', () => {
+      const { provider, onMessage } = setup();
+      const [first, second] = chunksOf(serialize(original), [12]);
+
+      provider.deliver(first);
+      provider.deliver(whole);
+      provider.deliver(second);
+
+      expect(onMessage.mock.calls.map(([m]) => m)).toEqual([whole, original]);
+      expect(provider.forceReconnect).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['with no data', { type: 'CHUNK', last: true }],
+      ['whose last is not a boolean', { type: 'CHUNK', last: 1, data: new Uint8Array([1, 2]) }],
+    ])(
+      '(2) CHUNK(last=false), then a malformed CHUNK %s: one reconnect and the sequence discarded',
+      (_label, malformed) => {
+        const { provider, onMessage } = setup();
+        const bytes = serialize(original);
+        provider.deliver(chunk(false, bytes.slice(0, 10)));
+        provider.deliver(malformed);
+
+        expect(provider.forceReconnect).toHaveBeenCalledTimes(1);
+        expect(onMessage).not.toHaveBeenCalled();
+
+        // The discarded partial is not prepended: a later valid sequence reassembles alone.
+        for (const c of chunksOf(bytes, [4, 20])) provider.deliver(c);
+        expect(onMessage).toHaveBeenCalledTimes(1);
+        expect(onMessage).toHaveBeenCalledWith(original);
+        expect(provider.forceReconnect).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('(3) CHUNK(last=false), a whole message, an undecodable CHUNK(last=true): one reconnect; the whole message was delivered', () => {
+      const { provider, onMessage } = setup();
+      const bytes = serialize(original);
+      // A truncated encoding: the map header promises more than the bytes hold.
+      const truncated = bytes.slice(0, bytes.length - 5);
+
+      provider.deliver(chunk(false, truncated.slice(0, 8)));
+      provider.deliver(whole);
+      provider.deliver(chunk(true, truncated.slice(8)));
+
+      expect(provider.forceReconnect).toHaveBeenCalledTimes(1);
+      expect(onMessage).toHaveBeenCalledTimes(1);
+      expect(onMessage).toHaveBeenCalledWith(whole);
     });
   });
 

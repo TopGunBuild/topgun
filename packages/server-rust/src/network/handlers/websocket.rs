@@ -11,7 +11,7 @@
 //! reader can continue consuming frames while previous dispatches are
 //! still in flight. If no JWT secret is configured, Phase 1 is skipped.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -1884,13 +1884,15 @@ async fn join_outbound_with_timeout(handle: tokio::task::JoinHandle<()>) {
 
 /// Drains the outbound mpsc channel and writes each message to the socket.
 ///
-/// Every frame of a queued message, from [`outbound_frames`], is written
-/// before the next message is taken off the queue. So wire order is queue
-/// order and no two messages are ever merged. On whole-message framing each
-/// queued message is one WebSocket message of any size (`TG-WS-001`); on a
-/// chunk-capable connection a message longer than the chunk length is a run
-/// of `CHUNK` messages instead (`TG-WS-002`). Draining ready messages with
-/// `try_recv` only saves a wake-up per message.
+/// On whole-message framing every frame of a queued message is written
+/// before the next message is taken off the queue, so wire order is queue
+/// order and each queued message is one WebSocket message of any size
+/// (`TG-WS-001`). Draining ready messages with `try_recv` only saves a
+/// wake-up per message.
+///
+/// On a chunk-capable connection a message longer than the chunk length is a
+/// run of `CHUNK` messages (`TG-WS-002`), and [`interleaving_writer`] lets
+/// small messages pass a long answer between its `CHUNK`s (`TG-WS-004`).
 async fn outbound_task<S>(
     mut sender: S,
     mut rx: mpsc::Receiver<OutboundMessage>,
@@ -1898,25 +1900,298 @@ async fn outbound_task<S>(
 ) where
     S: Sink<Message> + Unpin,
 {
-    while let Some(msg) = rx.recv().await {
-        if send_outbound_message(&mut sender, msg, framing)
-            .await
-            .is_err()
-        {
-            break;
-        }
-        while let Ok(msg) = rx.try_recv() {
+    if let Some(chunk_len) = framing.chunk_len {
+        let _ = interleaving_writer(&mut sender, &mut rx, framing, chunk_len).await;
+    } else {
+        while let Some(msg) = rx.recv().await {
             if send_outbound_message(&mut sender, msg, framing)
                 .await
                 .is_err()
             {
-                return;
+                break;
+            }
+            while let Ok(msg) = rx.try_recv() {
+                if send_outbound_message(&mut sender, msg, framing)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
             }
         }
     }
 
     // Gracefully close the WebSocket write half.
     let _ = sender.close().await;
+}
+
+/// The message types a small message may pass while they are sent as
+/// `CHUNK`s (`TG-WS-004`).
+///
+/// Each is the answer to a client's request: a live or one-shot query's
+/// snapshot, a search's answer, a hybrid search's answer. The client holds
+/// the later messages of the same subscription until that answer has arrived
+/// (the query hold in `QueryManager`, the search handles' pre-response hold),
+/// so letting them arrive first changes nothing the client shows. Every other
+/// type keeps its place in the queue. Adding a type here is a protocol
+/// change: the client must hold that type's followers too.
+const PASSABLE_TYPES: [&[u8]; 3] = [b"QUERY_RESP", b"SEARCH_RESP", b"HYBRID_SEARCH_RESP"];
+
+/// How many large messages the interleaving writer holds besides the one it
+/// is sending.
+///
+/// A reconnect that resubscribes eight large queries keeps small messages
+/// passing: one is sent and seven wait. A ninth fills the list and the writer
+/// stops dequeuing until one completes, which hands the pressure back to the
+/// queue's own bound and overflow policy instead of growing a second,
+/// unbounded queue.
+const MAX_WAITING_LARGE: usize = 8;
+
+/// Whether an outbound message may be passed by smaller ones while it is
+/// sent as `CHUNK`s: its `MsgPack` map's first entry is `"type"` and its value
+/// is one of [`PASSABLE_TYPES`].
+///
+/// `Message` is internally tagged, so `rmp_serde::to_vec_named` writes the
+/// tag first, as a fixstr. Only that exact prefix is recognised; a message
+/// encoded any other way, cut short or of another type keeps its place,
+/// which is the order a connection had before passing existed. Nothing past
+/// the type's name is read.
+fn passable(payload: &[u8]) -> bool {
+    let entries = match payload.first() {
+        Some(0x80..=0x8f) => payload.get(1..),
+        Some(0xde) => payload.get(3..),
+        Some(0xdf) => payload.get(5..),
+        _ => None,
+    };
+    let Some(rest) = entries.and_then(|rest| rest.strip_prefix(b"\xa4type")) else {
+        return false;
+    };
+    let Some((&marker, rest)) = rest.split_first() else {
+        return false;
+    };
+    if !(0xa0..=0xbf).contains(&marker) {
+        return false;
+    }
+    rest.get(..usize::from(marker & 0x1f))
+        .is_some_and(|name| PASSABLE_TYPES.contains(&name))
+}
+
+/// A message longer than the chunk length that the interleaving writer has
+/// dequeued but not started.
+enum WaitingLarge {
+    /// May be passed by small messages once it is sent.
+    Passable(Bytes),
+    /// Sent as all of its `CHUNK`s with nothing between them.
+    Ordered(Bytes),
+}
+
+/// The state of [`interleaving_writer`].
+///
+/// With no `active` message `waiting` is empty and no `Close` is remembered:
+/// the writer then awaits the queue as the whole-message writer does.
+#[derive(Default)]
+struct Interleave {
+    /// The passable message being sent, as its remaining `CHUNK` frames.
+    active: Option<ChunkFrames>,
+    /// Large messages dequeued while `active` was sent, in queue order: at
+    /// most [`MAX_WAITING_LARGE`], and an ordered one only last.
+    waiting: VecDeque<WaitingLarge>,
+    /// A `Close` dequeued while `active` was sent: written once `active` and
+    /// `waiting` are.
+    close: Option<OutboundMessage>,
+}
+
+impl Interleave {
+    /// Whether dequeuing has stopped: an ordered message or a `Close` must
+    /// keep everything queued after it behind it, and a full waiting list
+    /// leaves the rest in the queue.
+    fn stopped(&self) -> bool {
+        self.close.is_some()
+            || self.waiting.len() >= MAX_WAITING_LARGE
+            || matches!(self.waiting.back(), Some(WaitingLarge::Ordered(_)))
+    }
+
+    /// Takes one dequeued message: a small one is written at once, a large one
+    /// becomes `active` or is sent at once when nothing is active and waits
+    /// otherwise, and a `Close` is written when nothing is active and
+    /// remembered otherwise. `Err` ends the writer.
+    async fn take<S>(
+        &mut self,
+        sender: &mut S,
+        msg: OutboundMessage,
+        framing: OutboundFraming,
+        chunk_len: usize,
+    ) -> Result<(), ()>
+    where
+        S: Sink<Message> + Unpin,
+    {
+        let idle = self.active.is_none();
+        match msg {
+            OutboundMessage::Binary(data) if data.len() > chunk_len => {
+                let data = Bytes::from(data);
+                match (passable(&data), idle) {
+                    (true, true) => self.active = Some(chunk_frames(data, chunk_len)),
+                    (true, false) => self.waiting.push_back(WaitingLarge::Passable(data)),
+                    (false, true) => write_frames(sender, chunk_frames(data, chunk_len)).await?,
+                    (false, false) => self.waiting.push_back(WaitingLarge::Ordered(data)),
+                }
+                Ok(())
+            }
+            close @ OutboundMessage::Close(_) if !idle => {
+                self.close = Some(close);
+                Ok(())
+            }
+            msg => send_outbound_message(sender, msg, framing).await,
+        }
+    }
+}
+
+/// The writer of a chunk-capable connection (`TG-WS-004`).
+///
+/// A passable message longer than `chunk_len` is sent one `CHUNK` at a time.
+/// After each `CHUNK` the writer takes at most the messages that were ready
+/// at that moment (`rx.len()`): it writes the small ones whole, in queue
+/// order, and keeps the large ones waiting, so a long answer holds neither
+/// acknowledgements nor live events behind it. Bounding each gap by what was
+/// ready when it began moves the answer on by one `CHUNK` per gap, even
+/// against producers that refill the queue as fast as the writer drains it.
+/// Large messages are sent one after another in queue order, never mixed:
+/// the client always knows which message a `CHUNK` belongs to, and two
+/// answers of one query arrive in the order they were sent. An ordered large
+/// message or a `Close` stops dequeuing, so nothing queued after it passes it.
+/// While a message is active the writer never awaits the queue, only the
+/// socket, so the transfer advances whenever the socket takes bytes.
+async fn interleaving_writer<S>(
+    sender: &mut S,
+    rx: &mut mpsc::Receiver<OutboundMessage>,
+    framing: OutboundFraming,
+    chunk_len: usize,
+) -> Result<(), ()>
+where
+    S: Sink<Message> + Unpin,
+{
+    let mut state = Interleave::default();
+    loop {
+        let Some(active) = state.active.as_mut() else {
+            if let Some(close) = state.close.take() {
+                return send_outbound_message(sender, close, framing).await;
+            }
+            let Some(msg) = rx.recv().await else {
+                return Ok(());
+            };
+            state.take(sender, msg, framing, chunk_len).await?;
+            // A passable message that became active is written next; what is
+            // queued behind it is taken only in the gaps between its CHUNKs.
+            while state.active.is_none() {
+                let Ok(msg) = rx.try_recv() else { break };
+                state.take(sender, msg, framing, chunk_len).await?;
+            }
+            continue;
+        };
+
+        write_chunk(sender, active).await?;
+        let finished = active.is_finished();
+        if !state.stopped() {
+            for _ in 0..rx.len() {
+                let Ok(msg) = rx.try_recv() else { break };
+                state.take(sender, msg, framing, chunk_len).await?;
+                if state.stopped() {
+                    break;
+                }
+            }
+        }
+        if finished {
+            state.active = None;
+            match state.waiting.pop_front() {
+                Some(WaitingLarge::Passable(data)) => {
+                    state.active = Some(chunk_frames(data, chunk_len));
+                }
+                Some(WaitingLarge::Ordered(data)) => {
+                    write_frames(sender, chunk_frames(data, chunk_len)).await?;
+                }
+                None => {}
+            }
+        }
+    }
+}
+
+/// Writes the next `CHUNK` of `frames`: its frames up to and including the
+/// one that ends a flush.
+async fn write_chunk<S>(sender: &mut S, frames: &mut ChunkFrames) -> Result<(), ()>
+where
+    S: Sink<Message> + Unpin,
+{
+    for (frame, flush) in frames.by_ref() {
+        write_frame(sender, frame, flush).await?;
+        if flush {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Writes every frame of `frames`.
+async fn write_frames<S>(
+    sender: &mut S,
+    frames: impl Iterator<Item = (Frame, bool)>,
+) -> Result<(), ()>
+where
+    S: Sink<Message> + Unpin,
+{
+    for (frame, flush) in frames {
+        write_frame(sender, frame, flush).await?;
+    }
+    Ok(())
+}
+
+/// Writes one frame, flushing when `flush`.
+async fn write_frame<S>(sender: &mut S, frame: Frame, flush: bool) -> Result<(), ()>
+where
+    S: Sink<Message> + Unpin,
+{
+    let written = if flush {
+        sender.send(Message::Frame(frame)).await
+    } else {
+        sender.feed(Message::Frame(frame)).await
+    };
+    written.map_err(|_| ())
+}
+
+/// The most unsent bytes the kernel keeps in a client socket's send buffer
+/// (`TCP_NOTSENT_LOWAT`), set on Linux by [`tune_client_socket`].
+///
+/// Unsent bytes are delay ahead of every small message the writer writes
+/// later: 16 KiB is 0.13 s at 1 Mbit/s and 0.44 s at 0.3 Mbit/s, where an
+/// auto-tuned send buffer of megabytes would be tens of seconds. Bytes in
+/// flight are not counted, so the link stays busy as long as the writer
+/// refills within one round trip plus the time the link needs for these
+/// 16 KiB (131 µs at 1 Gbit/s).
+pub const CLIENT_NOTSENT_LOWAT: u32 = 16_384;
+
+/// Bounds the unsent bytes of an accepted client socket by
+/// [`CLIENT_NOTSENT_LOWAT`], so a small message the writer passes ahead of a
+/// long answer is not queued behind the answer inside the kernel
+/// (`TG-WS-004`).
+///
+/// Linux only: elsewhere the option is not exposed by `socket2` and this does
+/// nothing. A failure is logged once per process and the connection is served
+/// as before.
+#[cfg(target_os = "linux")]
+pub fn tune_client_socket(stream: &mut tokio::net::TcpStream) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if let Err(error) = socket2::SockRef::from(&*stream).set_tcp_notsent_lowat(CLIENT_NOTSENT_LOWAT)
+    {
+        WARNED.call_once(|| {
+            warn!(%error, "could not bound the unsent bytes of a client socket (TCP_NOTSENT_LOWAT); small messages may wait behind a large answer in the kernel");
+        });
+    }
+}
+
+/// Bounds the unsent bytes of an accepted client socket on Linux; on this
+/// target the option is not exposed and nothing is done.
+#[cfg(not(target_os = "linux"))]
+pub fn tune_client_socket(stream: &mut tokio::net::TcpStream) {
+    let _ = stream;
 }
 
 /// Sends a single outbound message to the WebSocket sender.
@@ -1933,16 +2208,7 @@ where
 {
     match msg {
         OutboundMessage::Binary(data) => {
-            for (frame, flush) in outbound_frames(Bytes::from(data), framing) {
-                let written = if flush {
-                    sender.send(Message::Frame(frame)).await
-                } else {
-                    sender.feed(Message::Frame(frame)).await
-                };
-                if written.is_err() {
-                    return Err(());
-                }
-            }
+            write_frames(sender, outbound_frames(Bytes::from(data), framing)).await?;
         }
         OutboundMessage::Close(reason) => {
             let close_frame = reason.map(|r| CloseFrame {
@@ -2053,6 +2319,13 @@ struct ChunkFrames {
     chunk_len: usize,
     /// The data frame of the `CHUNK` whose header was just yielded.
     data: Option<Frame>,
+}
+
+impl ChunkFrames {
+    /// Whether every `CHUNK` has been yielded.
+    fn is_finished(&self) -> bool {
+        self.rest.is_empty() && self.data.is_none()
+    }
 }
 
 impl Iterator for ChunkFrames {
@@ -4684,6 +4957,12 @@ mod writer_tests {
     /// The harness on a connection that opted in to chunked delivery when
     /// `chunked`, with the default settings.
     async fn harness_with(hold: bool, chunked: bool) -> Harness {
+        harness_queued(hold, chunked, Vec::new()).await
+    }
+
+    /// The harness with `queued` already in the writer's queue when the writer
+    /// starts, so the writer's first decisions see all of them.
+    async fn harness_queued(hold: bool, chunked: bool, queued: Vec<OutboundMessage>) -> Harness {
         let connection = ConnectionConfig::default();
         let (server_io, tap_server) = tokio::io::duplex(DUPLEX);
         let (tap_client, client_io) = tokio::io::duplex(DUPLEX);
@@ -4707,6 +4986,9 @@ mod writer_tests {
             }
         });
         let (tx, rx) = mpsc::channel(256);
+        for msg in queued {
+            tx.try_send(msg).expect("the queue holds every input");
+        }
         let framing = OutboundFraming::new(&connection, chunked);
         let writer = tokio::spawn(outbound_task(sink, rx, framing));
         let (client_sink, client_stream) = client.split();
@@ -5261,5 +5543,828 @@ mod writer_tests {
             wire_messages(&frames),
             vec![expected_shapes(4_400_000), expected_shapes(10)]
         );
+    }
+
+    // ---- Passing small messages between the CHUNKs of an answer (TG-WS-004) ----
+
+    use std::collections::HashMap as Lookup;
+    use std::pin::Pin;
+    use std::task::{Context as TaskContext, Poll};
+    use topgun_core::messages::base::ChangeEventType;
+    use topgun_core::messages::client_events::{QueryUpdatePayload, ServerEventPayload};
+    use topgun_core::messages::hybrid::{HybridSearchRespPayload, HybridSearchUpdatePayload};
+    use topgun_core::messages::messaging::PongData;
+    use topgun_core::messages::query::{QueryRespMessage, QueryRespPayload, QueryResultEntry};
+    use topgun_core::messages::search::{SearchRespPayload, SearchUpdatePayload};
+
+    fn encode(message: &TopGunMessage) -> Vec<u8> {
+        rmp_serde::to_vec_named(message).expect("encodes")
+    }
+
+    fn query_resp(id: &str, value: String) -> TopGunMessage {
+        TopGunMessage::QueryResp(QueryRespMessage {
+            payload: QueryRespPayload {
+                query_id: id.to_string(),
+                results: vec![QueryResultEntry {
+                    key: "k".to_string(),
+                    value: rmpv::Value::String(value.into()),
+                }],
+                ..Default::default()
+            },
+        })
+    }
+
+    fn query_update(id: &str, value: String) -> TopGunMessage {
+        TopGunMessage::QueryUpdate {
+            payload: QueryUpdatePayload {
+                query_id: id.to_string(),
+                key: "k".to_string(),
+                value: rmpv::Value::String(value.into()),
+                change_type: ChangeEventType::UPDATE,
+            },
+        }
+    }
+
+    fn server_event(key: String) -> TopGunMessage {
+        TopGunMessage::ServerEvent {
+            payload: ServerEventPayload {
+                map_name: "m".to_string(),
+                key,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// The encoding of `build(pad)` with `pad` chosen so the encoding is a
+    /// few bytes short of `len`, never longer: a `3C` input then has exactly
+    /// three `CHUNK`s.
+    fn padded(len: usize, build: impl Fn(String) -> TopGunMessage) -> Vec<u8> {
+        let base = encode(&build(String::new())).len();
+        let bytes = encode(&build("x".repeat(len - base - 5)));
+        assert!(
+            bytes.len() <= len && bytes.len() > len - 8,
+            "{} bytes for {len}",
+            bytes.len()
+        );
+        bytes
+    }
+
+    /// A passable message (a `QUERY_RESP`) of about `len` bytes, told apart
+    /// from others by `id`.
+    fn big_passable(id: usize, len: usize) -> Vec<u8> {
+        padded(len, |pad| query_resp(&format!("p-{id}"), pad))
+    }
+
+    /// An ordered message of about `len` bytes: a `QUERY_UPDATE` for an even
+    /// `id`, a `SERVER_EVENT` for an odd one.
+    fn big_ordered(id: usize, len: usize) -> Vec<u8> {
+        if id.is_multiple_of(2) {
+            padded(len, |pad| query_update(&format!("o-{id}"), pad))
+        } else {
+            padded(len, |pad| server_event(format!("o-{id}-{pad}")))
+        }
+    }
+
+    /// A 100-byte message carrying `id`.
+    fn small(id: u32) -> Vec<u8> {
+        let mut bytes = vec![0u8; 100];
+        bytes[..4].copy_from_slice(&id.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn passable_is_true_only_for_the_three_answer_types() {
+        let resp = encode(&query_resp("q", "v".to_string()));
+        assert!(passable(&resp), "QUERY_RESP");
+        assert!(passable(&encode(&TopGunMessage::SearchResp {
+            payload: SearchRespPayload {
+                request_id: "s".to_string(),
+                results: Vec::new(),
+                total_count: 0,
+                error: None,
+            },
+        })));
+        assert!(passable(&encode(&TopGunMessage::HybridSearchResp {
+            payload: HybridSearchRespPayload::default(),
+        })));
+        // The live snapshot's fold builds `to_vec_named(&Message::QueryResp(..))`
+        // and the overflow pair is two `QUERY_RESP`s: one with rows, one with
+        // only an error and a code.
+        assert!(passable(&encode(&TopGunMessage::QueryResp(
+            QueryRespMessage {
+                payload: QueryRespPayload {
+                    query_id: "q".to_string(),
+                    error: Some("Too many".to_string()),
+                    code: Some("QUERY_SNAPSHOT_OVERFLOW".to_string()),
+                    ..Default::default()
+                },
+            }
+        ))));
+        assert!(passable(&encode(&TopGunMessage::QueryResp(
+            QueryRespMessage {
+                payload: QueryRespPayload {
+                    query_id: "q".to_string(),
+                    results: vec![QueryResultEntry {
+                        key: "k".to_string(),
+                        value: rmpv::Value::Nil,
+                    }],
+                    next_cursor: Some("c".to_string()),
+                    has_more: Some(true),
+                    merkle_root_hash: Some(7),
+                    ..Default::default()
+                },
+            }
+        ))));
+
+        // map16 and map32 headers are read, although the encoder writes a
+        // fixmap for every two-entry message.
+        assert!(passable(b"\xde\x00\x02\xa4type\xaaQUERY_RESP"));
+        assert!(passable(b"\xdf\x00\x00\x00\x02\xa4type\xabSEARCH_RESP"));
+        assert_eq!(resp[0], 0x82, "a fixmap of type and payload");
+
+        let ordered = [
+            encode(&query_update("q", "v".to_string())),
+            encode(&server_event("k".to_string())),
+            encode(&TopGunMessage::SearchUpdate {
+                payload: SearchUpdatePayload {
+                    subscription_id: "s".to_string(),
+                    key: "k".to_string(),
+                    value: rmpv::Value::Nil,
+                    score: 1.0,
+                    matched_terms: Vec::new(),
+                    change_type: ChangeEventType::ENTER,
+                },
+            }),
+            encode(&TopGunMessage::HybridSearchUpdate {
+                payload: HybridSearchUpdatePayload {
+                    subscription_id: "s".to_string(),
+                    key: "k".to_string(),
+                    score: 1.0,
+                    method_scores: std::collections::HashMap::new(),
+                    value: None,
+                    change_type: ChangeEventType::ENTER,
+                },
+            }),
+            encode(&TopGunMessage::OpAck(OpAckMessage {
+                payload: OpAckPayload {
+                    last_id: "1".to_string(),
+                    ..Default::default()
+                },
+            })),
+            encode(&TopGunMessage::Pong(PongData {
+                timestamp: 1,
+                server_time: 2,
+            })),
+        ];
+        for bytes in &ordered {
+            assert!(!passable(bytes), "{:x?}", &bytes[..bytes.len().min(24)]);
+        }
+
+        assert!(!passable(&[]));
+        assert!(!passable(&[0x80]));
+        let header = b"\x82\xa4type\xaaQUERY_RESP";
+        for cut in 0..header.len() {
+            assert!(!passable(&header[..cut]), "cut at {cut}");
+        }
+        assert!(passable(header), "nothing past the name is read");
+        assert!(!passable(b"\x82\xd9\x04type\xaaQUERY_RESP"), "type as str8");
+        assert!(!passable(b"\x82\xa4type\xd9\x0aQUERY_RESP"), "name as str8");
+        assert!(!passable(b"\x82\xa4type\xabQUERY_RESPX"));
+        assert!(!passable(b"\x82\xa4type\xa9QUERY_RES"));
+        assert!(
+            !passable(b"\x82\xa7payload\xaaQUERY_RESP"),
+            "another first key"
+        );
+        assert!(!passable(b"\x92\xa4type\xaaQUERY_RESP"), "an array");
+
+        // The payloads of the ordered-message writer tests are never passable,
+        // so those tests keep covering ordered messages.
+        for seed in 0..251 {
+            assert!(!passable(&payload(seed, 4096)), "payload({seed})");
+        }
+    }
+
+    /// One message as the client sees it: a whole message, or the `i`-th
+    /// `CHUNK` of a large one.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Seen {
+        Whole(String),
+        Chunk(String, usize),
+    }
+
+    /// Names what the client received: whole messages by the input they
+    /// equal, and each `CHUNK` by the large input its sequence rejoins.
+    fn label(received: &[Bytes], inputs: &[(&str, &Vec<u8>)]) -> Vec<Seen> {
+        let name_of = |bytes: &[u8]| -> String {
+            inputs
+                .iter()
+                .find(|(_, input)| input[..] == bytes[..])
+                .map_or_else(|| "?".to_string(), |(name, _)| (*name).to_string())
+        };
+        let mut seen = Vec::new();
+        let mut open: Vec<usize> = Vec::new();
+        let mut joined = Vec::new();
+        for message in received {
+            if message.starts_with(b"\x83\xa4type\xa5CHUNK") {
+                let (last, data) = decode_chunk(message);
+                joined.extend_from_slice(&data);
+                open.push(seen.len());
+                seen.push(Seen::Chunk(String::new(), open.len() - 1));
+                if last {
+                    let name = name_of(&joined);
+                    for at in open.drain(..) {
+                        if let Seen::Chunk(n, _) = &mut seen[at] {
+                            n.clone_from(&name);
+                        }
+                    }
+                    joined.clear();
+                }
+                continue;
+            }
+            seen.push(Seen::Whole(name_of(message)));
+        }
+        assert!(open.is_empty(), "an unfinished CHUNK sequence");
+        seen
+    }
+
+    fn whole(name: &str) -> Seen {
+        Seen::Whole(name.to_string())
+    }
+
+    fn chunks(name: &str, count: usize) -> Vec<Seen> {
+        (0..count)
+            .map(|i| Seen::Chunk(name.to_string(), i))
+            .collect()
+    }
+
+    /// Runs the chunked writer over `inputs`, all queued before it starts,
+    /// and labels the first `count` messages the client reads.
+    async fn schedule(inputs: &[(&str, &Vec<u8>)], count: usize) -> Vec<Seen> {
+        let queued = inputs
+            .iter()
+            .map(|(_, bytes)| OutboundMessage::Binary((*bytes).clone()))
+            .collect();
+        let mut h = harness_queued(false, true, queued).await;
+        let got = read_messages(&mut h.client_stream, count, Duration::from_secs(30)).await;
+        label(&got, inputs)
+    }
+
+    #[tokio::test]
+    async fn small_messages_pass_an_answer_between_its_chunks() {
+        let p = big_passable(0, 3 * C);
+        let (s1, s2) = (small(1), small(2));
+        let seen = schedule(&[("P", &p), ("s1", &s1), ("s2", &s2)], 5).await;
+        let mut want = chunks("P", 3);
+        want.insert(1, whole("s1"));
+        want.insert(2, whole("s2"));
+        assert_eq!(seen, want);
+    }
+
+    #[tokio::test]
+    async fn nothing_passes_an_ordered_message() {
+        let o = big_ordered(0, 3 * C);
+        let s1 = small(1);
+        let seen = schedule(&[("O", &o), ("s1", &s1)], 4).await;
+        let mut want = chunks("O", 3);
+        want.push(whole("s1"));
+        assert_eq!(seen, want);
+
+        let o = big_ordered(1, 3 * C);
+        let seen = schedule(&[("O", &o), ("s1", &s1)], 4).await;
+        let mut want = chunks("O", 3);
+        want.push(whole("s1"));
+        assert_eq!(seen, want, "a SERVER_EVENT");
+    }
+
+    #[tokio::test]
+    async fn an_ordered_message_waits_for_the_answer_and_holds_what_follows() {
+        for id in 0..2 {
+            let p = big_passable(0, 3 * C);
+            let o = big_ordered(id, 3 * C);
+            let s1 = small(1);
+            let seen = schedule(&[("P", &p), ("O", &o), ("s1", &s1)], 7).await;
+            let mut want = chunks("P", 3);
+            want.extend(chunks("O", 3));
+            want.push(whole("s1"));
+            assert_eq!(seen, want, "ordered message {id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn answers_are_sent_one_after_another_in_queue_order() {
+        let (p1, p2) = (big_passable(1, 3 * C), big_passable(2, 3 * C));
+        let s1 = small(1);
+        let seen = schedule(&[("P1", &p1), ("P2", &p2), ("s1", &s1)], 7).await;
+        let mut want = chunks("P1", 3);
+        want.insert(1, whole("s1"));
+        want.extend(chunks("P2", 3));
+        assert_eq!(seen, want);
+
+        let p3 = big_passable(3, 3 * C);
+        let seen = schedule(&[("P1", &p1), ("P2", &p2), ("P3", &p3), ("s1", &s1)], 10).await;
+        let mut want = chunks("P1", 3);
+        want.insert(1, whole("s1"));
+        want.extend(chunks("P2", 3));
+        want.extend(chunks("P3", 3));
+        assert_eq!(seen, want, "the waiting list is first in, first out");
+    }
+
+    #[tokio::test]
+    async fn a_full_waiting_list_stops_dequeuing_until_an_answer_completes() {
+        let answers: Vec<Vec<u8>> = (0..=MAX_WAITING_LARGE)
+            .map(|id| big_passable(id, 3 * C))
+            .collect();
+        let names: Vec<String> = (0..answers.len()).map(|id| format!("P{id}")).collect();
+        let s1 = small(1);
+        let mut inputs: Vec<(&str, &Vec<u8>)> = names
+            .iter()
+            .map(String::as_str)
+            .zip(answers.iter())
+            .collect();
+        inputs.push(("s1", &s1));
+        let seen = schedule(&inputs, 3 * answers.len() + 1).await;
+        let at = seen
+            .iter()
+            .position(|s| *s == whole("s1"))
+            .expect("s1 is written");
+        let last_of = |name: &str| {
+            seen.iter()
+                .position(|s| *s == Seen::Chunk(name.to_string(), 2))
+                .expect("the answer completes")
+        };
+        assert!(
+            at > last_of("P0"),
+            "s1 waits for the first answer: {seen:?}"
+        );
+        assert!(at < last_of("P1"), "s1 passes the second answer: {seen:?}");
+        for (id, name) in names.iter().enumerate().skip(1) {
+            assert!(last_of(&names[id - 1]) < last_of(name), "FIFO");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_close_is_written_after_the_answer_and_nothing_after_it() {
+        let p = big_passable(0, 3 * C);
+        let (s1, s2) = (small(1), small(2));
+        let queued = vec![
+            OutboundMessage::Binary(p.clone()),
+            OutboundMessage::Binary(s1.clone()),
+            OutboundMessage::Close(None),
+            OutboundMessage::Binary(s2.clone()),
+        ];
+        let mut h = harness_queued(false, true, queued).await;
+        let got = read_until_close(&mut h.client_stream, Duration::from_secs(30)).await;
+        let seen = label(&got, &[("P", &p), ("s1", &s1), ("s2", &s2)]);
+        let mut want = chunks("P", 3);
+        want.insert(1, whole("s1"));
+        assert_eq!(seen, want, "s2 is never written");
+        let frames = h.tap.frames.lock().clone();
+        let close = frames
+            .iter()
+            .position(|f| f.opcode == OP_CLOSE)
+            .expect("the server's Close");
+        assert!(frames[close..].iter().all(|f| f.opcode >= 0x8));
+    }
+
+    #[tokio::test]
+    async fn small_messages_streamed_during_an_answer_are_all_written_in_order() {
+        let p = big_passable(0, 3 * C);
+        let mut h = harness_queued(false, true, vec![OutboundMessage::Binary(p.clone())]).await;
+        let sender = h.tx.clone();
+        tokio::spawn(async move {
+            for id in 0..300 {
+                sender
+                    .send(OutboundMessage::Binary(small(id)))
+                    .await
+                    .expect("queue open");
+            }
+        });
+        let got = read_messages(&mut h.client_stream, 303, Duration::from_secs(10)).await;
+        let smalls: Vec<Vec<u8>> = (0..300).map(small).collect();
+        let names: Vec<String> = (0..300).map(|id| format!("s{id}")).collect();
+        let mut inputs: Vec<(&str, &Vec<u8>)> = vec![("P", &p)];
+        inputs.extend(names.iter().map(String::as_str).zip(smalls.iter()));
+        let seen = label(&got, &inputs);
+        let written: Vec<&Seen> = seen
+            .iter()
+            .filter(|s| matches!(s, Seen::Whole(_)))
+            .collect();
+        let want: Vec<Seen> = names.iter().map(|n| whole(n)).collect();
+        assert_eq!(
+            written,
+            want.iter().collect::<Vec<_>>(),
+            "every small message, in order"
+        );
+        assert_eq!(seen[0], Seen::Chunk("P".to_string(), 0));
+        assert_eq!(
+            seen.iter()
+                .filter(|s| matches!(s, Seen::Chunk(n, _) if n == "P"))
+                .count(),
+            3,
+            "the answer completes"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_completes_against_a_producer_that_awaits_a_slot() {
+        let p = big_passable(0, 3 * C);
+        let h = harness_queued(false, true, vec![OutboundMessage::Binary(p.clone())]).await;
+        let mut client_stream = h.client_stream;
+        tokio::spawn(async move { while client_stream.next().await.is_some() {} });
+        let frames = Arc::clone(&h.tap.frames);
+        let sender = h.tx.clone();
+        let last_seen = move || {
+            frames
+                .lock()
+                .iter()
+                .filter(|f| f.opcode == OP_CONTINUE && f.fin)
+                .count()
+                >= 3
+        };
+        let producer = tokio::spawn(async move {
+            let mut id = 0;
+            while !last_seen() {
+                sender
+                    .send(OutboundMessage::Binary(small(id)))
+                    .await
+                    .expect("queue open");
+                id += 1;
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), producer)
+            .await
+            .expect("the answer completes within 10 s")
+            .expect("the producer does not panic");
+        let frames = h.tap.frames.lock().clone();
+        let messages = wire_messages(&frames);
+        let mut between = 0;
+        let mut chunks_seen = 0;
+        for message in &messages {
+            if message[0] == (OP_BINARY, false, message[0].2) && message.len() == 2 {
+                chunks_seen += 1;
+                if chunks_seen > 1 {
+                    assert!(
+                        between <= 256,
+                        "{between} small messages between two CHUNKs"
+                    );
+                }
+                between = 0;
+            } else if chunks_seen > 0 && chunks_seen < 3 {
+                between += 1;
+            }
+        }
+        assert_eq!(chunks_seen, 3, "every CHUNK of the answer");
+    }
+
+    /// What a [`RecordingSink`] saw: the frames, in write order.
+    type Recorded = Arc<parking_lot::Mutex<Vec<(u8, bool, Bytes)>>>;
+
+    /// A sink that records every frame and, while an answer's `CHUNK`s are
+    /// being written, puts one more small message into the writer's queue for
+    /// each small message it records, so a gap's drain never finds the queue
+    /// empty on its own.
+    struct RecordingSink {
+        frames: Recorded,
+        refill: Option<mpsc::Sender<OutboundMessage>>,
+        refills_left: u32,
+        next_id: u32,
+        in_answer: bool,
+        last_header: bool,
+    }
+
+    impl Sink<Message> for RecordingSink {
+        type Error = ();
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<Result<(), ()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), ()> {
+            let frame = match item {
+                Message::Frame(frame) => frame,
+                Message::Close(_) => {
+                    self.frames.lock().push((OP_CLOSE, true, Bytes::new()));
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            };
+            let opcode = opcode_byte(frame.header().opcode);
+            let fin = frame.header().is_final;
+            let data = Bytes::copy_from_slice(frame.payload());
+            if opcode == OP_BINARY && !fin {
+                // A CHUNK's header frame: byte 17 is its `last` flag.
+                self.in_answer = true;
+                self.last_header = data[17] == 0xc3;
+            } else if opcode == OP_CONTINUE && fin && self.last_header {
+                self.in_answer = false;
+                self.refill = None;
+            } else if opcode == OP_BINARY && fin && self.in_answer && self.refills_left > 0 {
+                let id = self.next_id;
+                if let Some(refill) = &self.refill {
+                    refill
+                        .try_send(OutboundMessage::Binary(small(id)))
+                        .expect("a slot was just freed");
+                }
+                self.next_id += 1;
+                self.refills_left -= 1;
+            }
+            self.frames.lock().push((opcode, fin, data));
+            Ok(())
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<Result<(), ()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<Result<(), ()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// The messages a recording holds, in write order: a whole message, or a
+    /// `CHUNK` sequence rejoined, with the positions of its `CHUNK`s.
+    fn recorded_messages(frames: &[(u8, bool, Bytes)]) -> Vec<(Vec<u8>, Vec<usize>)> {
+        let mut messages = Vec::new();
+        let mut joined = Vec::new();
+        let mut at = Vec::new();
+        let mut last = false;
+        let mut position = 0;
+        for (opcode, fin, data) in frames {
+            match (*opcode, *fin) {
+                (OP_BINARY, false) => last = data[17] == 0xc3,
+                (OP_CONTINUE, true) => {
+                    joined.extend_from_slice(data);
+                    at.push(position);
+                    position += 1;
+                    if last {
+                        messages.push((std::mem::take(&mut joined), std::mem::take(&mut at)));
+                    }
+                }
+                (OP_BINARY, true) => {
+                    messages.push((data.to_vec(), Vec::new()));
+                    position += 1;
+                }
+                _ => {}
+            }
+        }
+        messages
+    }
+
+    #[tokio::test]
+    async fn a_gap_takes_only_the_messages_ready_when_it_began() {
+        let p = big_passable(0, 3 * C);
+        let (tx, rx) = mpsc::channel(256);
+        tx.try_send(OutboundMessage::Binary(p.clone()))
+            .expect("slot");
+        for id in 0..255 {
+            tx.try_send(OutboundMessage::Binary(small(id)))
+                .expect("slot");
+        }
+        let frames: Recorded = Arc::default();
+        let sink = RecordingSink {
+            frames: Arc::clone(&frames),
+            refill: Some(tx),
+            refills_left: 1_000,
+            next_id: 255,
+            in_answer: false,
+            last_header: false,
+        };
+        let framing = OutboundFraming::new(&ConnectionConfig::default(), true);
+        tokio::time::timeout(Duration::from_secs(10), outbound_task(sink, rx, framing))
+            .await
+            .expect("the writer ends once every sender is gone");
+
+        let frames = frames.lock().clone();
+        let messages = recorded_messages(&frames);
+        let answer = messages
+            .iter()
+            .find(|(_, at)| !at.is_empty())
+            .expect("the answer");
+        assert!(answer.0 == p, "the answer rejoins");
+        assert_eq!(answer.1.len(), 3, "every CHUNK of the answer");
+        let gaps: Vec<usize> = answer.1.windows(2).map(|w| w[1] - w[0] - 1).collect();
+        assert_eq!(gaps[0], 255, "the first gap takes the 255 ready messages");
+        assert!(gaps.iter().all(|&g| g <= 256), "gaps {gaps:?}");
+        let ids: Vec<u32> = messages
+            .iter()
+            .filter(|(_, at)| at.is_empty())
+            .map(|(bytes, _)| u32::from_be_bytes(bytes[..4].try_into().expect("four bytes")))
+            .collect();
+        let total = u32::try_from(ids.len()).expect("fits");
+        assert_eq!(
+            ids,
+            (0..total).collect::<Vec<_>>(),
+            "each small message once, in order"
+        );
+        assert!(total > 255, "refills were written");
+    }
+
+    #[tokio::test]
+    async fn chunked_writer_answers_ping_between_the_chunks_of_an_answer() {
+        let mut h = harness_with(true, true).await;
+        let big = big_passable(0, 4_400_000);
+        h.tx.send(OutboundMessage::Binary(big.clone()))
+            .await
+            .expect("queue open");
+        let k = big.len().div_ceil(C);
+        let mut client_stream = h.client_stream;
+        let reader = tokio::spawn(async move {
+            read_messages(&mut client_stream, k, Duration::from_secs(10)).await
+        });
+        tokio::time::timeout(Duration::from_secs(10), &mut h.tap.held)
+            .await
+            .expect("the first CHUNK within 10 s")
+            .expect("tap alive");
+        h.client_sink
+            .send(Message::Ping(Bytes::from_static(b"mid-answer")))
+            .await
+            .expect("ping sent");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        h.tap.release.notify_one();
+
+        let got = reader.await.expect("the client reader does not panic");
+        rejoin_chunks(&got, &big);
+        let frames = h.tap.frames.lock().clone();
+        let pong = frames
+            .iter()
+            .position(|f| f.opcode == OP_PONG && f.control == b"mid-answer")
+            .expect("a Pong with the Ping's payload");
+        let last = frames
+            .iter()
+            .rposition(|f| f.opcode == OP_CONTINUE && f.fin)
+            .expect("the last CHUNK's data frame");
+        assert!(pong < last, "the Pong came after the last CHUNK");
+    }
+
+    /// One input of the order property.
+    #[derive(Debug, Clone)]
+    enum Input {
+        Small(usize),
+        Passable(usize),
+        Ordered(usize),
+        Close,
+    }
+
+    /// Runs the chunked writer over `inputs`, all queued at once, and
+    /// returns the queue positions of the messages in the order their last
+    /// frame was written, and whether a Close was written last.
+    fn run_inputs(inputs: &[Input]) -> (Vec<usize>, Vec<Vec<u8>>, bool) {
+        let bytes: Vec<Vec<u8>> = inputs
+            .iter()
+            .enumerate()
+            .map(|(id, input)| match input {
+                Input::Small(len) => {
+                    let mut b = vec![0u8; (*len).max(4)];
+                    b[..4].copy_from_slice(&u32::try_from(id).expect("fits").to_be_bytes());
+                    b
+                }
+                Input::Passable(len) => big_passable(id, *len),
+                Input::Ordered(len) => big_ordered(id, *len),
+                Input::Close => Vec::new(),
+            })
+            .collect();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let frames: Recorded = Arc::default();
+        rt.block_on(async {
+            let (tx, rx) = mpsc::channel(256);
+            for (input, b) in inputs.iter().zip(&bytes) {
+                let msg = match input {
+                    Input::Close => OutboundMessage::Close(None),
+                    _ => OutboundMessage::Binary(b.clone()),
+                };
+                tx.try_send(msg).expect("slot");
+            }
+            drop(tx);
+            let sink = RecordingSink {
+                frames: Arc::clone(&frames),
+                refill: None,
+                refills_left: 0,
+                next_id: 0,
+                in_answer: false,
+                last_header: false,
+            };
+            let framing = OutboundFraming::new(&ConnectionConfig::default(), true);
+            outbound_task(sink, rx, framing).await;
+        });
+        let frames = frames.lock().clone();
+        let closed_last = frames
+            .last()
+            .is_some_and(|(opcode, _, _)| *opcode == OP_CLOSE)
+            || inputs.iter().all(|i| !matches!(i, Input::Close));
+        let index: Lookup<&[u8], usize> = bytes
+            .iter()
+            .enumerate()
+            .filter(|(id, _)| !matches!(inputs[*id], Input::Close))
+            .map(|(id, b)| (&b[..], id))
+            .collect();
+        let order = recorded_messages(&frames)
+            .iter()
+            .map(|(b, _)| {
+                *index
+                    .get(&b[..])
+                    .expect("a written message equals an input")
+            })
+            .collect();
+        (order, bytes, closed_last)
+    }
+
+    #[test]
+    fn the_writer_keeps_every_order_but_small_after_answer() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, TestRunner};
+        let input = prop_oneof![
+            4 => (1usize..=200).prop_map(Input::Small),
+            2 => ((C + 1)..=(5 * C)).prop_map(Input::Passable),
+            2 => ((C + 1)..=(5 * C)).prop_map(Input::Ordered),
+        ];
+        let strategy = (
+            proptest::collection::vec(input, 1..=24),
+            proptest::option::of(0usize..=24),
+        );
+        let mut runner = TestRunner::new(Config {
+            cases: 512,
+            ..Config::default()
+        });
+        runner
+            .run(&strategy, |(mut inputs, close_at)| {
+                if let Some(at) = close_at {
+                    inputs.insert(at.min(inputs.len()), Input::Close);
+                }
+                let close = inputs.iter().position(|i| matches!(i, Input::Close));
+                let (order, bytes, closed_last) = run_inputs(&inputs);
+                let before_close = |id: usize| close.is_none_or(|c| id < c);
+                let mut want: Vec<usize> = (0..inputs.len())
+                    .filter(|&id| !matches!(inputs[id], Input::Close) && before_close(id))
+                    .collect();
+                let mut got = order.clone();
+                got.sort_unstable();
+                want.sort_unstable();
+                prop_assert_eq!(got, want, "every message before a Close, once; none after");
+                prop_assert!(closed_last, "the Close is written last");
+                let done: Lookup<usize, usize> =
+                    order.iter().enumerate().map(|(at, &id)| (id, at)).collect();
+                for &a in &order {
+                    for &b in &order {
+                        if a < b && done[&b] < done[&a] {
+                            let ok =
+                                passable(&bytes[a]) && bytes[a].len() > C && bytes[b].len() <= C;
+                            prop_assert!(ok, "{} passed {} in {:?}", b, a, inputs);
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .expect("the order rule holds");
+    }
+
+    #[tokio::test]
+    async fn whole_message_writer_keeps_the_legacy_frames_for_an_answer() {
+        let mut h = harness(false).await;
+        let big = big_passable(0, 4_400_000);
+        let small_one = payload(2, 10);
+        for bytes in [&big, &small_one] {
+            h.tx.send(OutboundMessage::Binary(bytes.clone()))
+                .await
+                .expect("queue open");
+        }
+        h.tx.send(OutboundMessage::Close(None))
+            .await
+            .expect("queue open");
+        let got = read_until_close(&mut h.client_stream, Duration::from_secs(30)).await;
+        assert_eq!(got.len(), 2, "whole messages, no CHUNK");
+        assert!(got[0][..] == big[..] && got[1][..] == small_one[..]);
+        let frames = h.tap.frames.lock().clone();
+        assert_eq!(
+            wire_messages(&frames),
+            vec![expected_shapes(big.len()), expected_shapes(10)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tuned_client_socket_carries_bytes_both_ways() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (mut server, _) = listener.accept().await.expect("accept");
+        tune_client_socket(&mut server);
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            socket2::SockRef::from(&server)
+                .tcp_notsent_lowat()
+                .expect("read the option"),
+            CLIENT_NOTSENT_LOWAT
+        );
+        server.write_all(b"down").await.expect("write");
+        client.write_all(b"up").await.expect("write");
+        let mut down = [0u8; 4];
+        let mut up = [0u8; 2];
+        client.read_exact(&mut down).await.expect("read");
+        server.read_exact(&mut up).await.expect("read");
+        assert_eq!((&down, &up), (b"down", b"up"));
     }
 }

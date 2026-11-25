@@ -1447,8 +1447,14 @@ async fn main() -> anyhow::Result<()> {
     // into_make_service_with_connect_info threads the peer SocketAddr into each
     // request so the governor's PeerIpKeyExtractor can identify the client IP.
     // Without it, every rate-limited admin route 500s with "Unable To Extract Key".
+    // Bound every client socket's unsent bytes, so a small message the writer
+    // passes ahead of a long answer does not wait behind it in the kernel
+    // (TG-WS-004).
     axum::serve(
-        listener,
+        axum::serve::ListenerExt::tap_io(
+            listener,
+            topgun_server::network::handlers::websocket::tune_client_socket,
+        ),
         built
             .router
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),

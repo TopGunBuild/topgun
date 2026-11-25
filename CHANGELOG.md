@@ -21,10 +21,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a bandwidth-capped proxy, with the client in Node: a ~4.1 MB live snapshot at 1 Mbit/s and a
   ~512 KiB one at 0.4 Mbit/s with no reconnect, and in the recorded evidence ~4.1 MB at 0.3 and
   3.5 Mbit/s. A dead link is still detected within about 20 s of the last message (measured
-  19.8–19.9 s, idle and in the middle of a transfer). Other reconnects during a long transfer are not
-  ruled out: a subscription receiving more than a few live events per second can still be
-  disconnected by a full outbound queue (`TG-LIVE-003`). Older clients, clients that do not send
-  the pair and cluster-mode clients get whole messages as before.
+  19.8–19.9 s, idle and in the middle of a transfer). Older clients, clients that do not send the
+  pair and cluster-mode clients get whole messages as before.
+- **Fixed (client and server): live writes during a large query or search answer no longer
+  reconnect a slow link.** While a long answer arrived as `CHUNK`s, every other message waited
+  behind it, so on a slow link live events filled the connection's outbound queue, the server
+  disconnected the client (`TG-LIVE-003`), and the resubscribe resent the whole answer. Now, on a
+  connection opened with `tg_chunks=1`, the server writes messages of at most 64 KiB between the
+  `CHUNK`s of a `QUERY_RESP`, `SEARCH_RESP` or `HYBRID_SEARCH_RESP`; every other order is kept
+  (`TG-WS-004`). The client accepts such messages inside a `CHUNK` sequence, applies a live query's
+  updates after its snapshot, and sends every `QUERY_SUB` under a new id, so an answer of an
+  earlier subscribe is ignored. On Linux the server also keeps at most 16 KiB of unsent bytes in
+  each client socket (`TCP_NOTSENT_LOWAT`). Shown against a real server through a 1 Mbit/s proxy,
+  on a Mac: a ~4.1 MB live snapshot with live writes to its own map at 7 and 20 writes/s, 3 runs
+  each, completes with no reconnect and ends equal to a fresh query; before this change 20
+  writes/s reconnected. A client built from `main` between the large-message change and this one
+  reconnects at the first passed message. On Linux (Hetzner ccx33, 8 vCPU AMD EPYC-Milan, kernel
+  6.1, `net.ipv4.tcp_moderate_rcvbuf=0`), at 1 Mbit/s, 3 runs each: a `queryOnce` of a 10-row map
+  sent 8 s into that transfer settled in 1.90–1.95 s, with about 1.25 MB of it passed, and a write
+  to a second live query of the same client arrived 1.96–2.01 s after its acknowledgement, before
+  any row of the snapshot; before this change the `queryOnce` did not settle within its 5 s
+  timeout and the write arrived after the whole snapshot (one run each). Nothing is claimed at
+  lower rates. Large live events and sync responses still hold the messages behind them, and
+  buffers below the server's socket (the network, reverse proxies, receive buffers that Linux
+  auto-tunes up to megabytes by default, and on macOS the server's own send buffer) still delay a
+  passed message.
 - **Fixed (server): large answers reach the client.** An outbound WebSocket message larger than
   512 KB — a query, search or sync answer, or a live snapshot — closed the connection instead of
   reaching the client, and the client reconnected into the same failure. Such messages are now sent

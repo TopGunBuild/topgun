@@ -5,8 +5,14 @@
  * - Each accepted connection has its own budget: its server-to-client bytes
  *   are released in 10 ms ticks at the configured rate. Client-to-server bytes
  *   pass unthrottled.
- * - When more than 256 KiB waits on a connection, its upstream socket is
- *   paused, so the server meets TCP back-pressure as on a real slow link.
+ * - When more than `highWaterBytes` (default 256 KiB) waits on a connection,
+ *   its upstream socket is paused, so the server meets TCP back-pressure as on
+ *   a real slow link. A small value makes the proxy model a link rather than
+ *   add a deep buffer of its own.
+ * - A client that does not read stops its connection: while the client
+ *   socket refuses more bytes (`write` returns false), nothing more is
+ *   released to it until it drains, so the pending bytes pass the high-water
+ *   mark and the server meets back-pressure, as it would from that client.
  * - When either side of a connection ends or errors, the other side is
  *   destroyed and the connection's pending bytes are dropped, so an abandoned
  *   connection does not keep the server sending.
@@ -24,6 +30,8 @@ export interface ThrottleProxy {
   port: number;
   /** Server-to-client bytes written to clients so far, over every connection. */
   bytesDownstream(): number;
+  /** The local ports of the open connections' upstream sockets, to find them in `ss`. */
+  upstreamPorts(): number[];
   /** Sets the cap of existing and later connections; `Infinity` is unthrottled. */
   setRate(bitsPerSecond: number): void;
   blackhole(): void;
@@ -31,7 +39,7 @@ export interface ThrottleProxy {
 }
 
 const TICK_MS = 10;
-const HIGH_WATER = 256 * 1024;
+const DEFAULT_HIGH_WATER = 256 * 1024;
 /** The most credit a connection keeps across idle ticks, so it never bursts above the rate. */
 const MAX_CREDIT_TICKS = 5;
 
@@ -41,6 +49,8 @@ interface Link {
   pending: Buffer[];
   pendingBytes: number;
   credit: number;
+  /** The client socket refused more bytes; released again on its `'drain'`. */
+  blocked: boolean;
   dead: boolean;
   closed: boolean;
 }
@@ -48,8 +58,10 @@ interface Link {
 export async function startThrottleProxy(options: {
   targetPort: number;
   bitsPerSecond: number;
+  highWaterBytes?: number;
 }): Promise<ThrottleProxy> {
   let rate = options.bitsPerSecond;
+  const highWater = options.highWaterBytes ?? DEFAULT_HIGH_WATER;
   let downstream = 0;
   const links = new Set<Link>();
 
@@ -65,19 +77,26 @@ export async function startThrottleProxy(options: {
 
   const deliver = (link: Link, bytes: Buffer) => {
     downstream += bytes.length;
-    link.client.write(bytes);
+    if (!link.client.write(bytes)) {
+      link.blocked = true;
+      link.client.once('drain', () => {
+        link.blocked = false;
+      });
+    }
   };
 
   const pump = (link: Link, elapsedMs: number) => {
-    if (link.dead || link.closed) return;
+    if (link.dead || link.closed || link.blocked) return;
     if (rate === Infinity) {
-      for (const bytes of link.pending) deliver(link, bytes);
-      link.pending = [];
-      link.pendingBytes = 0;
+      while (link.pending.length > 0 && !link.blocked) {
+        const bytes = link.pending.shift()!;
+        link.pendingBytes -= bytes.length;
+        deliver(link, bytes);
+      }
     } else {
       const perMs = rate / 8 / 1000;
       link.credit = Math.min(link.credit + perMs * elapsedMs, perMs * TICK_MS * MAX_CREDIT_TICKS);
-      while (link.pending.length > 0 && link.credit >= 1) {
+      while (link.pending.length > 0 && link.credit >= 1 && !link.blocked) {
         const head = link.pending[0];
         const take = Math.min(head.length, Math.floor(link.credit));
         deliver(link, head.subarray(0, take));
@@ -87,7 +106,7 @@ export async function startThrottleProxy(options: {
         else link.pending[0] = head.subarray(take);
       }
     }
-    if (link.pendingBytes <= HIGH_WATER && link.upstream.isPaused()) link.upstream.resume();
+    if (link.pendingBytes <= highWater && link.upstream.isPaused()) link.upstream.resume();
   };
 
   let last = Date.now();
@@ -106,6 +125,7 @@ export async function startThrottleProxy(options: {
       pending: [],
       pendingBytes: 0,
       credit: 0,
+      blocked: false,
       dead: false,
       closed: false,
     };
@@ -115,13 +135,13 @@ export async function startThrottleProxy(options: {
 
     upstream.on('data', (bytes: Buffer) => {
       if (link.dead || link.closed) return;
-      if (rate === Infinity && link.pending.length === 0) {
+      if (rate === Infinity && link.pending.length === 0 && !link.blocked) {
         deliver(link, bytes);
         return;
       }
       link.pending.push(bytes);
       link.pendingBytes += bytes.length;
-      if (link.pendingBytes > HIGH_WATER) upstream.pause();
+      if (link.pendingBytes > highWater) upstream.pause();
     });
     client.on('data', (bytes: Buffer) => {
       if (link.dead || link.closed) return;
@@ -146,6 +166,8 @@ export async function startThrottleProxy(options: {
   return {
     port: address.port,
     bytesDownstream: () => downstream,
+    upstreamPorts: () =>
+      [...links].map((link) => link.upstream.localPort).filter((p): p is number => p !== undefined),
     setRate: (bitsPerSecond: number) => {
       rate = bitsPerSecond;
     },

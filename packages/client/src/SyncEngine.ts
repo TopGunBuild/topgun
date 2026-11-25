@@ -2429,11 +2429,7 @@ export class SyncEngine {
   }
 
   private handleQueryUpdate(message: QueryUpdateMessage): void {
-    const { queryId, key, value, changeType } = message.payload;
-    const query = this.queryManager.getQueries().get(queryId);
-    if (query) {
-      query.onUpdate(key, changeType === 'LEAVE' ? null : value);
-    }
+    this.queryManager.handleQueryUpdate(message.payload);
   }
 
   private async handleServerEvent(message: ServerEventMessage): Promise<void> {
