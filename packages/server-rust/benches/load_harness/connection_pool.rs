@@ -29,15 +29,15 @@ struct LoadTestClaims {
     exp: u64,
 }
 
+/// Whether connections opt in to chunked delivery (`--chunked`), as every
+/// `TopGunClient` does, so the run measures the chunk-capable writer.
+pub static CHUNKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Pool of authenticated WebSocket connections to the server.
 ///
 /// Connections are opened in batches to avoid overwhelming the server with
 /// simultaneous SYN packets, and each connection completes the full auth
 /// handshake before being considered ready.
-/// Whether connections opt in to chunked delivery (`--chunked`), as every
-/// `TopGunClient` does, so the run measures the chunk-capable writer.
-pub static CHUNKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 pub struct ConnectionPool {
     connections: Vec<Connection>,
 }

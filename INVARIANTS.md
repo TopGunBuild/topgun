@@ -5276,9 +5276,12 @@ weaker than a test.
     exposes it);
   - end-to-end order on macOS: the writer's order (c) holds there too, but the server's send
     buffer and the receiving side's buffers are auto-tuned up to 4 MiB and can hold most or all of
-    an answer, so a passed message can still reach the client after it (in 1 of 4 runs of R8 G on
-    a Mac, a write 8 s into a ~4.1 MB transfer arrived after the whole answer); the end-to-end
-    predicates are asserted on Linux only;
+    an answer, so a passed message can still reach the client after it: in R8 G on a Mac, a write
+    8 s into a ~4.1 MB transfer arrived after the whole answer in 2 of 9 runs of the final head
+    series (3 of 12 with the first run), and in R8 F a `queryOnce` during the transfer timed out at
+    its 5 s default in 9 of 9 (it settled at ~1.63 of 4.17 MB), so on macOS a `queryOnce` during a
+    transfer is not shown to settle within 5 s; the end-to-end predicates are asserted on Linux
+    only;
   - `NetworkModule`'s TLS serving path (`serve_tls`, through `axum_server`), which the binary does
     not use;
   - `queryOnce`'s 5 s default at 0.3 Mbit/s through the test proxy, whose derived bound is ~10.1 s;
