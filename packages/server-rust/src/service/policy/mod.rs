@@ -967,10 +967,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_condition_needing_a_missing_principal_fails_closed() {
-        use PolicyEffect::{Allow, Deny};
-        let empty = rec(vec![]);
-        let alice = principal("alice", &[]);
-        let not_admin_subject = principal("admin", &["admin"]);
         // (policies, caller, record, decision)
         type Case<'a> = (
             &'a [(PolicyEffect, Option<&'a str>)],
@@ -978,6 +974,10 @@ mod tests {
             rmpv::Value,
             PolicyDecision,
         );
+        use PolicyEffect::{Allow, Deny};
+        let empty = rec(vec![]);
+        let alice = principal("alice", &[]);
+        let not_admin_subject = principal("admin", &["admin"]);
         let cases: Vec<Case> = vec![
             (
                 &[(Allow, Some("auth.id == 'bob'"))],
