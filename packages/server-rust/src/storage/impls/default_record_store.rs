@@ -3376,12 +3376,13 @@ mod tests {
     // -----------------------------------------------------------------------
 
     mod record_cap {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Mutex;
 
         use super::materialize::{or_value, store_over, MAP};
         use super::*;
         use crate::service::domain::crdt::{apply_or_delta, normalize_to_or_map};
-        use crate::storage::datastores::{WriteBehindConfig, WriteBehindDataStore};
+        use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
         use crate::storage::map_data_store::RecordTooLarge;
         use crate::storage::record::{
             add_live_census, add_tombstone_bytes, live_census, sub_live_census, tombstone_bytes,
@@ -3389,7 +3390,7 @@ mod tests {
         };
         use crate::storage::record_store::MutateOutcome;
         use crate::storage::tombstone_gauge::{with_gauge_sink, IsolatedGauge};
-        use crate::storage::wal::OrDelta;
+        use crate::storage::wal::{OrDelta, Wal, WalEntry};
 
         const RECORD: &str = "topgun_write_behind_capacity_refusals_total{bound=\"record\"}";
         const OVERGROWN: &str = "past the per-record cap by more than one message; admitted";
@@ -3413,6 +3414,33 @@ mod tests {
             }
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
+            }
+        }
+
+        /// A WAL that only counts its frames, so a test sees whether a write
+        /// reached the log, as a snapshot or as a witnessed delta.
+        #[derive(Default)]
+        struct CountingWal {
+            frames: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl Wal for CountingWal {
+            async fn append(&self, _partition: u32, _entry: &WalEntry) -> anyhow::Result<()> {
+                self.frames.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+
+            async fn mark_applied(&self, _partition: u32, _sequence: u64) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn unapplied(&self, _partition: u32) -> anyhow::Result<Vec<WalEntry>> {
+                Ok(Vec::new())
+            }
+
+            fn durable_applied(&self, _partition: u32) -> Option<u64> {
+                Some(0)
             }
         }
 
@@ -3440,6 +3468,9 @@ mod tests {
             let mut merge_add = |value: &mut RecordValue| {
                 normalize_to_or_map(value);
                 let entry = new_entry.take().expect("runs once");
+                let witness = OrDelta::Add {
+                    entry: entry.clone(),
+                };
                 let tag_len = entry.tag.len() as u64;
                 let outcome = apply_or_delta(OrDelta::Add { entry }, value);
                 if outcome.added {
@@ -3449,7 +3480,7 @@ mod tests {
                 }
                 MutateOutcome {
                     changed: true,
-                    witness: None,
+                    witness: outcome.added.then_some(witness),
                 }
             };
             store
@@ -3511,8 +3542,8 @@ mod tests {
 
         // `TG-WB-012`, the in-place half: with a test cap `C` (so the clone
         // margin is `C / 2`), a mutation that would grow a slot past `C` from
-        // above `C − C/2` is refused and leaves the slot, its cost, the buffer
-        // and the census as they were; one that stays at or below `C` is
+        // above `C − C/2` is refused and leaves the slot, its cost, the buffer,
+        // the WAL and the census as they were; one that stays at or below `C` is
         // admitted; one that grows a slot past `C` from below the margin is
         // admitted and logged; a remove of a held tag shrinks an oversized slot.
         #[test]
@@ -3540,14 +3571,20 @@ mod tests {
                         .expect("runtime");
                     let sink = Arc::new(IsolatedGauge::new());
                     runtime.block_on(with_gauge_sink(sink, async {
-                        let write_behind = WriteBehindDataStore::new(
+                        let wal = Arc::new(CountingWal::default());
+                        let write_behind = WriteBehindDataStore::new_with_wal(
                             Arc::new(NullDataStore) as Arc<dyn MapDataStore>,
                             WriteBehindConfig {
                                 flush_interval_ms: 600_000,
                                 max_record_charge: CAP,
                                 ..WriteBehindConfig::default()
                             },
+                            Some(WalBootstrap {
+                                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                                sequence_start: 1,
+                            }),
                         );
+                        let frames = || wal.frames.load(Ordering::SeqCst);
                         let store = store_over(
                             Arc::clone(&write_behind) as Arc<dyn MapDataStore>,
                             Box::new(HashMapStorage::new()),
@@ -3558,6 +3595,7 @@ mod tests {
                         assert!(add(&store, "k", entry("s1", 2_500)).await.expect("seed"));
                         let (seeded, seeded_cost) = slot(&store, "k");
                         assert!(seeded_cost > CAP - CAP / 2 && seeded_cost < CAP);
+                        assert_eq!(frames(), 1, "an admitted add is framed");
                         let pending = write_behind.pending_operation_count();
                         let census = (live_census(), tombstone_bytes());
 
@@ -3568,6 +3606,7 @@ mod tests {
                         assert_eq!(records(), "1", "counted under bound=record");
                         assert_eq!(slot(&store, "k"), (seeded.clone(), seeded_cost));
                         assert_eq!(write_behind.pending_operation_count(), pending);
+                        assert_eq!(frames(), 1, "a refused write frames nothing");
                         assert_eq!((live_census(), tombstone_bytes()), census);
 
                         // A remove of a tag the slot does not hold grows it.
@@ -3576,6 +3615,7 @@ mod tests {
                         assert_eq!(records(), "2");
                         assert_eq!(slot(&store, "k"), (seeded, seeded_cost));
                         assert_eq!(write_behind.pending_operation_count(), pending);
+                        assert_eq!(frames(), 1, "a refused write frames nothing");
                         assert_eq!((live_census(), tombstone_bytes()), census);
 
                         // An add that keeps the slot at or below the cap.
