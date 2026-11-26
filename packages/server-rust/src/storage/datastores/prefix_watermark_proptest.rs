@@ -4673,9 +4673,6 @@ fn queued_entry(store_time: i64, sequence: u64) -> DelayedEntry {
         store_time,
         buffered_at: tokio::time::Instant::now(),
         sequence,
-        retry_count: 0,
-        next_attempt: None,
-        first_refused: None,
         wal_sequences: BTreeSet::from([sequence]),
     }
 }

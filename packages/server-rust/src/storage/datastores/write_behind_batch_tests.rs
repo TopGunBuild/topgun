@@ -774,7 +774,7 @@ async fn flush_until_gone(wb: &WriteBehindDataStore, keys: &[String]) {
     while wb.test_pass_open()
         || keys
             .iter()
-            .any(|key| wb.test_retry_state(MAP, key).is_some())
+            .any(|key| wb.test_buffered_at(MAP, key).is_some())
     {
         assert!(
             start.elapsed() < Duration::from_secs(60),
@@ -785,19 +785,11 @@ async fn flush_until_gone(wb: &WriteBehindDataStore, keys: &[String]) {
     }
 }
 
-/// `(retry_count, next_attempt is set, first_refused is set)` of the queued
-/// entry of each key; `None` for a key with no queued entry.
+/// `Some((0, false, false))` for each key whose entry is queued, `None` for a
+/// key with no queued entry: an entry carries no retry state of its own.
 fn retry_states(wb: &WriteBehindDataStore, keys: &[String]) -> Vec<Option<(u32, bool, bool)>> {
     keys.iter()
-        .map(|key| {
-            wb.test_retry_state(MAP, key).map(|(count, next)| {
-                (
-                    count,
-                    next.is_some(),
-                    wb.test_first_refused(MAP, key).is_some(),
-                )
-            })
-        })
+        .map(|key| wb.test_buffered_at(MAP, key).map(|_| (0, false, false)))
         .collect()
 }
 
@@ -1773,7 +1765,7 @@ async fn b12_no_pass_commit_is_non_durable() {
         poll_until(2_000, || {
             !wb.test_store_hold_active()
                 && !wb.test_pass_open()
-                && keys.iter().all(|k| wb.test_retry_state(MAP, k).is_none())
+                && keys.iter().all(|k| wb.test_buffered_at(MAP, k).is_none())
         })
         .await;
         let writes = node.engine.writes_since(mark);
@@ -1854,7 +1846,7 @@ async fn b13_after_an_accepted_probe_two_records_refused_in_different_halves_are
         .cloned()
         .collect();
     poll_until(2_000, || {
-        !wb.test_pass_open() && others.iter().all(|k| wb.test_retry_state(MAP, k).is_none())
+        !wb.test_pass_open() && others.iter().all(|k| wb.test_buffered_at(MAP, k).is_none())
     })
     .await;
     let after = node.engine.writes_since(mark);
@@ -2453,7 +2445,7 @@ async fn b20_a_key_commits_in_wal_order_across_passes_and_a_coalesced_survivor_s
     add_at(&wb, pin, 1).await;
     one_pass(&wb).await;
     assert!(
-        wb.test_retry_state(MAP, pin).is_some(),
+        wb.test_buffered_at(MAP, pin).is_some(),
         "the pin stays queued"
     );
 
