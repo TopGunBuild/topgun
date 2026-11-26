@@ -3527,7 +3527,11 @@ mod tests {
                 .with_ansi(false)
                 .with_max_level(tracing::Level::ERROR)
                 .finish();
-            let records = || rendered(&handle.render(), RECORD).unwrap_or(0.0);
+            let records = || {
+                rendered(&handle.render(), RECORD)
+                    .unwrap_or(0.0)
+                    .to_string()
+            };
             metrics::with_local_recorder(&recorder, || {
                 crate::storage::wal::with_thread_subscriber(subscriber, || {
                     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3561,7 +3565,7 @@ mod tests {
                         assert!(refused_at_the_cap(
                             add(&store, "k", entry("x1", 1_500)).await
                         ));
-                        assert_eq!(records(), 1.0, "counted under bound=record");
+                        assert_eq!(records(), "1", "counted under bound=record");
                         assert_eq!(slot(&store, "k"), (seeded.clone(), seeded_cost));
                         assert_eq!(write_behind.pending_operation_count(), pending);
                         assert_eq!((live_census(), tombstone_bytes()), census);
@@ -3569,7 +3573,7 @@ mod tests {
                         // A remove of a tag the slot does not hold grows it.
                         let absent = "t".repeat(1_500);
                         assert!(refused_at_the_cap(remove(&store, "k", &absent).await));
-                        assert_eq!(records(), 2.0);
+                        assert_eq!(records(), "2");
                         assert_eq!(slot(&store, "k"), (seeded, seeded_cost));
                         assert_eq!(write_behind.pending_operation_count(), pending);
                         assert_eq!((live_census(), tombstone_bytes()), census);
@@ -3579,7 +3583,7 @@ mod tests {
                             .await
                             .expect("admitted"));
                         assert!(slot(&store, "k").1 <= CAP);
-                        assert_eq!(records(), 2.0);
+                        assert_eq!(records(), "2");
 
                         // From below the margin past the cap in one mutation.
                         assert!(add(&store, "big", entry("b0", 100))
@@ -3595,7 +3599,7 @@ mod tests {
                         assert!(remove(&store, "big", "b0").await.expect("admitted"));
                         let shrunk = slot(&store, "big").1;
                         assert!(shrunk < grown && shrunk > CAP);
-                        assert_eq!(records(), 2.0);
+                        assert_eq!(records(), "2");
                     }));
                 });
             });
