@@ -681,6 +681,7 @@ mod tests {
             .upsert_policy(PermissionPolicy {
                 id: "allow-all".to_string(),
                 map_pattern: "*".to_string(),
+                key_pattern: None,
                 action: PermissionAction::All,
                 effect: PolicyEffect::Allow,
                 condition: None,

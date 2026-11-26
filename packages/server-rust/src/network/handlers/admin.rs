@@ -47,7 +47,7 @@ use crate::service::domain::index::IndexType;
 use crate::service::middleware::authorization::is_reserved_map_name;
 use crate::service::middleware::metrics::total_operations;
 use crate::service::policy::{
-    expr_parser::parse_permission_expr, validate_map_pattern, PermissionAction, PermissionPolicy,
+    expr_parser::parse_permission_expr, validate_policy, PermissionAction, PermissionPolicy,
     PolicyEffect, PolicyStore,
 };
 use crate::storage::{check_tenant, DropOutcome, MapDataStore};
@@ -633,6 +633,7 @@ pub async fn list_policies(
         .map(|p| PolicyResponse {
             id: p.id,
             map_pattern: p.map_pattern,
+            key_pattern: p.key_pattern,
             action: p.action,
             effect: p.effect,
             condition: p.condition,
@@ -677,20 +678,6 @@ pub async fn create_policy(
         )
     })?;
 
-    if let Err(segment) = validate_map_pattern(&req.map_pattern) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                code: 400,
-                message: format!(
-                    "mapPattern segment {segment:?} contains `*` but is neither `*` nor `**`; \
-                     it would match only a name spelled with that star"
-                ),
-                field: Some("mapPattern".to_string()),
-            }),
-        ));
-    }
-
     let id = req.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // Resolve condition: JSON `condition` takes precedence over `condition_expr` string.
@@ -715,10 +702,28 @@ pub async fn create_policy(
     let policy = PermissionPolicy {
         id: id.clone(),
         map_pattern: req.map_pattern.clone(),
+        key_pattern: req.key_pattern.clone(),
         action: req.action,
         effect: req.effect,
         condition: condition.clone(),
     };
+
+    if let Err(refusal) = validate_policy(&policy, state.config.tenant_claim.is_some()) {
+        // A condition taken from the expression is reported under that field.
+        let field = if refusal.field == "condition" && req.condition.is_none() {
+            "conditionExpr"
+        } else {
+            refusal.field
+        };
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                code: 400,
+                message: refusal.message,
+                field: Some(field.to_string()),
+            }),
+        ));
+    }
 
     policy_store.upsert_policy(policy).await.map_err(|e| {
         (
@@ -734,6 +739,7 @@ pub async fn create_policy(
     let response = PolicyResponse {
         id,
         map_pattern: req.map_pattern,
+        key_pattern: req.key_pattern,
         action: req.action,
         effect: req.effect,
         condition,
@@ -980,6 +986,7 @@ async fn run_tenant_delete(
     let deny = PermissionPolicy {
         id: tenant_deny_policy_id(tenant),
         map_pattern: format!("{tenant}.**"),
+        key_pattern: None,
         action: PermissionAction::All,
         effect: PolicyEffect::Deny,
         condition: None,
@@ -2700,6 +2707,7 @@ mod tenant_tests {
             .upsert_policy(PermissionPolicy {
                 id: "allow-all".to_string(),
                 map_pattern: "*".to_string(),
+                key_pattern: None,
                 action: PermissionAction::All,
                 effect: PolicyEffect::Allow,
                 condition: None,
@@ -2878,6 +2886,7 @@ mod tenant_tests {
             let req = CreatePolicyRequest {
                 id: None,
                 map_pattern: pattern.to_string(),
+                key_pattern: None,
                 action: PermissionAction::Read,
                 effect: PolicyEffect::Allow,
                 condition: None,
@@ -2906,6 +2915,7 @@ mod tenant_tests {
         let req = CreatePolicyRequest {
             id: None,
             map_pattern: "docs".to_string(),
+            key_pattern: None,
             action: PermissionAction::Write,
             effect: PolicyEffect::Allow,
             condition: None,
@@ -2922,6 +2932,222 @@ mod tenant_tests {
         );
         let stored = state.policy_store.unwrap().list_policies().await.unwrap();
         assert!(stored.is_empty());
+    }
+
+    fn policy_state(tenancy: bool) -> AppState {
+        AppState {
+            policy_store: Some(Arc::new(InMemoryPolicyStore::new())),
+            config: Arc::new(NetworkConfig {
+                tenant_claim: tenancy.then(|| "org".to_string()),
+                ..NetworkConfig::default()
+            }),
+            ..AppState::for_test()
+        }
+    }
+
+    fn policy_request(
+        map_pattern: &str,
+        key_pattern: Option<&str>,
+        action: PermissionAction,
+        condition_expr: Option<&str>,
+    ) -> CreatePolicyRequest {
+        CreatePolicyRequest {
+            id: None,
+            map_pattern: map_pattern.to_string(),
+            key_pattern: key_pattern.map(str::to_string),
+            action,
+            effect: PolicyEffect::Allow,
+            condition: None,
+            condition_expr: condition_expr.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_upsert_refuses_malformed_templates() {
+        use PermissionAction::{All, Read, Remove, Write};
+        // (request, tenancy, refused field, message fragment)
+        let refused: Vec<(CreatePolicyRequest, bool, &str, &str)> = vec![
+            (
+                policy_request("t.{auth.email}", None, Read, None),
+                true,
+                "mapPattern",
+                "{auth.email}",
+            ),
+            (
+                policy_request("t.{auth.id}x", None, Read, None),
+                true,
+                "mapPattern",
+                "{auth.id}x",
+            ),
+            (
+                policy_request("a{b", None, Read, None),
+                true,
+                "mapPattern",
+                "a{b",
+            ),
+            (
+                policy_request("t.p", Some("{auth.id}:*"), Read, None),
+                true,
+                "keyPattern",
+                "write rule",
+            ),
+            (
+                policy_request("t.p", Some("{auth.id}:*"), Remove, None),
+                true,
+                "keyPattern",
+                "evaluated as writes",
+            ),
+            (
+                policy_request("t.p", Some("{auth.id}:*"), All, None),
+                true,
+                "keyPattern",
+                "write rule",
+            ),
+            (
+                policy_request("t.p", Some(""), Write, None),
+                true,
+                "keyPattern",
+                "empty",
+            ),
+            (
+                policy_request("{auth.tenant}.p", None, Read, None),
+                false,
+                "mapPattern",
+                "tenancy is off",
+            ),
+            (
+                policy_request("t.p", Some("{auth.tenant}:*"), Write, None),
+                false,
+                "keyPattern",
+                "tenancy is off",
+            ),
+            (
+                policy_request("t.p", None, Write, Some("resource.to == 'x'")),
+                true,
+                "conditionExpr",
+                "reserved",
+            ),
+            (
+                policy_request("t.p", None, Write, Some("resource.topic == 'x'")),
+                true,
+                "conditionExpr",
+                "resource.topic",
+            ),
+            (
+                policy_request("t.p", None, Write, Some("resource == 'x'")),
+                true,
+                "conditionExpr",
+                "resource",
+            ),
+            (
+                policy_request("t.p", None, Write, Some("data.a == foo.x")),
+                true,
+                "conditionExpr",
+                "foo.x",
+            ),
+        ];
+        for (req, tenancy, field, fragment) in refused {
+            let state = policy_state(tenancy);
+            let label = format!("{req:?}");
+            let result = create_policy(claims(), State(state.clone()), Json(req)).await;
+            let (code, Json(body)) = result.expect_err(&label);
+            assert_eq!(code, StatusCode::BAD_REQUEST, "{label}");
+            assert_eq!(
+                body.field.as_deref(),
+                Some(field),
+                "{label}: {}",
+                body.message
+            );
+            assert!(body.message.contains(fragment), "{label}: {}", body.message);
+            let stored = state.policy_store.unwrap().list_policies().await.unwrap();
+            assert!(stored.is_empty(), "{label} must not be stored");
+        }
+
+        // A JSON condition is refused under `condition`.
+        let mut json = policy_request("t.p", None, Write, None);
+        json.condition = Some(topgun_core::messages::base::PredicateNode {
+            op: topgun_core::messages::base::PredicateOp::Eq,
+            attribute: Some("data.a".to_string()),
+            value_ref: Some("foo.x".to_string()),
+            ..Default::default()
+        });
+        let (_, Json(body)) = create_policy(claims(), State(policy_state(true)), Json(json))
+            .await
+            .expect_err("foo.x");
+        assert_eq!(body.field.as_deref(), Some("condition"));
+
+        for (req, tenancy) in [
+            (
+                policy_request("t.p", None, Write, Some("foo.x == 'v'")),
+                false,
+            ),
+            (policy_request("t.conv.{auth.id}", None, Read, None), false),
+            (
+                policy_request("t.p", Some("{auth.id}:*"), Write, None),
+                false,
+            ),
+            (
+                policy_request("{auth.tenant}.visitor.{auth.id}.**", None, All, None),
+                true,
+            ),
+            (
+                policy_request("t.p", Some("{auth.tenant}:{auth.id}"), Write, None),
+                true,
+            ),
+            (
+                policy_request("t.p", None, Write, Some("resource.key == auth.id")),
+                false,
+            ),
+            (
+                policy_request(
+                    "t.p",
+                    None,
+                    Write,
+                    Some("resource.map == 'm' && auth.tenant == 'acme'"),
+                ),
+                false,
+            ),
+        ] {
+            let label = format!("{req:?}");
+            let state = policy_state(tenancy);
+            let (code, _) = create_policy(claims(), State(state.clone()), Json(req))
+                .await
+                .unwrap_or_else(|(_, Json(body))| panic!("{label}: {}", body.message));
+            assert_eq!(code, StatusCode::CREATED, "{label}");
+            let stored = state.policy_store.unwrap().list_policies().await.unwrap();
+            assert_eq!(stored.len(), 1, "{label}");
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_list_returns_key_pattern() {
+        let state = policy_state(false);
+        for req in [
+            policy_request(
+                "t.presence",
+                Some("{auth.id}:*"),
+                PermissionAction::Write,
+                None,
+            ),
+            policy_request("t.plain", None, PermissionAction::Read, None),
+        ] {
+            let (code, _) = create_policy(claims(), State(state.clone()), Json(req))
+                .await
+                .unwrap_or_else(|(_, Json(body))| panic!("{}", body.message));
+            assert_eq!(code, StatusCode::CREATED);
+        }
+        let Json(list) = list_policies(claims(), State(state)).await.unwrap();
+        let body = serde_json::to_value(&list).unwrap();
+        let policies = body["policies"].as_array().unwrap();
+        let by_pattern = |pattern: &str| {
+            policies
+                .iter()
+                .find(|p| p["mapPattern"] == pattern)
+                .unwrap_or_else(|| panic!("{pattern} listed"))
+                .clone()
+        };
+        assert_eq!(by_pattern("t.presence")["keyPattern"], "{auth.id}:*");
+        assert!(by_pattern("t.plain").get("keyPattern").is_none());
     }
 
     // ── AC12 ─────────────────────────────────────────────────────────────

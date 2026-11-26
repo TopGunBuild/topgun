@@ -294,6 +294,7 @@ mod tests {
         PermissionPolicy {
             id: "deny-read".to_string(),
             map_pattern: map_pattern.to_string(),
+            key_pattern: None,
             action: PermissionAction::Read,
             effect: PolicyEffect::Deny,
             condition: None,

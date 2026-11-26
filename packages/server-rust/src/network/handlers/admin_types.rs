@@ -170,6 +170,10 @@ pub struct CreatePolicyRequest {
     #[serde(default)]
     pub id: Option<String>,
     pub map_pattern: String,
+    /// Optional `:`-segment pattern over the keys a write names; write rules only.
+    #[serde(default)]
+    #[schema(nullable = true)]
+    pub key_pattern: Option<String>,
     pub action: PermissionAction,
     pub effect: PolicyEffect,
     /// Optional predicate condition as a JSON object.
@@ -190,6 +194,9 @@ pub struct CreatePolicyRequest {
 pub struct PolicyResponse {
     pub id: String,
     pub map_pattern: String,
+    /// The key pattern of a key-scoped write rule; absent for any other.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub key_pattern: Option<String>,
     pub action: PermissionAction,
     pub effect: PolicyEffect,
     /// Optional predicate condition as a JSON object.

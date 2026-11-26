@@ -1771,6 +1771,7 @@ mod tests {
             PermissionPolicy {
                 id: "allow-notes".to_string(),
                 map_pattern: HTTP_MAP.to_string(),
+                key_pattern: None,
                 action: PermissionAction::Write,
                 effect: PolicyEffect::Allow,
                 condition: None,
@@ -1778,6 +1779,7 @@ mod tests {
             PermissionPolicy {
                 id: "deny-blocked".to_string(),
                 map_pattern: HTTP_MAP.to_string(),
+                key_pattern: None,
                 action: PermissionAction::Write,
                 effect: PolicyEffect::Deny,
                 condition: Some(PredicateNode {
@@ -2471,6 +2473,7 @@ mod tests {
             .upsert_policy(PermissionPolicy {
                 id: "allow-all".to_string(),
                 map_pattern: "*".to_string(),
+                key_pattern: None,
                 action: PermissionAction::All,
                 effect: PolicyEffect::Allow,
                 condition: None,
