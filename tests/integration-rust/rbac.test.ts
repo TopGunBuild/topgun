@@ -57,10 +57,10 @@ function makeWriteBatch(mapName: string, key: string): object {
 }
 
 /**
- * Creates an OP_BATCH payload whose record value contains an ownerId field.
+ * Creates an OP_BATCH payload that writes `value` as the record value.
  * Used for testing record-level write conditions.
  */
-function makeOwnerWriteBatch(mapName: string, key: string, ownerId: string): object {
+function makeValueWriteBatch(mapName: string, key: string, value: object): object {
   return {
     type: 'OP_BATCH',
     payload: {
@@ -70,7 +70,7 @@ function makeOwnerWriteBatch(mapName: string, key: string, ownerId: string): obj
           mapName,
           opType: 'PUT',
           key,
-          record: createLWWRecord({ ownerId }),
+          record: createLWWRecord(value),
         },
       ],
     },
@@ -404,7 +404,7 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
       // Write with ownerId matching the authenticated user's id.
       const resp = await sendAndWaitForResponse(
         client,
-        makeOwnerWriteBatch('owned-docs', 'doc-owned', 'owner-user-1'),
+        makeValueWriteBatch('owned-docs', 'doc-owned', { ownerId: 'owner-user-1' }),
         'owner write (matching)',
       );
 
@@ -430,7 +430,7 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
       // Write with ownerId that does NOT match the authenticated user's id.
       const resp = await sendAndWaitForResponse(
         client,
-        makeOwnerWriteBatch('owned-docs', 'doc-stolen', 'someone-else'),
+        makeValueWriteBatch('owned-docs', 'doc-stolen', { ownerId: 'someone-else' }),
         'owner write (mismatched)',
       );
 
@@ -458,13 +458,52 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
       // The admin bypass should allow it regardless of the condition.
       const resp = await sendAndWaitForResponse(
         adminClient,
-        makeOwnerWriteBatch('owned-docs', 'admin-override', 'any-other-user'),
+        makeValueWriteBatch('owned-docs', 'admin-override', { ownerId: 'any-other-user' }),
         'admin write (bypassing condition)',
       );
 
       expect(resp.type).toBe('OP_ACK');
     } finally {
       adminClient.close();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // `auth.…` in a condition names the authenticated caller; a value carrying
+  // its own `auth` object must not be able to impersonate one.
+  // -------------------------------------------------------------------------
+  test('a forged auth object in the value does not satisfy an auth.id literal condition', async () => {
+    await createPolicy(server.port, {
+      id: 'p-forged-auth-bob-write',
+      mapPattern: 'forged-auth-docs',
+      action: 'write',
+      effect: 'allow',
+      conditionExpr: "auth.id == 'bob'",
+    });
+
+    const alice = await createRustTestClient(server.port, { userId: 'alice', roles: ['user'] });
+    const bob = await createRustTestClient(server.port, { userId: 'bob', roles: ['user'] });
+
+    try {
+      await alice.waitForMessage('AUTH_ACK', 8000);
+      await bob.waitForMessage('AUTH_ACK', 8000);
+
+      const forged = await sendAndWaitForResponse(
+        alice,
+        makeValueWriteBatch('forged-auth-docs', 'doc-forged', { auth: { id: 'bob' }, title: 'x' }),
+        'alice write with a forged auth object',
+      );
+      expectDenied(forged);
+
+      const genuine = await sendAndWaitForResponse(
+        bob,
+        makeValueWriteBatch('forged-auth-docs', 'doc-genuine', { title: 'y' }),
+        'bob write without an auth field',
+      );
+      expect(genuine.type).toBe('OP_ACK');
+    } finally {
+      alice.close();
+      bob.close();
     }
   });
 });
