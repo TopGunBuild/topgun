@@ -77,6 +77,21 @@ fn lww(millis: u64) -> RecordValue {
     }
 }
 
+/// A value whose encoding is larger than a pass may carry. Taken first, it is
+/// admitted whole and the pass is cut before the next entry, so a test can
+/// store one write in a pass of its own while a later one stays queued.
+fn past_the_pass_byte_limit(millis: u64) -> RecordValue {
+    RecordValue::Lww {
+        value: Value::String("x".repeat(PASS_MAX_VALUE_BYTES)),
+        timestamp: Timestamp {
+            millis,
+            counter: 0,
+            node_id: String::new(),
+        },
+        ttl_ms: None,
+    }
+}
+
 /// Delays long enough that nothing drains behind an assertion: every flush in
 /// these tests is explicit, so a background pass can never resolve a sequence the
 /// test is about to read.
@@ -1173,8 +1188,14 @@ async fn a_refused_entry_holds_the_watermark_and_its_frame_is_replayed() {
     );
 
     // A later, healthy write of the same partition reaches the store, and must
-    // not drag the watermark over the refused one.
-    store.add(TEST_MAP, &keys[1], &lww(2), 1000).await.unwrap();
+    // not drag the watermark over the refused one. A refused commit refuses
+    // its whole pass, so the healthy write is stored only in a pass without
+    // the refused one: its earlier store time puts it first, and its value,
+    // past the pass byte limit, cuts that pass before the refused write.
+    store
+        .add(TEST_MAP, &keys[1], &past_the_pass_byte_limit(2), 0)
+        .await
+        .unwrap();
     wait_until("the later key's sequence to be resolved", || {
         store
             .test_pending_wal_sequences(partition)
@@ -4020,10 +4041,9 @@ impl Stepped {
 
     /// Keeps refusing the first key and accepting the other until the other
     /// key's write — the last one made — is resolved. Accepting its call is
-    /// not enough: a commit that holds both keys is refused on the first key
-    /// after the other key's write went through, and only the half that
-    /// holds the other key alone settles it. Does nothing more when the store
-    /// goes idle first.
+    /// not enough: a refused commit refuses its whole pass, so only a pass
+    /// that does not hold the first key settles it. Does nothing more when
+    /// the store goes idle first.
     async fn flush_the_other_key(&self) {
         let other = self.store.test_max_assigned_wal_sequence(self.partition);
         while self.pending().iter().any(|(seq, _)| *seq == other) {
@@ -4374,7 +4394,7 @@ async fn a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable
             TEST_MAP,
             key,
             WriteSource::Value(&or_value(&["a"], &[])),
-            0,
+            1000,
             Some(&add_tag("a")),
         )
         .await
@@ -4386,7 +4406,7 @@ async fn a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable
             TEST_MAP,
             key,
             WriteSource::Value(&or_value(&["a", "b"], &[])),
-            0,
+            1000,
             Some(&add_tag("b")),
         )
         .await
@@ -4398,11 +4418,14 @@ async fn a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable
     let pending_after_supersede = stepped.pending();
 
     // A second key of the same partition: its flush is what can move the
-    // partition's watermark past a sequence that was resolved too early. It
+    // partition's watermark past a sequence that was resolved too early. A
+    // refused commit refuses its whole pass, so it is stored only in a pass
+    // without the survivor: its earlier store time puts it first, and its
+    // value, past the pass byte limit, cuts that pass before the survivor. It
     // is accepted whenever its call comes up between the survivor's refusals.
     stepped
         .store
-        .add(TEST_MAP, other_key, &lww(1), 0)
+        .add(TEST_MAP, other_key, &past_the_pass_byte_limit(1), 0)
         .await
         .unwrap();
     let (refusals, _) = stepped.refuse_first_key(10).await;
@@ -4442,9 +4465,9 @@ async fn a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable
 
 #[tokio::test]
 async fn a_subsuming_write_over_a_survivor_resolves_the_carried_sequences() {
-    // The first backoff is min(base * 2, cap). It has to be long: the third
-    // write below must land inside it, and with a short one that would be a
-    // race against the flush loop instead of a two-second window.
+    // The first hold after a refusal is the backoff base. It has to be long:
+    // the third write below must land inside it, and with a short one that
+    // would be a race against the flush loop instead of a one-second window.
     let config = WriteBehindConfig {
         backoff_base_ms: 1000,
         backoff_cap_ms: 5000,
@@ -4582,7 +4605,7 @@ async fn a_retired_delta_entry_stays_replayable_until_its_survivor_is_durable() 
             TEST_MAP,
             key,
             WriteSource::Value(&or_value(&["a"], &[])),
-            0,
+            1000,
             Some(&add_tag("a")),
         )
         .await
@@ -4594,7 +4617,7 @@ async fn a_retired_delta_entry_stays_replayable_until_its_survivor_is_durable() 
             TEST_MAP,
             key,
             WriteSource::Value(&or_value(&["a", "b"], &[])),
-            0,
+            1000,
             Some(&add_tag("b")),
         )
         .await
@@ -4618,10 +4641,12 @@ async fn a_retired_delta_entry_stays_replayable_until_its_survivor_is_durable() 
     let pending_after_refusals = stepped.pending();
 
     // A second key of the same partition: its flush is what can move the
-    // partition's watermark past a sequence that was resolved too early.
+    // partition's watermark past a sequence that was resolved too early. It
+    // is stored in a pass of its own, cut before the survivor, as in the test
+    // of the superseded entry above.
     stepped
         .store
-        .add(TEST_MAP, other_key, &lww(1), 0)
+        .add(TEST_MAP, other_key, &past_the_pass_byte_limit(1), 0)
         .await
         .unwrap();
     stepped.flush_the_other_key().await;
