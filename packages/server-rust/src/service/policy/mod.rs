@@ -435,7 +435,7 @@ impl PolicyEvaluator {
         map_name: &str,
         data: &rmpv::Value,
     ) -> PolicyDecision {
-        use crate::service::domain::predicate::{evaluate_predicate, EvalContext};
+        use crate::service::domain::predicate::{evaluate_policy_condition, EvalContext};
 
         // Admin bypass is server-anchored: only subjects on the configured
         // allow-list bypass policy checks. A `roles: ["admin"]` JWT claim is
@@ -484,7 +484,10 @@ impl PolicyEvaluator {
                     auth: auth_value.as_ref(),
                     data,
                 };
-                if !evaluate_predicate(condition, &ctx) {
+                // An unresolved `auth` reference must neither make an allow
+                // match nor keep a deny from applying (TG-AUTHZ-002).
+                let unknown = policy.effect == PolicyEffect::Deny;
+                if !evaluate_policy_condition(condition, &ctx, unknown) {
                     continue;
                 }
             }
@@ -864,5 +867,283 @@ mod tests {
             .await;
         // No effective policies -> default deny
         assert_eq!(decision, PolicyDecision::Deny);
+    }
+
+    fn principal(id: &str, roles: &[&str]) -> topgun_core::Principal {
+        topgun_core::Principal {
+            id: id.to_string(),
+            roles: roles.iter().map(|r| (*r).to_string()).collect(),
+            tenant: None,
+        }
+    }
+
+    fn rec(pairs: Vec<(&str, rmpv::Value)>) -> rmpv::Value {
+        rmpv::Value::Map(
+            pairs
+                .into_iter()
+                .map(|(k, v)| (rmpv::Value::String(k.into()), v))
+                .collect(),
+        )
+    }
+
+    fn forged(field: &str, value: rmpv::Value) -> rmpv::Value {
+        rec(vec![("auth", rec(vec![(field, value)]))])
+    }
+
+    fn s(v: &str) -> rmpv::Value {
+        rmpv::Value::String(v.into())
+    }
+
+    /// Policies from `(effect, condition expression)`; `None` is unconditional.
+    fn evaluator(
+        action: PermissionAction,
+        policies: &[(PolicyEffect, Option<&str>)],
+    ) -> PolicyEvaluator {
+        let store = make_store_with(
+            policies
+                .iter()
+                .enumerate()
+                .map(|(i, (effect, expr))| PermissionPolicy {
+                    id: format!("p{i}"),
+                    map_pattern: "*".to_string(),
+                    action,
+                    effect: *effect,
+                    condition: expr.map(|e| {
+                        expr_parser::parse_permission_expr(e)
+                            .unwrap_or_else(|err| panic!("'{e}': {err}"))
+                    }),
+                })
+                .collect(),
+        );
+        // Configured, as a server that has written a policy is, so the gate
+        // evaluates instead of allowing every read.
+        store
+            .configured
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        PolicyEvaluator::new(store)
+    }
+
+    async fn write(
+        eval: &PolicyEvaluator,
+        who: Option<&topgun_core::Principal>,
+        data: &rmpv::Value,
+    ) -> PolicyDecision {
+        eval.evaluate(who, PermissionAction::Write, "m", data).await
+    }
+
+    #[tokio::test]
+    async fn stored_auth_literal_condition_reads_the_principal() {
+        use topgun_core::messages::base::PredicateOp;
+        let stored = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("auth.id".to_string()),
+            value: Some(s("bob")),
+            value_ref: None,
+            children: None,
+        };
+        assert_eq!(
+            expr_parser::parse_permission_expr("auth.id == 'bob'").unwrap(),
+            stored
+        );
+        let store = make_store_with(vec![PermissionPolicy {
+            id: "stored".to_string(),
+            map_pattern: "m".to_string(),
+            action: PermissionAction::Write,
+            effect: PolicyEffect::Allow,
+            condition: Some(stored),
+        }]);
+        let eval = PolicyEvaluator::new(store);
+        let alice = principal("alice", &[]);
+        let bob = principal("bob", &[]);
+        assert_eq!(
+            write(&eval, Some(&alice), &forged("id", s("bob"))).await,
+            PolicyDecision::Deny
+        );
+        assert_eq!(
+            write(&eval, Some(&bob), &rec(vec![])).await,
+            PolicyDecision::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn a_condition_needing_a_missing_principal_fails_closed() {
+        // (policies, caller, record, decision)
+        type Case<'a> = (
+            &'a [(PolicyEffect, Option<&'a str>)],
+            Option<&'a topgun_core::Principal>,
+            rmpv::Value,
+            PolicyDecision,
+        );
+        use PolicyEffect::{Allow, Deny};
+        let empty = rec(vec![]);
+        let alice = principal("alice", &[]);
+        let not_admin_subject = principal("admin", &["admin"]);
+        let cases: Vec<Case> = vec![
+            (
+                &[(Allow, Some("auth.id == 'bob'"))],
+                None,
+                empty.clone(),
+                PolicyDecision::Deny,
+            ),
+            (
+                &[(Allow, None), (Deny, Some("auth.id != 'admin'"))],
+                None,
+                empty.clone(),
+                PolicyDecision::Deny,
+            ),
+            (
+                &[(Allow, None), (Deny, Some("!(auth.id == 'admin')"))],
+                None,
+                empty.clone(),
+                PolicyDecision::Deny,
+            ),
+            (
+                &[(Allow, None), (Deny, Some("data.ownerId != auth.id"))],
+                None,
+                rec(vec![("ownerId", s("x"))]),
+                PolicyDecision::Deny,
+            ),
+            (
+                &[(Allow, Some("data.public == true && auth == null"))],
+                None,
+                rec(vec![("public", rmpv::Value::Boolean(true))]),
+                PolicyDecision::Allow,
+            ),
+            (
+                &[(Allow, Some("auth == null || auth.id == 'bob'"))],
+                None,
+                empty.clone(),
+                PolicyDecision::Allow,
+            ),
+            (
+                &[
+                    (Allow, None),
+                    (Deny, Some("auth != null && auth.id == 'mallory'")),
+                ],
+                None,
+                empty.clone(),
+                PolicyDecision::Allow,
+            ),
+            (
+                &[(Allow, None), (Deny, Some("auth.id != 'admin'"))],
+                Some(&alice),
+                empty.clone(),
+                PolicyDecision::Deny,
+            ),
+            (
+                &[(Allow, None), (Deny, Some("auth.id != 'admin'"))],
+                Some(&not_admin_subject),
+                empty.clone(),
+                PolicyDecision::Allow,
+            ),
+            (
+                &[(Allow, None), (Deny, Some("auth.tenant != 'x'"))],
+                Some(&alice),
+                empty.clone(),
+                PolicyDecision::Deny,
+            ),
+            (
+                &[(Allow, Some("auth.tenant == 'x'"))],
+                Some(&alice),
+                forged("tenant", s("x")),
+                PolicyDecision::Deny,
+            ),
+        ];
+        for (i, (policies, who, data, expected)) in cases.into_iter().enumerate() {
+            let eval = evaluator(PermissionAction::Write, policies);
+            assert_eq!(
+                write(&eval, who, &data).await,
+                expected,
+                "case {i}: {policies:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_only_conditions_without_a_record_decide_from_the_principal() {
+        let bob = principal("bob", &[]);
+        let alice = principal("alice", &[]);
+        let mallory = principal("mallory", &[]);
+
+        let reads = evaluator(
+            PermissionAction::Read,
+            &[(PolicyEffect::Allow, Some("auth.id == 'bob'"))],
+        );
+        assert!(reads.may_read_now(Some(&bob), "m"));
+        assert!(!reads.may_read_now(Some(&alice), "m"));
+        assert!(!reads.may_read_now(None, "m"));
+
+        let nil = rmpv::Value::Nil;
+        let writes = evaluator(
+            PermissionAction::Write,
+            &[(PolicyEffect::Allow, Some("auth.id == 'bob'"))],
+        );
+        assert_eq!(
+            write(&writes, Some(&bob), &nil).await,
+            PolicyDecision::Allow
+        );
+        assert_eq!(
+            write(&writes, Some(&alice), &nil).await,
+            PolicyDecision::Deny
+        );
+
+        let denied = evaluator(
+            PermissionAction::Write,
+            &[
+                (PolicyEffect::Allow, None),
+                (PolicyEffect::Deny, Some("auth.id == 'mallory'")),
+            ],
+        );
+        assert_eq!(
+            write(&denied, Some(&mallory), &nil).await,
+            PolicyDecision::Deny
+        );
+        assert_eq!(
+            write(&denied, Some(&bob), &nil).await,
+            PolicyDecision::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn documented_forms_read_record_and_principal_from_their_own_sides() {
+        let u1 = principal("u1", &[]);
+        let owner = evaluator(
+            PermissionAction::Write,
+            &[(PolicyEffect::Allow, Some("auth.id == data.ownerId"))],
+        );
+        let mine = rec(vec![
+            ("ownerId", s("u1")),
+            ("auth", rec(vec![("id", s("x"))])),
+        ]);
+        let theirs = rec(vec![
+            ("ownerId", s("x")),
+            ("auth", rec(vec![("id", s("u1"))])),
+        ]);
+        assert_eq!(write(&owner, Some(&u1), &mine).await, PolicyDecision::Allow);
+        assert_eq!(
+            write(&owner, Some(&u1), &theirs).await,
+            PolicyDecision::Deny
+        );
+
+        let editor = principal("e", &["editor"]);
+        let role = evaluator(
+            PermissionAction::Write,
+            &[(PolicyEffect::Allow, Some("data.role in auth.roles"))],
+        );
+        assert_eq!(
+            write(&role, Some(&editor), &rec(vec![("role", s("editor"))])).await,
+            PolicyDecision::Allow
+        );
+        let forged_admin = rec(vec![
+            ("role", s("admin")),
+            (
+                "auth",
+                rec(vec![("roles", rmpv::Value::Array(vec![s("admin")]))]),
+            ),
+        ]);
+        assert_eq!(
+            write(&role, Some(&editor), &forged_admin).await,
+            PolicyDecision::Deny
+        );
     }
 }

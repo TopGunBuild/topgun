@@ -602,11 +602,30 @@ impl<'a> Parser<'a> {
         }
     }
 
+    // `data.` is stripped from a compared field, so a record field named `auth`
+    // or `resource` would compile to the node that names the caller or the
+    // target (TG-AUTHZ-002) and be decided by them, not by the record.
+    fn refuse_reserved_record_field(&self, pos: usize, segs: &[String]) -> Result<(), ParseError> {
+        match segs {
+            [data, name, ..] if data == "data" && (name == "auth" || name == "resource") => {
+                Err(self.error_at(
+                    pos,
+                    &format!(
+                        "a record field named '{name}' cannot be referenced in a condition: '{name}.…' names the {}",
+                        if name == "auth" { "caller" } else { "target of the operation" }
+                    ),
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
     // Parses a field_ref (dotted identifier), returning (position, segments).
     fn parse_field_ref_raw(&mut self) -> Result<(usize, Vec<String>), ParseError> {
         let pos = self.current_pos();
         match self.current_token().clone() {
             Token::FieldRef(segs) => {
+                self.refuse_reserved_record_field(pos, &segs)?;
                 self.advance()?;
                 Ok((pos, segs))
             }
@@ -637,6 +656,7 @@ impl<'a> Parser<'a> {
         let pos = self.current_pos();
         match self.current_token().clone() {
             Token::FieldRef(segs) => {
+                self.refuse_reserved_record_field(pos, &segs)?;
                 self.advance()?;
                 Ok(RhsValue::FieldRef(segs))
             }
@@ -2201,5 +2221,51 @@ mod tests {
             data: &data_neither,
         };
         assert!(!evaluate_predicate(&node, &ctx3));
+    }
+
+    #[test]
+    fn a_record_field_named_auth_is_refused() {
+        for input in [
+            "data.auth.id == 'x'",
+            "data.auth == null",
+            "data.x == data.auth.y",
+            "auth.id == data.auth.y",
+            "data.auth.tags contains 'x'",
+            "data.x in data.auth.list",
+            "data.auth.p startsWith 'a'",
+        ] {
+            let err = parse_err(input);
+            assert!(
+                err.message.contains("record field named 'auth'"),
+                "'{input}': {}",
+                err.message
+            );
+        }
+        for input in ["data.resource.map == 'x'", "data.x == data.resource.key"] {
+            let err = parse_err(input);
+            assert!(
+                err.message.contains("record field named 'resource'"),
+                "'{input}': {}",
+                err.message
+            );
+        }
+        // A field whose name merely starts with the reserved word is a record field.
+        assert_eq!(
+            parsed("data.author == 'x'").attribute,
+            Some("author".to_string())
+        );
+    }
+
+    #[test]
+    fn auth_on_the_left_of_membership_and_literal_left_sides_stay_refused() {
+        for input in [
+            "'bob' == auth.id",
+            "1 == auth.x",
+            "'admin' in auth.roles",
+            "auth.id in auth.roles",
+            "auth.roles contains 'admin'",
+        ] {
+            parse_err(input);
+        }
     }
 }

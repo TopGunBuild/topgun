@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Security (server): a permission-policy condition's `auth.…` now reads the authenticated
+  caller, never the written record (`TG-AUTHZ-002`).** A condition comparing `auth`, `auth.<f>` or
+  `auth.<f>.<g>` with a literal (`auth.id == 'bob'`), or `auth.<f>` with another `auth.<g>`, was
+  decided by the record's own `auth` field, so a writer could satisfy an allow by putting
+  `{auth: {id: 'bob'}}` in its value, or escape a deny by leaving it out. Such conditions now read
+  the principal for every operator, also in policies stored before the upgrade and in JSON
+  `condition` nodes; nothing needs re-creating. A reference the principal cannot answer — no
+  authenticated caller, or an `auth.…` field other than `id` and `roles` — is unknown: an allow
+  does not match and a deny applies, also for the documented forms such as
+  `data.ownerId != auth.id`, whose deny did not apply to an anonymous caller before. `auth == null`
+  and `auth != null` are unchanged. An operation evaluated without a record — a read, a remove, an
+  OR-Map write, and every other write that carries no LWW record value — now decides
+  `auth`-only conditions from the principal; before, they never matched. `conditionExpr` refuses
+  `data.auth.…` and `data.resource.…` with 400. A stored condition whose compared field was a
+  record field named `auth` (`data.auth.<f> <op> …` with any operator, or `auth.<g> <op>
+  data.auth.<f>`) now reads the principal and has to be re-authored; a record field `auth` used
+  only on the right (`data.x == data.auth.y`) still reads the record. Query predicates are
+  unchanged.
 - **Fixed (server): an acknowledged write whose stored value exceeded 4 GiB is no longer lost
   silently.** RocksDB drops a batch entry above its per-entry limit with a status its Rust binding
   does not return, and wrote the rest of the batch — the key's version row and the advanced
