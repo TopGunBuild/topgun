@@ -1542,7 +1542,7 @@ data.role in auth.roles || data.public == true
 data.status == 'draft' && auth.id == 'alice'
 ```
 
-`auth.…` always names the authenticated caller, never the record, so a value that carries its own `auth` field cannot impersonate anyone; a record field named `auth` (or `resource`) cannot be referenced in a condition. The caller's fields are `id` and `roles` only. Without an authenticated caller, or for any other `auth.…` field, a comparison is unknown: it does not satisfy an `allow` and makes a `deny` apply. `auth == null` and `auth != null` test whether there is a caller.
+`auth.…` always names the authenticated caller, never the record, so a value that carries its own `auth` field cannot impersonate anyone; a `conditionExpr` cannot reference a record field named `auth` (or `resource`); a JSON `condition` whose `value_ref` is `data.auth.…` still reads that record field. The caller's fields are `id` and `roles` only. Without an authenticated caller, or for any other `auth.…` field, a comparison is unknown: it does not satisfy an `allow` and makes a `deny` apply. `auth == null` and `auth != null` test whether there is a caller.
 
 Supported operators: `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `contains`, `containsAll`, `containsAny`, `startsWith`, `endsWith`, combined with `&&`, `||`, `!`, and parentheses. Values are strings (`'...'`), numbers, or booleans. If you prefer to pass a structured predicate directly, send a `condition` JSON object instead — it takes precedence over `conditionExpr`.
 
