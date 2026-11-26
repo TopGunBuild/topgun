@@ -68,17 +68,59 @@ impl<'a> EvalContext<'a> {
 /// The `ctx.data` value is expected to be an `rmpv::Value::Map` for field-level
 /// access. Returns `false` if data is not a Map. `ctx.auth` is used when the
 /// predicate contains a `value_ref` pointing to the `auth` namespace.
+///
+/// Query scope: an attribute `auth.…` is a record path, because the client
+/// evaluates the same predicate locally against the record.
 #[must_use]
 pub fn evaluate_predicate(predicate: &PredicateNode, ctx: &EvalContext) -> bool {
+    evaluate_scoped(predicate, ctx, None)
+}
+
+/// Evaluates a permission-policy condition (`TG-AUTHZ-002`).
+///
+/// An attribute `auth` or `auth.…` names the authenticated principal
+/// (`ctx.auth`) and is never read from the record, so no record content can
+/// satisfy or defeat a condition's reference to the caller. Every other
+/// attribute reads `ctx.data`.
+///
+/// A leaf other than `IsNull`/`IsNotNull` whose attribute or `value_ref` is an
+/// `auth` reference that does not resolve in the principal (no principal, or a
+/// field it does not carry) evaluates to `unknown`, before the record side is
+/// looked at; `Not` evaluates its child with `!unknown`. Called with
+/// `unknown = false` for an allow and `true` for a deny, an unresolved
+/// reference never makes an allow match nor keeps a deny from applying. This
+/// is a sound over-approximation of Kleene three-valued evaluation: a leaf
+/// with an unresolved `auth` reference is unknown even where the record side
+/// alone would be false; it never fails open.
+#[must_use]
+pub fn evaluate_policy_condition(
+    predicate: &PredicateNode,
+    ctx: &EvalContext,
+    unknown: bool,
+) -> bool {
+    evaluate_scoped(predicate, ctx, Some(unknown))
+}
+
+/// `policy_unknown` is `None` in query scope and, in policy scope, the value an
+/// unresolved `auth` reference takes at this depth.
+fn evaluate_scoped(
+    predicate: &PredicateNode,
+    ctx: &EvalContext,
+    policy_unknown: Option<bool>,
+) -> bool {
     match predicate.op {
         // L2 combinators
         PredicateOp::And => {
             let children = predicate.children.as_deref().unwrap_or(&[]);
-            children.iter().all(|child| evaluate_predicate(child, ctx))
+            children
+                .iter()
+                .all(|child| evaluate_scoped(child, ctx, policy_unknown))
         }
         PredicateOp::Or => {
             let children = predicate.children.as_deref().unwrap_or(&[]);
-            children.iter().any(|child| evaluate_predicate(child, ctx))
+            children
+                .iter()
+                .any(|child| evaluate_scoped(child, ctx, policy_unknown))
         }
         PredicateOp::Not => {
             let children = predicate.children.as_deref().unwrap_or(&[]);
@@ -86,13 +128,16 @@ pub fn evaluate_predicate(predicate: &PredicateNode, ctx: &EvalContext) -> bool 
                 // Vacuously true if no children
                 true
             } else {
-                !evaluate_predicate(&children[0], ctx)
+                // The negation flips which outcome counts as safe, so an
+                // unknown child must take the opposite value for `Not` to
+                // return the caller's `unknown`.
+                !evaluate_scoped(&children[0], ctx, policy_unknown.map(|u| !u))
             }
         }
         // Null-check operators (don't require a value field)
         PredicateOp::IsNull | PredicateOp::IsNotNull => evaluate_null_check(predicate, ctx),
         // L1 leaf operators (require attribute + value)
-        _ => evaluate_leaf(predicate, ctx),
+        _ => evaluate_leaf(predicate, ctx, policy_unknown),
     }
 }
 
@@ -189,14 +234,37 @@ pub fn execute_query(entries: Vec<(String, rmpv::Value)>, query: &Query) -> Vec<
 /// Attribute lookup uses dot-path traversal to support nested fields (e.g., `"address.city"`).
 /// Comparison value is resolved from `value_ref` (if set) or `value` field. If `value_ref`
 /// cannot be resolved (unknown namespace or missing field), the predicate returns `false`.
-fn evaluate_leaf(predicate: &PredicateNode, ctx: &EvalContext) -> bool {
+///
+/// In policy scope (`policy_unknown` is `Some`) an `auth` attribute reads the
+/// principal, and an unresolved `auth` reference on either side yields the
+/// scope's unknown value (see `evaluate_policy_condition`).
+fn evaluate_leaf(
+    predicate: &PredicateNode,
+    ctx: &EvalContext,
+    policy_unknown: Option<bool>,
+) -> bool {
+    if let Some(unknown) = policy_unknown {
+        let unresolved =
+            |path: &str| auth_path(path).is_some_and(|rest| resolve_auth(ctx, &rest).is_none());
+        if predicate.attribute.as_deref().is_some_and(unresolved)
+            || predicate.value_ref.as_deref().is_some_and(unresolved)
+        {
+            return unknown;
+        }
+    }
+
     let Some(attribute) = &predicate.attribute else {
         return false;
     };
 
-    // Resolve attribute via dot-path traversal against ctx.data
-    let segments: Vec<&str> = attribute.split('.').collect();
-    let Some(actual) = resolve_dot_path(ctx.data, &segments) else {
+    let resolved = match policy_unknown.and_then(|_| auth_path(attribute)) {
+        Some(rest) => resolve_auth(ctx, &rest),
+        None => {
+            let segments: Vec<&str> = attribute.split('.').collect();
+            resolve_dot_path(ctx.data, &segments)
+        }
+    };
+    let Some(actual) = resolved else {
         return false;
     };
 
@@ -441,6 +509,23 @@ fn resolve_dot_path(root: &rmpv::Value, segments: &[&str]) -> Option<rmpv::Value
             .map(|(_, v)| v)?;
     }
     Some(current.clone())
+}
+
+/// The path inside the principal named by an `auth` reference: `auth` is the
+/// whole principal, `auth.a.b` is `[a, b]`; `None` for any other namespace.
+fn auth_path(path: &str) -> Option<Vec<&str>> {
+    if path == "auth" {
+        Some(Vec::new())
+    } else {
+        path.strip_prefix("auth.")
+            .map(|rest| rest.split('.').collect())
+    }
+}
+
+/// Resolves a path inside the principal; `None` without one.
+fn resolve_auth(ctx: &EvalContext, segments: &[&str]) -> Option<rmpv::Value> {
+    ctx.auth
+        .and_then(|principal| resolve_dot_path(principal, segments))
 }
 
 /// Resolves a variable reference string against an `EvalContext`.
@@ -2287,6 +2372,176 @@ mod tests {
         assert!(!evaluate_predicate(
             &is_null,
             &EvalContext::data_only(&data_present)
+        ));
+    }
+
+    fn s(v: &str) -> rmpv::Value {
+        rmpv::Value::String(v.into())
+    }
+
+    /// The principal as `PolicyEvaluator::evaluate` builds it: `{id, roles}`.
+    fn principal(id: &str, roles: &[&str]) -> rmpv::Value {
+        make_map(vec![
+            ("id", s(id)),
+            (
+                "roles",
+                rmpv::Value::Array(roles.iter().map(|r| s(r)).collect()),
+            ),
+        ])
+    }
+
+    fn forged(inner: Vec<(&str, rmpv::Value)>) -> rmpv::Value {
+        make_map(vec![("auth", make_map(inner))])
+    }
+
+    fn policy(
+        node: &PredicateNode,
+        auth: Option<&rmpv::Value>,
+        data: &rmpv::Value,
+        unknown: bool,
+    ) -> bool {
+        evaluate_policy_condition(node, &EvalContext { auth, data }, unknown)
+    }
+
+    #[test]
+    fn policy_auth_attributes_read_the_principal_not_the_record() {
+        let alice = principal("alice", &["user"]);
+        let bob = principal("bob", &["user"]);
+        let empty = make_map(vec![]);
+        let forged_bob = forged(vec![("id", s("bob"))]);
+
+        // Eq: a forged record does not make alice bob; bob needs no record field.
+        let eq = leaf(PredicateOp::Eq, "auth.id", s("bob"));
+        assert!(!policy(&eq, Some(&alice), &forged_bob, false));
+        assert!(policy(&eq, Some(&bob), &empty, false));
+
+        // Neq: inverted.
+        let neq = leaf(PredicateOp::Neq, "auth.id", s("bob"));
+        assert!(policy(&neq, Some(&alice), &forged_bob, false));
+        assert!(!policy(&neq, Some(&bob), &empty, false));
+
+        // Gt on an integer the principal does not carry is unknown; the record
+        // value is never consulted, whatever it says.
+        let gt = leaf(
+            PredicateOp::Gt,
+            "auth.level",
+            rmpv::Value::Integer(1.into()),
+        );
+        let forged_level = forged(vec![("level", rmpv::Value::Integer(5.into()))]);
+        assert!(!policy(&gt, Some(&alice), &forged_level, false));
+        // Gt on a field the principal carries (string ordering).
+        let gt_id = leaf(PredicateOp::Gt, "auth.id", s("aaa"));
+        assert!(policy(
+            &gt_id,
+            Some(&bob),
+            &forged(vec![("id", s("a"))]),
+            false
+        ));
+        let a_principal = principal("a", &[]);
+        assert!(!policy(
+            &gt_id,
+            Some(&a_principal),
+            &forged(vec![("id", s("zzz"))]),
+            false
+        ));
+
+        // Like.
+        let like = leaf(PredicateOp::Like, "auth.id", s("bo%"));
+        assert!(!policy(&like, Some(&alice), &forged_bob, false));
+        assert!(policy(&like, Some(&bob), &empty, false));
+
+        // JSON-shaped In on the principal's roles.
+        let in_roles = leaf(PredicateOp::In, "auth.roles", s("admin"));
+        let admin_roles = principal("carol", &["admin"]);
+        assert!(policy(&in_roles, Some(&admin_roles), &empty, false));
+        let forged_roles = forged(vec![("roles", rmpv::Value::Array(vec![s("admin")]))]);
+        assert!(!policy(&in_roles, Some(&alice), &forged_roles, false));
+
+        // Bare `auth` compares the principal map, never the record field `auth`.
+        let bare = leaf(PredicateOp::Eq, "auth", s("x"));
+        assert!(!policy(
+            &bare,
+            Some(&alice),
+            &make_map(vec![("auth", s("x"))]),
+            false
+        ));
+
+        // auth.X == auth.Y: both sides from the principal, the record is ignored.
+        let both = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("auth.id".to_string()),
+            value_ref: Some("auth.id".to_string()),
+            ..Default::default()
+        };
+        assert!(policy(
+            &both,
+            Some(&alice),
+            &forged(vec![("id", s("zzz"))]),
+            false
+        ));
+
+        // A field the principal does not carry is unknown, in both polarities.
+        let tenant = leaf(PredicateOp::Eq, "auth.tenant", s("x"));
+        let forged_tenant = forged(vec![("tenant", s("x"))]);
+        assert!(!policy(&tenant, Some(&alice), &forged_tenant, false));
+        assert!(policy(&tenant, Some(&alice), &forged_tenant, true));
+        let nested = leaf(PredicateOp::Eq, "auth.a.b", rmpv::Value::Integer(1.into()));
+        let forged_nested = forged(vec![(
+            "a",
+            make_map(vec![("b", rmpv::Value::Integer(1.into()))]),
+        )]);
+        assert!(!policy(&nested, Some(&alice), &forged_nested, false));
+        assert!(policy(&nested, Some(&alice), &forged_nested, true));
+
+        // A leaf with no attribute and an unresolved auth value_ref is unknown.
+        let ref_only = PredicateNode {
+            op: PredicateOp::Eq,
+            value_ref: Some("auth.id".to_string()),
+            ..Default::default()
+        };
+        assert!(!policy(&ref_only, None, &empty, false));
+        assert!(policy(&ref_only, None, &empty, true));
+
+        // Not flips the unknown value for its child, so Not(unknown) is unknown.
+        let not_tenant = combinator(PredicateOp::Not, vec![tenant.clone()]);
+        assert!(!policy(&not_tenant, Some(&alice), &empty, false));
+        assert!(policy(&not_tenant, Some(&alice), &empty, true));
+    }
+
+    #[test]
+    fn query_predicates_still_read_auth_paths_from_the_record() {
+        let node = leaf(PredicateOp::Eq, "auth.id", s("bob"));
+        let forged_bob = forged(vec![("id", s("bob"))]);
+        assert!(evaluate_predicate(
+            &node,
+            &EvalContext::data_only(&forged_bob)
+        ));
+        assert!(!evaluate_predicate(
+            &node,
+            &EvalContext::data_only(&make_map(vec![]))
+        ));
+
+        // A principal present in the context does not change a query's reading.
+        let bob = principal("bob", &[]);
+        let empty = make_map(vec![]);
+        assert!(!evaluate_predicate(
+            &node,
+            &EvalContext {
+                auth: Some(&bob),
+                data: &empty
+            }
+        ));
+
+        let by_ref = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("ownerId".to_string()),
+            value_ref: Some("auth.id".to_string()),
+            ..Default::default()
+        };
+        let owned = make_map(vec![("ownerId", s("bob"))]);
+        assert!(!evaluate_predicate(
+            &by_ref,
+            &EvalContext::data_only(&owned)
         ));
     }
 }
