@@ -3252,6 +3252,38 @@ weaker than a test.
 - **Discovered by:** the TODO-859/861 research; TODO-876; TODO-879; TODO-882.
 - **Status:** decided, **enforced**.
 
+### TG-AUTHZ-002: A permission-policy condition's `auth` reference is answered only by the authenticated principal
+
+- **Scope:** permission-policy conditions as `PolicyEvaluator::evaluate` decides them (every write
+  and read authorization, `may_read_now`, the HTTP `/sync` path and the event journal go through
+  it), whether the condition was stored from `conditionExpr`, sent as a JSON `condition`, or
+  stored before this rule. **Excluded:** query predicates (`evaluate_predicate`), where `auth.…`
+  is a record path, as in the client's local evaluation.
+- **Statement:** in a policy condition, a leaf attribute or `value_ref` `auth` or `auth.…` resolves
+  only from the authenticated principal (`{id, roles}`); the record is never consulted for it. A
+  reference that does not resolve there — no principal, or a field it does not carry — makes its
+  leaf (other than `IsNull` / `IsNotNull`) unknown, and the condition is decided in three-valued
+  logic with unknown counting as not matching for an allow and as matching for a deny (`Not`
+  flips it). This is a sound over-approximation of Kleene evaluation — a leaf with an unresolved
+  `auth` reference is unknown even where the record side alone would be false — and it never fails
+  open. `conditionExpr` refuses a field reference `data.auth…` or `data.resource…` on either side.
+- **Stated limits:** the principal carries only `id` and `roles`, so every other `auth.…` field is
+  unknown (an allow on it never matches, a deny on it always applies). A stored condition whose
+  compared field was a record field named `auth` now names the principal. JSON conditions are not
+  validated: their `value_ref` `data.auth.…` still reads the record.
+- **Maintaining code:** `service/domain/predicate.rs` `evaluate_policy_condition`,
+  `evaluate_scoped`, `evaluate_leaf`; `service/policy/mod.rs` `PolicyEvaluator::evaluate`;
+  `service/policy/expr_parser.rs` `refuse_reserved_record_field`.
+- **Enforcing test:** `policy_auth_attributes_read_the_principal_not_the_record`
+  (`predicate.rs`), `a_condition_needing_a_missing_principal_fails_closed` (`mod.rs`); also
+  `auth_only_conditions_without_a_record_decide_from_the_principal`,
+  `stored_auth_literal_condition_reads_the_principal`, `a_record_field_named_auth_is_refused`, and
+  at the wire the forged-`auth` case of `tests/integration-rust/rbac.test.ts`.
+- **Violation consequence:** a writer satisfies an allow written for another caller, or escapes a
+  deny, by putting an `auth` object in its value or leaving it out; a deny that needs the caller
+  stops applying to an anonymous one.
+- **Status:** decided, **enforced**.
+
 ### TG-TEN-001: With tenancy on, a client reaches only the names its tenant owns
 
 - **Scope:** the server binary's operation pipeline (which always installs the authorization layer,
