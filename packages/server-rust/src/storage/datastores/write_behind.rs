@@ -17,11 +17,13 @@ use topgun_core::PARTITION_COUNT;
 use tracing::{error, info, warn};
 
 use crate::storage::engine::SlotCell;
+#[cfg(test)]
+use crate::storage::map_data_store::MAX_RECORD_CHARGE_BYTES;
 use crate::storage::map_data_store::{
     check_map_name, check_tenant, merkle_leaf_hash, CommitDurability, DropOutcome, FlushCommit,
     LeafSink, Loaded, MapDataStore, MapNameRefused, MerkleLeaf, PutValue, RecordRefused,
     RecordTooLarge, ScanBatch, ScanCursor, ScanOrder, StoreBrokenCause, StoreErrorClass,
-    StoreInconsistent, StoreWrite, WriteSource, MAX_RECORD_CHARGE_BYTES,
+    StoreInconsistent, StoreWrite, WriteSource, CAPACITY_REFUSALS_COUNTER,
 };
 // The one routing function of WAL partitions; the version row key uses it too.
 use crate::storage::map_data_store::wal_partition as partition_for;
@@ -1853,9 +1855,6 @@ const FLUSH_PASSES_COUNTER: &str = "topgun_write_behind_flush_passes_total";
 const FLUSH_PASS_ENTRIES_COUNTER: &str = "topgun_write_behind_flush_pass_entries_total";
 /// Seconds one committed flush pass took, one observation per pass.
 const FLUSH_PASS_SECONDS_HISTOGRAM: &str = "topgun_write_behind_flush_pass_seconds";
-/// Writes of keys that were not buffered, refused because the buffer was at
-/// its capacity.
-const CAPACITY_REFUSALS_COUNTER: &str = "topgun_write_behind_capacity_refusals_total";
 /// The buffered values' memory in charge units, the counter the byte bound
 /// reads; set at the end of every pass.
 const BUFFERED_BYTES_GAUGE: &str = "topgun_write_behind_buffered_bytes";
@@ -5552,17 +5551,6 @@ impl WriteBehindDataStore {
         Ok(())
     }
 
-    #[cfg(test)]
-    fn max_record_charge(&self) -> u64 {
-        self.config.max_record_charge
-    }
-
-    #[cfg(not(test))]
-    #[allow(clippy::unused_self)]
-    fn max_record_charge(&self) -> u64 {
-        MAX_RECORD_CHARGE_BYTES
-    }
-
     /// Refuses a write once graceful drain is in progress, so any
     /// out-of-order arrival is visible as an error rather than silently lost,
     /// and once the store has failed, because the write would be acked and
@@ -5866,6 +5854,14 @@ impl WriteBehindDataStore {
 
 #[async_trait]
 impl MapDataStore for WriteBehindDataStore {
+    // Tests size the cap through the config; `refuse_oversized` and the
+    // record store's in-place guard both read it here, so they refuse at the
+    // same value. Production keeps the trait's default.
+    #[cfg(test)]
+    fn max_record_charge(&self) -> u64 {
+        self.config.max_record_charge
+    }
+
     async fn add(&self, map: &str, key: &str, value: &RecordValue, now: i64) -> anyhow::Result<()> {
         // One write path, not two: the same code the witness-bearing callers
         // run with the witness set. A second body would let the two drift. The

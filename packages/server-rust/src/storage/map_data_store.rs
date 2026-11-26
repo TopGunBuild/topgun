@@ -646,6 +646,13 @@ impl std::error::Error for StoreInconsistent {}
 /// message (at most 2 MiB) is charged below 5 MiB and is never refused.
 pub const MAX_RECORD_CHARGE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// The counter of writes refused at one of the write-behind's bounds, labelled
+/// `bound` (`keys`, `bytes`, `record`). Declared here, beside the per-record
+/// cap, because both the write-behind and the record store's in-place guard
+/// count under `bound="record"`, and the record store cannot name the
+/// write-behind's private module (`TG-WB-012`: one series for the record cap).
+pub(crate) const CAPACITY_REFUSALS_COUNTER: &str = "topgun_write_behind_capacity_refusals_total";
+
 /// A write refused at admission because one record would exceed
 /// [`MAX_RECORD_CHARGE_BYTES`] (`TG-WB-012`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -855,6 +862,17 @@ pub trait MapDataStore: Send + Sync {
     /// must then leave the key unchanged.
     fn admit_in_place(&self, _map: &str, _key: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    /// The per-record cap this store enforces, in charge bytes (`TG-WB-012`).
+    ///
+    /// One value for both checks: a plain write is refused against it at
+    /// admission, and the record store's in-place guard refuses an in-place
+    /// write that would grow a slot past it. Reading it from the store, not a
+    /// constant, keeps the two checks on the same value when a store sizes
+    /// its cap for tests.
+    fn max_record_charge(&self) -> u64 {
+        MAX_RECORD_CHARGE_BYTES
     }
 
     /// Whether a put to `map` can be stored: the map holds an id, or one is
