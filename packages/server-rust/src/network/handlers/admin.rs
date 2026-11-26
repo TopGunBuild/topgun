@@ -2897,6 +2897,33 @@ mod tenant_tests {
         }
     }
 
+    #[tokio::test]
+    async fn create_policy_refuses_a_record_field_named_auth_in_condition_expr() {
+        let state = AppState {
+            policy_store: Some(Arc::new(InMemoryPolicyStore::new())),
+            ..AppState::for_test()
+        };
+        let req = CreatePolicyRequest {
+            id: None,
+            map_pattern: "docs".to_string(),
+            action: PermissionAction::Write,
+            effect: PolicyEffect::Allow,
+            condition: None,
+            condition_expr: Some("data.auth.id == 'x'".to_string()),
+        };
+        let result = create_policy(claims(), State(state.clone()), Json(req)).await;
+        let (code, Json(body)) = result.expect_err("data.auth must be refused");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body.field.as_deref(), Some("conditionExpr"));
+        assert!(
+            body.message.contains("record field named 'auth'"),
+            "{}",
+            body.message
+        );
+        let stored = state.policy_store.unwrap().list_policies().await.unwrap();
+        assert!(stored.is_empty());
+    }
+
     // ── AC12 ─────────────────────────────────────────────────────────────
 
     /// `b.x` (primary), `b.y` (backup rows only), `b.z` (only buffered, not in
