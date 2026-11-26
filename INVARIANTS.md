@@ -689,9 +689,10 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
     for good once a live write of the key flushes above them. This is TODO-823's class (a key whose
     earlier frame failed at boot). A frame that follows a written subsuming frame of its key above
     every unresolved frame of the key below it is not held: it is applied at that boot.
-  - A frame the store refuses for ever holds the later non-subsuming frames of its key for as long
-    as it is refused, and stalls its partition's watermark, so every key of that partition written
-    meanwhile keeps a version row until the refusal ends (TODO-824, TODO-828).
+  - A store that refuses writes stalls the watermark of every partition with a pending write, and
+    a pending frame holds the later non-subsuming frames of its key, so every key of those
+    partitions written meanwhile keeps a version row until the store accepts again — for as long
+    as the refusal lasts (`TG-WB-009`).
   - The first boot of this binary after an unclean `batched` stop of an older binary: no version
     row exists yet, so a retained older frame of a key can overwrite a newer value whose frame was
     never fsynced — within the `batched` loss contract. A stop of the older binary that logs
@@ -836,11 +837,11 @@ CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
   longer than a synchronous critical section.
 - **Maintaining code:** `write_behind.rs` `put_back`, which a flush pass calls for an entry the
   store refused and for every entry it did not attempt when a store-wide hold began: the entry is
-  put back on its queue in one statement, so the guard is a temporary. The refusal branch no
-  longer awaits anything — the time of the next attempt is written on the entry and a later pass
-  honours it (`TG-WB-009`) — so at this site the statement holds by construction.
+  put back on its queue in one statement, so the guard is a temporary. The refusal branch awaits
+  nothing — the flush task keeps the store-wide hold, and a later pass takes the entry again
+  (`TG-WB-009`) — so at this site the statement holds by construction.
 - **Enforcing test:** `write_behind.rs::the_queue_shard_is_free_during_a_retry_backoff` — a write to
-  the partition of a refused entry, while that entry waits for its next attempt, must complete
+  the partition of a refused entry, while that entry waits for the hold to end, must complete
   within 1000 ms. With no await left in the refusal branch the test no longer discriminates at
   that site; it is kept as a guard. Two more enforcers cover other parts; the table below says
   which covers what.
@@ -993,8 +994,8 @@ measured; do not read it as reported.
   the put-back, so a cancelled flush task cannot leave it half done. A flush batch is one pass,
   and a pass holds at most `L = 1000` entries or 8 MiB of encoded values (the first entry taken
   whole); the entries it does not take stay queued, untouched. With `C = capacity > 0` this
-  bounds the count: `pending_count <= C - 1 + W + H`, `H <= min(L, C - 1 + W)`, and `H <= 1`
-  during a store-wide hold (`TG-WB-006`, "Not claimed", `capacity` as a hard limit). Every
+  bounds the count: `pending_count <= C - 1 + W + H` and `H <= min(L, C - 1 + W)` (`TG-WB-006`,
+  "Not claimed", `capacity` as a hard limit). Every
   commit of a pass settles its entries only after the store accepted it; a refused commit
   changes no entry's state before the refusal is handled (`TG-WB-009`).
 - **Mechanical predicate:** once the store accepts writes again and the write-behind store is
@@ -1028,9 +1029,9 @@ measured; do not read it as reported.
 | `a_refused_entry_superseded_by_a_newer_write_is_retired_into_it` | the retry path, one fixed order: counter, watermark, WAL sequences, watchdog class | CI (`cargo test`) |
 | `a_write_in_the_flush_window_then_a_refusal_leaves_nothing_unaccounted` | the retry path at its smallest: one write in the flush window, one refusal | CI (`cargo test`) |
 | `a_superseded_retry_entry_stays_replayable_until_its_survivor_is_durable` | WHY the WAL sequences are carried and not resolved at once: with a second key in the same partition, a crash before the newer entry is durable must still replay the retired frame | CI (`cargo test`) |
-| `a_subsuming_write_over_a_survivor_resolves_the_carried_sequences` | a later write that subsumes the newer entry resolves the sequences that entry carried. Also WHEN the retirement is accounted: while the refused entry's next attempt is still ahead, the count and the flushed watermark already have their settled values | CI (`cargo test`) |
+| `a_subsuming_write_over_a_survivor_resolves_the_carried_sequences` | a later write that subsumes the newer entry resolves the sequences that entry carried. Also WHEN the retirement is accounted: while the hold its refusal started is still in force, the count and the flushed watermark already have their settled values | CI (`cargo test`) |
 | `a_refused_entry_with_a_queued_newer_write_is_retired_into_it` | the retirement with the newer write already queued when the store refuses: the refused entry is not tagged `Abandoned`, and the key becomes durable through the newer write | CI (`cargo test`) |
-| `a_retired_delta_entry_stays_replayable_until_its_survivor_is_durable` | WHY the sequences are carried for a delta frame too: the newer entry is refused ten times and stays queued with both sequences `Live`; with a second key in the same partition, a crash before the newer entry is durable must still replay the retired frame | CI (`cargo test`) |
+| `a_retired_delta_entry_stays_replayable_until_its_survivor_is_durable` | WHY the sequences are carried for a delta frame too: the newer entry stays queued with both sequences `Live` across refused passes while a second key of the same partition is stored by a pass the 8 MiB limit cut; a crash before the newer entry is durable must still replay the retired frame | CI (`cargo test`) |
 | `a_retired_entry_hands_its_earlier_due_time_to_the_queued_write` | the queued entry takes the earlier due time of the two, so a key rewritten during an outage keeps its flush schedule | CI (`cargo test`) |
 | `buffered_bytes_equal_the_live_charges` | the byte counter, over generated adds, in-place cell write-throughs, removes, `remove_all`s, rewrites, refusals and accepts against a refusing-then-accepting inner store, and a pass parked inside its commit that holds its batch across the following steps and then settles — accepted, put back, or retired into a newer write of its key that came meanwhile (a superseded put-back): after every step the counter equals the queued charges plus the charges of the held batch; at idle both counters are 0 | CI (`cargo test`) |
 | `buffered_bytes_follow_insert_coalesce_and_settle`, `a_rewrite_while_a_pass_holds_the_key_counts_both_until_each_settles`, `a_superseded_put_back_releases_the_retired_charge`, `an_in_place_write_is_charged_at_the_cell_cost` | each site that moves the byte counter, one fixed order each: insert, smaller and larger coalesce, settle; a rewrite of a key a parked pass holds; the release of a retired entry; an in-place write charged at its cell's cost | CI (`cargo test`) |
@@ -1191,10 +1192,7 @@ weaker than a test.
   `pending_count + n <= C`, and whose queue insert ran after the count reached `C`; `W >= 1`
   while any write is in progress, because the inserting writer is itself past its check. `H` is the number of entries the running flush pass holds whose key
   was re-written while the pass holds them; a pass holds the entries that were due when it
-  began, at most `L` of them and 8 MiB of encoded values, and `batch_size` does not limit it. A third line holds while a store-wide hold is in force
-  (`TG-WB-009`): `H <= 1`, because a hold puts back every entry the pass did not attempt and a
-  pass during a hold holds at most the one entry it probes the store with; an entry waiting for
-  its next attempt is in its queue, not in a pass, and adds nothing to `H`. What changes with a
+  began, at most `L` of them and 8 MiB of encoded values, and `batch_size` does not limit it. What changes with a
   store that refuses is not the bound but how long it is met: nothing leaves the buffer, so the
   count stays at the bound until the store accepts again, and for that long every write of a key
   that is not buffered is refused. **Precondition:** one writer per key (`TG-KEY-001`). The
@@ -1209,7 +1207,7 @@ weaker than a test.
   writes admitted below `B` whose insert ran after the counter reached `B`, in-place writes
   admitted by `admit_in_place` included), `H_b <= min(L, N_held) × S_max` (the charges of held
   entries whose key was rewritten while the pass holds them; the 8 MiB pass limit is in encoded
-  bytes and does not bound it), and `H_b <= S_max` during a store-wide hold. The counter
+  bytes and does not bound it). The counter
   under-counts the in-place growth of a cell under a provenance that owes no write-through
   (`Backup`, `Replication`, `Load`) until its entry settles, and a cell whose write-through's WAL
   append failed until the key's next write-through; it over-counts, on the safe side, a rewrite
@@ -1391,216 +1389,137 @@ weaker than a test.
 
 ### TG-WB-009: A write-behind entry the store refuses is retried on a schedule and is never dropped
 
-- **Scope:** the flush task of `WriteBehindDataStore` on a node that is not shutting down,
-  whose flush task is alive and whose inner store has not reported itself broken
-  (`TG-WB-010`): the flush pass — its selection, its one commit and the halving of a refused
-  commit — what it does with an entry the store refused, the store-wide hold and its probe.
-  Below, `B = backoff_base_ms`, `K = backoff_cap_ms`, `I = flush_interval_ms`, and
-  `L = 1000`, the most entries one pass takes; the numbers are for the defaults (500, 5000 and
-  100 ms, and no write delay: `write_delay_ms = 0`) and for store calls that return promptly,
-  unless a clause says otherwise.
+- **Scope:** the flush task of `WriteBehindDataStore` on a node whose flush task is alive and
+  whose inner store has not reported itself broken (`TG-WB-010`): the flush pass — its selection
+  and its one commit — what it does with a refused commit, and the store-wide hold; and the
+  shutdown drain's retry of a refused commit. Below, `B = backoff_base_ms`,
+  `K = backoff_cap_ms`, `I = flush_interval_ms`, and `L = 1000`, the most entries one pass takes;
+  the numbers are for the defaults (500, 5000 and 100 ms, and no write delay:
+  `write_delay_ms = 0`) and for store calls that return promptly, unless a clause says otherwise.
 - **Precondition:** one writer per `(map, key)` at a time (`TG-KEY-001`).
 - **Statement:**
-  1. **Nothing is dropped.** An entry the store refuses goes back to its queue with its staging
-     slot, its count, its entry sequence pending and its WAL sequences `Live`, and is attempted
-     again; the number of attempts is not limited. No branch of the flush task clears a staging
-     slot, lowers the count, resolves an entry sequence or abandons a WAL sequence for an entry
-     the store refused. The only other outcome of a put-back is the retirement into a queued
-     newer write of the same key (`TG-WB-005`), which takes over the retry state.
-  2. **The schedule.** An entry is *due* once it is queued and its next attempt, if it has one,
-     has come: with `write_delay_ms = 0` (production) there is no store-time deadline, so
-     `store_time` orders a pass but does not decide whether an entry is due (`due_deadline`). A
-     non-zero `write_delay_ms` (tests and benches only) holds an entry back until
-     `store_time <= now − write_delay_ms` on the wall clock. After its n-th refusal on its own — alone in a commit, by a record-level
-     refusal, or as a refused probe — an entry is not attempted again for `min(B << n, K)`,
-     counted from the return of the refused call: 1000, 2000, 4000, 5000, 5000 … ms. The
-     arithmetic saturates: the wait stays at `K` for any number of refusals. The wait belongs to
-     the key, not to one write of it: a write that replaces the queued entry inherits it. A pass
-     takes up to `L` entries or 8 MiB of encoded values, whichever comes first (the first entry
-     taken is admitted whole whatever its size), with one slot reserved for the oldest due
-     refused entry: when any refused entry is due, the one whose time came longest ago is taken
-     first. The rest are taken in pass order — those never refused, in write order, then those
-     refused, the one whose time came longest ago first — and the commit is written in that
-     order, the reserved entry at its own place among the refused ones. A pass never waits on
-     behalf of an entry. A pass whose selection a limit cut (`L` entries, or the 8 MiB cap with its
-     entry put back), that stored something while the store is neither held nor broken, is
-     followed by the next pass without the interval sleep; after any other pass the loop waits
-     the interval or an explicit flush. Below the limits a pass takes every due entry.
-  3. **The store-wide hold.** A pass commits its entries in one store call. A refused commit of
-     one entry refuses that entry alone (statement 2). A refused commit of two or more entries
-     is split into two halves, committed one after the other in the same pass: when one half is
-     refused, the accepted half is stored and the refused half is split again; when **both
-     halves** are refused, the store refuses, not a record, and a hold starts: every entry of
-     the commit not yet stored goes back untouched (no backoff, no first-refusal time), the
-     entries the pass did not take stay queued, and until the hold's time has passed no pass
-     takes anything from a queue or calls the store, whoever woke it. Calls before a hold:
-     exactly 3 (the commit and its two halves). Then a pass takes ONE due entry, the probe: the
-     newest entry never refused, or, when none is due, the refused entry whose time came
-     longest ago. Accepted: the hold ends and passes go on over everything that is due.
-     Refused: the hold is renewed, longer. Hold lengths are `min(B << k, K)` after the k-th
-     failed probe in a row, counted from the return of the refused call: 500, 1000, 2000, 4000,
-     5000, 5000 … ms. A new hold always starts at the first length. **One exception:** the
-     first refused commit of two or more entries after an accepted probe is split to single
-     entries — both halves refused there start no hold; every refused part is halved until it
-     is one entry, which is refused alone. Only once that commit is resolved may a refused
-     commit start a hold again. The state is not armed at process start, and a hold that starts
-     by any other path disarms it.
-  4. **Bounds that follow.** Notation for the pass bounds: `m` = the least number of
-     never-refused entries a pass takes when that many are due —
-     `m = min(L − 1, ⌊(8 MiB − v_max) / v_max⌋)` for encoded values of at most `v_max` bytes, so
-     `m = 999` for values up to ~8 KiB and `m ≥ 1` while `v_max ≤ 4 MiB`; `C_max` = the longest
-     commit; `C_pass` = the longest pass, `≤ (1 + 2⌈log₂ L⌉) · C_max` when it meets one refused
-     record. Hold time is excluded from every pass count below.
-     - *One refused record in a pass of n entries:* at most `2⌈log₂ n⌉` extra commits; the
-       other `n − 1` are stored in that pass, and the refused one goes on the schedule of
-       statement 2 — n = 1000 → at most 20 extra.
-     - *k refused records:* at most `2k⌈log₂ n⌉` extra commits **as long as no two refused
-       halves meet**; when they do, a hold starts (statement 6). Proven by test for k = 1 and
-       for the meeting case; the general formula is **not proven** by a test.
-     - *A store that refuses everything is left alone.* The flush task makes at most
-       `3 + ⌈log₂(K / B)⌉ + 1 + D / K` commits in any stretch `D` that begins with the first
-       refusal and contains no accepted probe — `8 + D / 5 s`, 20 in 60 s — whatever the number
-       of buffered entries. When a refused call takes `t_r` to return, calls do not overlap and
-       the last term is `D / (K + t_r)`: a store that is slow to refuse is still left alone for
-       a whole hold after each refusal.
-     - *A store that goes down again right after an accepted probe:* the first refused commit,
-       of `n ≤ L` entries, costs at most `2n − 1` commits (a full halving tree) and starts no
-       hold; its entries take the per-entry schedule; the next refused commit of two or more
-       entries starts a hold after 3 calls. So a stretch `D` that begins with that refusal costs
-       at most `2L − 1 + 8 + D / 5 s` commits — 2 019 in 60 s with `L = 1000`. The state stays
-       armed until the next refused commit, however long that is. For a store that flaps —
-       accepted probes recurring — each accepted probe adds at most `2L − 1`; a bound over
-       several flaps is **not proven** by a test.
-     - *When the store returns at `T`, with no write after `T`:* every entry buffered at `T` is
-       in a pass that begins no later than `T + K + I + ⌈N_T / m⌉ · C_pass`, `N_T` =
-       entries buffered at `T` — `T + 5100 ms + C_pass` while they fit in one pass: the pass in
-       progress when the last of them becomes due may be followed by the interval, and every
-       later pass that leaves one behind was cut and is followed at once (a cut pass that
-       stores nothing, every entry refused at encoding, costs one more `I`). With writes after
-       `T` the never-refused ones among them precede refused entries; the refused-entry bound
-       below applies to those. `C_max` itself is **not bounded** by this store.
-     - *Order.* Entries of one partition may be stored in any order; the WAL watermark and the
-       flushed watermark stay at or below the lowest unresolved sequence. When the store
+  1. **Nothing is dropped.** An entry of a refused commit goes back to its queue with its staging
+     slot, its count, its entry sequence pending and its WAL sequences `Live`, and a later pass
+     attempts it again; the number of attempts is not limited. No branch of the flush task clears
+     a staging slot, lowers the count, resolves an entry sequence or abandons a WAL sequence for an
+     entry the store refused. The only other outcome of a put-back is the retirement into a queued
+     newer write of the same key (`TG-WB-005`).
+  2. **The pass.** With `write_delay_ms = 0` (production) every queued entry is due: `store_time`
+     orders a pass but does not decide whether an entry is due (`due_deadline`). A non-zero
+     `write_delay_ms` (tests and benches only) holds an entry back until
+     `store_time <= now − write_delay_ms` on the wall clock. A pass takes the due entries in
+     `(store_time, sequence)` order up to `L` entries or 8 MiB of encoded values, whichever comes
+     first (the first entry taken is admitted whole whatever its size), and commits them in that
+     order in one store call. A rewrite of a queued key keeps the key's `store_time`, so its place.
+     A pass never waits on behalf of an entry. A pass whose selection a limit cut, that stored
+     something while the store is neither held nor broken, is followed by the next pass without
+     the interval sleep; after any other pass the loop waits the interval or an explicit flush.
+     Below the limits a pass takes every due entry.
+  3. **The store-wide hold.** A commit the store refuses with an error not classified
+     `StoreBroken` puts every entry of the pass back untouched — no entry is singled out, and no
+     entry carries a retry state — counts one in `topgun_write_behind_flush_refusals_total`, and
+     starts a store-wide hold, or renews the one in force, of `min(B << k, K)`, `k` = the commits
+     refused in a row before this one, counted from the return of the refused call: 500, 1000,
+     2000, 4000, 5000, 5000 … ms. The count saturates, so the length stays at `K`. Until the
+     hold's time has passed no pass takes anything from a queue or calls the store, whoever woke
+     it. The first pass after it is an ordinary pass over everything that is due: accepted, the
+     hold ends and the count resets, so the next refusal holds for `B` again; refused, the hold is
+     renewed, longer. An entry whose value cannot be encoded is not a refusal: the pass puts every
+     entry it took back and the store stops the node (`TG-WB-010`, `site="encode"`).
+  4. **The shutdown drain continues the hold.** A hold in force when `hard_flush` joins the flush
+     task is honoured: no drain commit starts before it ends. A drain commit the store refuses
+     with an error not classified `StoreBroken` puts its entries back and renews the hold by the
+     same rule, `k` continuing the flush task's count, and the drain commits them again once it
+     ends. No commit starts at or after the drain deadline, and a drain whose hold ends at or
+     after it stops there; every entry not stored is abandoned, never resolved, so on a WAL-backed
+     store its frames replay at the next start. A broken store follows `TG-WB-010`.
+  5. **Bounds that follow.** Notation: `m = min(L, ⌊8 MiB / v_max⌋) ≥ 1`, the fewest entries a
+     pass takes when that many are due, for encoded values of at most `v_max` bytes; `C_pass` =
+     the longest pass, one commit and its selection and settle. Hold time is excluded from every
+     pass count below.
+     - *A store that refuses every call — the exact count.* With the defaults and calls that
+       return at once, the flush task calls it at 0, 0.5, 1.5, 3.5 and 7.5 s and then every 5 s
+       (12.5, …, 57.5 s): **15** calls in `[0, 60 s)`, with 10 and with 1000 entries buffered. A
+       call that takes time, and the wake-up of the loop on the interval, shift the later calls
+       later, which only lowers the count.
+     - *The same store — the loose bound.* At most `1 + ⌈log₂(K/B)⌉ + ⌈D/K⌉` calls in any
+       stretch `D` that begins with a refusal and contains no accepted call — 17 for `D = 60 s`.
+       A bound, not a count.
+     - *Any pattern of answers.* Every refused call is followed by at least `B` with no call,
+       whatever the store accepted before, so at most `1 + D/B` refused calls fall in any stretch
+       `D` — also for a store that flaps, and across the flush → drain boundary. A hold that
+       begins after an accepted call starts at `B`.
+     - *When the store returns at `T`, with no write after `T`:* every entry buffered at `T` is in
+       a pass that begins no later than `T + K + I + ⌈N_T / m⌉ · C_pass`, `N_T` = entries
+       buffered at `T` — `T + 5100 ms + C_pass` while they fit in one pass. `C_pass` itself is
+       **not bounded** by this store.
+     - *A new key `H` due at `t0`, outside a hold,* is in one of the first `⌈(Q + 1) / m⌉` passes
+       that begin after `t0`, `Q` = due entries ahead of it in `(store_time, sequence)` at `t0` —
+       within `⌈(Q + 1) / m⌉ · (C_pass + I)`. `store_time` affects only this **order**:
+       production passes the wall clock, which can step back, and after a backward step a later
+       write can sort ahead of `H` and count in `Q`. During a hold `H` waits for the hold's end,
+       at most `K` after the last refused call, and the bound applies from the first pass after
+       it.
+     - *The drain against a store that refuses every commit* makes at most
+       `1 + ⌈log₂(K/B)⌉ + ⌈T_drain / K⌉` commits, `T_drain` its deadline — a bound, not a count.
+     - *Order.* Entries of one partition may be stored out of their WAL order; the WAL watermark
+       and the flushed watermark stay at or below the lowest unresolved sequence. When the store
        accepts a key again, the last value it receives for the key is the key's newest buffered
        value, and it receives no older value of the key after a newer one.
-     - *A new healthy key `H` due at `t0`* is attempted in one of the first `⌈(Q_H + 1) / m⌉`
-       passes that begin after `t0`, `Q_H` = never-refused due entries ahead of it in
-       `(store_time, sequence)` at `t0` (later writes sort after it, except a rewrite of a key
-       already ahead, which keeps that key's place). `store_time` affects only this **order**:
-       production passes the wall clock, which can step back, and after a backward step a later
-       write can sort ahead of `H` and count in `Q_H`; whether `H` is due does not depend on it
-       (statement 2). A pass that begins after `t0` and does not take `H` was cut. In time,
-       outside holds: within `C_pass + I + (⌈(Q_H + 1) / m⌉ − 1) · C_pass` after `t0` while
-       every pass that does not take it stores something, and within
-       `⌈(Q_H + 1) / m⌉ · (C_pass + I)` in any case. During a hold, within `K + I` after it is
-       due — 5100 ms.
-       Refused records do not enter `Q_H`: they take the reserved slot and leftover capacity
-       only. For `v_max > 4 MiB` (`m` may be 0 in a pass whose reserved entry is large) the
-       bound is **not proven**.
-     - *A refused entry `T` due at `t0`* is attempted in one of the first `R_T + 1` passes that
-       begin after `t0`, outside holds, `R_T` = due refused entries ahead of `T` in
-       `(next_attempt, sequence)` at `t0` — whatever the load of new writes, because the
-       reserved slot takes the oldest due refused entry in every pass and an entry refused
-       again gets a later `next_attempt` (behind `T`), so the set ahead of `T` only shrinks. In
-       time: within `(R_T + 1) · (C_pass + I)` of `t0` plus hold time — `I` because a run of
-       passes ends after a pass that committed nothing (for example every entry refused alone),
-       and the loop then sleeps the interval. During holds one probe per hold applies: with `P`
-       records refused for ever, a refused healthy key is attempted after at most `P` refused
-       probes, at most `(P + 1) · (K + I)` — 158.1 s for `P = 30`; linear in `P`, not a constant.
-  5. **What is not bounded — part of the statement, not a footnote.**
-     Without classifying store errors there is no time by which every buffered key reaches the store while some records are refused for ever.
-     A healthy key written before `N` refused keys that have not been tried yet, with no newer
-     healthy write, waits up to one hold for each of them, when the hold rule takes them for a
-     store that is down (statement 6); so does a refused healthy key for every never-refused
-     entry that is due. Two or more records the engine itself refuses (not caught as a
-     record-level refusal before the commit) in different halves of a pass make the store look
-     down once: one hold starts; after its accepted probe the next refused commit is split to
-     single entries, which isolates every such record of that commit to the per-entry schedule
-     and stores the rest in the same pass. Bound for that case: one hold cycle plus at most
-     `2n − 1` commits for the split commit of `n` entries; then the isolated records are retried
-     alone (statement 2). Not proven: a stream of new engine-refused records arriving while
-     isolated ones are still retried — each new pair may cost one more hold cycle. No such
-     record-level engine refusal is known for redb (TODO-824); the known record-level errors are
-     refused per entry before the commit. Not bounded either: the time to store a healthy key
-     when encoded values exceed 4 MiB (statement 4). A refused entry is **not** starved by
-     sustained load: the reserved slot. **The cost of the reserved slot:** a pass whose
-     reserved entry is a record the store keeps refusing pays one halving, at most
-     `2⌈log₂ n⌉` extra commits; with `P` such records under sustained load each is due once per
-     `K`, so at most `P` halved passes per `K` — `P · 2⌈log₂ L⌉ = 20 P` extra commits per 5 s.
-     Not a defect, but a few tens of them can exceed the flush budget; not bounded further.
-  6. **The hold has a false positive.** Both halves of a refused commit refused start a
-     store-wide hold also on a healthy store when two of its particular records are refused, one
-     in each half: the hold is a heuristic for "the store is down", and such records look the
-     same to it. Two refused records anywhere in a pass start a hold even when everything else
-     in it is stored; only a pass with exactly one refused entry gets through without one.
-  7. **Records the store never accepts fill the buffer.** Records the store never accepts stay
-     in the buffer, and once they fill it the node refuses writes of new keys until an operator
-     intervenes.
-- **The known cost.** A refused entry keeps its entry sequence pending, so the node-wide flushed
-  watermark stops behind it and no tombstone is pruned on any map of the node. For a store that
-  returns, this is the correct behaviour: the fence must not pass a tombstone the store did not
-  get. For a record the store never accepts it lasts until the key is rewritten or the node
-  restarts (TODO-828, TODO-824).
+- **The known cost.** A refused commit keeps every entry it carried pending, so the node-wide
+  flushed watermark stops behind the lowest of them and no tombstone is pruned on any map of the
+  node until the store accepts a pass again. This is correct: the fence must not pass a tombstone
+  the store did not get. The fence stays node-wide: during an outage a per-partition or per-map
+  fence would release only partitions with nothing pending, and a prune there writes into the
+  same refusing store. How long and how far it is held:
+  `topgun_write_behind_oldest_refusal_age_seconds` (the time since the first refused commit of the
+  hold in force: pruning has stood still for at least this long, and may have stopped earlier,
+  at the write of the oldest pending entry), and, published unless `TOPGUN_PRUNE_RECORD` is a
+  falsey word, `topgun_or_prune_conjunct_durable_watermark_lag` (epochs),
+  `topgun_or_prune_conjunct_retained_epochs_durability_only` and
+  `topgun_or_prune_conjunct_retained_refs_durability_only` (what only this fence retains), and
+  `topgun_or_prune_durable_epoch_watermark` beside `topgun_or_prune_current_epoch`.
 - **Maintaining code:** `write_behind.rs` — `due_deadline` (no store-time deadline at
-  `write_delay_ms = 0`), `run_flush_pass`, `select_pass` (the selection with
-  the reserved slot and the pass limits), `encode_put`, `commit_prepared` (rows planned per
-  commit), `settle_batch`, `commit_resolving_records`, `commit_bisect` (the halving, the
-  both-halves rule), `start_hold`, the `split_to_singles` state of `RetrySchedule`,
-  `requeue_refused`, `put_back`, `settle_stored`, `choose_probe`, `retry_backoff`,
-  `flush_loop` (the next pass at once only after a cut pass), `PassSelection::cut`,
-  `report_retries`; `PartitionQueue::best_due`, `take`;
-  `DelayedEntry::pass_order`, `inherit_from`; `PartitionQueue::retire_into_queued` (the retry
-  state of the retired entry).
-- **Enforcing test:** `write_behind.rs::a_refused_entry_stays_buffered_and_holds_the_flushed_watermark`,
+  `write_delay_ms = 0`), `run_flush_pass`, `select_pass` (the selection and the pass limits),
+  `encode_put`, `commit_prepared` (rows planned per commit), `settle_batch`, `put_back`,
+  `settle_stored`, `hold_after_refusal`, `end_hold`, `publish_hold`, `retry_backoff`,
+  `RetrySchedule`, `HoldState`, `flush_loop` (the next pass at once only after a cut pass),
+  `PassSelection::cut`, `report_retries`, `report_hold`, `drain_for_shutdown`, `drain_pass`,
+  `commit_drain_batch`; `PartitionQueue::take`, `PartitionQueue::retire_into_queued`;
+  `DelayedEntry::pass_order`, `inherit_from`.
+- **Enforcing test:** `write_behind.rs::a_refused_commit_starts_a_hold_after_one_call`,
+  `write_behind.rs::a_refused_single_entry_commit_starts_a_hold`,
+  `write_behind.rs::the_pass_after_a_hold_stores_everything_due_in_one_call`,
+  `write_behind.rs::a_store_that_refuses_everything_gets_fifteen_calls_a_minute`,
+  `write_behind.rs::refused_calls_are_at_least_the_base_apart_whatever_the_store_does`,
+  `write_behind.rs::the_refusal_series_follow_the_hold`,
+  `write_behind.rs::the_drain_retries_a_refused_commit_until_its_deadline`,
+  `write_behind.rs::a_refused_tombstone_holds_the_fence_until_the_store_takes_it`,
   `write_behind.rs::an_entry_refused_for_longer_than_the_old_ladder_is_stored_when_the_store_returns`,
-  `write_behind.rs::a_pass_over_refused_entries_ends_without_a_timer_wait`,
-  `write_behind.rs::one_refused_entry_costs_one_store_call_per_backoff_and_delays_no_other_key`,
-  `write_behind.rs::a_rewritten_refused_key_keeps_its_backoff`,
-  `write_behind.rs::a_superseded_entry_hands_its_backoff_to_the_queued_write`,
-  `write_behind.rs::a_store_that_refuses_everything_gets_a_bounded_number_of_calls`,
   `write_behind.rs::a_hold_makes_no_store_call_even_when_a_flush_is_requested`,
   `write_behind.rs::after_a_refusal_longer_than_the_old_ladder_the_buffer_drains_within_one_backoff_cap_and_one_interval`,
-  `write_behind.rs::keys_of_one_partition_are_stored_out_of_write_order_and_the_watermarks_follow`,
   `write_behind.rs::a_refused_cell_entry_persists_what_the_cell_holds_when_it_is_accepted`,
-  `write_behind.rs::healthy_keys_written_after_refused_ones_are_never_starved`,
-  `write_behind.rs::a_refused_healthy_key_is_reached_after_at_most_one_probe_per_rejected_key`,
   `write_behind.rs::a_store_that_refuses_slowly_is_called_once_at_a_time_and_left_alone_for_a_hold`,
-  `write_behind.rs::never_refused_entries_are_stored_before_refused_ones_in_a_pass`,
-  `write_behind.rs::refused_entries_are_attempted_longest_waiting_first`,
   `write_behind.rs::entries_put_back_by_a_hold_are_accounted_like_a_retry`,
-  `write_behind.rs::an_accepted_probe_ends_the_hold_and_the_next_trip_starts_at_the_first_length`,
-  `write_behind.rs::one_refused_record_among_healthy_ones_starts_no_hold`,
-  `write_behind.rs::a_probe_does_not_take_an_entry_whose_time_has_not_come`,
-  `write_behind.rs::a_probe_whose_key_was_rewritten_before_it_was_taken_stores_the_new_value_in_that_pass`,
-  `write_behind.rs::an_accepted_probe_is_followed_by_a_normal_pass_over_what_is_due`,
-  `write_behind.rs::the_probe_is_the_never_refused_entry_with_the_latest_store_time_whatever_its_sequence`,
-  `write_behind.rs::an_entry_refused_a_hundred_times_backs_off_at_the_cap_and_the_flush_task_lives`,
-  `write_behind.rs::a_refusal_count_at_its_maximum_stays_there`, and the nineteen tests of
-  `write_behind_batch_tests.rs` over a counting engine on redb (redb: no
+  `write_behind.rs::a_refused_pass_count_at_its_maximum_holds_for_the_cap_and_the_flush_task_lives`,
+  the tests of `write_behind_batch_tests.rs` over a counting engine on redb (redb: no
   `unsynced_write_survives_process_crash`, so its pass commits are durable):
   `b01_a_pass_is_one_durable_engine_write_holding_its_entries_and_rows`,
   `b02_a_pass_takes_at_most_1000_entries_or_8_mib_and_the_first_entry_whole`,
   `b03_passes_run_back_to_back_while_entries_are_due`,
-  `b04_one_refused_record_is_isolated_with_at_most_2_log2_n_extra_commits`,
-  `b05_a_store_that_refuses_every_commit_starts_a_hold_after_three_calls`,
-  `b06_refused_records_in_both_halves_start_a_hold_the_documented_false_positive`,
-  `b07_record_level_refusals_are_handled_per_entry_without_halving`,
+  `b05_a_store_that_refuses_every_commit_starts_a_hold_after_one_call`,
+  `b07_the_pass_byte_limit_counts_encoded_bytes`,
   `b08_a_broken_store_in_a_pass_resolves_nothing_and_calls_no_more`,
   `b09_the_shutdown_drain_commits_in_passes_with_rows_and_stops_at_its_deadline`,
   `b10_a_refused_commit_leaves_staging_counts_and_both_watermarks_unchanged`,
   `b11_after_the_store_returns_every_buffered_entry_is_attempted_within_the_formula`,
   `b12_no_pass_commit_is_non_durable`,
-  `b13_after_an_accepted_probe_two_records_refused_in_different_halves_are_isolated_without_a_new_hold`,
-  `b14_a_store_that_goes_down_right_after_an_accepted_probe_splits_once_then_holds`,
-  `b15_a_half_committed_after_its_sibling_plans_its_rows_after_the_sibling_settled`,
-  `b16_a_recommit_never_marks_a_refused_entry_applied`,
-  `b17_a_refused_entry_is_attempted_under_sustained_load`,
-  `b18_a_new_healthy_key_waits_at_most_its_queue_position_in_passes` and
-  `b19_a_run_of_passes_yields_and_stops_at_the_shutdown_signal`, and in `write_behind.rs` the
-  tests of the defaults and the head age:
+  `b18_a_new_healthy_key_waits_at_most_its_queue_position_in_passes`,
+  `b19_a_run_of_passes_yields_and_stops_at_the_shutdown_signal` and
+  `b20_a_key_commits_in_wal_order_across_passes_and_a_coalesced_survivor_stores_its_own_wal_sequence`,
+  and in `write_behind.rs` the tests of the defaults and the head age:
   `default_config_stores_a_write_within_two_flush_intervals`,
   `a_write_ahead_of_the_wall_clock_is_due_at_once`,
-  `a_pass_that_stores_nothing_ends_the_run`,
   `a_pass_cut_by_the_byte_cap_runs_on`,
   `a_pass_cut_by_the_entry_cap_runs_on`,
   `an_uncut_pass_waits_for_the_interval`,
@@ -1610,18 +1529,26 @@ weaker than a test.
   `the_report_walks_the_queues_at_most_once_a_second`,
   `an_emptied_buffer_is_reported_at_once` and
   `a_hold_that_ends_and_begins_again_between_reports_is_walked`. All run in CI (`cargo test`).
-  Which test holds which bound: one refused record, b04 (n = 1000, at most 21 writes); the
-  meeting case, b06; the store that refuses everything, `a_store_that_refuses_everything_gets_a_bounded_number_of_calls`
-  and b05; the store that goes down right after an accepted probe, b14 (n = 1000: at most
-  1 999 commits and no hold, then a hold after exactly 3 more); the store that returns, b11; a
-  new healthy key, `healthy_keys_written_after_refused_ones_are_never_starved`, b04 and b18; a
-  refused entry under sustained load, b17; the split to single entries after an accepted probe,
-  b13. At process level, over redb with an injected refusal:
-  `tests/integration-rust/store-refusal-liveness.test.ts` — the refused write stays readable, a
-  retry warning is logged, the write reaches the store once the store accepts again, and it is
+  Which test holds which clause: the hold after one refused commit,
+  `a_refused_commit_starts_a_hold_after_one_call`, `a_refused_single_entry_commit_starts_a_hold`
+  and b05; the ordinary pass after a hold, `the_pass_after_a_hold_stores_everything_due_in_one_call`;
+  the exact count, `a_store_that_refuses_everything_gets_fifteen_calls_a_minute`; the spacing of
+  refused calls under any pattern of answers, the drain included,
+  `refused_calls_are_at_least_the_base_apart_whatever_the_store_does` (a proptest, 256 cases,
+  paused clock); the drain, `the_drain_retries_a_refused_commit_until_its_deadline` (refused
+  twice then accepted: three commits, 500 and 1000 ms apart, the applied watermark below the
+  refused entries after each refusal; refused until a 10 s deadline: commits at 0, 0.5, 1.5, 3.5
+  and 7.5 s, nothing stored, every frame unapplied) and b09; the store that returns, b11; a new
+  key, b18; the fence, `a_refused_tombstone_holds_the_fence_until_the_store_takes_it`; the
+  refusal series and the warning, `the_refusal_series_follow_the_hold`. At process level, over
+  RocksDB with an injected refusal: `tests/integration-rust/store-refusal-liveness.test.ts` — the
+  retry warning carries `hold=true` and `refused_passes`, `/metrics` shows
+  `topgun_write_behind_store_hold 1` and a refusal age above 0 and no retrying series, the
+  refused write stays readable, both gauges read 0 once the store accepts again, and the write is
   read back from a second process after a SIGTERM during the refusal. That file is local only
   (`pnpm test:integration-rust:liveness`), for the reason given under `TG-WB-004`; a CI job that
-  runs it is TODO-832.
+  runs it is TODO-832. The two bounds labelled "a bound, not a count" are derived by reading
+  `hold_after_refusal` and `retry_backoff`; no test asserts them as written.
 - **Violation consequence:** an acknowledged write is lost on a running node. When the flush
   gave up on a refused entry, the entry's staging slot went with it, and a read of the key was
   then answered from the inner store, which never got the write: after an eviction an LWW write
@@ -1629,70 +1556,45 @@ weaker than a test.
   lost its tag and an OR remove its tombstone — and the next write of the key was built on that
   stale value and stored that way. Only a restart, replaying the WAL, brought the write back.
 - **Discovered by:** a review of what a read returns after the flush gave up on an entry; fixed
-  and catalogued by SPEC-390; restated for batched passes by SPEC-395b.
+  and catalogued by SPEC-390; restated for batched passes by SPEC-395b; restated for one
+  store-wide hold per refused commit by SPEC-430b.
 - **Status:** decided, **enforced** — within the limits listed under "Not claimed" below.
 
 **Not claimed.**
 
-- **A time by which every key reaches the store.** Statement 5. The only sign that a record is
-  one the store rejects is a refused call, and a hold allows a fixed number of calls per
-  period, so `P` such records cost at least `P` periods under any order of attempts. Measured,
-  before passes were batched, for a never-refused healthy key written before `N` refused keys
-  not tried yet, with no newer healthy write: 7.5 s for `N = 3`, 142.5 s for `N = 30`, 442.5 s
-  for `N = 90` — in the order of 14 hours for a full default buffer of 10 000. A known cost; no
-  test pins it. Classifying store errors and parking such records is TODO-824.
-- **A store that never accepts a record.** The entry is retried for the life of the process and
-  holds one buffer place and its partition's WAL watermark. Nothing parks or classifies it
-  (TODO-824). A redb store whose error is an I/O error, a previous I/O error, corruption or a
-  poisoned lock is not retried this way: it reports itself broken and the node stops
-  (`TG-WB-010`).
-- **Tombstone pruning while an entry is refused.** The known cost above. How long it has lasted
-  is read from `topgun_write_behind_oldest_refusal_age_seconds` as a lower bound: the fence has
-  stood for at least that long, and can have stopped earlier, at the write of the entry. How
-  many tombstones wait has no series (TODO-828).
-- **Two or more refused records due in one pass.** They start a hold (statement 6); a healthy
-  key then waits for the probe, up to `K + I`. "Stored in that pass" is stated for one refused
-  record in a pass.
-- **`TOPGUN_WRITEBEHIND_CAPACITY=0` with a store that refuses** is not supported. With no
-  capacity nothing stops the arrival of records the store always refuses, each is newer than a
-  waiting healthy key, and there is then no bound at all on when that key is stored; memory
-  grows without limit.
-- **A store call that does not return promptly.** Calls of the flush task do not overlap and
-  each hold is counted from the return of the refused call. No timeout is added around the
-  store call: a call that never returns stops the flush task for as long as it hangs. The
-  commit runs synchronously on the runtime worker (TODO-865).
-- **Atomicity of the halving on other stores.** The halving reasons about whole commits; it is
-  exact for the engine store, whose commit is one engine write. The default commit of other
-  stores (test doubles) writes entry by entry and stops at its first failing write: a refused
-  half may already have written its earlier entries, which a later commit writes again —
-  idempotent for the doubles used here.
-- **The shutdown drain against a store that is down.** The drain runs passes of the same limits
-  over every queued entry, each a commit with its watermark rows; the hold does not apply to
-  it. A refused drain commit of two or more entries is halved down to single entries, commit by
-  commit, for as long as the drain deadline allows (checked before every commit); a single
-  entry refused is abandoned, the rest of its pass goes on, and every entry not stored when the
-  deadline passes is abandoned too — its frame replays at the next start on a WAL-backed store.
-  A drain pass of `n` entries makes at most `2n − 1` commits. A commit that has started is not
-  cut on the engine store, so a stop may overrun its deadline by one commit. On a redb store
-  that reports itself broken the drain stops at its first such refusal and abandons the rest
-  without calling the store (`TG-WB-010`).
+- **A store that never returns.** The entries stay buffered, the buffer fills and writes of new
+  keys are refused at the capacity, the WAL grows and tombstone pruning stops, for as long as it
+  lasts. That is the back-pressure, not a defect; how far the WAL grows is not measured or
+  limited (TODO-757).
+- **A store that refuses one write for good.** A store's `commit` that returns an error not
+  classified `StoreBroken` for one particular write is outside the commit contract
+  (`TG-WB-012`): the store's own refusals of a record are refused at admission or stop the node.
+  Such a refusal would look like an outage — a hold, the stall alarm, the buffer bound — and
+  would not be isolated: it holds the whole node until a restart, where WAL recovery halves the
+  refused part down to the one frame, holds it (`TG-WAL-015`), and stores the rest. A restart is
+  the operator's remedy.
+- **`TOPGUN_WRITEBEHIND_CAPACITY=0` with a store that refuses** is not supported: nothing then
+  bounds the buffer, and memory grows for as long as the store refuses.
+- **A store call that does not return.** Calls of the flush task do not overlap and each hold
+  is counted from the return of the refused call. No timeout is put around a flush commit: a call
+  that never returns stops the flush task for as long as it hangs (TODO-1039). The commit runs
+  synchronously on the runtime worker (TODO-865). A drain commit that has started is not cut on
+  the engine store, so a stop may overrun its deadline by one commit.
 - **A frame the store refuses at boot.** WAL recovery logs the refusal and continues; the frame
   is not handed to this schedule and is not retried until the next restart (TODO-823).
 - **How many times the store is called for one key.** A key written again while its entry is
-  held by a pass is stored twice when the held entry is accepted; an entry in a halved commit
-  is in up to `1 + 2⌈log₂ n⌉` of its commits. The statement gives the order, not the count.
-- **WAL growth during an outage.** No frame is collected in a partition whose watermark is
-  held; nothing measures or limits the growth (TODO-757).
+  held by a pass is stored twice when the held entry is accepted, and an entry is in every
+  refused commit of its pass. The statement gives the order, not the count.
 - **The stall alarm during an outage.** Once a partition's stall has outlasted
   `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS`, the watchdog reports it at `ERROR` on every tick for
-  every partition with a refused entry and ongoing writes, for the rest of the outage. It is
+  every partition with a pending entry and ongoing writes, for the rest of the outage. It is
   not rate-limited (TODO-757).
 - **Two writers of one key.** Outside the precondition. A caller that writes the write-behind
   store directly — `DeviceIdentityStore` — is outside `TG-KEY-001` and has to exclude a second
   writer of its key itself.
-- **redb.** The tests in `write_behind.rs` use a test double as the inner store; the batch tests
-  use redb through a counting engine that injects the refusals; the process-level test uses
-  redb with an injected refusal. No record-level refusal of redb itself is known.
+- **The inner stores of the tests.** The tests in `write_behind.rs` use a test double as the
+  inner store; the batch tests use redb through a counting engine that injects the refusals; the
+  process-level test uses RocksDB with an injected refusal.
 - **The crash harness.** Its model still describes a flush that gives up; its proofs of
   recovery after a crash are proofs about that model and are not evidence for this schedule
   (TODO-829).
@@ -1703,9 +1605,8 @@ weaker than a test.
 
 ### TG-WB-010: A write-behind store whose inner store reports itself broken fails like a store whose background task panicked: new writes are refused, nothing it holds is resolved, and the server binary exits 72
 
-- **Scope:** `WriteBehindDataStore` — the refusal branch of its flush task (a pass commit, each
-  half of a bisect, a re-commit after a record-level refusal, and a probe) and of its shutdown
-  drain, its failure record and lifecycle state, `hard_flush`;
+- **Scope:** `WriteBehindDataStore` — the refusal branch of its flush task (a pass commit, and
+  a pass that meets a value it cannot encode) and of its shutdown drain, its failure record and lifecycle state, `hard_flush`;
   `MapDataStore::classify_error` and its one override, `EngineMapDataStore::classify_error`
   (the server's store, `RocksDataStore`, is `EngineMapDataStore` over `RocksKvEngine`; the redb
   store, `RedbDataStore`, kept as the source of the one-time engine migration, is
@@ -1755,9 +1656,8 @@ weaker than a test.
      appended to the WAL, and `hard_flush` returns an error whose source is the recorded
      failure, whatever started the stop.
   3. **Nothing it holds is resolved.** On a `StoreBroken` commit every entry of the pass not
-     stored goes back to its queue **untouched** — no retry count, no backoff, no first-refusal
-     time: a broken store says nothing about a record, so no entry is singled out for a retry
-     state. The error line names the record a `StoreInconsistent` in the error's chain names,
+     stored goes back to its queue **untouched**: a broken store says nothing about a record, so
+     no entry is singled out. The error line names the record a `StoreInconsistent` in the error's chain names,
      else the first entry of the failing commit, and its `error` field is the whole chain. The
      drain abandons
      every entry it has not stored; their WAL sequences are abandoned, never resolved. On a
@@ -1776,9 +1676,12 @@ weaker than a test.
      deadline. The kind is read from the recorded failure after `hard_flush` returned, so a stop
      begun by a signal on a broken store also exits 72.
   7. **`Unknown` follows `TG-WB-009`.** An error classified `Unknown` is handled by
-     `TG-WB-009`: in the flush task by the halving of the refused commit, the store-wide hold
-     and the per-entry schedule; in the shutdown drain by the split to single entries until the
-     drain deadline.
+     `TG-WB-009`: in the flush task the one refused commit starts a store-wide hold, and the first
+     pass after it is an ordinary pass over everything due; in the shutdown drain a refused commit
+     is retried on the same hold lengths until the drain deadline. A value the flush task cannot
+     encode is not `Unknown`: the pass puts every entry it took back, makes no store call, and
+     records cause `inconsistent` with `site="encode"`, naming the entry's map and key, so the
+     node stops as for a broken store.
   8. **Recovery holds an inconsistent frame.** WAL recovery (`TG-WAL-015`) ends the replay of a
      partition on `StoreBroken` with cause `io`, `previous_io`, `corrupted` or `lock_poisoned`.
      `StoreBroken(Inconsistent)` concerns the frame's own rows, so recovery treats it as any other
@@ -1805,9 +1708,9 @@ weaker than a test.
   `StoreInconsistent` sites of `commit` and `write_ops` (`check_version_regression`,
   `registry_row`, `planned_id`, `stored_next_map_id`, the applied-watermark checks, the
   `InvalidArgument` arm of `commit`), and the registry-read rule: a registry read that fails is an error, never "no such map", so a remove
-  is not reported done on a broken store. `write_behind.rs` — `run_flush_pass`, `commit_resolving_records` and `commit_bisect` (a
-  `StoreBroken` commit puts every entry of the pass it did not store back with `put_back`,
-  untouched, and is never halved), `flush_loop` (a broken store ends the run of passes for good)
+  is not reported done on a broken store. `write_behind.rs` — `run_flush_pass` (a
+  `StoreBroken` commit, and a value that cannot be encoded, put every entry of the pass back with
+  `put_back`, untouched), `flush_loop` (a broken store ends the run of passes for good)
   and the `store_broken` flag of `RetrySchedule`, `record_store_broken` (record, state, line, counter in that order),
   `failed_reason`, the refusal arm of `drain_for_shutdown`, `finish_shutdown`,
   `BackgroundFailure::{store_broken, cause_label}`. `wal/mod.rs` — `commit_batch`, which ends a
@@ -1829,7 +1732,7 @@ weaker than a test.
 - **Visible to an operator:** one error line per process,
   `write-behind store: the durable store is broken and stores nothing more in this process; writes are refused from now on and the node stops`,
   with fields `cause`, `io_kind` (for `io` only), `error`, `map`, `key` and `site`
-  (`flush` | `shutdown_drain`); when the drain stops, one line
+  (`flush` | `encode` | `shutdown_drain`); when the drain stops, one line
   `write-behind shutdown drain stopped at a broken store: the entries it did not store stay un-resolved and replay from the WAL at the next start`
   with `abandoned_entries` and `cause`; the binary's line
   `the durable store is broken; shutting the node down` with `cause` and `exit_code`; the
@@ -1855,7 +1758,8 @@ weaker than a test.
 | `t_no_more_calls_after_a_broken_store` (`write_behind.rs`) | predicate (c): one pass makes one inner call; every entry is back untouched, none lost; two more passes make no call | CI (`cargo test`) |
 | `b08_a_broken_store_in_a_pass_resolves_nothing_and_calls_no_more` (`write_behind_batch_tests.rs`) | after `Broken` the flush task starts no pass and makes no inner call, with entries still due, and the test ends | CI (`cargo test`) |
 | `t_drain_one_call_on_a_broken_store` (`write_behind.rs`) | predicate (d) and (e) for the drain: one inner call, `Err` with a store-broken source, every entry's frames abandoned and none resolved, the drain line with `abandoned_entries` | CI (`cargo test`) |
-| `t_unknown_unchanged` (`write_behind.rs`) | an `Unknown` refusal: a hold after the commit and its two halves with every entry back untouched, then a drain that splits to single entries and abandons the four, no record, `hard_flush` `Ok` | CI (`cargo test`) |
+| `t_unknown_unchanged` (`write_behind.rs`) | an `Unknown` refusal: a hold after the one refused commit with every entry back untouched; the drain honours the hold, which ends past its deadline, so it makes no call and abandons the four; no record, `hard_flush` `Ok` | CI (`cargo test`) |
+| `an_unencodable_entry_fails_the_store_as_inconsistent` (`write_behind.rs`) | statement 7's unencodable value: the store fails with cause `inconsistent`, `site="encode"` and the entry's map and key; every entry of the pass, the unencodable one included, is still buffered with its WAL sequences pending, the buffered counts unchanged, the flushed watermark not past them; no further inner call | CI (`cargo test`) |
 | `t_once_per_process` (`write_behind.rs`) | broken in a pass, then again in the drain: one line, count 1 | CI (`cargo test`) |
 | `t_metric_broken` (`write_behind.rs`) | the four series at 0 after construction; the failure's cause at 1; the panic counter unchanged | CI (`cargo test`) |
 | `t_refuse_broken` (`write_behind.rs`) | each write entry returns the store-broken sentence, the WAL saw no append, the pending count is unchanged | CI (`cargo test`) |
@@ -1906,8 +1810,13 @@ weaker than a test.
   `TG-WB-009`; they reach a commit only for a write no admission checked (WAL recovery isolates
   and holds such a frame, `TG-WAL-015`; a direct inner-store write returns the error to its
   caller). redb's `ValueTooLarge` and `TableTypeMismatch` are `Unknown` too; redb is only the
-  source of the one-time engine migration. An unencodable value is still retried by the halving
-  (TODO-824).
+  source of the one-time engine migration.
+- **An unencodable value crash-loops on its key.** It stops the node (exit 72,
+  `cause="inconsistent"`, `site="encode"`); at the next start recovery's prepare fails to encode
+  the same value and holds the frame with `cause="prepare"`, the rest of its partition replays,
+  and the next write of that key stops the node again. The operator's remedy is a restore from
+  backup. No such value is known: `rmp_serde` is not known to fail on a `RecordValue`. The
+  shutdown drain abandons such an entry with a warning; its frame replays.
 - **An inconsistency can crash-loop on its key, by cause.** `inconsistent` stops the node; what
   the next start does depends on the site. A version or registry row that does not decode is met
   first by recovery's version read (`prepare_entry`), so the frame is held with `cause="prepare"`
@@ -2049,11 +1958,13 @@ weaker than a test.
 - **Exactness of the charge.** It is a structural estimate of the stored encoding (for an LWW
   value between half and seven thirds of it), not a heap measurement.
 
-### TG-WB-012: A write the store could refuse on its own, or drop, is refused before the acknowledgement: map names, map ids and one plain record's size
+### TG-WB-012: A write the store could refuse on its own, or drop, is refused before the acknowledgement: map names, map ids and one record's size
 
 - **Scope:** `WriteBehindDataStore` admission — `admit_write` (shared by `admit_value`,
   `admit_in_place`, `remove` and `remove_all`), `admit_value`, `admit_in_place`, and the
-  write-through `add_with_witness`; `MapDataStore::admit_map` and its one override,
+  write-through `add_with_witness`; the in-place record-size guard of
+  `DefaultRecordStore::update_in_place`, which reads the cap through
+  `MapDataStore::max_record_charge`; `MapDataStore::admit_map` and its one override,
   `EngineMapDataStore::admit_map`, with the engine store's map-id reservation (`plan_registry`,
   `write_ops`, `drop_tenant`); and, as the backstop, `RocksKvEngine::write`.
 - **Statement:**
@@ -2082,20 +1993,50 @@ weaker than a test.
      successful batch — on the locked and on the settled path — once the batch has given the name
      an id and the cache holds it; a batch that gave it none (only a delete or a version op named
      the map) keeps it; `drop_tenant` releases the tenant's names.
-  3. **One plain record's size.** A write whose charge (the structural estimate the byte bound
-     uses, key included) is above `MAX_RECORD_CHARGE_BYTES` = 64 MiB, or a write of any kind whose
-     key is longer than that, is refused by `admit_write` with `RecordTooLarge` (`record too large:
-     {charge} bytes would exceed the per-record limit of {max} bytes`), and again at the
-     write-through of a `WriteSource::Value` write. It is counted in
+  3. **One record's size.** A write whose charge (the structural estimate the byte bound
+     uses, key included) is above the per-record cap `C` = `MAX_RECORD_CHARGE_BYTES` = 64 MiB, or
+     a write of any kind whose key is longer than that, is refused by `admit_write` with
+     `RecordTooLarge` (`record too large: {charge} bytes would exceed the per-record limit of
+     {max} bytes`), and again at the write-through of a `WriteSource::Value` write. The write-behind
+     reports the cap it checks through `MapDataStore::max_record_charge`, so the plain and the
+     in-place check (below) read one value. A refusal of either is counted in
      `topgun_write_behind_capacity_refusals_total{bound="record"}`, rendered at 0 from
-     construction, and in no other series. One client message (at most 2 MiB) is charged below
-     5 MiB, so the cap never refuses a single client value. An LWW value encodes below twice its
-     charge and an OR slot below three times it, so an admitted record encodes below 192 MiB, far
-     below RocksDB's per-entry limit and the WAL frame's `u32` length.
+     construction, and in no other series. One client message (at most 2 MiB) is charged at most
+     about 28 MiB — the estimator charges an integer 14 bytes for its one byte on the wire —, so
+     no single client value reaches the cap. An LWW value encodes below twice its charge and an
+     OR slot below three times it, so an admitted record encodes below 192 MiB, far below
+     RocksDB's per-entry limit and the WAL frame's `u32` length.
+
+     **In-place writes.** An in-place write of provenance `Client` or `CrdtMerge`
+     over a store that is not null — in production every such call is an OR write: an OR add, an
+     OR remove, a tombstone prune, a client's push diff — is held to the same cap `C`, decided
+     around its mutation, because an OR write's growth is known only once it has run. A slot whose
+     cost is above `C − C/2` before the mutation is cloned; when the mutation grows it, and grows
+     it past `C`, the census charges the mutation made (live entries, live tag bytes, tombstone tag
+     bytes) are taken back, the clone is put back, nothing is written through, and the write is
+     refused with `RecordTooLarge`: the cell, its cost metadata, the WAL, the live OR census and
+     the tombstone-bytes gauge are as they were (`TG-WB-011`, `TG-OR-008`). A mutation that does
+     not grow the slot — an OR remove of a tag the slot holds, a prune, a TTL removal, a duplicate
+     add — is never refused, whatever the slot's size, so an oversized slot can always shrink. An
+     OR remove of a tag the slot does not hold only appends a tombstone, so it grows the slot and
+     is refused at the cap like an add. The margin `C/2` (32 MiB) exceeds what one client message
+     adds to a slot. A slot grown past `C` from at or below the clone threshold — more than one
+     message's growth in one mutation — has no clone to restore: it is admitted and logged once
+     at `ERROR` (`record size: an in-place write grew {map}/{key} past the per-record cap by more
+     than one message; admitted`), with statement 5 as the backstop. Every production in-place
+     write applies the ops of one client message (WebSocket or HTTP, both capped at 2 MiB), so
+     that arm is not reachable from ingress today and stays as a defence. `Backup`, `Replication`
+     and `Load` do not write through and are not held to the cap. With
+     `TOPGUN_OR_DELTA_WAL=false` every OR write frames the whole slot; under the cap that payload
+     stays far below the WAL frame's `u32` length.
   4. **Order and no trace.** `admit_write` decides name, record size, key bound, byte bound
-     (`TG-WB-011`); `admit_map` comes last. A refusal at any of them changes nothing and leaves no
-     promise behind; to the client it is the transient `internal` error (500), with no new wire
-     kind.
+     (`TG-WB-011`); `admit_map` comes last. An in-place write is decided in another order:
+     `admit_in_place` decides the name, the key's length, the key bound, the byte bound and
+     `admit_map` before the mutation, and the record cap on the slot's cost after it. So an
+     in-place write a bound refuses never reaches that cap and is counted once, under `keys` or
+     `bytes`, and one counted under `record` for its slot passed both bounds. A refusal at any of
+     them changes nothing and leaves no promise behind; to the client it is the transient
+     `internal` error (500), with no new wire kind.
   5. **The engine's backstop.** `RocksKvEngine::write` checks every key (at most `u32::MAX − 8`
      bytes, RocksDB's `kMaxWriteBatchKeySize`) and every value (at most `u32::MAX` bytes) of a
      batch before it builds the batch, and refuses the whole batch with
@@ -2105,21 +2046,28 @@ weaker than a test.
      node (`TG-WB-010`, cause `inconsistent`) and is never silent.
 - **Mechanical predicate:** a write of a refused name, a put of a new map once no id can be
   promised, a plain record charged above the cap and a remove of a key longer than it each return
-  their error from `add` / `remove`, with the WAL showing no append and no sequence assigned; with
+  their error from `add` / `remove`, with the WAL showing no append and no sequence assigned; an
+  in-place OR add that would grow a slot above `C − C/2` past `C` returns `RecordTooLarge` from
+  `update_in_place` with the slot, its cost, the buffer, the census and the tombstone bytes
+  unchanged; with
   `k` ids left, concurrent admissions of distinct new maps admit exactly `k`; a direct inner-store
   add of a new map is refused while the last id is promised, also while its own batch is in
   flight; an engine batch holding an entry above the limit returns `InvalidArgument` with none of
   its keys written.
-- **Maintaining code:** `map_data_store.rs` — `MapDataStore::admit_map`, `MapAdmission`,
-  `MapNameRefused`, `MapIdSpaceExhausted`, `RecordTooLarge`, `MAX_RECORD_CHARGE_BYTES`;
+- **Maintaining code:** `map_data_store.rs` — `MapDataStore::admit_map`,
+  `MapDataStore::max_record_charge`, `MapAdmission`, `MapNameRefused`, `MapIdSpaceExhausted`,
+  `RecordTooLarge`, `MAX_RECORD_CHARGE_BYTES`, `CAPACITY_REFUSALS_COUNTER`;
+  `default_record_store.rs` — `in_place_margin`, `InPlaceGuard` (`mutate`, `settle`),
+  `undo_census`, `in_place_guard` (the provenance enumeration), `update_in_place`;
   `write_behind.rs` — `admit_write`, `refuse_store_refused_name`, `refuse_oversized`,
   `admit_value`, `admit_in_place`, the write-through re-checks of `add_with_witness`, the
   `bound="record"` registration; `engine_store.rs` — `admit_map`, `issued_next`, `promised`,
   `plan_registry` (the promise check and the plan-time raise), `release_promises` (called by
   `write_ops` after the cache fill), `drop_tenant`; `rocks_engine.rs` — the size check of `write`.
 - **Enforcing test:** `write_behind.rs::a_store_refused_map_name_is_refused_before_the_wal_append`,
-  `engine_store_tests.rs::concurrent_admissions_never_promise_more_ids_than_are_left` and
-  `rocks_engine.rs::an_entry_above_the_engine_limit_refuses_the_whole_batch`. All run in CI
+  `engine_store_tests.rs::concurrent_admissions_never_promise_more_ids_than_are_left`,
+  `default_record_store.rs::an_or_write_that_would_grow_a_slot_past_the_cap_is_refused_before_it_changes_anything`
+  and `rocks_engine.rs::an_entry_above_the_engine_limit_refuses_the_whole_batch`. All run in CI
   (`cargo test`). The table below lists the others.
 - **Violation consequence:** an acknowledged write the store refuses for ever — retried for the
   life of the process while it stops tombstone pruning and fills the buffer — or, for an entry
@@ -2130,8 +2078,8 @@ weaker than a test.
   `cause="inconsistent"` should the engine's backstop fire on the flush path.
 - **Discovered by:** the store-error classification of TODO-824 and the silent drop of TODO-1040;
   SPEC-430a.
-- **Status:** decided, **enforced** for names, map ids and plain records; an in-place OR write is
-  not capped yet (see "Not claimed"; SPEC-430b extends this row).
+- **Status:** decided, **enforced** — within the limits listed under "Not claimed" below; the
+  in-place half (statement 3) by SPEC-430b.
 
 | Enforcer | What it covers | Where it runs |
 |----------|----------------|---------------|
@@ -2142,17 +2090,20 @@ weaker than a test.
 | `a_direct_write_cannot_take_an_id_promised_to_a_buffered_put` (`engine_store_tests.rs`) | every issuer honours the promises, also with the direct write parked between its plan and its engine write | CI (`cargo test`) |
 | `a_put_to_a_map_that_cannot_get_an_id_is_refused_before_the_ack`, `an_existing_uncached_map_stays_writable_once_the_id_space_is_exhausted` (`write_behind.rs`) | statement 2 through the write-behind over the bare engine store: the refused put reaches no WAL; an existing map whose row is not cached stays writable at `u32::MAX` | CI (`cargo test`) |
 | `a_record_above_the_size_cap_is_refused_before_the_wal_append` (`write_behind.rs`) | statement 3 with a test-sized cap: the `record` series at 0 first, a value above the cap and a key longer than it refused under `bound="record"` only, with no WAL append and no sequence; a value at exactly the cap admitted | CI (`cargo test`) |
+| `an_or_write_that_would_grow_a_slot_past_the_cap_is_refused_before_it_changes_anything` (`default_record_store.rs`) | statement 3 through `update_in_place` over the write-behind with a test-sized cap and mutate closures that charge the census as the production ones do: an add that would push a slot above `C − C/2` past `C` refused, `bound="record"` up by one, the slot's value and its cost unchanged, nothing more buffered, `live_census()` and `tombstone_bytes()` as before; a remove of a tag the slot does not hold refused the same way; an add that stays at or below `C` admitted; an add that grows a slot from below the clone threshold past `C` admitted with the `ERROR` line once; a remove of a tag that oversized slot holds admitted, shrinking it | CI (`cargo test`) |
+| `one_message_grows_an_or_slot_by_less_than_the_clone_margin` (`default_record_store.rs`) | the margin of statement 3: an OR entry whose value fills the largest ingress message with positive fixints, the worst charge per wire byte, is charged below `C/2` at the production cap; changing the message caps or the estimator fails it | CI (`cargo test`) |
 | `an_or_slot_encodes_below_three_times_its_charge` (`write_behind.rs`), `structural_size_is_within_the_fidelity_band` (`record.rs`) | the encoded-to-charge factors of statement 3: below 3 for an OR slot, below 2 for an LWW value | CI (`cargo test`) |
 | `an_entry_above_the_engine_limit_refuses_the_whole_batch` (`rocks_engine.rs`), `an_oversized_put_at_commit_is_inconsistent` (`engine_store_tests.rs`) | statement 5 with lowered limits: a value, a put key and a delete key above them refuse the whole batch; at the commit the refusal is `inconsistent` and names the largest put | CI (`cargo test`) |
 | `a_value_above_u32_max_is_refused_not_dropped` (`rocks_engine.rs`, `#[ignore]`) | statement 5 at RocksDB's real limit: a value of `u32::MAX + 1` bytes beside a small put; before the check the small put was stored, the large one absent and the write `Ok` | by hand, recorded with each change to the check |
 
 **Not claimed.**
 
-- **An in-place OR write is not capped.** An OR slot can grow past the cap through in-place
-  writes (SPEC-430b). Should its encoding pass RocksDB's limit, statement 5 stops the node with
-  exit 72, `cause="inconsistent"`, instead of losing the write. With `TOPGUN_OR_DELTA_WAL=false`
-  an OR write on a slot past 4 GiB meets the WAL's `payload too large` after its in-place mutation
-  (TODO-992).
+- **One in-place mutation that grows a slot by more than `C/2`** from at or below the clone
+  threshold is admitted past the cap (statement 3's `ERROR` arm); none is known, and no ingress
+  path reaches it. Should a slot ever pass RocksDB's limit, statement 5 stops the node with exit
+  72, `cause="inconsistent"`, instead of losing the write.
+- **A slot written past the cap before this check** stays readable and can shrink; it refuses
+  every growing write until it is below the cap again.
 - **To the client both refusals are temporary** (the transient `internal`): it keeps resending a
   doomed op. A permanent error kind is out of scope.
 - **Early exhaustion.** A promise whose write is refused after admission (a WAL append failure, a
@@ -2183,7 +2134,7 @@ weaker than a test.
      evictable, while its write is still on its way to the inner store; that is why statement
      1 rests on the staging slot and not on this rule.
 - **Maintaining code:** for statement 1, `write_behind.rs` — `stage` before the queue insert
-  (`TG-WB-007`); `requeue_refused`, which keeps the slot of an entry the store refused
+  (`TG-WB-007`); `put_back`, which keeps the slot of an entry the store refused
   (`TG-WB-009`); `load` / `load_slot`, which answer from the slot before they ask the inner
   store. For statement 2, `storage/impls/default_record_store.rs` dirty-skip;
   `RecordMetadata::is_dirty` is exact by write token (`stored_token != write_token`, set by

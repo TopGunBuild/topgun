@@ -28,6 +28,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   data.auth.<f>`) now reads the principal and has to be re-authored; a record field `auth` used
   only on the right (`data.x == data.auth.y`) still reads the record. Query predicates are
   unchanged.
+- **Changed (server): one refused flush commit starts a store-wide hold (`TG-WB-009`).** When the
+  store refuses a flush commit, every write of the pass goes back to the buffer unchanged, and the
+  server does not call the store for 0.5 s, then for 1, 2, 4 and 5 s while it keeps refusing; each
+  retry is an ordinary pass over everything due, and the first accepted pass ends the hold. Before,
+  a refused commit was split in halves down to single writes, a write refused on its own got a
+  retry schedule of its own, a hold began only after both halves were refused, and a one-write
+  probe ended it. Those mechanisms existed for a record the store refuses on its own, which is now
+  refused before it is acknowledged or stops the node. A store that refuses every commit is called
+  15 times in the first minute. The shutdown drain keeps a hold in force when the stop begins and
+  retries a refused commit on the same lengths until `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`,
+  instead of splitting it, so a stop while the store refuses can take up to that long; what it did
+  not store stays in the write-ahead log and replays at the next start.
+- **Changed (server): the retry warning and the refusal age follow the hold.**
+  `Write-behind entries are being retried: the store refuses them` is logged when a hold begins and
+  then at most once per 30 s, with the fields `buffered`, `oldest_refusal_age_s`, `hold`,
+  `refused_passes` and `error`, which now carries the whole error chain of the last refused
+  commit; the fields `retrying`, `attempts`, `map` and `key` are gone.
+  `topgun_write_behind_oldest_refusal_age_seconds` is now the time since the first refused commit
+  of the hold in force, 0 when no hold is in force; before, it read 0 when a hold began.
+- **Changed (server): an in-place OR-Map write is held to the per-record limit (`TG-WB-012`).** An
+  OR add, an OR remove, a tombstone prune or a client's push diff that would grow its key's slot
+  past 64 MiB of estimated size is refused before it changes anything, with the temporary
+  `record too large: …` error, counted in
+  `topgun_write_behind_capacity_refusals_total{bound="record"}`; so is an OR remove of a tag the
+  key does not hold, which adds a tombstone. A write that does not grow the slot is always
+  admitted, so a key at the limit shrinks as its entries are removed.
+- **Changed (server): a buffered value that cannot be encoded stops the node (`TG-WB-010`).** The
+  flush logs the broken-store line with `cause="inconsistent"` and `site="encode"`, and the node
+  exits 72, instead of retrying the value for ever; at the next start recovery keeps that write's
+  frame unapplied with `cause="prepare"`. No such value is known.
+- **Removed (server): `topgun_write_behind_retrying_entries`.** No write is refused on its own any
+  more; watch `topgun_write_behind_store_hold` and
+  `topgun_write_behind_oldest_refusal_age_seconds`.
 - **Fixed (server): an acknowledged write whose stored value exceeded 4 GiB is no longer lost
   silently.** RocksDB drops a batch entry above its per-entry limit with a status its Rust binding
   does not return, and wrote the rest of the batch — the key's version row and the advanced
@@ -44,8 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this store`); and one plain record is limited to 64 MiB of estimated size, its key included
   (`record too large: …`, counted in `topgun_write_behind_capacity_refusals_total{bound="record"}`).
   Each is the temporary `internal` error (500); before, such a write was acknowledged and then
-  retried by the flush for the life of the process. An in-place OR-Map write is not checked against
-  the record limit yet.
+  retried by the flush for the life of the process.
 - **Changed (server): the store's own consistency failures stop the node.** A flush commit that
   meets a record version row or a registry row that does not decode, a version or applied-watermark
   regression, or a malformed next-map-id row was retried for ever; it now stops the node with exit

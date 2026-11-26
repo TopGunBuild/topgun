@@ -21,8 +21,9 @@
  *
  * - CONTROL  — the PINNED configuration with the sentinel never created, so
  *              nothing is refused. It shows the probes pass on a healthy node,
- *              that no retry warning is logged there, and that the retry gauge
- *              is published at zero before anything was ever refused.
+ *              that no retry warning is logged there, that the hold and the
+ *              refusal-age gauges are published at zero before anything was
+ *              ever refused, and that no retrying series is published.
  * - PINNED   — the stall watchdog ticks every 600 ms, so the lag gauge it
  *              refreshes follows the buffer closely;
  * - DEFAULTS — the shipped configuration (the watchdog ticks every 6 s);
@@ -36,40 +37,42 @@
  *              See below.
  *
  * PINNED and DEFAULTS store a control write while the store is healthy, then
- * have one write refused for fifteen seconds. While it is refused they read
- * two things before any probe connects: the retry warnings in the log, which
- * must exist and name the refused map only, and the two gauges
- * `topgun_write_behind_retrying_entries` and
- * `topgun_write_behind_buffered_entries`, which must both be above zero — the
- * write is still in the buffer. Then the refused key and the control key are
- * read back and a new connection is opened. Then the sentinel is removed, and
- * the per-partition gauge `topgun_wal_applied_watermark_lag` has to return to
- * zero on every partition, the log has to carry the line that says the retry
- * backlog cleared, and the retrying gauge has to read zero. A server that
- * dropped the refused write instead would show a lag that never returns to
- * zero without a restart, and a retrying gauge at zero while the store still
- * refuses.
+ * have one write refused for fifteen seconds. A refused flush commit starts a
+ * store-wide hold, which is renewed while the store keeps refusing. While it
+ * is refused they read, before any probe connects: the retry warnings in the
+ * log, which must exist, each with `hold=true` and a `refused_passes` field
+ * and none naming a record (a refusal concerns the store, not a write); the
+ * gauges `topgun_write_behind_store_hold` at 1,
+ * `topgun_write_behind_oldest_refusal_age_seconds` above zero and
+ * `topgun_write_behind_buffered_entries` above zero — the write is still in
+ * the buffer; and no `topgun_write_behind_retrying_entries` series, which no
+ * longer exists. Then the refused key and the control key are read back and a
+ * new connection is opened. Then the sentinel is removed, and the
+ * per-partition gauge `topgun_wal_applied_watermark_lag` has to return to zero
+ * on every partition, the log has to carry the line that says the retry
+ * backlog cleared, and the hold and refusal-age gauges have to read zero. A
+ * server that dropped the refused write instead would show a lag that never
+ * returns to zero without a restart.
  *
- * The readings taken while the store refuses come before the probes for a
- * reason: each connection makes the server write a device-credentials record
- * of its own, which is refused in its turn and may become the record a later
- * warning names.
+ * The readings taken while the store refuses come before the probes so that
+ * they describe the one refused write: each connection makes the server write
+ * a device-credentials record of its own, which is refused in its turn.
  *
  * STORE-DOWN-FROM-START differs from those two on purpose. The sentinel is
  * created before the first connection and the refused write is sent as soon as
  * that connection is authenticated, so nothing was ever stored when the store
  * starts refusing. So:
  *
- * - there is no control write, and nothing is said about one (L0 is `n/a`);
+ * - there is no control write, and nothing is said about one;
  * - two records are refused, not one: the test's key, and the
  *   device-credentials record the server itself writes when the first
- *   connection authenticates. A retry warning names one record as its example
- *   and it may be either, so the warnings are checked by the maps they name:
- *   every one must name one of those two maps.
+ *   connection authenticates. The warnings name neither.
  *
  * SIGTERM-WHILE-REFUSING asks what a shutdown does with a write the store is
  * still refusing. The first process gets SIGTERM with the sentinel in place
- * and has to exit cleanly and in time. The sentinel is then removed and a
+ * and has to exit cleanly and in time: its shutdown drain keeps the hold and
+ * retries the refused commit until the drain deadline (30 s by default), so
+ * this arm allows a longer exit than the others. The sentinel is then removed and a
  * second process is started on the same data directory; the first thing done
  * against it is a read of the refused key, repeated until it returns the
  * written value. Nothing is asserted about the lag gauge of the second
@@ -152,19 +155,21 @@ const CONTROL_VALUE = { name: 'Alice', written: 'while the store was healthy' };
 const REFUSED_MAP = 'liveness_refused';
 const REFUSED_KEY = 'bob';
 const REFUSED_VALUE = { name: 'Bob', written: 'while the store refuses' };
-/** The map the server keeps its own per-device record in; it writes one when a connection authenticates. */
-const DEVICE_CREDENTIALS_MAP = '_topgun_device_credentials';
 
 const LOAD_MAP = 'liveness_load';
 const LOAD_KEYS = ['load-0', 'load-1', 'load-2', 'load-3', 'load-4', 'load-5'];
 
-/** Logged at warn level while the store refuses buffered writes; it names one refused record as an example. */
+/** Logged at warn level when a store-wide hold begins and at most every 30 s while it lasts; it names no record. */
 const RETRY_WARNING_TEXT = 'Write-behind entries are being retried: the store refuses them';
-/** Logged once when the store has accepted every write it had refused, if a retry warning was logged before. */
+/** Logged once when a pass is accepted after a retry warning, which ends the hold. */
 const BACKLOG_CLEARED_TEXT =
   'Write-behind retry backlog cleared: the store accepted every refused entry';
-/** Buffered writes the store has refused at least once, as of the last flush pass. */
-const RETRYING_GAUGE = 'topgun_write_behind_retrying_entries';
+/** 1 while a store-wide hold is in force, else 0. */
+const STORE_HOLD_GAUGE = 'topgun_write_behind_store_hold';
+/** Seconds since the first refused commit of the hold in force, 0 when no hold is in force. */
+const REFUSAL_AGE_GAUGE = 'topgun_write_behind_oldest_refusal_age_seconds';
+/** A series the server no longer publishes: no write is refused on its own. */
+const REMOVED_RETRYING_GAUGE = 'topgun_write_behind_retrying_entries';
 /** Buffered keys, the number the capacity check uses. */
 const BUFFERED_GAUGE = 'topgun_write_behind_buffered_entries';
 
@@ -177,12 +182,20 @@ const PROBE_WAIT_MS = 5_000;
 const CONTROL_FLUSH_WAIT_MS = 3_000;
 /**
  * How long the store refuses the one write before anything is read. The retry
- * warning is due at the third refusal of one record, a few seconds after the
- * ack; the window leaves room, and it is long enough that a write merely
- * waiting for its first flush would be gone from the buffer.
+ * warning is due when the first refused commit starts a hold, within a flush
+ * interval of the ack; the window leaves room, and it is long enough that a
+ * write merely waiting for its first flush would be gone from the buffer.
  */
 const WINDOW_MS = 15_000;
 const SIGTERM_EXIT_MS = 15_000;
+/**
+ * The exit bound where SIGTERM reaches a server whose store still refuses: the
+ * drain retries the refused commit on the hold lengths (up to 5 s apart) until
+ * its deadline, TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS, 30 s by default; the
+ * rest is slack.
+ */
+const SIGTERM_WHILE_REFUSING_EXIT_MS = 45_000;
+const SIGTERM_WHILE_REFUSING_TIMEOUT_MS = 180_000;
 const SIGTERM_OBSERVE_MS = 10_000;
 const CLIENT_CLOSE_MS = 2_000;
 const TEST_TIMEOUT_MS = 120_000;
@@ -422,15 +435,20 @@ async function sendRefusedWrite(
   return { ackedAt, delaySpawnMs };
 }
 
-/** What the log and the two gauges say about refused writes at one moment. */
+/** What the log and the gauges say about refused writes at one moment. */
 interface RefusalReading {
   /** Number of retry warnings in the log so far. */
   retryWarnings: number;
-  /** The maps those warnings name as their example, each once, sorted. */
-  warningMaps: string[];
+  /** Retry warnings that carry `hold=true` and a `refused_passes` count. */
+  warningsWithHold: number;
+  /** Retry warnings that name a record by a `map` or `key` field; the warning has neither. */
+  warningsNamingARecord: number;
   /** `null` when the server does not render the series. */
-  retryingEntries: number | null;
+  storeHold: number | null;
+  refusalAge: number | null;
   bufferedEntries: number | null;
+  /** `null` is expected: the series is no longer published. */
+  retryingEntries: number | null;
 }
 
 function retryWarningLines(server: SpawnedBinary): string[] {
@@ -439,23 +457,25 @@ function retryWarningLines(server: SpawnedBinary): string[] {
 
 async function readRefusal(server: SpawnedBinary, port: number): Promise<RefusalReading> {
   const warnings = retryWarningLines(server);
-  const maps = new Set<string>();
-  for (const line of warnings) {
-    const named = / map=(\S+) key=/.exec(line);
-    maps.add(named ? named[1] : '(unparsed)');
-  }
   return {
     retryWarnings: warnings.length,
-    warningMaps: [...maps].sort(),
-    retryingEntries: await scrapeGauge(port, RETRYING_GAUGE),
+    warningsWithHold: warnings.filter(
+      (line) => / hold=true\b/.test(line) && / refused_passes=\d+/.test(line),
+    ).length,
+    warningsNamingARecord: warnings.filter((line) => / (map|key)=/.test(line)).length,
+    storeHold: await scrapeGauge(port, STORE_HOLD_GAUGE),
+    refusalAge: await scrapeGauge(port, REFUSAL_AGE_GAUGE),
     bufferedEntries: await scrapeGauge(port, BUFFERED_GAUGE),
+    retryingEntries: await scrapeGauge(port, REMOVED_RETRYING_GAUGE),
   };
 }
 
 function shownReading(reading: RefusalReading): string {
   return (
-    `retry_warnings=${reading.retryWarnings} warning_maps=${JSON.stringify(reading.warningMaps)} ` +
-    `retrying=${reading.retryingEntries} buffered=${reading.bufferedEntries}`
+    `retry_warnings=${reading.retryWarnings} with_hold=${reading.warningsWithHold} ` +
+    `naming_a_record=${reading.warningsNamingARecord} hold=${reading.storeHold} ` +
+    `refusal_age=${reading.refusalAge} buffered=${reading.bufferedEntries} ` +
+    `retrying=${reading.retryingEntries}`
   );
 }
 
@@ -490,6 +510,8 @@ interface AfterLift {
   lastScrapes: LagScrape[];
   /** Number of lines in the log that say the retry backlog cleared. */
   backlogClearedLines: number;
+  storeHold: number | null;
+  refusalAge: number | null;
   retryingEntries: number | null;
 }
 
@@ -507,8 +529,17 @@ async function readAfterLift(
     backlogClearedLines: plainLines(server.stdout()).filter((line) =>
       line.includes(BACKLOG_CLEARED_TEXT),
     ).length,
-    retryingEntries: await scrapeGauge(port, RETRYING_GAUGE),
+    storeHold: await scrapeGauge(port, STORE_HOLD_GAUGE),
+    refusalAge: await scrapeGauge(port, REFUSAL_AGE_GAUGE),
+    retryingEntries: await scrapeGauge(port, REMOVED_RETRYING_GAUGE),
   };
+}
+
+function shownAfterLift(afterLift: AfterLift): string {
+  return (
+    `backlog-cleared lines ${afterLift.backlogClearedLines}, hold ${afterLift.storeHold}, ` +
+    `refusal age ${afterLift.refusalAge}, retrying ${afterLift.retryingEntries}`
+  );
 }
 
 /**
@@ -544,6 +575,7 @@ async function sampleAndStop(
   env: FaultEnv,
   sampleStem: string,
   record: RunRecord,
+  exitBoundMs: number = SIGTERM_EXIT_MS,
 ): Promise<Stopped> {
   const server = launched.server;
   let sampleName = 'off';
@@ -563,7 +595,7 @@ async function sampleAndStop(
   const s0 = Buffer.byteLength(server.stdout());
   record.note(`SIGTERM (running=${runningBeforeSigterm}, stdout ${s0} bytes)`);
   const signalledAt = Date.now();
-  const stopping = server.stop('SIGTERM', SIGTERM_EXIT_MS).then((status) => ({
+  const stopping = server.stop('SIGTERM', exitBoundMs).then((status) => ({
     status,
     exitMs: Date.now() - signalledAt,
   }));
@@ -597,8 +629,6 @@ interface LoadObserved {
 
 interface Observed {
   arm: SingleProcessArm;
-  /** `ok` when no retry warning names the control map; `n/a` in the arm that has no control write. */
-  l0: 'ok' | 'fail' | 'n/a';
   /** The control key as read back, the reason it could not be read, or `NOT_READ`. */
   controlRead: unknown;
   /** The refused key as read back while the store still refuses it, the reason it could not be read, or `NOT_READ`. */
@@ -760,9 +790,7 @@ async function runArm(arm: SingleProcessArm): Promise<Observed> {
         `lag settled after ${settled.settledAfterMs} ms; ${settled.scrapes.length} scrapes, the last ${lastScrapes.length}: ${JSON.stringify(lastScrapes)}`,
       );
       note(`partitions at lag 2 or more in each of those: ${JSON.stringify(stuckPartitions)}`);
-      note(
-        `after the lift: backlog-cleared lines ${afterLift.backlogClearedLines}, retrying ${afterLift.retryingEntries}`,
-      );
+      note(`after the lift: ${shownAfterLift(afterLift)}`);
       load = {
         lagSamplesAtBaseline: Object.keys(baseline).length,
         lagAtBaseline: baseline,
@@ -793,11 +821,6 @@ async function runArm(arm: SingleProcessArm): Promise<Observed> {
       before = await readRefusal(server, port);
       note(`before the probes: ${shownReading(before)}`);
     }
-    const controlWarnings = retryWarningLines(server).filter((line) =>
-      line.includes(` map=${CONTROL_MAP} `),
-    );
-    let l0: Observed['l0'] = controlWarnings.length === 0 ? 'ok' : 'fail';
-    if (fromStart) l0 = 'n/a';
 
     // Step 7: probes, collected first and asserted together by the caller.
     // The refused key is read while the store still refuses it.
@@ -823,7 +846,6 @@ async function runArm(arm: SingleProcessArm): Promise<Observed> {
       l2 = 'ok';
     }
     note(`L2 ${l2}`);
-    note(`L0 ${l0}`);
     if (load) {
       for (const key of LOAD_KEYS) {
         load.readBack[key] = await observe(() =>
@@ -847,9 +869,7 @@ async function runArm(arm: SingleProcessArm): Promise<Observed> {
       note(
         `lag settled ${settled.settledAfterMs} ms after the lift (bound ${settleBoundMs} ms); ${settled.scrapes.length} scrapes, the last ${afterLift.lastScrapes.length}: ${JSON.stringify(afterLift.lastScrapes)}`,
       );
-      note(
-        `after the lift: backlog-cleared lines ${afterLift.backlogClearedLines}, retrying ${afterLift.retryingEntries}`,
-      );
+      note(`after the lift: ${shownAfterLift(afterLift)}`);
     }
 
     // Step 9: the test's own connections go first, then SIGTERM.
@@ -863,19 +883,20 @@ async function runArm(arm: SingleProcessArm): Promise<Observed> {
     const l4Clean = isEqual(l4, { code: 0, signal: null });
     let verdict: Observed['verdict'] = 'OTHER';
     if (!l1Ok && l2 !== 'ok' && l4?.signal === 'SIGKILL') verdict = 'HUNG';
-    else if (l0 !== 'fail' && l1Ok && l2 === 'ok' && l4Clean) verdict = 'HEALTHY';
+    else if (l1Ok && l2 === 'ok' && l4Clean) verdict = 'HEALTHY';
 
     record.summary =
       `store-refusal-liveness arm=${arm} sha256=${server.sha256} commit=${env.commit} ` +
       `delay_spawn_ms=${delaySpawnMs ?? 'n/a'} ` +
-      `L0=${l0} L1=${l1Ok ? 'ok' : 'fail'} L2=${l2 === 'ok' ? 'ok' : 'fail'} ` +
+      `L1=${l1Ok ? 'ok' : 'fail'} L2=${l2 === 'ok' ? 'ok' : 'fail'} ` +
       `${shownReading(before)} ` +
       `S0=${stopped.s0} S10=${stopped.s10} X10=${stopped.x10} L4=${JSON.stringify(l4)} exit_ms=${stopped.exitMs} ` +
       `sample=${stopped.sampleName} verdict=${verdict}`;
     if (afterLift) {
       record.summary +=
         ` settleBoundMs=${afterLift.settleBoundMs} settledAfterMs=${afterLift.settledAfterMs} ` +
-        `backlogClearedLines=${afterLift.backlogClearedLines} retryingAfterLift=${afterLift.retryingEntries}`;
+        `backlogClearedLines=${afterLift.backlogClearedLines} holdAfterLift=${afterLift.storeHold} ` +
+        `refusalAgeAfterLift=${afterLift.refusalAge} retryingAfterLift=${afterLift.retryingEntries}`;
     }
     if (load) {
       record.summary +=
@@ -886,7 +907,6 @@ async function runArm(arm: SingleProcessArm): Promise<Observed> {
 
     return {
       arm,
-      l0,
       controlRead,
       refusedRead,
       l2,
@@ -958,7 +978,13 @@ async function runSigtermWhileRefusing(): Promise<RestartObserved> {
 
     // The signal reaches a server whose store still refuses: the sentinel stays.
     await closeClients(clients, record);
-    const firstStopped = await sampleAndStop(first, env, `${arm}-${env.run}`, record);
+    const firstStopped = await sampleAndStop(
+      first,
+      env,
+      `${arm}-${env.run}`,
+      record,
+      SIGTERM_WHILE_REFUSING_EXIT_MS,
+    );
 
     fs.rmSync(sentinel);
     note('sentinel removed; starting a second process on the same data directory');
@@ -1041,17 +1067,23 @@ describe('Integration: a write the store refuses stays buffered, is retried and 
         async () => {
           const o = await runSigtermWhileRefusing();
           expect({
-            retryWarningNamesTheRefusedMap: o.before.warningMaps.includes(REFUSED_MAP),
-            retryingEntriesBeforeSigterm: (o.before.retryingEntries ?? 0) >= 1,
+            retryWarningWithHold: o.before.warningsWithHold >= 1,
+            warningsNamingARecord: o.before.warningsNamingARecord,
+            storeHoldBeforeSigterm: o.before.storeHold,
+            refusalAgeBeforeSigterm: (o.before.refusalAge ?? 0) > 0,
+            retryingSeries: o.before.retryingEntries,
             runningBeforeSigterm: o.first.runningBeforeSigterm,
             exitOnSigterm: o.first.exit,
-            exitedWithinBound: o.first.exitMs < SIGTERM_EXIT_MS,
+            exitedWithinBound: o.first.exitMs < SIGTERM_WHILE_REFUSING_EXIT_MS,
             readAfterRestart: o.restartRead,
             readAfterRestartWithinBound: o.restartReadAfterMs !== null,
             restartExitOnSigterm: o.second.exit,
           }).toEqual({
-            retryWarningNamesTheRefusedMap: true,
-            retryingEntriesBeforeSigterm: true,
+            retryWarningWithHold: true,
+            warningsNamingARecord: 0,
+            storeHoldBeforeSigterm: 1,
+            refusalAgeBeforeSigterm: true,
+            retryingSeries: null,
             runningBeforeSigterm: true,
             exitOnSigterm: { code: 0, signal: null },
             exitedWithinBound: true,
@@ -1060,21 +1092,22 @@ describe('Integration: a write the store refuses stays buffered, is retried and 
             restartExitOnSigterm: { code: 0, signal: null },
           });
         },
-        TEST_TIMEOUT_MS,
+        SIGTERM_WHILE_REFUSING_TIMEOUT_MS,
       );
       continue;
     }
 
     if (arm === 'CONTROL') {
       test(
-        'CONTROL: with nothing refused, every probe passes, no retry warning is logged and the retry gauge reads zero',
+        'CONTROL: with nothing refused, every probe passes, no retry warning is logged and the hold and refusal-age gauges read zero',
         async () => {
           const o = await runArm(arm);
           expect({
-            controlWriteNamedInWarning: o.l0 === 'fail',
             retryWarnings: o.before.retryWarnings,
-            // Zero, not absent: the series is published before anything was refused.
-            retryingEntries: o.before.retryingEntries,
+            // Zero, not absent: both series are published before anything was refused.
+            storeHold: o.before.storeHold,
+            refusalAge: o.before.refusalAge,
+            retryingSeries: o.before.retryingEntries,
             readControl: o.controlRead,
             readRefused: o.refusedRead,
             newConnection: o.l2,
@@ -1083,9 +1116,10 @@ describe('Integration: a write the store refuses stays buffered, is retried and 
             exitedWithinBound: o.exitMs < SIGTERM_EXIT_MS,
             verdict: o.verdict,
           }).toEqual({
-            controlWriteNamedInWarning: false,
             retryWarnings: 0,
-            retryingEntries: 0,
+            storeHold: 0,
+            refusalAge: 0,
+            retryingSeries: null,
             readControl: CONTROL_VALUE,
             readRefused: REFUSED_VALUE,
             newConnection: 'ok',
@@ -1111,7 +1145,6 @@ describe('Integration: a write the store refuses stays buffered, is retried and 
             lagAtBaselineAllZero: allZero(load.lagAtBaseline),
             lagDuringOutage: load.maxLagDuringOutage >= 1,
             allLagsZeroWithinBound: load.allLagsZeroWithinBound,
-            controlWriteNamedInWarning: o.l0 === 'fail',
             read: o.controlRead,
             newConnection: o.l2,
             loadKeys: load.readBack,
@@ -1124,7 +1157,6 @@ describe('Integration: a write the store refuses stays buffered, is retried and 
             lagAtBaselineAllZero: true,
             lagDuringOutage: true,
             allLagsZeroWithinBound: true,
-            controlWriteNamedInWarning: false,
             read: CONTROL_VALUE,
             newConnection: 'ok',
             loadKeys: load.written,
@@ -1139,14 +1171,10 @@ describe('Integration: a write the store refuses stays buffered, is retried and 
       continue;
     }
 
-    // With the store down from the start the server's own device-credentials
-    // record is refused alongside the test's key, and a warning names either.
-    const refusedMaps =
-      arm === 'STORE-DOWN-FROM-START' ? [REFUSED_MAP, DEVICE_CREDENTIALS_MAP] : [REFUSED_MAP];
-    let title = `${arm}: a refused write stays readable and buffered, is reported by the retry warning, and reaches the store once the refusal is lifted`;
+    let title = `${arm}: a refused write stays readable and buffered under a store-wide hold that the retry warning and the gauges report, and reaches the store once the refusal is lifted`;
     if (arm === 'STORE-DOWN-FROM-START') {
       title =
-        'STORE-DOWN-FROM-START: the store refuses from the start, default watchdog tick — the server keeps serving, warns about a record it retries, and stores what it buffered once the refusal is lifted';
+        'STORE-DOWN-FROM-START: the store refuses from the start, default watchdog tick — the server keeps serving, reports the hold, and stores what it buffered once the refusal is lifted';
     }
     test(
       title,
@@ -1154,35 +1182,39 @@ describe('Integration: a write the store refuses stays buffered, is retried and 
         const o = await runArm(arm);
         const after = o.afterLift as AfterLift;
         expect({
-          controlWriteNamedInWarning: o.l0 === 'fail',
-          retryWarningBeforeLift: o.before.retryWarnings >= 1,
-          warningMapsOtherThanTheRefusedOnes: o.before.warningMaps.filter(
-            (map) => !refusedMaps.includes(map),
-          ),
-          retryingEntriesBeforeLift: (o.before.retryingEntries ?? 0) >= 1,
+          retryWarningWithHoldBeforeLift: o.before.warningsWithHold >= 1,
+          warningsNamingARecord: o.before.warningsNamingARecord,
+          storeHoldBeforeLift: o.before.storeHold,
+          refusalAgeBeforeLift: (o.before.refusalAge ?? 0) > 0,
+          retryingSeriesBeforeLift: o.before.retryingEntries,
           bufferedEntriesBeforeLift: (o.before.bufferedEntries ?? 0) >= 1,
           readRefused: o.refusedRead,
           readControl: o.controlRead,
           newConnection: o.l2,
           allLagsZeroAfterLift: after.allLagsZeroWithinBound,
           backlogClearedLineAfterLift: after.backlogClearedLines >= 1,
-          retryingEntriesAfterLift: after.retryingEntries,
+          storeHoldAfterLift: after.storeHold,
+          refusalAgeAfterLift: after.refusalAge,
+          retryingSeriesAfterLift: after.retryingEntries,
           runningBeforeSigterm: o.runningBeforeSigterm,
           exitOnSigterm: o.l4,
           exitedWithinBound: o.exitMs < SIGTERM_EXIT_MS,
           verdict: o.verdict,
         }).toEqual({
-          controlWriteNamedInWarning: false,
-          retryWarningBeforeLift: true,
-          warningMapsOtherThanTheRefusedOnes: [],
-          retryingEntriesBeforeLift: true,
+          retryWarningWithHoldBeforeLift: true,
+          warningsNamingARecord: 0,
+          storeHoldBeforeLift: 1,
+          refusalAgeBeforeLift: true,
+          retryingSeriesBeforeLift: null,
           bufferedEntriesBeforeLift: true,
           readRefused: REFUSED_VALUE,
           readControl: arm === 'STORE-DOWN-FROM-START' ? NOT_READ : CONTROL_VALUE,
           newConnection: 'ok',
           allLagsZeroAfterLift: true,
           backlogClearedLineAfterLift: true,
-          retryingEntriesAfterLift: 0,
+          storeHoldAfterLift: 0,
+          refusalAgeAfterLift: 0,
+          retryingSeriesAfterLift: null,
           runningBeforeSigterm: true,
           exitOnSigterm: { code: 0, signal: null },
           exitedWithinBound: true,
