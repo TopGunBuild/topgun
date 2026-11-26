@@ -245,6 +245,24 @@ This guide covers common issues you may encounter when using TopGun, organized b
 
 **Solution:** Start the newer version again: it serves the data directory as it was. There is no tool that removes these rows, and no way to give the data directory to the older version as it is. To go back to an older version anyway, use the [engine rollback](#upgrading-to-the-rocksdb-store-and-rolling-back), which returns to the redb store kept at the RocksDB migration (`engine.redb.pre-rocksdb`): it applies only to a node that was migrated from redb and still holds that file, and every write acknowledged since that migration is then gone on the server.
 
+### Server refuses to start with `FATAL: policy recovery failed: … decode policy`
+
+**Symptom:** The server exits with code 1 at startup, before it listens, with `FATAL: policy recovery failed: internal error: decode policy '<id>': …` on stderr.
+
+**Cause, on this version:** the stored policy `<id>` was written by an earlier version and its `mapPattern` contains `{` or `}`. Before placeholders existed such a pattern could only be a literal map name, so this version refuses it rather than read it as a template. The message says `contains a brace`.
+
+**Cause, on an earlier version:** the store holds a policy written by a later version with a placeholder (`{auth.id}`, `{auth.tenant}`) or a `keyPattern`. The earlier version cannot read it (`missing field mapPattern`) and stops instead of reading the placeholder as a literal or dropping the `keyPattern`.
+
+**Solution:** start the version that wrote the policy on the same directories, delete the named policy (`DELETE /api/admin/policies/<id>`), and start the other version again. If a legacy `{` pattern was meant as a template, re-create it after the upgrade in the [template grammar](/docs/guides/rbac#templates-placeholders-and-keypattern). Before an upgrade, list the policies (`GET /api/admin/policies`) and look for `{` in `mapPattern`; before a rollback, look for a `{` or a `keyPattern`.
+
+### A policy is named at startup with `is not a known condition namespace` or `now names the evaluated`
+
+**Symptom:** A `WARN` line at startup: `policy <id>: <reference> is not a known condition namespace; the condition now fails closed: as an allow it does not match, as a deny it applies`, or `policy <id>: resource.map now names the evaluated map, not a record field`.
+
+**Cause:** the policy's condition was stored by an earlier version and this version reads it differently. A reference outside `auth`, `data` and `resource.map` / `resource.key` was a comparison that was always false; it is now unknown, so an allow with it does not match and a deny with it applies. A `resource.map` or `resource.key` that read a record field now names the evaluated map or key.
+
+**Solution:** if the new meaning is not what the policy intends, delete it and re-create it with a condition the admin API accepts. The line repeats at every start while the policy is stored.
+
 ### Upgrading to the RocksDB store and rolling back
 
 **Upgrading.** The first start of this version on a data directory that holds `engine.redb` migrates it into `engine.rocksdb/` inside the store open, before it listens; nothing is run by hand. Give the start time: measured in-process on a Mac, 1 000 000 rows of 1 KiB took 6.56 s. The migration needs `1.5 × the size of engine.redb + 64 MiB` free on the data directory's file system. The next release no longer reads redb stores or the store files of earlier versions, so **upgrading from a version before this release: start this release first, then the next one.**
