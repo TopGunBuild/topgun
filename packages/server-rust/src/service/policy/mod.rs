@@ -971,12 +971,14 @@ mod tests {
         let empty = rec(vec![]);
         let alice = principal("alice", &[]);
         let not_admin_subject = principal("admin", &["admin"]);
-        let cases: Vec<(
-            &[(PolicyEffect, Option<&str>)],
-            Option<&topgun_core::Principal>,
+        // (policies, caller, record, decision)
+        type Case<'a> = (
+            &'a [(PolicyEffect, Option<&'a str>)],
+            Option<&'a topgun_core::Principal>,
             rmpv::Value,
             PolicyDecision,
-        )> = vec![
+        );
+        let cases: Vec<Case> = vec![
             (
                 &[(Allow, Some("auth.id == 'bob'"))],
                 None,

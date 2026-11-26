@@ -257,12 +257,11 @@ fn evaluate_leaf(
         return false;
     };
 
-    let resolved = match policy_unknown.and_then(|_| auth_path(attribute)) {
-        Some(rest) => resolve_auth(ctx, &rest),
-        None => {
-            let segments: Vec<&str> = attribute.split('.').collect();
-            resolve_dot_path(ctx.data, &segments)
-        }
+    let resolved = if let Some(rest) = policy_unknown.and_then(|_| auth_path(attribute)) {
+        resolve_auth(ctx, &rest)
+    } else {
+        let segments: Vec<&str> = attribute.split('.').collect();
+        resolve_dot_path(ctx.data, &segments)
     };
     let Some(actual) = resolved else {
         return false;
