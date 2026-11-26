@@ -536,27 +536,6 @@ pub struct AppliedWatermarks {
     pub max_version: u64,
 }
 
-/// Writes of a [`FlushCommit`] the store refused on their own (a map name it
-/// does not take, a map it cannot give an id), by index in `writes`. Nothing
-/// of such a commit is written.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordRefused {
-    /// Indices into [`FlushCommit::writes`].
-    pub indices: Vec<usize>,
-}
-
-impl std::fmt::Display for RecordRefused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "the store refused the writes at {:?} of the commit; nothing was written",
-            self.indices
-        )
-    }
-}
-
-impl std::error::Error for RecordRefused {}
-
 /// Longest part of a refused map name or key an admission error repeats, in
 /// bytes: the error reaches log lines and a client's error text, so it never
 /// carries a whole name or key an attacker chose the size of.
