@@ -287,7 +287,7 @@ A disconnect of a reader that is not slow invalidates the run (`disconnect`); a 
 
 ### Arm matrix
 
-Every arm runs the same writes: `null` store, 10⁴ writes/s (2·10³ in the two reference arms), 200 connections, batches of 10, 10 s warm-up, 30 s window. `TOPGUN_EVICTION_INTERVAL_MS=3600000` is a measurement choice, set in every arm: at 10⁴ writes/s the eviction tick's tail (TODO-941, below) would swamp the fan-out cost being compared.
+Every arm runs the same writes: `null` store, 10⁴ writes/s (2·10³ or 500 in the reference arms), 200 connections, batches of 10, 10 s warm-up, 30 s window. `TOPGUN_EVICTION_INTERVAL_MS=3600000` is a measurement choice, set in every arm: at 10⁴ writes/s the eviction tick's tail (TODO-941, below) would swamp the fan-out cost being compared.
 
 ```bash
 COMMON="--scenario open_loop --store null --rate 10000 --batch-size 10 --connections 200 --warmup 10 --duration 30"
@@ -304,6 +304,7 @@ export TOPGUN_EVICTION_INTERVAL_MS=3600000
 | `re-snapshot` | `T5` flags + `--slow-readers 1 --slow-reader-subs 30 --slow-reader-frame-us 20000` | the same reader ten times slower, so that it falls behind for certain (reported only) |
 | `T5-2k` | `--rate 2000` + `T5` flags | reference: `T5` at a rate the `e040f7ee` server keeps its readers at, for a before/after comparison at equal offered load |
 | `T6-2k` | `--rate 2000` + `T6` flags | reference: `T6` at the same rate |
+| `T6-500` | `--rate 500` + `T6` flags | reference: `T6` at a lower rate, in case the `e040f7ee` server drops the `T6` readers at 2·10³ |
 
 Three runs of each arm, every run a separate process, interleaved (each repetition runs every arm once). `--rate` in the reference arms comes after `$COMMON`'s and overrides it. A run is read only when it is valid. Figures for T5, T6, the slow reader and the `A0` ratio come from a Linux host (see below); a Mac run checks only that the arm is valid (no mismatch, no unexpected disconnect), because of the APFS `F_FULLFSYNC` cap and the shared CPUs.
 
