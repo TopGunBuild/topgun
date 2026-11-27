@@ -43,7 +43,9 @@ use super::decode;
 use super::AppState;
 use crate::network::config::ConnectionConfig;
 use crate::network::connection::{ConnectionHandle, ConnectionId};
-use crate::network::device_identity::{frontier_client_id, DeviceIdentityStore};
+use crate::network::device_identity::{
+    frontier_client_id, guest_credential_key, guest_present_or_mint, DeviceIdentityStore,
+};
 use crate::network::{ConnectionKind, OutboundMessage};
 use crate::service::classify::OperationService;
 use crate::service::dispatch::PartitionDispatcher;
@@ -51,6 +53,7 @@ use crate::service::operation::{
     CallerOrigin, ClassifyError, ErrorDisposition, OpOutcome, OpVerdict, Operation, OperationError,
     OperationResponse, ALL_ERROR_KINDS,
 };
+use topgun_core::types::PrincipalKind;
 use topgun_core::Principal;
 
 /// Maximum number of in-flight dispatch tasks per connection.
@@ -342,7 +345,7 @@ async fn handle_socket(mut socket: ServerSocket, state: AppState, chunked: bool)
                                         &state,
                                         &handle,
                                         conn_id,
-                                        Some(&principal.id),
+                                        Some(&principal),
                                         auth_msg.device_token.as_deref(),
                                     )
                                     .await;
@@ -504,7 +507,7 @@ async fn handle_socket(mut socket: ServerSocket, state: AppState, chunked: bool)
                         &state,
                         &handle,
                         conn_id,
-                        principal.as_ref().map(|p| p.id.as_str()),
+                        principal.as_ref(),
                         hello.device_token.as_deref(),
                     )
                     .await;
@@ -650,7 +653,7 @@ async fn handle_socket(mut socket: ServerSocket, state: AppState, chunked: bool)
 /// `None`) and NEVER blocks authentication — an attacker can always claim "no token"
 /// anyway, so failing an honest user out buys no security.
 ///
-/// `principal_id` is `Some` in JWT mode and `None` in `NO_AUTH` mode (keyed under the
+/// `principal` is `Some` in JWT mode and `None` in `NO_AUTH` mode (keyed under the
 /// frontier sentinel namespace). The caller guarantees the one-shot precondition
 /// (JWT: structural single Phase-1 bind; `NO_AUTH`: explicit pre-call guard), so this
 /// only sets `device_id` when it is still `None`.
@@ -658,16 +661,29 @@ async fn bind_device_identity(
     state: &AppState,
     handle: &Arc<ConnectionHandle>,
     conn_id: ConnectionId,
-    principal_id: Option<&str>,
+    principal: Option<&Principal>,
     presented: Option<&str>,
 ) -> (Option<String>, Option<String>) {
     let Some(factory) = state.store_factory.as_ref() else {
         return (None, None);
     };
-    let dev_store = DeviceIdentityStore::new(factory.data_store());
-    // present_or_mint tags the no-auth namespace structurally from the `None` principal;
-    // no content sentinel is substituted here (a JWT `sub` can never forge the tag).
-    match dev_store.present_or_mint(principal_id, presented).await {
+    let principal_id = principal.map(|p| p.id.as_str());
+    let bound = match principal {
+        // A guest's credential is checked against the process key and never reaches
+        // the store, so guests leave no credential row (`TG-AUTH-002`).
+        Some(p) if p.kind == PrincipalKind::Guest => {
+            Ok(guest_present_or_mint(guest_credential_key(), p, presented))
+        }
+        // present_or_mint tags the no-auth namespace structurally from the `None`
+        // principal; no content sentinel is substituted here (a JWT `sub` can never
+        // forge the tag).
+        _ => {
+            DeviceIdentityStore::new(factory.data_store())
+                .present_or_mint(principal_id, presented)
+                .await
+        }
+    };
+    match bound {
         Ok(binding) => {
             {
                 let mut meta = handle.metadata.write().await;
@@ -4704,6 +4720,106 @@ mod tests {
             (0, 8193, vec!["413".to_string()], 0),
             "(messages held, cost, one label per frame queued, operations handed to the domain service)"
         );
+    }
+
+    /// Guests leave no device credential row in a durable store, a user does, and a
+    /// credential re-binds only for the kind of principal it was issued to
+    /// (`TG-AUTH-002`).
+    #[cfg(feature = "rocksdb")]
+    #[tokio::test]
+    async fn guest_auth_writes_no_device_credential_row() {
+        use crate::network::device_identity::CREDENTIAL_MAP;
+        use crate::storage::datastores::engine_store::EngineMapDataStore;
+        use crate::storage::datastores::rocks_engine::{OpenMode, RocksConfig, RocksKvEngine};
+        use crate::storage::map_data_store::MapDataStore;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = RocksKvEngine::open(
+            dir.path(),
+            OpenMode::CreateNew,
+            &RocksConfig::production(64 * 1024 * 1024, -1),
+        )
+        .expect("open engine");
+        let store: Arc<dyn MapDataStore> =
+            Arc::new(EngineMapDataStore::open(Arc::new(engine)).expect("open store"));
+        let state = AppState {
+            store_factory: Some(Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::clone(&store),
+                Vec::new(),
+            ))),
+            ..AppState::for_test()
+        };
+        let rows = || async {
+            let mut batch = store
+                .scan_values(CREDENTIAL_MAP, false, 0)
+                .await
+                .expect("scan");
+            let mut n = batch.records.len();
+            while let Some(cursor) = batch.next_cursor.take() {
+                batch = store
+                    .scan_values_batched(CREDENTIAL_MAP, false, cursor, 0)
+                    .await
+                    .expect("scan");
+                n += batch.records.len();
+            }
+            n
+        };
+        let bind = |who: Principal, presented: Option<String>| {
+            let state = state.clone();
+            async move {
+                let (handle, _rx) = state
+                    .registry
+                    .register(ConnectionKind::Client, &ConnectionConfig::default());
+                let (device_id, token) = bind_device_identity(
+                    &state,
+                    &handle,
+                    handle.id,
+                    Some(&who),
+                    presented.as_deref(),
+                )
+                .await;
+                (device_id.expect("a device is bound"), token)
+            }
+        };
+        let principal = |kind: PrincipalKind| Principal {
+            id: "v1".to_string(),
+            roles: vec!["USER".to_string()],
+            tenant: Some("acme".to_string()),
+            kind,
+        };
+        let guest = principal(PrincipalKind::Guest);
+        let user = principal(PrincipalKind::User);
+
+        let mut guest_token = None;
+        for _ in 0..100 {
+            let (_, token) = bind(guest.clone(), None).await;
+            guest_token = Some(token.expect("a guest with no credential is minted one"));
+        }
+        assert_eq!(rows().await, 0, "100 guest AUTHs leave no credential row");
+
+        let guest_token = guest_token.expect("minted");
+        let (guest_device, again) = bind(guest.clone(), Some(guest_token.clone())).await;
+        assert_eq!(guest_device, guest_token.split_once('.').expect("shape").0);
+        assert!(again.is_none(), "a re-presented guest credential re-binds");
+
+        let (user_device, user_token) = bind(user.clone(), None).await;
+        let user_token = user_token.expect("a user with no credential is minted one");
+        assert_eq!(rows().await, 1, "one user AUTH leaves one credential row");
+
+        let (device, token) = bind(guest.clone(), Some(user_token)).await;
+        assert!(
+            token.is_some(),
+            "a user credential presented by a guest mints"
+        );
+        assert_ne!(device, user_device);
+        let (device, token) = bind(user, Some(guest_token)).await;
+        assert!(
+            token.is_some(),
+            "a guest credential presented by a user mints"
+        );
+        assert_ne!(device, guest_device);
+        assert_eq!(rows().await, 2, "only the user mints wrote rows");
     }
 }
 

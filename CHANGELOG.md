@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Added (server): a guest's device credential is kept in memory only (`TG-AUTH-002`).** A guest
+  connection is given a device credential of the same shape as a user's, but signed with a key the
+  server draws at start and never stores, so a guest leaves no row in `_topgun_device_credentials`.
+  It re-binds the guest's device within one server process and only for the tenant, kind and `sub`
+  it was issued to; after a restart the guest is given a new device. A user's credential is stored
+  and survives restarts as before. A device credential issued to a token before it carried the
+  guest claim is replaced once.
 - **Added (server): guest principals, which never get the admin bypass (`TG-AUTHZ-005`).** With
   `TOPGUN_GUEST_CLAIM` naming a top-level JWT claim, a token whose claim is `true` is a guest and
   one where it is absent or `false` a user; any other value refuses the token, on the WebSocket

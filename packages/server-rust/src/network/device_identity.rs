@@ -10,9 +10,13 @@
 //! At rest only `SHA-256(secret)` (+ issued-at) is stored — never the secret or the
 //! opaque token. Verification is a constant-time hash compare. Credentials live under
 //! a reserved map namespace kept clear of the user-map namespace by convention.
+//!
+//! A guest's credential is never stored (`TG-AUTH-002`): it is an HMAC under a key
+//! that lives only as long as the process, see [`guest_present_or_mint`].
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -21,7 +25,7 @@ use uuid::Uuid;
 use crate::storage::map_data_store::MapDataStore;
 use crate::storage::record::RecordValue;
 use topgun_core::hlc::Timestamp;
-use topgun_core::types::Value;
+use topgun_core::types::{Principal, Value};
 
 /// Reserved map namespace for device credentials.
 ///
@@ -194,6 +198,81 @@ impl DeviceIdentityStore {
         let key = Self::identity_key(principal_id, device_id);
         self.store.remove(CREDENTIAL_MAP, &key, 0).await
     }
+}
+
+/// The key guest device credentials are signed with: 32 random bytes drawn once
+/// per process and never persisted or logged, so every guest credential stops
+/// verifying when the process ends and the guest is minted a new one
+/// (`TG-AUTH-002`).
+pub(crate) fn guest_credential_key() -> &'static [u8; 32] {
+    static KEY: OnceLock<[u8; 32]> = OnceLock::new();
+    KEY.get_or_init(|| {
+        let mut key = [0u8; 32];
+        rand::rng().fill_bytes(&mut key);
+        key
+    })
+}
+
+/// Present-or-mint for a guest, without a store (`TG-AUTH-002`).
+///
+/// The credential has a user credential's wire shape, `<deviceId>.<64 hex>`, but the
+/// hex is `HMAC-SHA-256(key, scope)` over the guest's tenant, kind, id and the
+/// `deviceId`, so a presented credential re-binds only under the scope and the key
+/// it was minted with; anything else mints fresh, fail-open like
+/// [`DeviceIdentityStore::present_or_mint`].
+#[must_use]
+pub(crate) fn guest_present_or_mint(
+    key: &[u8; 32],
+    principal: &Principal,
+    presented: Option<&str>,
+) -> DeviceBinding {
+    if let Some((device_id, tag_hex)) = presented.and_then(DeviceIdentityStore::parse_token) {
+        if Uuid::parse_str(device_id).is_ok() {
+            if let Ok(tag) = hex::decode(tag_hex) {
+                // `verify_slice` compares in constant time.
+                if guest_mac(key, principal, device_id)
+                    .verify_slice(&tag)
+                    .is_ok()
+                {
+                    return DeviceBinding {
+                        device_id: device_id.to_string(),
+                        minted_token: None,
+                    };
+                }
+            }
+        }
+    }
+    let device_id = Uuid::new_v4().to_string();
+    let tag = guest_mac(key, principal, &device_id)
+        .finalize()
+        .into_bytes();
+    let token = format!("{device_id}.{}", hex::encode(tag));
+    DeviceBinding {
+        device_id,
+        minted_token: Some(token),
+    }
+}
+
+/// The MAC of a guest credential. Every field is length-prefixed and the tenant
+/// carries a presence tag, so two different scopes never feed the same bytes.
+fn guest_mac(key: &[u8; 32], principal: &Principal, device_id: &str) -> Hmac<Sha256> {
+    fn field(mac: &mut Hmac<Sha256>, bytes: &[u8]) {
+        mac.update(&(bytes.len() as u64).to_be_bytes());
+        mac.update(bytes);
+    }
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts a key of any length");
+    match &principal.tenant {
+        Some(tenant) => {
+            mac.update(&[1]);
+            field(&mut mac, tenant.as_bytes());
+        }
+        None => mac.update(&[0]),
+    }
+    field(&mut mac, principal.kind.as_str().as_bytes());
+    field(&mut mac, principal.id.as_bytes());
+    field(&mut mac, device_id.as_bytes());
+    mac
 }
 
 /// Build the server-authenticated frontier identity for a connection.
@@ -449,6 +528,94 @@ mod tests {
         assert!(
             !logged.contains(&token),
             "opaque token leaked into logs: {logged}"
+        );
+    }
+}
+
+// Not behind the `redb` feature like `tests` above: this test needs no store, and
+// it must keep compiling in when that feature goes.
+#[cfg(test)]
+mod guest_credential_tests {
+    use super::*;
+    use topgun_core::types::PrincipalKind;
+
+    fn principal(tenant: Option<&str>, kind: PrincipalKind, id: &str) -> Principal {
+        Principal {
+            id: id.to_string(),
+            roles: vec!["USER".to_string()],
+            tenant: tenant.map(str::to_string),
+            kind,
+        }
+    }
+
+    #[test]
+    fn guest_credential_is_stateless_and_rebinds_only_in_its_process() {
+        let k1 = [1u8; 32];
+        let k2 = [2u8; 32];
+        let acme_v1 = principal(Some("acme"), PrincipalKind::Guest, "v1");
+
+        // A first AUTH mints a credential in the user credential's wire shape.
+        let first = guest_present_or_mint(&k1, &acme_v1, None);
+        let token = first.minted_token.clone().expect("a fresh guest is minted");
+        let (device_id, tag) = token.split_once('.').expect("<deviceId>.<hex>");
+        assert_eq!(device_id, first.device_id);
+        assert!(Uuid::parse_str(device_id).is_ok());
+        assert_eq!(tag.len(), 64);
+        assert!(tag
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+
+        // Re-presented under the same key and scope: the same deviceId, no new token.
+        let again = guest_present_or_mint(&k1, &acme_v1, Some(&token));
+        assert_eq!(again.device_id, first.device_id);
+        assert!(again.minted_token.is_none(), "a re-bind issues no token");
+
+        // Every other presentation mints a new deviceId.
+        let remints = |key: &[u8; 32], who: &Principal, presented: &str, why: &str| {
+            let b = guest_present_or_mint(key, who, Some(presented));
+            assert!(b.minted_token.is_some(), "{why}: must mint");
+            assert_ne!(b.device_id, first.device_id, "{why}: must not re-bind");
+        };
+        remints(
+            &k2,
+            &acme_v1,
+            &token,
+            "verified under another key (a restart)",
+        );
+        remints(
+            &k1,
+            &principal(Some("globex"), PrincipalKind::Guest, "v1"),
+            &token,
+            "same sub under another tenant",
+        );
+        remints(
+            &k1,
+            &principal(None, PrincipalKind::Guest, "v1"),
+            &token,
+            "same sub with no tenant",
+        );
+        remints(
+            &k1,
+            &principal(Some("acme"), PrincipalKind::Guest, "v2"),
+            &token,
+            "another guest",
+        );
+        remints(
+            &k1,
+            &principal(Some("acme"), PrincipalKind::User, "v1"),
+            &token,
+            "the same sub as a user",
+        );
+        // A user credential is `<uuid>.<hex of a random secret>`, which no guest MAC
+        // matches.
+        let user_credential = format!("{}.{}", Uuid::new_v4(), hex::encode([7u8; 32]));
+        remints(&k1, &acme_v1, &user_credential, "a user credential");
+        remints(&k1, &acme_v1, "not-a-token", "garbage");
+        remints(
+            &k1,
+            &acme_v1,
+            &format!("{}.{tag}", Uuid::new_v4()),
+            "the tag moved to another deviceId",
         );
     }
 }

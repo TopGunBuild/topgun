@@ -7,9 +7,10 @@ that every cited enforcing test still exists and that no new entry lands without
 an explicit `NAKED` marker; the gate is "the NAKED count never grows silently", not "zero NAKED".
 
 Conventions: IDs are `TG-<DOMAIN>-<NNN>` (domains: WAL, WB write-behind, OR, LWW, MRK merkle,
-EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch, ENG byte engine, AUTHZ
-authorization, ENC encryption at rest, READ whole-map reads, IDX scalar indexes, VEC vector indexes,
-TTL record expiry, LIVE live queries, QRY queries). Cite the ID verbatim in code comments and test names. Statuses:
+EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch, ENG byte engine, AUTH
+authentication, AUTHZ authorization, ENC encryption at rest, READ whole-map reads, IDX scalar
+indexes, VEC vector indexes, TTL record expiry, LIVE live queries, QRY queries). Cite the ID
+verbatim in code comments and test names. Statuses:
 `decided` (holds by design) · `open (SPEC/TODO-nnn)` (not yet true / not yet wired) ·
 `aspirational`. Precedent: omnigraph `docs/invariants.md` (structure) — improved here with the
 CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
@@ -3351,6 +3352,36 @@ weaker than a test.
   `guest_claim_decides_kind_and_refuses_non_booleans` (`auth.rs`).
 - **Violation consequence:** a visitor whose backend-minted `sub` collides with an admin subject,
   or who claims the `admin` role, reads and writes every map of the node.
+- **Status:** decided, **enforced**.
+
+### TG-AUTH-002: A guest's device credential is never stored
+
+- **Scope:** the device-identity binding of the WebSocket handshake (`bind_device_identity`, from
+  the JWT `AUTH` and from `DEVICE_HELLO`) for a principal of kind `Guest` (TG-AUTHZ-005), on a
+  server with a store; a server without one binds no device, for guests as for everyone.
+- **Statement:** a guest's device credential is `<deviceId>.<64 lowercase hex>`, the same shape as
+  a user's. The hex is HMAC-SHA-256 under a 32-byte key drawn once per process, never persisted or
+  logged, over a length-prefixed encoding of (tenant or none, kind, subject, `deviceId`). A
+  presented credential re-binds its `deviceId` only when that MAC verifies (in constant time);
+  otherwise a new credential is minted, and the binding never fails authentication. The guest
+  credential check (`guest_present_or_mint`) never calls the data store, so it writes no row to
+  `_topgun_device_credentials`. A credential re-binds only under the tenant, kind and subject it
+  was minted for: a guest credential presented by a guest of another tenant with the same `sub`, or
+  by a user, and a user credential presented by a guest, each mint fresh.
+- **Stated limits:** the credential lives as long as the server process: after a restart every
+  guest credential fails and the guest gets a new `deviceId`. Takeover, frontier rehydration and
+  the `AUTH_ACK` are as for users, and a guest's confirmed-apply cursor rows are still durable
+  (TODO-1044). A token that was a user before it carried the guest claim keeps its old credential
+  row, unreferenced. Single-node only.
+- **Maintaining code:** `network/device_identity.rs` `guest_present_or_mint`, `guest_mac`,
+  `guest_credential_key`; `network/handlers/websocket.rs` `bind_device_identity`.
+- **Enforcing test:** `guest_credential_is_stateless_and_rebinds_only_in_its_process`
+  (`device_identity.rs`); `guest_auth_writes_no_device_credential_row` (`websocket.rs`);
+  `tests/integration-rust/guest-principal.test.ts` "guest device identity lives as long as the
+  server process".
+- **Violation consequence:** every page view of a visitor without storage writes a durable row that
+  is never reclaimed, or one visitor's credential re-binds under another tenant or kind and takes
+  over its device identity.
 - **Status:** decided, **enforced**.
 
 ### TG-TEN-001: With tenancy on, a client reaches only the names its tenant owns

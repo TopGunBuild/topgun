@@ -4678,6 +4678,7 @@ dependencies = [
  "hdrhistogram",
  "hex",
  "hkdf",
+ "hmac",
  "http",
  "hyper",
  "hyper-util",
