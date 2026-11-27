@@ -5486,7 +5486,7 @@ mod writer_tests {
     }
 
     #[tokio::test]
-    async fn writer_frames_a_shared_message_as_binary() {
+    async fn whole_message_writer_frames_a_shared_message_as_binary() {
         let mut h = harness(false).await;
         let lengths = [16, F + 1];
         let expected: Vec<Vec<u8>> = lengths
@@ -6240,11 +6240,29 @@ mod writer_tests {
     async fn small_messages_pass_an_answer_between_its_chunks() {
         let p = big_passable(0, 3 * C);
         let (s1, s2) = (small(1), small(2));
-        let seen = schedule(&[("P", &p), ("s1", &s1), ("s2", &s2)], 5).await;
         let mut want = chunks("P", 3);
         want.insert(1, whole("s1"));
         want.insert(2, whole("s2"));
-        assert_eq!(seen, want);
+        // A shared answer must be scheduled and chunked as the owned one is.
+        let mut streams = Vec::new();
+        for answer in [
+            OutboundMessage::Binary(p.clone()),
+            OutboundMessage::Shared(Bytes::from(p.clone())),
+        ] {
+            let queued = vec![
+                answer,
+                OutboundMessage::Binary(s1.clone()),
+                OutboundMessage::Binary(s2.clone()),
+            ];
+            let mut h = harness_queued(false, true, queued).await;
+            let got = read_messages(&mut h.client_stream, 5, Duration::from_secs(30)).await;
+            assert_eq!(label(&got, &[("P", &p), ("s1", &s1), ("s2", &s2)]), want);
+            streams.push(got);
+        }
+        assert!(
+            streams[0] == streams[1],
+            "a shared answer's stream differs from the owned answer's"
+        );
     }
 
     #[tokio::test]
