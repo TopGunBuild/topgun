@@ -37,8 +37,8 @@ use topgun_core::messages::{ClientOp, Message, OpBatchMessage, OpBatchPayload, P
 use crate::connection_pool::ConnectionPool;
 use crate::store_arm::{dir_bytes, EffectiveStoreConfig, RunDirs, ServerHandle, Teardown};
 use crate::subscribers::{
-    self, ReaderSet, ServerMetrics, SubscriberConfig, SubscriberMeasurement, SubscribersBlock,
-    Timing,
+    self, HarnessWakeLag, ReaderSet, ServerMetrics, SubscriberConfig, SubscriberMeasurement,
+    SubscribersBlock, Timing,
 };
 
 /// The highest latency the histograms hold, in microseconds (one hour), so a
@@ -847,11 +847,15 @@ pub async fn run(
     drop(pool);
     let subscribers = match readers {
         Some(readers) => {
-            let mut m =
-                measure_subscribers(readers, server, jwt_secret, &config.subs, render).await?;
-            m.harness_wake_lag_p999_us = tally.wake_lag_run.value_at_quantile(0.999);
-            m.max_wake_lag_ms = config.max_wake_lag_ms;
-            Some(m)
+            let wake_lag = HarnessWakeLag {
+                p999_us: tally.wake_lag_run.value_at_quantile(0.999),
+                samples: tally.wake_lag_run.len(),
+                max_ms: config.max_wake_lag_ms,
+            };
+            Some(
+                measure_subscribers(readers, server, jwt_secret, &config.subs, render, wake_lag)
+                    .await?,
+            )
         }
         None => None,
     };
@@ -889,6 +893,7 @@ async fn measure_subscribers(
     jwt_secret: &str,
     subs: &SubscriberConfig,
     render: &(dyn Fn() -> String + Sync),
+    harness_wake_lag: HarnessWakeLag,
 ) -> anyhow::Result<SubscriberMeasurement> {
     let subscriptions = readers.subscriptions();
     let snapshots_at_warmup_start = readers.snapshots_at_warmup_start;
@@ -907,8 +912,7 @@ async fn measure_subscribers(
         check,
         metrics: ServerMetrics::scrape(&render()),
         before_server: subscribers::server_src_is_before(),
-        harness_wake_lag_p999_us: 0,
-        max_wake_lag_ms: 0,
+        harness_wake_lag,
     })
 }
 
@@ -1109,11 +1113,7 @@ fn validity(
         reasons.push("debug_build");
     }
     if let Some(block) = subscribers {
-        for reason in block.invalid_reasons() {
-            if !reasons.contains(&reason) {
-                reasons.push(reason);
-            }
-        }
+        reasons.extend(block.invalid_reasons());
     }
     Validity {
         valid: reasons.is_empty(),

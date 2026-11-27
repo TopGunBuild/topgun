@@ -1033,12 +1033,24 @@ pub struct SubscriberMeasurement {
     /// Whether the server under test is built from the sources of
     /// [`BEFORE_SERVER`]; `None` when `git` could not tell.
     pub before_server: Option<bool>,
-    /// The writers' wake lag p99.9 over warm-up and window, in µs, and its
-    /// bound (`--max-wake-lag-ms`): a harness that kept its own schedule
-    /// through warm-up, when the before server drops readers, also kept
-    /// reading them.
-    pub harness_wake_lag_p999_us: u64,
-    pub max_wake_lag_ms: u64,
+    pub harness_wake_lag: HarnessWakeLag,
+}
+
+/// The writers' wake lag over warm-up and window against its bound
+/// (`--max-wake-lag-ms`): a harness that kept its own schedule through
+/// warm-up, when the before server drops readers, also kept reading them.
+#[derive(Debug, Clone, Copy)]
+pub struct HarnessWakeLag {
+    pub p999_us: u64,
+    pub samples: u64,
+    pub max_ms: u64,
+}
+
+impl HarnessWakeLag {
+    /// Within the bound, on at least one sample: no sample shows nothing.
+    pub fn ok(&self) -> bool {
+        self.samples > 0 && self.p999_us <= self.max_ms.saturating_mul(1000)
+    }
 }
 
 /// The server sources the "before" figures are taken on. That server drops a
@@ -1180,6 +1192,7 @@ pub struct SubscribersBlock {
     /// The writers' wake lag p99.9 over warm-up and window, and whether it is
     /// within `--max-wake-lag-ms` (else `generator_saturated`).
     pub harness_wake_lag_warmup_window_p999_ms: f64,
+    pub harness_wake_lag_warmup_window_samples: u64,
     pub harness_wake_lag_ok: bool,
     /// Why the fresh-query check could not run; its views count as unchecked.
     pub check_error: Option<String>,
@@ -1216,8 +1229,7 @@ impl SubscribersBlock {
             disconnects += u64::from(s.disconnected);
         }
         let secs = duration_secs as f64;
-        let harness_wake_lag_ok =
-            m.harness_wake_lag_p999_us <= m.max_wake_lag_ms.saturating_mul(1000);
+        let harness_wake_lag_ok = m.harness_wake_lag.ok();
         let before_outcome = before_outcome(
             m.before_server,
             disconnects,
@@ -1255,7 +1267,8 @@ impl SubscribersBlock {
             views_disconnected: m.check.views_disconnected,
             server_metrics: m.metrics.clone(),
             before_server: m.before_server,
-            harness_wake_lag_warmup_window_p999_ms: m.harness_wake_lag_p999_us as f64 / 1000.0,
+            harness_wake_lag_warmup_window_p999_ms: m.harness_wake_lag.p999_us as f64 / 1000.0,
+            harness_wake_lag_warmup_window_samples: m.harness_wake_lag.samples,
             harness_wake_lag_ok,
             check_error: m.check.error.clone(),
             before_outcome,
@@ -1265,9 +1278,6 @@ impl SubscribersBlock {
     /// The validity reasons this block adds.
     pub fn invalid_reasons(&self) -> Vec<&'static str> {
         let mut reasons = Vec::new();
-        if !self.harness_wake_lag_ok {
-            reasons.push("generator_saturated");
-        }
         if self.max_unread_frames > READER_BEHIND_FRAMES {
             reasons.push("reader_behind");
         }
@@ -1459,8 +1469,11 @@ pub fn before_outcome_only_on_the_before_server() {
             check: CheckOutcome::default(),
             metrics: m,
             before_server: before,
-            harness_wake_lag_p999_us: lag_us,
-            max_wake_lag_ms: 5,
+            harness_wake_lag: HarnessWakeLag {
+                p999_us: lag_us,
+                samples: u64::from(lag_us > 0),
+                max_ms: 5,
+            },
         };
         SubscribersBlock::of(&measurement, &SubscriberConfig::default(), 1)
     };
@@ -1479,12 +1492,17 @@ pub fn before_outcome_only_on_the_before_server() {
         block(Some(true), metrics(0.0, 0.0), 127),
         block(Some(true), ServerMetrics::default(), 127),
         block_lag(Some(true), metrics(1.0, 0.0), 127, 5_001),
+        block_lag(Some(true), metrics(1.0, 0.0), 127, 0),
     ] {
         assert!(after.before_outcome.is_none());
         assert!(after.invalid_reasons().contains(&"disconnect"));
     }
-    let starved = block_lag(Some(true), metrics(1.0, 0.0), 127, 5_001);
-    assert!(starved.invalid_reasons().contains(&"generator_saturated"));
+    // The warm-up check only withholds the exemption; generator_saturated
+    // stays the window rule's, so a run that needs no exemption is judged as
+    // on any server.
+    for block in [before, block_lag(Some(true), metrics(1.0, 0.0), 127, 5_001)] {
+        assert!(!block.invalid_reasons().contains(&"generator_saturated"));
+    }
 }
 
 /// The before-server check reads the tree the binary was compiled from,

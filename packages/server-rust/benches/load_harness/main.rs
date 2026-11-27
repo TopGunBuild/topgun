@@ -776,6 +776,10 @@ async fn subscribers_e2e_self_test(observability: Arc<ObservabilityHandle>) -> b
         assert!(s.quiesced);
         assert_eq!(s.views_checked, 6);
         assert_eq!(s.view_mismatches, 0);
+        assert!(
+            s.harness_wake_lag_warmup_window_samples > 0,
+            "the warm-up and window wake lag is the run's own"
+        );
     });
     check.await.is_ok()
 }
