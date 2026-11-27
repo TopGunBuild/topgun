@@ -524,16 +524,15 @@ impl ReaderSet {
         let mut subscriptions = 0;
         for (conn, slow, subs) in plan {
             let snapshotted = Arc::new(std::sync::Mutex::new(HashSet::new()));
-            let resent = Arc::new(std::sync::Mutex::new(HashMap::new()));
+            let state = ReaderState::new(slow, subs.iter().map(|i| sub_id(*i)));
+            let resent = Arc::clone(&state.resent);
             readers.push(spawn_reader(
                 Arc::clone(&pool),
                 conn,
-                slow,
-                subs.iter().map(|i| sub_id(*i)).collect(),
+                state,
                 config.slow_reader_frame_us,
                 Arc::clone(&shared),
                 Arc::clone(&snapshotted),
-                Arc::clone(&resent),
             ));
             subscriptions += subs.len() as u64;
             subscribing.spawn(subscribe_reader(
@@ -683,13 +682,12 @@ enum Inbound {
 fn spawn_reader(
     pool: Arc<ConnectionPool>,
     conn: usize,
-    slow: bool,
-    query_ids: Vec<String>,
+    mut state: ReaderState,
     slow_frame_us: u64,
     shared: Arc<Shared>,
     snapshotted: Arc<std::sync::Mutex<HashSet<String>>>,
-    resent: Arc<std::sync::Mutex<HashMap<String, u32>>>,
 ) -> Reader {
+    let slow = state.slow;
     let (tx, mut rx) = mpsc::unbounded_channel::<Inbound>();
     let backlog = Arc::new(AtomicI64::new(0));
     let max_backlog = Arc::new(AtomicI64::new(0));
@@ -724,8 +722,6 @@ fn spawn_reader(
     let process = {
         let backlog = Arc::clone(&backlog);
         tokio::spawn(async move {
-            let mut state = ReaderState::new(slow, query_ids);
-            state.resent = resent;
             let mut reassembly = Reassembly::default();
             while let Some(inbound) = rx.recv().await {
                 let (at, bytes) = match inbound {
