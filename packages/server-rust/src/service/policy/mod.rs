@@ -877,7 +877,7 @@ impl PolicyEvaluator {
         let action_matches: Vec<&PermissionPolicy> = policies
             .iter()
             .filter(|p| p.action == action || p.action == PermissionAction::All)
-            .filter(|p| self.applies_to(p, principal, map_name, key))
+            .filter(|p| applies_to(p, principal, map_name, key))
             .collect();
 
         // Build the auth rmpv::Value once, outside the per-policy loop. A
@@ -949,45 +949,44 @@ impl PolicyEvaluator {
             PolicyDecision::Deny
         }
     }
+}
 
-    /// Whether `policy`'s patterns match `map_name` and `key` for `principal`
-    /// (`TG-AUTHZ-003`, `TG-AUTHZ-004`). A placeholder the principal cannot
-    /// fill never widens an allow and never narrows a deny: an allow does not
-    /// match, a deny's map segment matches as one `*`, and a deny's
-    /// `keyPattern` matches every key, as it does on an operation with no key.
-    fn applies_to(
-        &self,
-        policy: &PermissionPolicy,
-        principal: Option<&topgun_core::Principal>,
-        map_name: &str,
-        key: Option<&str>,
-    ) -> bool {
-        let deny = policy.effect == PolicyEffect::Deny;
-        let mut unfilled = None;
-        let fits = resolve_pattern(&policy.map_pattern, '.', principal, deny, &mut unfilled)
-            .is_some_and(|resolved| segments_match(&policy.map_pattern, &resolved, map_name, '.'))
-            && match (&policy.key_pattern, key) {
-                (None, _) => true,
-                (Some(_), None) => deny,
-                (Some(key_pattern), Some(key)) => {
-                    match resolve_pattern(key_pattern, ':', principal, false, &mut unfilled) {
-                        Some(resolved) => segments_match(key_pattern, &resolved, key, ':'),
-                        None => deny,
-                    }
+/// Whether `policy`'s patterns match `map_name` and `key` for `principal`
+/// (`TG-AUTHZ-003`, `TG-AUTHZ-004`). A placeholder the principal cannot
+/// fill never widens an allow and never narrows a deny: an allow does not
+/// match, a deny's map segment matches as one `*`, and a deny's
+/// `keyPattern` matches every key, as it does on an operation with no key.
+fn applies_to(
+    policy: &PermissionPolicy,
+    principal: Option<&topgun_core::Principal>,
+    map_name: &str,
+    key: Option<&str>,
+) -> bool {
+    let deny = policy.effect == PolicyEffect::Deny;
+    let mut unfilled = None;
+    let fits = resolve_pattern(&policy.map_pattern, '.', principal, deny, &mut unfilled)
+        .is_some_and(|resolved| segments_match(&policy.map_pattern, &resolved, map_name, '.'))
+        && match (&policy.key_pattern, key) {
+            (None, _) => true,
+            (Some(_), None) => deny,
+            (Some(key_pattern), Some(key)) => {
+                match resolve_pattern(key_pattern, ':', principal, false, &mut unfilled) {
+                    Some(resolved) => segments_match(key_pattern, &resolved, key, ':'),
+                    None => deny,
                 }
-            };
-        if let Some(placeholder) = unfilled {
-            if UNFILLED_LOGGED.insert(policy.id.clone(), ()).is_none() {
-                tracing::warn!(
-                    "policy {}: {} has no single-segment value for this principal; \
-                     the policy fails closed: as an allow it does not match, as a deny it applies",
-                    policy.id,
-                    placeholder.token()
-                );
             }
+        };
+    if let Some(placeholder) = unfilled {
+        if UNFILLED_LOGGED.insert(policy.id.clone(), ()).is_none() {
+            tracing::warn!(
+                "policy {}: {} has no single-segment value for this principal; \
+                 the policy fails closed: as an allow it does not match, as a deny it applies",
+                policy.id,
+                placeholder.token()
+            );
         }
-        fits
     }
+    fits
 }
 
 // ---------------------------------------------------------------------------
