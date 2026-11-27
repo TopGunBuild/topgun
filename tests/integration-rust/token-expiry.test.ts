@@ -130,8 +130,13 @@ describe('Integration: sockets close at token expiry (TG-AUTH-001)', () => {
     const session = await open(port, token('old-client', ['USER'], -55));
     clients.push(session.client);
     const ackAt = Date.now();
-    await waitUntil(() => session.closedAt() !== undefined, 10_000);
+    await waitUntil(() => received(session.client, 'AUTH_FAIL').length > 0, 10_000, 20);
+    const failAt = Date.now();
+    await waitUntil(() => session.closedAt() !== undefined, 5000, 20);
 
+    // The server closes right behind the AUTH_FAIL, not when its teardown
+    // gives up on the writer two seconds later.
+    expect(session.closedAt()! - failAt).toBeLessThan(1000);
     const fail = received(session.client, 'AUTH_FAIL');
     expect(fail).toHaveLength(1);
     expect(fail[0].code).toBe(4401);
