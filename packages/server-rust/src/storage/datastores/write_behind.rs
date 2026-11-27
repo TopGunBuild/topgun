@@ -171,7 +171,7 @@ pub struct WriteBehindConfig {
     /// buffered_bytes  <=  B - 1 + W_b + H_b
     /// W_b             <=  W × S_max
     /// H_b             <=  min(L, N_held) × S_max      L = 1000 entries per pass
-    /// H_b             <=  S_max                       while a store-wide hold is in force
+    /// H_b             =   0                           while a store-wide hold is in force
     /// ```
     ///
     /// - `W_b` is the cohort of counter increments of writes admitted while
@@ -4222,8 +4222,8 @@ fn retry_backoff(base_ms: u64, cap_ms: u64, attempt: u32) -> std::time::Duration
 
 /// What the flush task remembers between passes about a store that refuses.
 ///
-/// Owned by the flush task alone, so it needs no lock; the store carries an
-/// atomic that mirrors the hold for readers outside the task.
+/// Owned by the flush task alone, so it needs no lock; the store carries a
+/// `Mutex<HoldState>` that mirrors the hold for readers outside the task.
 #[derive(Default)]
 struct RetrySchedule {
     /// Set by a refused commit until a pass is accepted. Until this instant

@@ -617,12 +617,15 @@ impl std::fmt::Display for StoreInconsistent {
 
 impl std::error::Error for StoreInconsistent {}
 
-/// The largest charge one plain record may have, its key included, in bytes
-/// (`TG-WB-012`). The charge is the structural estimate the byte bound uses;
-/// an LWW value encodes below twice it and an OR slot below three times it,
-/// so an admitted record encodes below 192 MiB — far below RocksDB's
-/// per-entry limit and the WAL frame's `u32` length — while one client
-/// message (at most 2 MiB) is charged below 5 MiB and is never refused.
+/// The largest charge one record may have, its key included, in bytes
+/// (`TG-WB-012`): a plain write is checked against it before it changes
+/// anything, and an in-place OR write against its key's whole slot. The charge
+/// is the structural estimate the byte bound uses; an LWW value encodes below
+/// twice it and an OR slot below three times it, so an admitted record encodes
+/// below 192 MiB — far below RocksDB's per-entry limit and the WAL frame's
+/// `u32` length. One client message (at most 2 MiB) is charged at most about
+/// 28 MiB, the estimate counting 14 bytes for an integer of one wire byte, so
+/// no single client value reaches it.
 pub const MAX_RECORD_CHARGE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The counter of writes refused at one of the write-behind's bounds, labelled
