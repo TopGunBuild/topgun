@@ -30,6 +30,16 @@ In-process load testing harness for TopGun's Rust server. It boots a full server
 | `--sample-ms` | u64 | 1000 | `open_loop`: timeline interval |
 | `--ack-timeout-ms` | u64 | 10000 | `open_loop`: wait for a batch's answer before abandoning its connection |
 | `--max-wake-lag-ms` | u64 | 5 | `open_loop`: generator-validity bound on wake lag p99.9 |
+| `--subscribers` | usize | off | `open_loop`: turn the [subscriber arm](#subscriber-arm) on with this many reader connections (`0` is its A/A arm) |
+| `--sub-buckets` | u64 | 100 | `open_loop`: `B`, every value's `bucket` is `key_id % B` |
+| `--subs-per-reader` | usize | 1 | subscriber arm: live queries per reader |
+| `--sub-predicate` | string | `none` | subscriber arm: `none`, `eq` or `range` |
+| `--sub-sort` | `field:asc\|desc` | none | subscriber arm: sort of every subscription |
+| `--sub-limit` | u32 | none | subscriber arm: limit of every subscription |
+| `--slow-readers` | usize | 0 | subscriber arm: extra readers that read one frame per `--slow-reader-frame-us` |
+| `--slow-reader-subs` | usize | `--subs-per-reader` | subscriber arm: live queries per slow reader |
+| `--slow-reader-frame-us` | u64 | 2000 | subscriber arm: a slow reader's time per frame, in µs |
+| `--quiesce-ms` | u64 | 2000 | subscriber arm: how long no reader may receive a frame before the views are checked |
 | `--arms` | list | the `--store` value | `open_loop` series: comma-separated arms, e.g. `null,rocksdb` |
 | `--repeat` | u64 | 1 | `open_loop` series: repetitions of the arm list |
 
@@ -181,7 +191,7 @@ On first ever run (placeholder zeros in baseline), the assertion emits `[no base
 
 The identities `scheduled = sent + unsent` and `sent = acked + refused_permanent + refused_transient + unanswered` (ops, window batches only) are checked before the report is written; a violation is a harness bug and exits 1.
 
-**Key mix.** With probability `--new-key-fraction` an op writes a never-written key `ol-{connection}-{id}`, else a key `hot-{j}`, `j` uniform in `0..--hot-keys`, shared by all connections. It matters because the write-behind capacity (`TOPGUN_WRITEBEHIND_CAPACITY`) is a wall for **new** keys only: a write of a key already buffered is always accepted. `--value-bytes` adds a binary field of that size to every value.
+**Key mix.** With probability `--new-key-fraction` an op writes a never-written key `ol-{connection}-{id}`, else a key `hot-{j}`, `j` uniform in `0..--hot-keys`, shared by all connections. Every value is `{v, t, bucket}` (plus `bin` with `--value-bytes`): `v` is the op id, `t` the batch's **scheduled** instant in µs since `t0` on the harness's monotonic clock (a batch sent late keeps it), and `bucket` is `key_id % --sub-buckets`, where `key_id` is `id` for a new key and `j` for a hot one, so a key's bucket never changes. It matters because the write-behind capacity (`TOPGUN_WRITEBEHIND_CAPACITY`) is a wall for **new** keys only: a write of a key already buffered is always accepted. `--value-bytes` adds a binary field of that size to every value.
 
 **Teardown drain.** After the measurement window the server stops serving, stops the expiry sweep and eviction, and drains the write-behind buffer with `hard_flush` — exactly as the binary's signal stop, with no outer timeout (the drain is bounded by the store's own `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`). The outcome is the report's `teardown` object `{ drained, drain_ms, pending_after, error }`: `drained` is `hard_flush` returned `Ok` and `pending_after == 0`, the binary's own definition; all four are `null` for the `null` arm. A drain that did not finish prints a stderr warning but neither invalidates the run nor changes the exit code: the figures were taken before it.
 
@@ -194,15 +204,20 @@ The identities `scheduled = sent + unsent` and `sent = acked + refused_permanent
 | `unanswered_batches` | `ops.unanswered > 0`: the latency tail is censored |
 | `store_failed` | the durable store's failure watch holds a failure at the end of the run (text in `validity.store_failure`) |
 | `debug_build` | the harness was built with debug assertions |
+| `reader_behind` | subscriber arm: a reader's unread inbound frames exceeded 100 000, so its figures measure the harness, not the server |
+| `view_mismatch` | subscriber arm: after quiesce a view differs from a fresh query (`subscribers.view_mismatches > 0`) |
+| `disconnect` | subscriber arm: the server closed a reader that is not a slow reader |
+| `not_quiesced` | subscriber arm: the readers still received frames 120 s after the writers stopped, so the views were checked while deliveries were in flight |
+| `view_unchecked` | subscriber arm: a fresh query of a subscription without a limit came back clamped (`has_more`, `max_query_records`), so its view could not be compared |
 
 Refusals do not invalidate a run: they are a result. Nothing here is a threshold on server performance, and an invalid run still writes its report and exits 0.
 
-**Report (`--json-output`), `schema_version: 1`:**
+**Report (`--json-output`), `schema_version: 2`:**
 
 ```
 {
-  schema_version: 1,
-  scenario: "open_loop", store, run_index (null outside a series), timestamp,
+  schema_version: 2,
+  scenario: "open_loop", command: [the harness's argv], store, run_index (null outside a series), timestamp,
   target_ops_per_sec, batch_size, connections, warmup_secs, duration_secs,
   key_mix: { new_key_fraction, hot_keys, value_bytes, seed },
   achieved: { acked_ops_per_sec, sent_ops_per_sec },
@@ -220,15 +235,73 @@ Refusals do not invalidate a run: they are a result. Nothing here is a threshold
   host: { os, arch, cpus, kernel, cpu_model },
   build: { git_commit, git_dirty, binary_sha256, debug_assertions, allocator },
   teardown: { drained, drain_ms, pending_after, error },
+  subscribers: <the subscriber arm's block, below; null when the arm is off>,
   validity: { valid, reasons: [..], store_failure }
 }
 ```
+
+Version 2 added `command` and `subscribers`; nothing of version 1 changed. `baseline.json` names the version (`open_loop.report_schema_version`).
 
 - `timeline` has `floor((warmup + duration) · 1000 / sample_ms)` entries, one per tick from `t0`, warm-up included (`warmup_end_ms` marks its end); the sampler stops at the window end. `acked_ops` / `refused_ops` are the ops answered in that interval (wall clock); `depth` is the write-behind buffered-key count (`pending_operation_count`, the number the capacity check uses, 0 on `null`); `wal_bytes` / `store_bytes` are the total file sizes under the run's `wal/` and `data/` (`null` on `null`).
 - `config` (non-null arms; also in the closed-loop JSON of a non-null arm): `{ store, data_dir, wal_fsync_policy ("per_op" | "batched" | "none"), write_delay_ms, flush_interval_ms, capacity, backoff_base_ms, backoff_cap_ms, shutdown_timeout_ms, wal_watermark_stall_bound_ms, or_delta_wal, eviction: { max_ram_mb, high_pct, low_pct, interval_ms }, encryption_at_rest: "off", durable_merkle_index: true }`.
 - `build.binary_sha256` is the SHA-256 of the running harness binary. Release builds are not byte-reproducible, so this — not the commit — is the provenance of a figure. `git_commit` / `git_dirty` are `null` where `git` is unavailable.
 
 Stdout prints a short summary: arm, target, achieved, ack p50/p99/p99.9/max, refusals, depth max, validity.
+
+## Subscriber arm
+
+`--subscribers N` (with `--scenario open_loop`) adds `N` reader connections, plus `--slow-readers S`, to the open loop. It measures what live queries cost the writes and what reaches the readers.
+
+**Readers.** Each reader opens its connection as the writers do (the same handshake, `tg_chunks=1` with `--chunked`, and the client's `PING` every 5 s) and sends `--subs-per-reader M` live `QUERY_SUB`s on `bench` (a slow reader sends `--slow-reader-subs`). Subscription `i = reader·M + j` (slow readers are numbered after the others) asks for:
+
+- `none`: every row;
+- `eq`: `bucket == i % B`;
+- `range`: `bucket >= x ∧ bucket < x + ⌈B/10⌉`, `x = (i·⌈B/10⌉) % B`;
+
+with `--sub-sort` and `--sub-limit` when given. Every subscription is sent and every snapshot (`QUERY_RESP`) is received before `t0`; a run where one is missing fails (exit 1), and `subscribers.snapshots_at_warmup_start` records the count. Each reader has a receive task, which only reads frames and stamps their arrival, and a processing task, which reassembles `CHUNK`s, decodes and applies: `QUERY_UPDATE` ENTER/UPDATE upserts the key and LEAVE removes it; a `QUERY_RESP` for an active id replaces the view (after the first one, it counts as a re-snapshot); `SERVER_EVENT` is counted. A slow reader is throttled in its receive task to one frame per `--slow-reader-frame-us`, so the server meets a socket that drains slowly.
+
+**Figures.** Inside the measurement window, by arrival: `deliveries` (`QUERY_UPDATE` frames) and `map_events` (`SERVER_EVENT` frames), per second over `--duration`; `delivery_latency_us` (HDR) = arrival − the delivered value's `t`, so it counts from the write's schedule and includes the time the write waited to be sent. They cover the readers that are not slow; the slow readers have their own `slow_readers` counts. `max_unread_frames` is the most frames any reader had received but not yet processed.
+
+**Quiesce and check.** After the writers stop, the harness waits until no reader has received a frame other than `PONG` for `--quiesce-ms` and nothing is unread (at most 120 s, else `not_quiesced`), stops the readers, and runs one fresh one-shot query (`snapshotOnly`) per subscription on separate connections. `view_mismatches` sums, over the views, the keys present on one side only and the keys whose values differ. A slow reader the server disconnected has no view to compare (`slow_views_disconnected`). The recorder is then read for `topgun_live_event_loss_disconnects_total{cause}` and, where the server registers them, the `topgun_live_resnapshots_*`, `topgun_fanout_lane_*` and `topgun_live_stage_*` series (`null` when absent).
+
+**Block:**
+
+```
+subscribers: {
+  config: { readers, buckets, subs_per_reader, predicate, sort, limit, slow_readers, slow_reader_subs,
+            slow_reader_frame_us, quiesce_ms },
+  subscriptions, snapshots_at_warmup_start,
+  deliveries, deliveries_per_sec, map_events, map_events_per_sec,
+  delivery_latency_us: { count, p50, p99, p999, max },
+  resnapshots, disconnects, query_errors, protocol_anomalies,
+  slow_readers: { readers, frames, resnapshots, disconnects },
+  max_unread_frames, quiesced, quiesce_wait_ms,
+  view_mismatches, views_checked, views_unchecked, slow_views_disconnected,
+  server_metrics: { live_event_loss_disconnects_total, live_resnapshots, fanout_lane, live_stage }  // series → value, or null
+}
+```
+
+A disconnect of a reader that is not slow invalidates the run (`disconnect`); a slow reader's disconnect is a result and is counted in `slow_readers.disconnects`.
+
+### Arm matrix
+
+Every arm runs the same writes: `null` store, 10⁴ writes/s, 200 connections, batches of 10, 10 s warm-up, 30 s window, with `TOPGUN_EVICTION_INTERVAL_MS=3600000` so that the eviction tick's tail (TODO-941, below) does not swamp the fan-out cost being compared:
+
+```bash
+COMMON="--scenario open_loop --store null --rate 10000 --batch-size 10 --connections 200 --warmup 10 --duration 30"
+export TOPGUN_EVICTION_INTERVAL_MS=3600000
+```
+
+| Arm | Flags after `$COMMON` | What it shows |
+|---|---|---|
+| `A0` | `--subscribers 0` | the writes with the arm on and no reader: the ack-latency reference of the others |
+| `T6` | `--subscribers 10 --subs-per-reader 1000 --sub-predicate eq --sub-buckets 10000` | 10⁴ selective subscriptions on new keys: ack latency against `A0`, delivery latency |
+| `T5` | `--subscribers 20 --sub-predicate none --hot-keys 1000 --new-key-fraction 0` | 20 readers that match every write: `deliveries_per_sec`, delivery latency |
+| `T5-sorted` | `T5` flags + `--sub-sort t:desc --sub-limit 100` | the same with a sorted, limited window (reported only) |
+| `slow-reader` | `T5` flags + `--slow-readers 1 --slow-reader-subs 30 --slow-reader-frame-us 2000` | one reader at 1 frame / 2 ms holding 30 subscriptions beside `T5` |
+| `re-snapshot` | `T5` flags + `--slow-readers 1 --slow-reader-subs 30 --slow-reader-frame-us 20000` | the same reader ten times slower, so that it falls behind for certain (reported only) |
+
+Three runs of each arm, every run a separate process. A run is read only when it is valid. Figures for T5, T6, the slow reader and the `A0` ratio come from a Linux host (see below); a Mac run checks only that the arm is valid (no mismatch, no unexpected disconnect), because of the APFS `F_FULLFSYNC` cap and the shared CPUs.
 
 ## A/A and ABAB series
 
@@ -269,7 +342,7 @@ Each spread figure is `{ min, max, mean, relative_spread }` over the arm's runs 
 - The server is the binary's single-node wiring, built by the same `topgun_server::bootstrap` functions. Differences that remain: the policy store is in memory for both arms (the binary keeps policies durable; with no policies configured both stores take the same per-operation path); a record's TTL is set by the generator on every record it sends (`--ttl-ms`), as a client asks for it; and a stop is reported as `teardown`, not as the binary's exit codes 70/71/72. A PUT-only LWW load creates no OR tombstones, so the prune task is wired but has no work.
 - Every connection sends the client's `PING` every 5 s, as the shipped client does; without it the connection reaper closes connections after 60 s. The ping shares the connection's send lock with the batches, so a batch send can wait for one small `PING` write every 5 s.
 - On macOS a WAL fsync is a full `F_FULLFSYNC` device barrier, so `rocksdb` figures from a Mac are far slower on fsync-bound passes than on Linux and are not comparable to a Linux target host.
-- Subscriber deliveries are not measured: every connection only writes.
+- Subscriber deliveries are measured by the [subscriber arm](#subscriber-arm). Its readers run in this process and share the host's CPUs with the writers and the server, so a reader that cannot keep up shows as `max_unread_frames` / `reader_behind`, and delivery latency includes the reader's own scheduling. The fresh-query check runs one one-shot query per subscription after the run, which on `T6` (10⁴ subscriptions) adds time to each run but not to its figures.
 - At 10 000 writes/s the server's eviction tick sets the `null` arm's tail. Every second the tick scans every resident record. In 3 runs of 60 s on an M1 Max, ack p99 / p99.9 averaged 31.2 / 71.9 ms as shipped and 5.5 / 12.1 ms with `TOPGUN_EVICTION_INTERVAL_MS=3600000`. This is a server cost, not a harness one, and it is open as TODO-941.
 
 ## Linux run on a ccx33-class host

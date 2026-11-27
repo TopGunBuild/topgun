@@ -13,5 +13,6 @@
     "optimize": { "max_p50_us": 23219404, "max_p99_us": 23219404 },
     "hybrid":   { "max_p50_us": 429 }
   },
+  "open_loop": { "report_schema_version": 2 },
   "regression_tolerance_pct": 20
 }
