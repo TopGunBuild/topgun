@@ -6,6 +6,9 @@ use std::time::Duration;
 use crate::network::handlers::auth_provider::AuthProviderConfig;
 
 /// Top-level network configuration for the server.
+// Each bool is an independent operator switch, set from its own variable; no
+// two of them form a state an enum would name.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct NetworkConfig {
     /// Bind address for the server.
@@ -87,6 +90,11 @@ pub struct NetworkConfig {
     /// other value is refused. `None` (default) makes every token a user's and
     /// the claim is never read. Set from `TOPGUN_GUEST_CLAIM`.
     pub guest_claim: Option<String>,
+    /// Whether an authenticated WebSocket connection is closed once its token's
+    /// `exp` plus `jwt_clock_skew_secs` has passed (`TG-AUTH-001`). Defaults to
+    /// `true`, also for embedders of `NetworkModule`. Set from
+    /// `TOPGUN_CLOSE_ON_TOKEN_EXPIRY`. An in-band refresh is verified either way.
+    pub close_on_token_expiry: bool,
 }
 
 impl Default for NetworkConfig {
@@ -111,6 +119,7 @@ impl Default for NetworkConfig {
             jwt_audience: None,
             tenant_claim: None,
             guest_claim: None,
+            close_on_token_expiry: true,
         }
     }
 }

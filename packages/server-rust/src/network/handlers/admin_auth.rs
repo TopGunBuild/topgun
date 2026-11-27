@@ -27,6 +27,10 @@ pub enum AdminAuthError {
     /// Tenancy is on and the JWT carries the tenant claim (named here): the
     /// admin plane works across tenants, so a tenant's token never enters it.
     TenantToken(String),
+    /// Guest principals are on and the JWT is a guest token (its guest claim,
+    /// named here, is `true`): a guest never enters the admin plane, whatever
+    /// its roles.
+    GuestToken(String),
     /// JWT secret not configured on the server.
     NotConfigured,
 }
@@ -46,6 +50,10 @@ impl IntoResponse for AdminAuthError {
             Self::TenantToken(claim) => (
                 StatusCode::FORBIDDEN,
                 format!("the admin API refuses a token carrying the tenant claim `{claim}`"),
+            ),
+            Self::GuestToken(claim) => (
+                StatusCode::FORBIDDEN,
+                format!("the admin API refuses a guest token (claim `{claim}`)"),
             ),
             Self::NotConfigured => (
                 StatusCode::UNAUTHORIZED,
@@ -153,6 +161,22 @@ impl FromRequestParts<AppState> for AdminClaims {
                 .is_some_and(|claims| claims.contains_key(claim))
             {
                 return Err(AdminAuthError::TenantToken(claim.to_owned()));
+            }
+        }
+
+        // Decided as the client path decides the kind, before the role check so
+        // a guest token carrying `admin` is refused by name.
+        if let Some(claim) = state.config.guest_claim.as_deref() {
+            match raw_claims.get(claim) {
+                None | Some(serde_json::Value::Bool(false)) => {}
+                Some(serde_json::Value::Bool(true)) => {
+                    return Err(AdminAuthError::GuestToken(claim.to_owned()));
+                }
+                Some(_) => {
+                    return Err(AdminAuthError::InvalidToken(format!(
+                        "invalid guest claim `{claim}` in JWT"
+                    )));
+                }
             }
         }
 
@@ -583,6 +607,24 @@ CQIDAQAB
         validator: Option<Arc<dyn crate::network::handlers::auth_validator::AuthValidator>>,
         claims: serde_json::Value,
     ) -> (StatusCode, String) {
+        get_maps_with(
+            NetworkConfig {
+                tenant_claim: tenancy_on.then(|| "org_id".to_string()),
+                ..NetworkConfig::default()
+            },
+            validator,
+            claims,
+        )
+        .await
+    }
+
+    /// `GET /api/admin/maps` with a token of `claims` (plus `sub` and `exp`)
+    /// against a server configured by `config`.
+    async fn get_maps_with(
+        config: NetworkConfig,
+        validator: Option<Arc<dyn crate::network::handlers::auth_validator::AuthValidator>>,
+        claims: serde_json::Value,
+    ) -> (StatusCode, String) {
         use axum::routing::get;
         use tower::ServiceExt;
 
@@ -601,10 +643,7 @@ CQIDAQAB
         )
         .unwrap();
         let state = AppState {
-            config: Arc::new(NetworkConfig {
-                tenant_claim: tenancy_on.then(|| "org_id".to_string()),
-                ..NetworkConfig::default()
-            }),
+            config: Arc::new(config),
             jwt_secret: Some(TEST_SECRET.to_owned()),
             auth_validator: validator,
             ..AppState::for_test()
@@ -701,5 +740,53 @@ CQIDAQAB
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{message}");
+    }
+
+    /// A guest token never enters the admin plane, even with the `admin` role;
+    /// a non-boolean guest claim is an invalid token; a user token, and any
+    /// token with guest principals off, pass the extractor (503: no store).
+    #[tokio::test]
+    async fn the_admin_api_refuses_guest_tokens() {
+        use serde_json::json;
+        let guests_on = || NetworkConfig {
+            guest_claim: Some("tg_guest".to_string()),
+            ..NetworkConfig::default()
+        };
+        let (status, message) = get_maps_with(
+            guests_on(),
+            None,
+            json!({ "roles": ["admin"], "tg_guest": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{message}");
+        assert!(
+            message.contains("guest token") && message.contains("`tg_guest`"),
+            "the answer names the guest claim, got {message:?}"
+        );
+        let (status, message) = get_maps_with(
+            guests_on(),
+            None,
+            json!({ "roles": ["admin"], "tg_guest": "true" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{message}");
+        for (config, claims) in [
+            (
+                guests_on(),
+                json!({ "roles": ["admin"], "tg_guest": false }),
+            ),
+            (guests_on(), json!({ "roles": ["admin"] })),
+            (
+                NetworkConfig::default(),
+                json!({ "roles": ["admin"], "tg_guest": true }),
+            ),
+        ] {
+            let (status, message) = get_maps_with(config, None, claims.clone()).await;
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{claims}: {message}"
+            );
+        }
     }
 }

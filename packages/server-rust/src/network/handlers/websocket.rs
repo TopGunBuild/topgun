@@ -33,12 +33,14 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use topgun_core::hash_to_partition;
 use topgun_core::messages::{
-    AuthAckData, ClientOp, DeviceAckData, ErrorPayload, Message as TopGunMessage, OpAckMessage,
-    OpAckPayload, WriteConcern,
+    AuthAckData, AuthFailData, ClientOp, DeviceAckData, ErrorPayload, Message as TopGunMessage,
+    OpAckMessage, OpAckPayload, WriteConcern,
 };
 use tracing::{debug, warn};
 
-use super::auth::AuthHandler;
+use super::auth::{
+    AuthHandler, TokenRefusal, AUTH_FAIL_PRINCIPAL_CHANGED, AUTH_FAIL_TOKEN_EXPIRED,
+};
 use super::decode;
 use super::AppState;
 use crate::network::config::ConnectionConfig;
@@ -264,6 +266,9 @@ async fn handle_socket(mut socket: ServerSocket, state: AppState, chunked: bool)
     // handle across the moves they perform on the disconnect path.
     let cancel = handle.cancel.clone();
 
+    // The `exp` of the token the handshake admitted; `None` on a NO_AUTH server.
+    let mut token_exp: Option<u64> = None;
+
     // Phase 1: sequential auth — only proceed when JWT secret is configured.
     // If no secret is set, every connection is pre-authenticated.
     if state.jwt_secret.is_some() {
@@ -327,7 +332,8 @@ async fn handle_socket(mut socket: ServerSocket, state: AppState, chunked: bool)
                                 )
                                 .await
                             {
-                                Ok(principal) => {
+                                Ok((principal, exp)) => {
+                                    token_exp = Some(exp);
                                     // Store principal in metadata so domain services can read it.
                                     // AtomicBool is set after metadata write so no reader sees
                                     // authenticated=true without principal being set.
@@ -453,17 +459,46 @@ async fn handle_socket(mut socket: ServerSocket, state: AppState, chunked: bool)
         std::time::Instant::now(),
     );
 
+    // The connection closes at its token's `exp` plus the leeway unless an
+    // in-band refresh moves it (`TG-AUTH-001`). One timer for the connection's
+    // life, re-armed by a refresh, so no frame constructs one.
+    let leeway = state.config.jwt_clock_skew_secs;
+    let deadline_for = |exp: u64| {
+        if state.config.close_on_token_expiry {
+            expiry_deadline(exp, leeway, tokio::time::Instant::now())
+        } else {
+            None
+        }
+    };
+    let mut deadline = token_exp.and_then(deadline_for);
+    let expiry = tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now));
+    tokio::pin!(expiry);
+
     // Phase 2: pipeline mode — each binary frame is dispatched concurrently.
     // The reader continues immediately after spawning, so multiple frames
     // can be in-flight simultaneously up to MAX_IN_FLIGHT.
     loop {
         // Select on the cancel token too, so the reaper can unblock a reader
         // parked on a half-open socket (no FIN, no client traffic). On cancel
-        // we fall through to the shared cleanup below.
+        // we fall through to the shared cleanup below. The expiry arm comes
+        // before the receiver: under `biased` an arm after it is not polled
+        // while a client keeps frames coming, so a flooding client would
+        // outlive its token.
         let next = tokio::select! {
             biased;
             () = cancel.cancelled() => {
                 debug!("connection {:?} reaped (idle/half-open)", conn_id);
+                break;
+            }
+            () = &mut expiry, if deadline.is_some() => {
+                debug!("connection {:?} closed: its token expired", conn_id);
+                refuse_and_close(
+                    &handle,
+                    Some(AUTH_FAIL_TOKEN_EXPIRED),
+                    "token expired".to_string(),
+                    "token expired",
+                );
+                metrics::counter!(TOKEN_EXPIRY_CLOSES_TOTAL).increment(1);
                 break;
             }
             msg = receiver.next() => msg,
@@ -566,6 +601,50 @@ async fn handle_socket(mut socket: ServerSocket, state: AppState, chunked: bool)
                     continue;
                 }
 
+                // In-band refresh (`TG-AUTH-001`). Only a server with a secret
+                // verifies tokens; on a NO_AUTH server the frame goes on to
+                // dispatch, which drops it without a reply, as it always did. An
+                // AUTH inside a BATCH envelope is not a `Message` frame and is
+                // refused by dispatch the same way.
+                if let (InboundFrame::Message(TopGunMessage::Auth(auth_msg)), Some(secret)) =
+                    (&frame, state.jwt_secret.as_deref())
+                {
+                    let verified = AuthHandler::from_state(secret, &state)
+                        .verify_token_with_expiry(&auth_msg.token, leeway)
+                        .await;
+                    match refresh_principal(&handle, verified).await {
+                        Ok(exp) => {
+                            deadline = deadline_for(exp);
+                            if let Some(at) = deadline {
+                                expiry.as_mut().reset(at);
+                            }
+                            // The bound device is named; a presented device
+                            // token is ignored, so a refresh never re-binds.
+                            let meta = handle.metadata.read().await;
+                            let ack = TopGunMessage::AuthAck(AuthAckData {
+                                user_id: meta.principal.as_ref().map(|p| p.id.clone()),
+                                device_id: meta.device_id.clone(),
+                                ..Default::default()
+                            });
+                            drop(meta);
+                            if let Ok(bytes) = rmp_serde::to_vec_named(&ack) {
+                                let _ = handle.tx.send(OutboundMessage::Binary(bytes)).await;
+                            }
+                        }
+                        Err((code, reason)) => {
+                            warn!(reason = %reason, "in-band token refresh refused; closing {:?}", conn_id);
+                            let error = if state.config.insecure_forward_auth_errors {
+                                reason
+                            } else {
+                                "Authentication failed".to_string()
+                            };
+                            refuse_and_close(&handle, code, error, "token refused");
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
                 // Confirmed-apply ACK: advance the per-device causal frontier inline.
                 // Identity-scoped and connection-ownership-fenced, so it is handled here
                 // (it needs the connection's device identity + the ownership registry,
@@ -643,6 +722,90 @@ async fn handle_socket(mut socket: ServerSocket, state: AppState, chunked: bool)
     release_session_state(&state, conn_id);
     state.registry.remove(conn_id);
     debug!("WebSocket disconnected: {:?}", conn_id);
+}
+
+/// The counter of connections closed because their token expired.
+const TOKEN_EXPIRY_CLOSES_TOTAL: &str = "topgun_ws_token_expiry_closes_total";
+
+/// Describes `topgun_ws_token_expiry_closes_total` and registers it at zero, so
+/// the first scrape reads an explicit zero. The binary calls it once after the
+/// recorder is installed; for an embedder that does not, the series appears on
+/// the first close.
+pub fn register_token_expiry_metrics() {
+    metrics::describe_counter!(
+        TOKEN_EXPIRY_CLOSES_TOTAL,
+        "Client WebSocket connections closed because their token's exp plus the leeway passed"
+    );
+    metrics::counter!(TOKEN_EXPIRY_CLOSES_TOTAL).increment(0);
+}
+
+/// When a connection admitted by a token with `exp` closes: `exp + leeway` on
+/// the wall clock, carried onto the monotonic clock from `now`. A deadline
+/// already passed is `now`. `None` when the sum overflows or does not fit the
+/// timer, so an absurd `exp` leaves the connection without a deadline rather
+/// than panicking. A wall-clock step after this call is not followed.
+fn expiry_deadline(
+    exp: u64,
+    leeway: u64,
+    now: tokio::time::Instant,
+) -> Option<tokio::time::Instant> {
+    let closes_at = std::time::Duration::from_secs(exp.checked_add(leeway)?);
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    now.checked_add(closes_at.saturating_sub(since_epoch))
+}
+
+/// Decides an in-band `AUTH` against the connection's stored principal
+/// (`TG-AUTH-001`): the new token's `exp` when it verified and names the same
+/// tenant, id, kind and set of roles; otherwise the `AUTH_FAIL` code (4401
+/// expired, 4409 another principal, none for any other refusal) and the reason.
+/// The stored principal is never replaced: a refresh extends a connection, it
+/// never changes who it is.
+async fn refresh_principal(
+    handle: &ConnectionHandle,
+    verified: Result<(Principal, u64), TokenRefusal>,
+) -> Result<u64, (Option<u32>, String)> {
+    fn roles(p: &Principal) -> std::collections::BTreeSet<&str> {
+        p.roles.iter().map(String::as_str).collect()
+    }
+    let (presented, exp) = verified.map_err(|refusal| {
+        (
+            refusal.expired.then_some(AUTH_FAIL_TOKEN_EXPIRED),
+            refusal.reason,
+        )
+    })?;
+    let meta = handle.metadata.read().await;
+    let same = meta.principal.as_ref().is_some_and(|current| {
+        current.tenant == presented.tenant
+            && current.id == presented.id
+            && current.kind == presented.kind
+            && roles(current) == roles(&presented)
+    });
+    if same {
+        Ok(exp)
+    } else {
+        Err((
+            Some(AUTH_FAIL_PRINCIPAL_CHANGED),
+            "the token names another principal than the connection's".to_string(),
+        ))
+    }
+}
+
+/// Queues `AUTH_FAIL` and then a Close frame without waiting, as the reaper
+/// does, so the writer sends both and closes the socket at once; without the
+/// Close the socket would go only at the teardown's two-second abort, because
+/// the registry still holds a sender. A full outbound channel drops them, and
+/// the client sees the socket close without them.
+fn refuse_and_close(handle: &ConnectionHandle, code: Option<u32>, error: String, reason: &str) {
+    let fail = TopGunMessage::AuthFail(AuthFailData {
+        error: Some(error),
+        code,
+    });
+    if let Ok(bytes) = rmp_serde::to_vec_named(&fail) {
+        let _ = handle.try_send(OutboundMessage::Binary(bytes));
+    }
+    let _ = handle.try_send(OutboundMessage::Close(Some(reason.to_string())));
 }
 
 /// Runs device-credential present-or-mint and binds the resulting identity to the
@@ -4820,6 +4983,97 @@ mod tests {
         );
         assert_ne!(device, guest_device);
         assert_eq!(rows().await, 2, "only the user mints wrote rows");
+    }
+
+    /// An `exp` whose sum with the leeway, or whose distance from now, does not
+    /// fit leaves the connection without a deadline instead of panicking; an
+    /// ordinary one is `exp + leeway` away, and a past one is now (`TG-AUTH-001`).
+    #[test]
+    fn expiry_deadline_saturates_instead_of_panicking() {
+        let now = tokio::time::Instant::now();
+        assert_eq!(expiry_deadline(u64::MAX, 60, now), None);
+        assert_eq!(expiry_deadline(u64::MAX - 60, 60, now), None);
+        assert_eq!(expiry_deadline(u64::MAX, 0, now), None);
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_secs();
+        let at = expiry_deadline(unix + 100, 60, now).expect("a deadline");
+        let away = at.duration_since(now).as_secs();
+        assert!((158..=160).contains(&away), "{away} s");
+        assert_eq!(expiry_deadline(unix - 600, 60, now), Some(now));
+    }
+
+    /// A refresh extends only the connection's own principal — the same tenant,
+    /// id, kind and set of roles — and never replaces the stored one; any other
+    /// verified principal is 4409, an expired token 4401, any other refusal has
+    /// no code (`TG-AUTH-001`).
+    #[tokio::test]
+    async fn in_band_refresh_extends_only_the_same_principal() {
+        let state = AppState::for_test();
+        let (handle, _rx) = state
+            .registry
+            .register(ConnectionKind::Client, &ConnectionConfig::default());
+        let stored = Principal {
+            id: "v1".to_string(),
+            roles: vec!["b".to_string(), "a".to_string()],
+            tenant: Some("acme".to_string()),
+            kind: PrincipalKind::Guest,
+        };
+        handle.metadata.write().await.principal = Some(stored.clone());
+        let with = |edit: &dyn Fn(&mut Principal)| {
+            let mut p = stored.clone();
+            edit(&mut p);
+            p
+        };
+
+        let reordered = with(&|p| p.roles = vec!["a".into(), "b".into(), "a".into()]);
+        assert_eq!(
+            refresh_principal(&handle, Ok((reordered, 42))).await,
+            Ok(42)
+        );
+        let stored_roles = || async {
+            let meta = handle.metadata.read().await;
+            meta.principal.as_ref().map(|p| p.roles.clone())
+        };
+        assert_eq!(
+            stored_roles().await,
+            Some(stored.roles.clone()),
+            "the stored principal keeps its roles in their original order"
+        );
+
+        for (case, other) in [
+            ("roles", with(&|p| p.roles = vec!["a".into()])),
+            ("sub", with(&|p| p.id = "v2".into())),
+            ("tenant", with(&|p| p.tenant = Some("other".into()))),
+            ("no tenant", with(&|p| p.tenant = None)),
+            ("kind", with(&|p| p.kind = PrincipalKind::User)),
+        ] {
+            let outcome = refresh_principal(&handle, Ok((other, 42))).await;
+            assert_eq!(
+                outcome.map_err(|(code, _)| code),
+                Err(Some(AUTH_FAIL_PRINCIPAL_CHANGED)),
+                "{case}"
+            );
+        }
+        let expired = TokenRefusal {
+            reason: "ExpiredSignature".into(),
+            expired: true,
+        };
+        assert_eq!(
+            refresh_principal(&handle, Err(expired)).await,
+            Err((Some(AUTH_FAIL_TOKEN_EXPIRED), "ExpiredSignature".into()))
+        );
+        let invalid = TokenRefusal::from("InvalidSignature".to_string());
+        assert_eq!(
+            refresh_principal(&handle, Err(invalid)).await,
+            Err((None, "InvalidSignature".into()))
+        );
+        assert_eq!(
+            stored_roles().await,
+            Some(stored.roles.clone()),
+            "no refusal touches the stored principal"
+        );
     }
 }
 
