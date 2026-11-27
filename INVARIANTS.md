@@ -8,8 +8,9 @@ an explicit `NAKED` marker; the gate is "the NAKED count never grows silently", 
 
 Conventions: IDs are `TG-<DOMAIN>-<NNN>` (domains: WAL, WB write-behind, OR, LWW, MRK merkle,
 EVI eviction, SYNC, NAME map names, KEY per-key writer, DISP dispatch, ENG byte engine, AUTH
-authentication, AUTHZ authorization, ENC encryption at rest, READ whole-map reads, IDX scalar indexes, VEC vector indexes,
-TTL record expiry, LIVE live queries, QRY queries). Cite the ID verbatim in code comments and test names. Statuses:
+authentication, AUTHZ authorization, ENC encryption at rest, READ whole-map reads, IDX scalar
+indexes, VEC vector indexes, TTL record expiry, LIVE live queries, QRY queries). Cite the ID
+verbatim in code comments and test names. Statuses:
 `decided` (holds by design) · `open (SPEC/TODO-nnn)` (not yet true / not yet wired) ·
 `aspirational`. Precedent: omnigraph `docs/invariants.md` (structure) — improved here with the
 CI check it lacks. Origin: extraction memo 2026-07-16 + SPEC-350/351 closures.
@@ -3362,11 +3363,11 @@ weaker than a test.
   a user's. The hex is HMAC-SHA-256 under a 32-byte key drawn once per process, never persisted or
   logged, over a length-prefixed encoding of (tenant or none, kind, subject, `deviceId`). A
   presented credential re-binds its `deviceId` only when that MAC verifies (in constant time);
-  otherwise a new credential is minted, and the binding never fails authentication. The guest path
-  never calls the data store, so it writes no row to `_topgun_device_credentials`. A credential
-  re-binds only under the tenant, kind and subject it was minted for: a guest credential presented
-  by a guest of another tenant with the same `sub`, or by a user, and a user credential presented
-  by a guest, each mint fresh.
+  otherwise a new credential is minted, and the binding never fails authentication. The guest
+  credential check (`guest_present_or_mint`) never calls the data store, so it writes no row to
+  `_topgun_device_credentials`. A credential re-binds only under the tenant, kind and subject it
+  was minted for: a guest credential presented by a guest of another tenant with the same `sub`, or
+  by a user, and a user credential presented by a guest, each mint fresh.
 - **Stated limits:** the credential lives as long as the server process: after a restart every
   guest credential fails and the guest gets a new `deviceId`. Takeover, frontier rehydration and
   the `AUTH_ACK` are as for users, and a guest's confirmed-apply cursor rows are still durable

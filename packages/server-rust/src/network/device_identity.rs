@@ -204,7 +204,7 @@ impl DeviceIdentityStore {
 /// per process and never persisted or logged, so every guest credential stops
 /// verifying when the process ends and the guest is minted a new one
 /// (`TG-AUTH-002`).
-pub fn guest_credential_key() -> &'static [u8; 32] {
+pub(crate) fn guest_credential_key() -> &'static [u8; 32] {
     static KEY: OnceLock<[u8; 32]> = OnceLock::new();
     KEY.get_or_init(|| {
         let mut key = [0u8; 32];
@@ -221,7 +221,7 @@ pub fn guest_credential_key() -> &'static [u8; 32] {
 /// it was minted with; anything else mints fresh, fail-open like
 /// [`DeviceIdentityStore::present_or_mint`].
 #[must_use]
-pub fn guest_present_or_mint(
+pub(crate) fn guest_present_or_mint(
     key: &[u8; 32],
     principal: &Principal,
     presented: Option<&str>,
