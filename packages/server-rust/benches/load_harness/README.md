@@ -262,7 +262,7 @@ with `--sub-sort` and `--sub-limit` when given. Every subscription is sent and e
 
 **Figures.** Inside the measurement window, by arrival: `deliveries` (`QUERY_UPDATE` frames) and `map_events` (`SERVER_EVENT` frames), per second over `--duration`; `delivery_latency_us` (HDR) = arrival − the delivered value's `t`, so it counts from the write's schedule and includes the time the write waited to be sent. They cover the readers that are not slow; the slow readers have their own `slow_readers` counts. `max_unread_frames` is the most frames any reader had received but not yet processed.
 
-**Quiesce and check.** After the writers stop, the harness waits until no reader has received a frame other than `PONG` for `--quiesce-ms` and nothing is unread (at most 120 s, else `not_quiesced`), stops the readers, and runs one fresh one-shot query (`snapshotOnly`) per subscription on separate connections. `view_mismatches` sums, over the views, the keys present on one side only and the keys whose values differ. A slow reader the server disconnected has no view to compare (`slow_views_disconnected`). The recorder is then read for `topgun_live_event_loss_disconnects_total{cause}` and, where the server registers them, the `topgun_live_resnapshots_*`, `topgun_fanout_lane_*` and `topgun_live_stage_*` series (`null` when absent).
+**Quiesce and check.** After the writers stop, the harness waits until no reader has received a frame other than `PONG` for `--quiesce-ms` and nothing is unread (at most 120 s, else `not_quiesced`), stops the readers, and runs one fresh one-shot query (`snapshotOnly`) per subscription on separate connections. `view_mismatches` sums, over the views, the keys present on one side only and the keys whose values differ. The views of a reader the server disconnected are not compared (`views_disconnected`): the disconnect is the finding, and it is reported as such. The recorder is then read for `topgun_live_event_loss_disconnects_total{cause}` and, where the server registers them, the `topgun_live_resnapshots_*`, `topgun_fanout_lane_*` and `topgun_live_stage_*` series (`null` when absent).
 
 **Block:**
 
@@ -276,7 +276,7 @@ subscribers: {
   resnapshots, disconnects, query_errors, protocol_anomalies,
   slow_readers: { readers, frames, resnapshots, disconnects },
   max_unread_frames, quiesced, quiesce_wait_ms,
-  view_mismatches, views_checked, views_unchecked, slow_views_disconnected,
+  view_mismatches, views_checked, views_unchecked, views_disconnected,
   server_metrics: { live_event_loss_disconnects_total, live_resnapshots, fanout_lane, live_stage }  // series → value, or null
 }
 ```

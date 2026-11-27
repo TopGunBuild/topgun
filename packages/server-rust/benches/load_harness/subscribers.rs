@@ -44,8 +44,9 @@ pub const MAP: &str = "bench";
 /// server's (`reader_behind`).
 pub const READER_BEHIND_FRAMES: i64 = 100_000;
 
-/// How long a reader waits for every subscription's snapshot, and the
-/// longest wait for quiesce, before the run is given up or marked.
+/// The longest wait for the next snapshot or fresh result, and for quiesce,
+/// before the run is given up or marked. Snapshots are waited for as long as
+/// they keep coming: 10^4 live subscribes take minutes on one node.
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(60);
 const QUIESCE_CAP: Duration = Duration::from_secs(120);
 
@@ -474,7 +475,7 @@ fn query_sub(query_id: String, query: Query, snapshot_only: bool) -> Vec<u8> {
 
 impl ReaderSet {
     /// Opens the readers, subscribes every subscription and returns once every
-    /// snapshot is in (or fails after [`SNAPSHOT_TIMEOUT`]).
+    /// snapshot is in (or fails once none has arrived for [`SNAPSHOT_TIMEOUT`]).
     pub async fn start(
         addr: SocketAddr,
         jwt_secret: &str,
@@ -520,15 +521,17 @@ impl ReaderSet {
     }
 
     async fn wait_for_snapshots(&self) -> Result<()> {
-        let deadline = Instant::now() + SNAPSHOT_TIMEOUT;
         loop {
             let notified = self.shared.snapshot_notify.notified();
             if self.shared.snapshots.load(Ordering::Acquire) >= self.subscriptions {
                 return Ok(());
             }
-            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+            if tokio::time::timeout(SNAPSHOT_TIMEOUT, notified)
+                .await
+                .is_err()
+            {
                 bail!(
-                    "{} of {} subscription snapshots arrived within {:?}",
+                    "{} of {} subscription snapshots arrived, then none for {:?}",
                     self.shared.snapshots.load(Ordering::Acquire),
                     self.subscriptions,
                     SNAPSHOT_TIMEOUT
@@ -798,8 +801,10 @@ pub struct CheckOutcome {
     pub views_checked: u64,
     /// Views of connected readers whose fresh result was truncated.
     pub views_unchecked: u64,
-    /// Views of slow readers the server disconnected: nothing to compare.
-    pub slow_views_disconnected: u64,
+    /// Views of readers the server disconnected: not compared, since a
+    /// disconnected reader is behind by design; the disconnect itself is
+    /// reported (and invalidates the run unless the reader is slow).
+    pub views_disconnected: u64,
 }
 
 pub async fn check_views(
@@ -816,8 +821,8 @@ pub async fn check_views(
                 .strip_prefix("sub-")
                 .and_then(|s| s.parse().ok())
                 .ok_or_else(|| anyhow!("unexpected subscription id {id}"))?;
-            if state.disconnected && state.slow {
-                outcome.slow_views_disconnected += 1;
+            if state.disconnected {
+                outcome.views_disconnected += 1;
             } else {
                 wanted.push(i);
             }
@@ -825,7 +830,7 @@ pub async fn check_views(
     }
     let fresh = fresh_results(addr, jwt_secret, config, wanted).await?;
     for state in states {
-        if state.disconnected && state.slow {
+        if state.disconnected {
             continue;
         }
         for (id, view) in &state.views {
@@ -949,7 +954,7 @@ pub struct SubscribersBlock {
     pub view_mismatches: u64,
     pub views_checked: u64,
     pub views_unchecked: u64,
-    pub slow_views_disconnected: u64,
+    pub views_disconnected: u64,
     pub server_metrics: ServerMetrics,
 }
 
@@ -1007,7 +1012,7 @@ impl SubscribersBlock {
             view_mismatches: m.check.view_mismatches,
             views_checked: m.check.views_checked,
             views_unchecked: m.check.views_unchecked,
-            slow_views_disconnected: m.check.slow_views_disconnected,
+            views_disconnected: m.check.views_disconnected,
             server_metrics: m.metrics.clone(),
         }
     }
