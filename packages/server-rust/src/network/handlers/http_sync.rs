@@ -784,6 +784,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use topgun_core::messages::HttpSyncRequest;
+    use topgun_core::types::PrincipalKind;
     use topgun_core::Timestamp;
 
     const TEST_SECRET: &str = "test-http-sync-secret";
@@ -1922,7 +1923,7 @@ mod tests {
             id: "writer-1".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
-            kind: topgun_core::types::PrincipalKind::User,
+            kind: PrincipalKind::User,
         };
         let mut response = HttpSyncResponse {
             server_hlc: Timestamp {
@@ -2086,7 +2087,7 @@ mod tests {
             id: "writer-1".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
-            kind: topgun_core::types::PrincipalKind::User,
+            kind: PrincipalKind::User,
         };
         let mut response = HttpSyncResponse {
             server_hlc: Timestamp {
@@ -2373,7 +2374,7 @@ mod tests {
             id: id.to_string(),
             roles: vec![],
             tenant: Some(tenant.to_string()),
-            kind: topgun_core::types::PrincipalKind::User,
+            kind: PrincipalKind::User,
         }
     }
 
@@ -2523,7 +2524,7 @@ mod tests {
             id: "user".to_string(),
             roles: vec![],
             tenant: None,
-            kind: topgun_core::types::PrincipalKind::User,
+            kind: PrincipalKind::User,
         };
         assert_eq!(
             query_outcomes(factory, &["a.orders"], Some(&user), None, true).await,

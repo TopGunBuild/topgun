@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use topgun_core::messages::base::PredicateNode;
+use topgun_core::types::PrincipalKind;
 use utoipa::ToSchema;
 
 // rmpv is used for auth context construction in PolicyEvaluator::evaluate.
@@ -866,9 +867,7 @@ impl PolicyEvaluator {
         // guest never gets it: its `sub` comes from whoever minted the guest
         // token, so it may collide with an admin subject (TG-AUTHZ-005).
         if let Some(p) = principal {
-            if p.kind == topgun_core::types::PrincipalKind::User
-                && self.admin_subjects.contains(&p.id)
-            {
+            if p.kind == PrincipalKind::User && self.admin_subjects.contains(&p.id) {
                 return PolicyDecision::Allow;
             }
         }
@@ -1192,7 +1191,7 @@ mod tests {
             id: "admin1".to_string(),
             roles: vec!["admin".to_string()],
             tenant: None,
-            kind: topgun_core::types::PrincipalKind::User,
+            kind: PrincipalKind::User,
         }
     }
 
@@ -1201,7 +1200,7 @@ mod tests {
             id: "user1".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
-            kind: topgun_core::types::PrincipalKind::User,
+            kind: PrincipalKind::User,
         }
     }
 
@@ -1384,7 +1383,7 @@ mod tests {
             id: id.to_string(),
             roles: roles.iter().map(|r| (*r).to_string()).collect(),
             tenant: None,
-            kind: topgun_core::types::PrincipalKind::User,
+            kind: PrincipalKind::User,
         }
     }
 
@@ -1667,7 +1666,7 @@ mod tests {
             id: id.to_string(),
             roles: Vec::new(),
             tenant: tenant.map(str::to_string),
-            kind: topgun_core::types::PrincipalKind::User,
+            kind: PrincipalKind::User,
         }
     }
 
@@ -1960,7 +1959,7 @@ mod tests {
 
     fn guest(id: &str) -> topgun_core::Principal {
         topgun_core::Principal {
-            kind: topgun_core::types::PrincipalKind::Guest,
+            kind: PrincipalKind::Guest,
             ..tenanted(id, Some("acme"))
         }
     }
@@ -2025,7 +2024,7 @@ mod tests {
     async fn admin_bypass_applies_only_to_users() {
         let admin_user = tenanted("ops", None);
         let admin_guest = topgun_core::Principal {
-            kind: topgun_core::types::PrincipalKind::Guest,
+            kind: PrincipalKind::Guest,
             ..tenanted("ops", None)
         };
         let actions = [
