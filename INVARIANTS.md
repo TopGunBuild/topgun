@@ -3332,7 +3332,8 @@ weaker than a test.
 
 - **Scope:** `PolicyEvaluator::evaluate_key` (every path of TG-AUTHZ-002), for a principal from a
   client token (WebSocket handshake or HTTP `/sync`, one path: `AuthHandler::verify_token`).
-  **Excluded:** the admin HTTP API, which admits a token by its `admin` role.
+  **Excluded:** the admin HTTP API, which admits a token by its `admin` role and refuses a guest
+  token (`AdminClaims`).
 - **Statement:** a principal skips policy evaluation only when its kind is `User` and its subject
   (`Principal.id`) is in the server-configured `TOPGUN_ADMIN_SUBJECTS` set. A role claim, `admin`
   included, never grants it. A principal of kind `Guest` — a token whose `TOPGUN_GUEST_CLAIM`
@@ -3340,8 +3341,9 @@ weaker than a test.
   the token is verified: the guest claim is `true` (guest), absent or `false` (user), and any other
   value refuses the token before the custom validator runs; with `TOPGUN_GUEST_CLAIM` unset every
   token is a user.
-- **Stated limits:** the admin HTTP API checks only the `admin` role and does not read the guest
-  claim, so a guest token must not carry that role. Binaries before guest principals ignore
+- **Stated limits:** the admin HTTP API refuses a token whose guest claim is `true` (403) or not a
+  boolean (401) before it checks the `admin` role, so a guest never enters it; the binaries before
+  that refusal admitted a guest token carrying the role. Binaries before guest principals ignore
   `TOPGUN_GUEST_CLAIM`, so after a rollback a guest is a user there. With no policy ever
   configured every operation is allowed, guests included. Single-node only.
 - **Maintaining code:** `service/policy/mod.rs` `PolicyEvaluator::evaluate_key`;
@@ -3349,9 +3351,56 @@ weaker than a test.
   `guest_claim_from_env`.
 - **Enforcing test:** `admin_bypass_applies_only_to_users`, `allow_listed_subject_bypasses_policies`,
   `admin_role_claim_alone_does_not_bypass`, `admin_subject_match_is_by_id_not_role` (`mod.rs`);
-  `guest_claim_decides_kind_and_refuses_non_booleans` (`auth.rs`).
+  `guest_claim_decides_kind_and_refuses_non_booleans` (`auth.rs`);
+  `the_admin_api_refuses_guest_tokens` (`admin_auth.rs`).
 - **Violation consequence:** a visitor whose backend-minted `sub` collides with an admin subject,
   or who claims the `admin` role, reads and writes every map of the node.
+- **Status:** decided, **enforced**.
+
+### TG-AUTH-001: A connection's principal never changes, and the connection closes when its token expires
+
+- **Scope:** an authenticated client WebSocket connection on a server with a JWT secret
+  (`handle_socket`), from its handshake `AUTH` to its end. **Excluded:** connections on a NO_AUTH
+  server (no token, no deadline; an `AUTH` frame there is dropped as before); HTTP `/sync`, which
+  verifies `exp` on every request and serves a refused token as an anonymous caller; cluster peer
+  connections.
+- **Statement:** a connection's principal (tenant, id, set of roles, kind) is fixed by its handshake
+  and never replaced. With `TOPGUN_CLOSE_ON_TOKEN_EXPIRY` on (the default, also for an embedder's
+  `NetworkConfig`) the connection holds a deadline at its token's `exp` plus `jwt_clock_skew_secs`;
+  at the deadline the server queues `AUTH_FAIL` with `code` 4401 and then a Close frame, counts the
+  close in `topgun_ws_token_expiry_closes_total` and ends the connection. A top-level `AUTH` on the
+  connection is verified as the handshake's is, whether or not the closing is on: a token for the
+  same tenant, id, kind and set of roles (order and duplicates ignored) moves the deadline to its
+  own `exp` plus the leeway, also when that is earlier, and is answered `AUTH_ACK` naming the bound
+  device and no `deviceToken`; any other outcome queues `AUTH_FAIL` (4409 another principal, 4401
+  expired, no code for any other refusal) and a Close frame and ends the connection. An `AUTH`
+  inside a `BATCH` envelope is refused by dispatch and changes nothing. A handshake refused for an
+  expired token carries 4401. An `exp` whose deadline overflows, or does not fit the timer, leaves
+  the connection without a deadline; nothing panics.
+- **Stated limits:** the `AUTH_FAIL` and the Close frame are queued without waiting, so on a full
+  outbound channel they are dropped and the client sees only the socket close. Until the leeway
+  runs out the connection receives live events and its operations are served, and operations
+  dispatched before the deadline finish after it. The deadline is computed once, as `exp + leeway`
+  minus the wall clock, onto the monotonic clock; a later wall-clock step is not followed, and a
+  client clock behind the server's by more than the leeway is refused at the handshake (4401). A
+  refresh is verified inline in the read loop, custom validator included, so a validator that hangs
+  stalls that connection's reads and its deadline. A refresh is charged one op against the
+  connection's rate limit; one dropped with the 429 error must be sent again before the deadline.
+  A presented `deviceToken` on a refresh is ignored. An embedder that does not call
+  `register_token_expiry_metrics` gets the counter on the first close. Single-node only.
+- **Maintaining code:** `network/handlers/websocket.rs` `handle_socket`, `expiry_deadline`,
+  `refresh_principal`, `refuse_and_close`, `register_token_expiry_metrics`;
+  `network/handlers/auth.rs` `AuthHandler::verify_token_with_expiry`, `AuthHandler::handle_auth`;
+  `bin/topgun_server.rs` `close_on_token_expiry_from_env`.
+- **Enforcing test:** `expiry_deadline_saturates_instead_of_panicking`,
+  `in_band_refresh_extends_only_the_same_principal` (`websocket.rs`); `expired_token_rejected`
+  (`auth.rs`); `close_on_token_expiry_unknown_empty_or_not_unicode_is_fatal` (`topgun_server.rs`);
+  `tests/integration-rust/token-expiry.test.ts` "an expired socket is closed with 4401", "the
+  closing can be turned off", "a refresh with changed roles closes the socket", "an AUTH on a
+  NO_AUTH server is ignored".
+- **Violation consequence:** an expired or revoked token keeps reading live data and writing for as
+  long as its socket stays open, or a refresh swaps in another identity or more roles on a
+  connection whose subscriptions and device were bound to the first.
 - **Status:** decided, **enforced**.
 
 ### TG-AUTH-002: A guest's device credential is never stored
