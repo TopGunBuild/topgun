@@ -16,7 +16,7 @@
     clippy::cast_sign_loss
 )]
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -48,7 +48,15 @@ pub const READER_BEHIND_FRAMES: i64 = 100_000;
 /// before the run is given up or marked. Snapshots are waited for as long as
 /// they keep coming: 10^4 live subscribes take minutes on one node.
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(60);
-const QUIESCE_CAP: Duration = Duration::from_secs(120);
+const QUIESCE_CAP: Duration = Duration::from_secs(300);
+
+/// Live subscribes a reader keeps unanswered at once, and how long it waits
+/// for one's snapshot before sending it again. The server answers a
+/// subscribe it sheds (worker inbox full) with an `ERROR 429` that names no
+/// query, and one that times out in the pipeline with nothing, so an
+/// unbounded burst loses subscribes for good.
+const SUBSCRIBE_WINDOW: usize = 8;
+const RESUBSCRIBE_AFTER: Duration = Duration::from_secs(10);
 
 /// Connections and in-flight one-shot queries of the fresh-query check.
 const CHECK_CONNECTIONS: usize = 4;
@@ -309,7 +317,7 @@ pub struct ReaderState {
     /// Query id → (key → value).
     pub views: HashMap<String, HashMap<String, rmpv::Value>>,
     /// Query ids whose first `QUERY_RESP` arrived.
-    snapshotted: std::collections::HashSet<String>,
+    snapshotted: HashSet<String>,
     pub deliveries: u64,
     pub map_events: u64,
     pub frames: u64,
@@ -325,7 +333,7 @@ impl ReaderState {
         Self {
             slow,
             views: query_ids.into_iter().map(|q| (q, HashMap::new())).collect(),
-            snapshotted: std::collections::HashSet::new(),
+            snapshotted: HashSet::new(),
             deliveries: 0,
             map_events: 0,
             frames: 0,
@@ -383,7 +391,11 @@ impl ReaderState {
                 if self.snapshotted.insert(resp.query_id) {
                     true
                 } else {
-                    self.resnapshots += 1;
+                    // Before the writes start a second answer is the reply to
+                    // a subscribe sent again, not a re-snapshot.
+                    if timing.is_some() {
+                        self.resnapshots += 1;
+                    }
                     false
                 }
             }
@@ -491,23 +503,28 @@ impl ReaderSet {
             epoch: Instant::now(),
         });
         let mut readers = Vec::with_capacity(plan.len());
+        let mut subscribing = tokio::task::JoinSet::new();
         let mut subscriptions = 0;
-        for (conn, slow, subs) in &plan {
+        for (conn, slow, subs) in plan {
+            let snapshotted = Arc::new(std::sync::Mutex::new(HashSet::new()));
             readers.push(spawn_reader(
                 Arc::clone(&pool),
-                *conn,
-                *slow,
+                conn,
+                slow,
                 subs.iter().map(|i| sub_id(*i)).collect(),
                 config.slow_reader_frame_us,
                 Arc::clone(&shared),
+                Arc::clone(&snapshotted),
             ));
             subscriptions += subs.len() as u64;
-        }
-        for (conn, _, subs) in &plan {
-            for i in subs {
-                pool.send_to(*conn, &query_sub(sub_id(*i), config.query(*i), false))
-                    .await?;
-            }
+            subscribing.spawn(subscribe_reader(
+                Arc::clone(&pool),
+                conn,
+                subs,
+                config.clone(),
+                snapshotted,
+                Arc::clone(&shared),
+            ));
         }
         let mut set = Self {
             readers,
@@ -515,7 +532,9 @@ impl ReaderSet {
             subscriptions,
             snapshots_at_warmup_start: 0,
         };
-        set.wait_for_snapshots().await?;
+        let waited = set.wait_for_snapshots().await;
+        subscribing.abort_all();
+        waited?;
         set.snapshots_at_warmup_start = set.shared.snapshots.load(Ordering::Acquire);
         Ok(set)
     }
@@ -587,6 +606,47 @@ impl ReaderSet {
     }
 }
 
+/// Sends one reader's live subscribes, at most [`SUBSCRIBE_WINDOW`]
+/// unanswered at once, sending again one unanswered for
+/// [`RESUBSCRIBE_AFTER`]; ends once every one has its snapshot.
+async fn subscribe_reader(
+    pool: Arc<ConnectionPool>,
+    conn: usize,
+    subs: Vec<u64>,
+    config: SubscriberConfig,
+    snapshotted: Arc<std::sync::Mutex<HashSet<String>>>,
+    shared: Arc<Shared>,
+) -> Result<()> {
+    let mut pending: VecDeque<u64> = subs.into();
+    let mut unanswered: Vec<(u64, Instant)> = Vec::new();
+    loop {
+        let notified = shared.snapshot_notify.notified();
+        {
+            let done = snapshotted.lock().expect("snapshot set");
+            unanswered.retain(|(i, _)| !done.contains(&sub_id(*i)));
+        }
+        while unanswered.len() < SUBSCRIBE_WINDOW {
+            let Some(i) = pending.pop_front() else {
+                break;
+            };
+            pool.send_to(conn, &query_sub(sub_id(i), config.query(i), false))
+                .await?;
+            unanswered.push((i, Instant::now()));
+        }
+        if unanswered.is_empty() {
+            return Ok(());
+        }
+        for (i, sent) in &mut unanswered {
+            if sent.elapsed() >= RESUBSCRIBE_AFTER {
+                pool.send_to(conn, &query_sub(sub_id(*i), config.query(*i), false))
+                    .await?;
+                *sent = Instant::now();
+            }
+        }
+        let _ = tokio::time::timeout(Duration::from_millis(100), notified).await;
+    }
+}
+
 enum Inbound {
     Frame(Instant, Vec<u8>),
     Disconnected,
@@ -599,6 +659,7 @@ fn spawn_reader(
     query_ids: Vec<String>,
     slow_frame_us: u64,
     shared: Arc<Shared>,
+    snapshotted: Arc<std::sync::Mutex<HashSet<String>>>,
 ) -> Reader {
     let (tx, mut rx) = mpsc::unbounded_channel::<Inbound>();
     let backlog = Arc::new(AtomicI64::new(0));
@@ -658,7 +719,14 @@ fn spawn_reader(
                                 .unwrap_or(u64::MAX);
                         shared.last_frame_ns.fetch_max(ns, Ordering::AcqRel);
                     }
+                    let resp_id = match &frame {
+                        ReaderFrame::Resp(resp) => Some(resp.query_id.clone()),
+                        _ => None,
+                    };
                     if state.apply(frame, at, shared.timing.get()) {
+                        if let Some(id) = resp_id {
+                            snapshotted.lock().expect("snapshot set").insert(id);
+                        }
                         shared.snapshots.fetch_add(1, Ordering::AcqRel);
                         shared.snapshot_notify.notify_waiters();
                     }
@@ -1140,8 +1208,18 @@ pub fn resp_replaces_and_chunks_reassemble() {
     };
     let mut state = ReaderState::new(false, ["q".to_string()]);
     let now = Instant::now();
+    let timing = Timing {
+        t0: now,
+        window_start: now,
+        window_end: now,
+    };
     assert!(state.apply(ReaderFrame::decode(&resp(&["a", "b"])), now, None));
-    assert!(!state.apply(ReaderFrame::decode(&resp(&["c"])), now, None));
+    assert!(!state.apply(ReaderFrame::decode(&resp(&["a"])), now, None));
+    assert_eq!(
+        state.resnapshots, 0,
+        "a second answer before t0 is no re-snapshot"
+    );
+    assert!(!state.apply(ReaderFrame::decode(&resp(&["c"])), now, Some(&timing)));
     assert_eq!(state.resnapshots, 1);
     assert_eq!(state.views["q"].keys().collect::<Vec<_>>(), vec!["c"]);
 
