@@ -2740,6 +2740,7 @@ mod tests {
             id: "writer-1".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
+            kind: topgun_core::types::PrincipalKind::User,
         }
     }
 
@@ -4186,6 +4187,7 @@ mod tests {
             id: "writer-2".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
+            kind: topgun_core::types::PrincipalKind::User,
         };
         // One partition, so the frames do not depend on the order two
         // sub-batches happened to finish in.

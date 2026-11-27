@@ -1922,6 +1922,7 @@ mod tests {
             id: "writer-1".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
+            kind: topgun_core::types::PrincipalKind::User,
         };
         let mut response = HttpSyncResponse {
             server_hlc: Timestamp {
@@ -2085,6 +2086,7 @@ mod tests {
             id: "writer-1".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
+            kind: topgun_core::types::PrincipalKind::User,
         };
         let mut response = HttpSyncResponse {
             server_hlc: Timestamp {
@@ -2371,6 +2373,7 @@ mod tests {
             id: id.to_string(),
             roles: vec![],
             tenant: Some(tenant.to_string()),
+            kind: topgun_core::types::PrincipalKind::User,
         }
     }
 
@@ -2520,6 +2523,7 @@ mod tests {
             id: "user".to_string(),
             roles: vec![],
             tenant: None,
+            kind: topgun_core::types::PrincipalKind::User,
         };
         assert_eq!(
             query_outcomes(factory, &["a.orders"], Some(&user), None, true).await,

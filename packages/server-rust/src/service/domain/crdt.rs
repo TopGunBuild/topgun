@@ -10262,6 +10262,7 @@ mod tests {
             id: "user-http".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
+            kind: topgun_core::types::PrincipalKind::User,
         }
     }
 

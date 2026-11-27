@@ -353,6 +353,7 @@ mod tests {
             id: "u1".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
+            kind: topgun_core::types::PrincipalKind::User,
         };
         let decision = eval
             .evaluate(

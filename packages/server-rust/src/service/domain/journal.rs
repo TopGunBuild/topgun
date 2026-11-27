@@ -665,6 +665,7 @@ mod tests {
             id: format!("user-{tenant}"),
             roles: vec![],
             tenant: Some(tenant.to_string()),
+            kind: topgun_core::types::PrincipalKind::User,
         }
     }
 

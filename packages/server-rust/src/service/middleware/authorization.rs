@@ -826,6 +826,7 @@ mod tests {
             id: "user1".to_string(),
             roles: vec![],
             tenant: None,
+            kind: topgun_core::types::PrincipalKind::User,
         });
         let op = Operation::Ping {
             ctx,
@@ -1048,6 +1049,7 @@ mod tests {
             id: "user1".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
+            kind: topgun_core::types::PrincipalKind::User,
         };
 
         let layer = AuthorizationLayer::new(evaluator);
@@ -1073,6 +1075,7 @@ mod tests {
             id: "user1".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
+            kind: topgun_core::types::PrincipalKind::User,
         };
 
         let layer = AuthorizationLayer::new(evaluator);
@@ -1098,6 +1101,7 @@ mod tests {
             id: "user1".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
+            kind: topgun_core::types::PrincipalKind::User,
         };
 
         let layer = AuthorizationLayer::new(evaluator);
@@ -1123,6 +1127,7 @@ mod tests {
             id: "user1".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
+            kind: topgun_core::types::PrincipalKind::User,
         };
 
         let layer = AuthorizationLayer::new(evaluator);
@@ -1261,6 +1266,7 @@ mod tests {
             id: "user1".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
+            kind: topgun_core::types::PrincipalKind::User,
         };
 
         let layer = AuthorizationLayer::new(evaluator);
@@ -2220,6 +2226,7 @@ mod tests {
                 id: "user".to_string(),
                 roles: vec![],
                 tenant: None,
+                kind: topgun_core::types::PrincipalKind::User,
             });
             ctx
         }
@@ -2632,6 +2639,7 @@ mod tests {
                 id: id.to_string(),
                 roles: vec![],
                 tenant: tenant.map(str::to_string),
+                kind: topgun_core::types::PrincipalKind::User,
             }
         }
 
@@ -3158,6 +3166,7 @@ mod tests {
                 id: "alice".to_string(),
                 roles: vec![],
                 tenant: None,
+                kind: topgun_core::types::PrincipalKind::User,
             });
             ctx
         };

@@ -186,6 +186,34 @@ pub struct Principal {
     /// Tenant the principal acts for. `None` means no tenant claim was
     /// presented, so no tenant boundary applies to this principal.
     pub tenant: Option<String>,
+    /// Whether the token named a user or a guest. Decided once, when the token
+    /// is verified, and never changed for the life of a connection.
+    #[serde(default)]
+    pub kind: PrincipalKind,
+}
+
+/// The kind of caller a token names. A guest is an anonymous visitor whose
+/// token the app backend minted; it is held to the policies like a user but
+/// never gets the policy admin bypass (`TG-AUTHZ-005`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PrincipalKind {
+    /// A signed-in user; what every token is unless it carries the guest claim.
+    #[default]
+    User,
+    /// A visitor holding a guest token.
+    Guest,
+}
+
+impl PrincipalKind {
+    /// The lowercase name policy conditions compare `auth.kind` against.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Guest => "guest",
+        }
+    }
 }
 
 /// Whether the map `name` belongs to `tenant`.
