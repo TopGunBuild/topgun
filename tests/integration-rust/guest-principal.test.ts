@@ -1,5 +1,5 @@
 /**
- * Guest principals over the wire (TG-AUTHZ-002, TG-AUTHZ-005).
+ * Guest principals over the wire (TG-AUTHZ-002, TG-AUTHZ-005, TG-AUTH-002).
  *
  * One server with guest principals on (`TOPGUN_GUEST_CLAIM=tg_guest`) and two
  * policies: an allow of everything, and a deny of every write whose caller has
@@ -10,9 +10,16 @@
  *   value carries `{auth: {kind: 'user'}}`: the kind comes from the token,
  *   never from the record;
  * - a user's write to the same map is acknowledged on both paths.
+ *
+ * A second server, on a durable store, proves the lifetime of a guest's device
+ * credential: it re-binds within the server process and is replaced after a
+ * restart, while a user's credential survives the restart.
  */
 
+import * as fs from 'fs';
 import * as jwt from 'jsonwebtoken';
+import * as os from 'os';
+import * as path from 'path';
 import { serialize, deserialize } from '@topgunbuild/core';
 import {
   spawnRustServer,
@@ -154,5 +161,82 @@ describe('Integration: guest principals (TOPGUN_GUEST_CLAIM)', () => {
     const userSync = await syncWrite(server.port, token('u-alice', false), 'hu', { item: 'hat' });
     expect(userSync.status).toBe(200);
     expect(userSync.body.errors ?? []).toEqual([]);
+  });
+});
+
+describe('Integration: guest device identity (TG-AUTH-002)', () => {
+  let dir = '';
+  let server: SpawnedServer | null = null;
+
+  const start = async (): Promise<void> => {
+    server = await spawnRustServer({
+      env: {
+        TOPGUN_GUEST_CLAIM: GUEST_CLAIM,
+        STORAGE_BACKEND: 'rocksdb',
+        TOPGUN_DATA_DIR: path.join(dir, 'topgun-data'),
+        TOPGUN_REDB_PATH: path.join(dir, 'topgun.redb'),
+        TOPGUN_WAL_DIR: path.join(dir, 'wal'),
+      },
+    });
+  };
+
+  /** A clean stop (exit 0), so the user's credential row is stored, then a new process. */
+  const restart = async (): Promise<void> => {
+    const stopping = server!;
+    server = null;
+    await stopping.cleanup();
+    await waitUntil(
+      () => stopping.process.exitCode !== null || stopping.process.signalCode !== null,
+      20_000,
+    );
+    expect(stopping.process.exitCode).toBe(0);
+    await start();
+  };
+
+  /** One connection that authenticates, presenting `deviceToken` when given; returns its AUTH_ACK. */
+  async function auth(sub: string, guest: boolean, deviceToken?: string): Promise<any> {
+    const client = await createRustTestClient(server!.port, { userId: sub, autoAuth: false });
+    try {
+      await client.waitForMessage('AUTH_REQUIRED', 8000);
+      client.send({
+        type: 'AUTH',
+        token: token(sub, guest),
+        ...(deviceToken ? { deviceToken } : {}),
+      });
+      return await client.waitForMessage('AUTH_ACK', 8000);
+    } finally {
+      client.close();
+    }
+  }
+
+  beforeAll(async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-guest-device-'));
+    await start();
+  });
+
+  afterAll(async () => {
+    if (server) await server.cleanup();
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('guest device identity lives as long as the server process', async () => {
+    const guest = await auth('g-device', true);
+    expect(guest.deviceToken).toMatch(/^[0-9a-f-]{36}\.[0-9a-f]{64}$/);
+    const user = await auth('u-device', false);
+    expect(user.deviceToken).toBeDefined();
+
+    const reconnected = await auth('g-device', true, guest.deviceToken);
+    expect([reconnected.deviceId, reconnected.deviceToken]).toEqual([guest.deviceId, undefined]);
+
+    await restart();
+
+    const afterRestart = await auth('g-device', true, guest.deviceToken);
+    expect(afterRestart.deviceId).not.toBe(guest.deviceId);
+    expect(afterRestart.deviceToken).toMatch(/^[0-9a-f-]{36}\.[0-9a-f]{64}$/);
+    const userAfterRestart = await auth('u-device', false, user.deviceToken);
+    expect([userAfterRestart.deviceId, userAfterRestart.deviceToken]).toEqual([
+      user.deviceId,
+      undefined,
+    ]);
   });
 });
