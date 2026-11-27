@@ -2963,6 +2963,7 @@ mod tenant_tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn policy_upsert_refuses_malformed_templates() {
         use PermissionAction::{All, Read, Remove, Write};
         // (request, tenancy, refused field, message fragment)

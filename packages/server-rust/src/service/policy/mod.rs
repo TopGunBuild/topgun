@@ -335,16 +335,17 @@ fn resolve_pattern<'a>(
             "**" => Segment::Any,
             seg => match Placeholder::parse(seg) {
                 None => Segment::Literal(seg),
-                Some(placeholder) => match placeholder.fill(principal, sep) {
-                    Some(value) => Segment::Literal(value),
-                    None => {
+                Some(placeholder) => {
+                    if let Some(value) = placeholder.fill(principal, sep) {
+                        Segment::Literal(value)
+                    } else {
                         *unfilled = Some(placeholder);
                         if !unfilled_as_one {
                             return None;
                         }
                         Segment::One
                     }
-                },
+                }
             },
         });
     }

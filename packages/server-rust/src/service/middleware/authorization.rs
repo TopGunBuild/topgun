@@ -3131,6 +3131,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn key_pattern_is_checked_against_every_key_an_operation_writes() {
         use crate::service::policy::{PermissionPolicy, PolicyEffect};
         use topgun_core::messages::{base, messaging, sync};

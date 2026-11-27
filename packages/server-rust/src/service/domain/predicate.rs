@@ -309,21 +309,13 @@ fn evaluate_leaf(predicate: &PredicateNode, ctx: &EvalContext, scope: Option<Pol
         return false;
     };
 
-    let resolved = match scope {
-        Some(scope) => {
-            if let Some(field) = resource_field(attribute) {
-                resolve_resource(scope.resource, field)
-            } else if let Some(rest) = auth_path(attribute) {
-                resolve_auth(ctx, &rest)
-            } else {
-                let segments: Vec<&str> = attribute.split('.').collect();
-                resolve_dot_path(ctx.data, &segments)
-            }
-        }
-        None => {
-            let segments: Vec<&str> = attribute.split('.').collect();
-            resolve_dot_path(ctx.data, &segments)
-        }
+    let resolved = if let (Some(scope), Some(field)) = (scope, resource_field(attribute)) {
+        resolve_resource(scope.resource, field)
+    } else if let Some(rest) = auth_path(attribute).filter(|_| scope.is_some()) {
+        resolve_auth(ctx, &rest)
+    } else {
+        let segments: Vec<&str> = attribute.split('.').collect();
+        resolve_dot_path(ctx.data, &segments)
     };
     let Some(actual) = resolved else {
         return false;
@@ -2671,6 +2663,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn policy_resource_fields_read_the_resource_not_the_record() {
         let on = |node: &PredicateNode,
                   auth: Option<&rmpv::Value>,
