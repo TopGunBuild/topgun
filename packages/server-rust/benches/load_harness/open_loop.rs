@@ -20,7 +20,7 @@
     clippy::cast_sign_loss
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -36,6 +36,10 @@ use topgun_core::messages::{ClientOp, Message, OpBatchMessage, OpBatchPayload, P
 
 use crate::connection_pool::ConnectionPool;
 use crate::store_arm::{dir_bytes, EffectiveStoreConfig, RunDirs, ServerHandle, Teardown};
+use crate::subscribers::{
+    self, HarnessWakeLag, ReaderSet, ServerMetrics, SubscriberConfig, SubscriberMeasurement,
+    SubscribersBlock, Timing,
+};
 
 /// The highest latency the histograms hold, in microseconds (one hour), so a
 /// coordinated-omission-corrected tail is never clipped.
@@ -59,6 +63,8 @@ pub struct OpenLoopConfig {
     pub max_wake_lag_ms: u64,
     /// The TTL every sent record asks for, as a client sets it (`--ttl-ms`).
     pub ttl_ms: Option<u64>,
+    /// The subscriber arm; `subs.readers` is `None` when it is off.
+    pub subs: SubscriberConfig,
 }
 
 impl Default for OpenLoopConfig {
@@ -74,6 +80,7 @@ impl Default for OpenLoopConfig {
             ack_timeout_ms: 10_000,
             max_wake_lag_ms: 5,
             ttl_ms: None,
+            subs: SubscriberConfig::default(),
         }
     }
 }
@@ -101,7 +108,7 @@ impl OpenLoopConfig {
                 "--hot-keys must be greater than 0 when --new-key-fraction is below 1".into(),
             );
         }
-        Ok(())
+        self.subs.validate()
     }
 }
 
@@ -362,6 +369,8 @@ struct ConnTally {
     ack: Histogram<u64>,
     service: Histogram<u64>,
     wake_lag: Histogram<u64>,
+    /// Wake lag over warm-up and window, which the subscriber arm reads.
+    wake_lag_run: Histogram<u64>,
     behind_schedule_sends: u64,
     max_behind_us: u64,
     /// Connections given up on (0 or 1 per connection before the merge).
@@ -379,6 +388,7 @@ impl ConnTally {
             ack: new_histogram(),
             service: new_histogram(),
             wake_lag: new_histogram(),
+            wake_lag_run: new_histogram(),
             behind_schedule_sends: 0,
             max_behind_us: 0,
             abandoned: 0,
@@ -397,6 +407,9 @@ impl ConnTally {
             .expect("same histogram bounds");
         self.wake_lag
             .add(&other.wake_lag)
+            .expect("same histogram bounds");
+        self.wake_lag_run
+            .add(&other.wake_lag_run)
             .expect("same histogram bounds");
         self.abandoned += other.abandoned;
         self.behind_schedule_sends += other.behind_schedule_sends;
@@ -437,14 +450,31 @@ impl Schedule {
     }
 }
 
+/// The `t` a batch's values carry: the batch's scheduled instant in µs since
+/// `t0`. A batch sent late keeps its schedule, so a subscriber's delivery
+/// latency counts the time the write waited to be sent.
+fn batch_t_us(t0: Instant, scheduled: Instant) -> u64 {
+    micros(scheduled.saturating_duration_since(t0))
+}
+
+/// What every value of one batch carries besides its key's own fields.
+struct ValueStamp {
+    t_us: u64,
+    buckets: u64,
+}
+
 /// Builds one `OP_BATCH`; each op carries a connection-local numeric id so
-/// the server can name it in `OP_REJECTED` and in a partial `OP_ACK`.
+/// the server can name it in `OP_REJECTED` and in a partial `OP_ACK`. Every
+/// value carries `t` and `bucket` (`key_id % buckets`, where `key_id` is the
+/// op id of a new key and the index of a hot key), which the subscriber arm
+/// filters and measures on.
 fn build_batch(
     conn_idx: usize,
     first_id: u64,
     batch_size: usize,
     key_mix: &KeyMix,
     ttl_ms: Option<u64>,
+    stamp: &ValueStamp,
     rng: &mut StdRng,
 ) -> Vec<u8> {
     let millis = SystemTime::now()
@@ -454,12 +484,20 @@ fn build_batch(
     let ops = (0..batch_size as u64)
         .map(|i| {
             let id = first_id + i;
-            let key = if rng.random::<f64>() < key_mix.new_key_fraction {
-                format!("ol-{conn_idx}-{id}")
+            let (key, key_id) = if rng.random::<f64>() < key_mix.new_key_fraction {
+                (format!("ol-{conn_idx}-{id}"), id)
             } else {
-                format!("hot-{}", rng.random_range(0..key_mix.hot_keys))
+                let hot = rng.random_range(0..key_mix.hot_keys);
+                (format!("hot-{hot}"), hot)
             };
-            let mut fields = vec![(rmpv::Value::from("v"), rmpv::Value::from(id as i64))];
+            let mut fields = vec![
+                (rmpv::Value::from("v"), rmpv::Value::from(id as i64)),
+                (rmpv::Value::from("t"), rmpv::Value::from(stamp.t_us)),
+                (
+                    rmpv::Value::from("bucket"),
+                    rmpv::Value::from(key_id % stamp.buckets),
+                ),
+            ];
             if key_mix.value_bytes > 0 {
                 fields.push((
                     rmpv::Value::from("bin"),
@@ -601,10 +639,10 @@ async fn drive_connection(
         let reached_early = now < scheduled;
         if reached_early {
             tokio::time::sleep_until(scheduled).await;
+            let lag = micros(Instant::now() - scheduled).max(1);
+            tally.wake_lag_run.saturating_record(lag);
             if in_window {
-                tally
-                    .wake_lag
-                    .saturating_record(micros(Instant::now() - scheduled).max(1));
+                tally.wake_lag.saturating_record(lag);
             }
         } else if in_window {
             let behind = micros(now - scheduled);
@@ -614,12 +652,17 @@ async fn drive_connection(
 
         let first_id = next_id;
         next_id += batch;
+        let stamp = ValueStamp {
+            t_us: batch_t_us(schedule.t0, scheduled),
+            buckets: config.subs.buckets,
+        };
         let bytes = build_batch(
             conn,
             first_id,
             config.batch_size,
             &config.key_mix,
             config.ttl_ms,
+            &stamp,
             &mut rng,
         );
         let sent_at = Instant::now();
@@ -726,16 +769,36 @@ pub struct Measurement {
     tally: ConnTally,
     timeline: Vec<TimelineSample>,
     store_failure: Option<String>,
+    subscribers: Option<SubscriberMeasurement>,
 }
 
 /// Runs the open loop against an already started server.
+///
+/// With the subscriber arm on, every reader is subscribed and has its
+/// snapshot before the first scheduled write; once the writers are done the
+/// readers are drained to quiesce, their views are checked against fresh
+/// queries, and `render` is read for the live-delivery series.
 pub async fn run(
     config: &OpenLoopConfig,
     server: &ServerHandle,
     dirs: Option<RunDirs>,
     jwt_secret: &str,
+    render: &(dyn Fn() -> String + Sync),
 ) -> anyhow::Result<Measurement> {
     let pool = Arc::new(ConnectionPool::new(server.addr, config.connections, jwt_secret).await?);
+    let readers = match config.subs.readers {
+        Some(_) => Some(ReaderSet::start(server.addr, jwt_secret, &config.subs).await?),
+        None => None,
+    };
+    if let Some(readers) = &readers {
+        if readers.snapshots_at_warmup_start != readers.subscriptions() {
+            anyhow::bail!(
+                "{} of {} subscription snapshots were in before warm-up",
+                readers.snapshots_at_warmup_start,
+                readers.subscriptions()
+            );
+        }
+    }
     let config = Arc::new(config.clone());
     let live = Arc::new(LiveCounters::default());
 
@@ -751,6 +814,13 @@ pub async fn run(
         batch_interval_ns: config.batch_size as u128 * 1_000_000_000 / u128::from(config.rate),
         connections: config.connections as u128,
     };
+    if let Some(readers) = &readers {
+        readers.set_timing(Timing {
+            t0,
+            window_start,
+            window_end,
+        });
+    }
 
     let sampler = tokio::spawn(sample_timeline(
         t0,
@@ -775,6 +845,20 @@ pub async fn run(
     }
     let timeline = sampler.await?;
     drop(pool);
+    let subscribers = match readers {
+        Some(readers) => {
+            let wake_lag = HarnessWakeLag {
+                p999_us: tally.wake_lag_run.value_at_quantile(0.999),
+                samples: tally.wake_lag_run.len(),
+                max_ms: config.max_wake_lag_ms,
+            };
+            Some(
+                measure_subscribers(readers, server, jwt_secret, &config.subs, render, wake_lag)
+                    .await?,
+            )
+        }
+        None => None,
+    };
 
     let store_failure = server
         .failure
@@ -784,6 +868,51 @@ pub async fn run(
         tally,
         timeline,
         store_failure,
+        subscribers,
+    })
+}
+
+impl Measurement {
+    /// The `t` of every value the readers hold at the end of the run.
+    pub fn held_t(&self) -> Vec<u64> {
+        self.subscribers
+            .iter()
+            .flat_map(|s| &s.states)
+            .flat_map(|state| state.views.values())
+            .flat_map(HashMap::values)
+            .filter_map(subscribers::value_t)
+            .collect()
+    }
+}
+
+/// Drains the readers to quiesce, stops them, checks their views and reads
+/// the live-delivery series.
+async fn measure_subscribers(
+    readers: ReaderSet,
+    server: &ServerHandle,
+    jwt_secret: &str,
+    subs: &SubscriberConfig,
+    render: &(dyn Fn() -> String + Sync),
+    harness_wake_lag: HarnessWakeLag,
+) -> anyhow::Result<SubscriberMeasurement> {
+    let subscriptions = readers.subscriptions();
+    let snapshots_at_warmup_start = readers.snapshots_at_warmup_start;
+    let (quiesced, quiesce_wait) = readers
+        .quiesce(Duration::from_millis(subs.quiesce_ms))
+        .await;
+    let (states, max_unread_frames) = readers.stop().await?;
+    let check = subscribers::check_views(server.addr, jwt_secret, subs, &states).await?;
+    Ok(SubscriberMeasurement {
+        subscriptions,
+        snapshots_at_warmup_start,
+        states,
+        max_unread_frames,
+        quiesced,
+        quiesce_wait,
+        check,
+        metrics: ServerMetrics::scrape(&render()),
+        before_server: subscribers::server_src_is_before(),
+        harness_wake_lag,
     })
 }
 
@@ -908,11 +1037,18 @@ pub struct Validity {
     pub store_failure: Option<String>,
 }
 
-/// One open-loop run, `schema_version` 1.
+/// The open-loop report's schema version; `baseline.json` names the one its
+/// readers expect.
+pub const REPORT_SCHEMA_VERSION: u32 = 2;
+
+/// One open-loop run, `schema_version` 2: version 1 plus `command` and
+/// `subscribers` (`null` when the subscriber arm is off).
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenLoopReport {
     pub schema_version: u32,
     pub scenario: &'static str,
+    /// The harness's command line, so a run names the arm it measured.
+    pub command: Vec<String>,
     pub store: String,
     pub run_index: Option<u64>,
     pub timestamp: String,
@@ -937,6 +1073,7 @@ pub struct OpenLoopReport {
     pub host: Host,
     pub build: Build,
     pub teardown: Teardown,
+    pub subscribers: Option<SubscribersBlock>,
     pub validity: Validity,
 }
 
@@ -953,7 +1090,12 @@ pub struct ReportContext {
 
 /// The fixed validity reasons. None of them judges the server: each says the
 /// measurement itself cannot be read as "the server at rate R".
-fn validity(m: &Measurement, ops: &Ops, max_wake_lag_ms: u64) -> Validity {
+fn validity(
+    m: &Measurement,
+    ops: &Ops,
+    max_wake_lag_ms: u64,
+    subscribers: Option<&SubscribersBlock>,
+) -> Validity {
     let mut reasons = Vec::new();
     if m.tally.wake_lag.value_at_quantile(0.999) > max_wake_lag_ms.saturating_mul(1000) {
         reasons.push("generator_saturated");
@@ -969,6 +1111,9 @@ fn validity(m: &Measurement, ops: &Ops, max_wake_lag_ms: u64) -> Validity {
     }
     if cfg!(debug_assertions) {
         reasons.push("debug_build");
+    }
+    if let Some(block) = subscribers {
+        reasons.extend(block.invalid_reasons());
     }
     Validity {
         valid: reasons.is_empty(),
@@ -996,9 +1141,14 @@ pub fn report(
     };
     ops.check()?;
     let duration = config.duration_secs as f64;
+    let subscribers = m
+        .subscribers
+        .as_ref()
+        .map(|s| SubscribersBlock::of(s, &config.subs, config.duration_secs));
     Ok(OpenLoopReport {
-        schema_version: 1,
+        schema_version: REPORT_SCHEMA_VERSION,
         scenario: "open_loop",
+        command: std::env::args().collect(),
         store: ctx.store.to_string(),
         run_index: ctx.run_index,
         timestamp: ctx.timestamp,
@@ -1047,7 +1197,8 @@ pub fn report(
         host: host_info(),
         build: build_info(),
         teardown: Teardown::default(),
-        validity: validity(m, &ops, config.max_wake_lag_ms),
+        validity: validity(m, &ops, config.max_wake_lag_ms, subscribers.as_ref()),
+        subscribers,
         ops,
     })
 }
@@ -1075,6 +1226,22 @@ impl OpenLoopReport {
             self.ops.unsent
         );
         println!("write-behind depth max: {}", self.write_behind.depth_max);
+        if let Some(s) = &self.subscribers {
+            let d = &s.delivery_latency_us;
+            println!(
+                "subscribers: {} subscriptions; {:.0} deliveries/s, {:.0} map events/s; delivery latency us: p50 {} p99 {} p99.9 {} max {}",
+                s.subscriptions, s.deliveries_per_sec, s.map_events_per_sec, d.p50, d.p99, d.p999, d.max
+            );
+            println!(
+                "subscribers: {} re-snapshots, {} disconnects (slow readers: {} re-snapshots, {} disconnects); {} view mismatches over {} views",
+                s.resnapshots,
+                s.disconnects,
+                s.slow_readers.resnapshots,
+                s.slow_readers.disconnects,
+                s.view_mismatches,
+                s.views_checked
+            );
+        }
         if self.validity.valid {
             println!("validity: valid");
         } else {
@@ -1383,10 +1550,88 @@ pub fn latency_origin_early_from_send_late_from_schedule() {
     assert_eq!(latency_origin(false, scheduled, sent_at), scheduled);
 }
 
+/// A batch whose send was delayed past its instant still carries that
+/// instant as `t`, and each value's `bucket` is its key id modulo the bucket
+/// count.
+pub fn value_t_is_the_scheduled_instant() {
+    let t0 = Instant::now();
+    let scheduled = t0 + Duration::from_millis(3);
+    // The send is late by 10 ms, as behind a late answer.
+    std::thread::sleep(Duration::from_millis(10));
+    let stamp = ValueStamp {
+        t_us: batch_t_us(t0, scheduled),
+        buckets: 7,
+    };
+    let mix = KeyMix {
+        new_key_fraction: 0.5,
+        hot_keys: 50,
+        ..KeyMix::default()
+    };
+    let mut rng = StdRng::seed_from_u64(3);
+    let bytes = build_batch(0, 100, 20, &mix, None, &stamp, &mut rng);
+    let Ok(Message::OpBatch(batch)) = rmp_serde::from_slice::<Message>(&bytes) else {
+        panic!("not an OP_BATCH");
+    };
+    for op in batch.payload.ops {
+        let value = op.record.flatten().and_then(|r| r.value).expect("value");
+        let field = |name: &str| {
+            value
+                .as_map()
+                .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some(name)))
+                .and_then(|(_, v)| v.as_u64())
+                .expect("field")
+        };
+        assert_eq!(field("t"), 3_000, "t is the scheduled instant");
+        let key_id: u64 = op
+            .key
+            .strip_prefix("hot-")
+            .unwrap_or_else(|| op.id.as_deref().expect("op id"))
+            .parse()
+            .expect("key id");
+        assert_eq!(field("bucket"), key_id % 7);
+    }
+}
+
+/// A report of a run with the subscriber arm off has `subscribers: null`
+/// and the schema version `baseline.json` names.
+pub fn report_schema_v2_arm_off_is_null() {
+    let config = OpenLoopConfig {
+        duration_secs: 1,
+        ..OpenLoopConfig::default()
+    };
+    let m = Measurement {
+        tally: ConnTally::new(),
+        timeline: Vec::new(),
+        store_failure: None,
+        subscribers: None,
+    };
+    let ctx = ReportContext {
+        store: "null",
+        run_index: None,
+        timestamp: String::new(),
+        config: None,
+        journal_enabled: true,
+        expiry_sweep_interval_ms: 0,
+        expiry_sweep_rows_per_sec: 0,
+    };
+    let report = serde_json::to_value(report(&m, &config, ctx).expect("report")).expect("json");
+    assert!(
+        report["subscribers"].is_null(),
+        "arm off: subscribers is null"
+    );
+    let baseline: serde_json::Value =
+        serde_json::from_str(include_str!("baseline.json")).expect("baseline.json parses");
+    assert_eq!(
+        report["schema_version"],
+        baseline["open_loop"]["report_schema_version"]
+    );
+    assert!(report["command"].is_array());
+}
+
 /// Runs every check, each isolated so that one failing check does not hide the
 /// others, and prints a libtest-shaped summary. Returns the exit code.
-pub fn run_self_tests() -> i32 {
-    let checks: [(&str, fn()); 4] = [
+pub fn run_self_tests(already_run: &[(&str, bool)]) -> i32 {
+    let mut checks: Vec<(&str, fn())> = vec![
         (
             "classify_partial_reject_then_error_counts_each_op_once",
             classify_partial_reject_then_error_counts_each_op_once,
@@ -1403,9 +1648,24 @@ pub fn run_self_tests() -> i32 {
             "latency_origin_early_from_send_late_from_schedule",
             latency_origin_early_from_send_late_from_schedule,
         ),
+        (
+            "value_t_is_the_scheduled_instant",
+            value_t_is_the_scheduled_instant,
+        ),
+        (
+            "report_schema_v2_arm_off_is_null",
+            report_schema_v2_arm_off_is_null,
+        ),
     ];
+    checks.extend(subscribers::SELF_TESTS);
     let mut failed = Vec::new();
-    for (name, check) in checks {
+    for &(name, ok) in already_run {
+        println!("test {name} ... {}", if ok { "ok" } else { "FAILED" });
+        if !ok {
+            failed.push(name);
+        }
+    }
+    for &(name, check) in &checks {
         let ok = std::panic::catch_unwind(check).is_ok();
         println!("test {name} ... {}", if ok { "ok" } else { "FAILED" });
         if !ok {
@@ -1421,7 +1681,7 @@ pub fn run_self_tests() -> i32 {
     println!(
         "\ntest result: {}. {} passed; {} failed",
         if failed.is_empty() { "ok" } else { "FAILED" },
-        checks.len() - failed.len(),
+        checks.len() + already_run.len() - failed.len(),
         failed.len()
     );
     i32::from(!failed.is_empty())

@@ -3,6 +3,7 @@ mod metrics;
 mod open_loop;
 mod scenarios;
 mod store_arm;
+mod subscribers;
 mod traits;
 
 use std::collections::HashSet;
@@ -294,6 +295,48 @@ async fn main() {
                 open_loop_config.max_wake_lag_ms = flag_value(&args, i, "--max-wake-lag-ms");
                 i += 2;
             }
+            "--subscribers" => {
+                open_loop_config.subs.readers = Some(flag_value(&args, i, "--subscribers"));
+                i += 2;
+            }
+            "--sub-buckets" => {
+                open_loop_config.subs.buckets = flag_value(&args, i, "--sub-buckets");
+                i += 2;
+            }
+            "--subs-per-reader" => {
+                open_loop_config.subs.subs_per_reader = flag_value(&args, i, "--subs-per-reader");
+                i += 2;
+            }
+            "--sub-predicate" => {
+                open_loop_config.subs.predicate = text_flag(&args, i, "--sub-predicate");
+                i += 2;
+            }
+            "--sub-sort" => {
+                open_loop_config.subs.sort = Some(text_flag(&args, i, "--sub-sort"));
+                i += 2;
+            }
+            "--sub-limit" => {
+                open_loop_config.subs.limit = Some(flag_value(&args, i, "--sub-limit"));
+                i += 2;
+            }
+            "--slow-readers" => {
+                open_loop_config.subs.slow_readers = flag_value(&args, i, "--slow-readers");
+                i += 2;
+            }
+            "--slow-reader-subs" => {
+                open_loop_config.subs.slow_reader_subs =
+                    Some(flag_value(&args, i, "--slow-reader-subs"));
+                i += 2;
+            }
+            "--slow-reader-frame-us" => {
+                open_loop_config.subs.slow_reader_frame_us =
+                    flag_value(&args, i, "--slow-reader-frame-us");
+                i += 2;
+            }
+            "--quiesce-ms" => {
+                open_loop_config.subs.quiesce_ms = flag_value(&args, i, "--quiesce-ms");
+                i += 2;
+            }
             "--arms" => {
                 arms_list = Some(flag_value(&args, i, "--arms"));
                 i += 2;
@@ -318,7 +361,11 @@ async fn main() {
     }
 
     if self_test {
-        std::process::exit(open_loop::run_self_tests());
+        let e2e = subscribers_e2e_self_test(Arc::clone(&observability)).await;
+        std::process::exit(open_loop::run_self_tests(&[(
+            "subscribers_snapshot_before_warmup_and_views_match",
+            e2e,
+        )]));
     }
 
     // --- Checks that must refuse before anything is created ---
@@ -651,6 +698,90 @@ async fn main() {
     if any_failed {
         std::process::exit(1);
     }
+}
+
+/// Reads a value after a flag that parses with its own message.
+fn text_flag<T: std::str::FromStr<Err = String>>(args: &[String], i: usize, flag: &str) -> T {
+    let Some(raw) = args.get(i + 1) else {
+        eprintln!("{flag} requires a value");
+        std::process::exit(1);
+    };
+    raw.parse().unwrap_or_else(|reason: String| {
+        eprintln!("{reason}");
+        std::process::exit(1);
+    })
+}
+
+/// The subscriber arm against the in-process server, end to end: every
+/// subscription's snapshot is in before the first scheduled write (the run
+/// fails otherwise), the readers receive deliveries, and after quiesce every
+/// view equals a fresh query. Returns whether it passed.
+async fn subscribers_e2e_self_test(observability: Arc<ObservabilityHandle>) -> bool {
+    let check = tokio::spawn(async move {
+        let mut server = ServerControl::start(ServerSpec {
+            store: StoreArm::Null,
+            durable_env: None,
+            dirs: None,
+            eviction: EvictionConfig::default(),
+            sweep_config: sweep_config_from_env(),
+            observability: Arc::clone(&observability),
+        });
+        let started = server.handle().expect("the server starts");
+        let mut config = OpenLoopConfig {
+            rate: 500,
+            batch_size: 5,
+            connections: 4,
+            warmup_secs: 1,
+            duration_secs: 2,
+            ..OpenLoopConfig::default()
+        };
+        config.key_mix.new_key_fraction = 0.5;
+        config.key_mix.hot_keys = 20;
+        config.subs.readers = Some(2);
+        config.subs.subs_per_reader = 3;
+        config.subs.buckets = 10;
+        config.subs.predicate = subscribers::SubPredicate::Range;
+        config.subs.quiesce_ms = 500;
+        let render = || observability.render_metrics();
+        let measured = open_loop::run(&config, &started.handle, None, "test-e2e-secret", &render)
+            .await
+            .expect("the run completes");
+        drop(started);
+        let ctx = ReportContext {
+            store: "null",
+            run_index: None,
+            timestamp: String::new(),
+            config: None,
+            journal_enabled: true,
+            expiry_sweep_interval_ms: 0,
+            expiry_sweep_rows_per_sec: 0,
+        };
+        // Every value carries its batch's scheduled instant, a multiple of
+        // the aggregate batch interval (5 ops / 500 per s = 10 ms) after t0.
+        let held_t = measured.held_t();
+        assert!(!held_t.is_empty(), "the readers hold values");
+        assert!(
+            held_t.iter().all(|t| t % 10_000 == 0),
+            "t is the scheduled instant: {:?}",
+            held_t.iter().find(|t| *t % 10_000 != 0)
+        );
+        let report = open_loop::report(&measured, &config, ctx).expect("report");
+        server.drain().await;
+        let s = report.subscribers.expect("the arm is on");
+        assert_eq!(s.subscriptions, 6);
+        assert_eq!(s.snapshots_at_warmup_start, 6);
+        assert!(s.deliveries > 0, "the readers received deliveries");
+        assert!(s.map_events > 0, "the readers received map events");
+        assert_eq!(s.disconnects, 0);
+        assert!(s.quiesced);
+        assert_eq!(s.views_checked, 6);
+        assert_eq!(s.view_mismatches, 0);
+        assert!(
+            s.harness_wake_lag_warmup_window_samples > 0,
+            "the warm-up and window wake lag is the run's own"
+        );
+    });
+    check.await.is_ok()
 }
 
 /// Reads the value after a flag, exiting with the harness's error style when it
@@ -1033,7 +1164,8 @@ async fn run_open_loop(
         "Connections: {}, Duration: {}s, Rate: {} ops/s",
         config.connections, config.duration_secs, config.rate
     );
-    let measured = open_loop::run(config, &handle, dirs, "test-e2e-secret").await;
+    let render = || observability.render_metrics();
+    let measured = open_loop::run(config, &handle, dirs, "test-e2e-secret", &render).await;
     // The store is drained and dropped on the server's runtime, not here.
     drop(handle);
     let report = measured
