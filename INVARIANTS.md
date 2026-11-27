@@ -3266,7 +3266,10 @@ weaker than a test.
   is reserved), or when it names `resource.key` on an operation with no key (a null check there
   is definitive: the key is null). (5) Upsert refuses (400, naming the field) a brace outside a
   whole placeholder, an unknown placeholder, a partial-star segment, `{auth.tenant}` while
-  tenancy is off, and a condition reference that (4) makes unknown. (6) A policy that uses a
+  tenancy is off, and a condition reference that is unknown whatever the resource: a `value_ref`
+  in a namespace other than `auth`, `data` and `resource`, bare `resource`, and a `resource`
+  field other than `map` and `key`. `resource.key` is accepted: it is unknown only when an
+  operation with no key is evaluated. (6) A policy that uses a
   placeholder or a `keyPattern` is persisted with `scopedMapPattern` instead of `mapPattern`, so
   binaries built before it refuse the store at start rather than widen the policy; a plain policy
   keeps the earlier bytes. A stored plain row whose `mapPattern` has a brace, and a stored row the

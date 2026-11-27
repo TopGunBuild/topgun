@@ -24,9 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Changed (server): a policy condition that references an unknown namespace now fails closed.**
   A `value_ref` outside `auth`, `data` and `resource`, and bare `resource` or a `resource` field
   other than `map` and `key`, make their comparison unknown: an allow does not match and a deny
-  applies (before, the comparison was false, so such a deny never applied). A stored attribute
-  `resource.map` or `resource.key` now names the evaluated map or key instead of a record field.
-  Each stored policy whose meaning changes is named by one `WARN` at start.
+  applies, also under `!`. Before, such a `value_ref` never resolved, so its comparison was
+  false, and an attribute `resource…` read a record field of that name. A stored attribute
+  `resource.map` or `resource.key` now names the evaluated map or key instead of a record field,
+  and a stored `value_ref` `resource.map` or `resource.key`, which used to resolve to nothing,
+  now names the evaluated map or key too, so a stored allow such as `data.owner == resource.key`
+  can start to match. Each stored policy whose meaning changes is named by one `WARN` at start.
 - **Rollback note (server):** a policy that uses a placeholder or a `keyPattern` is stored in an
   encoding earlier binaries do not read: on a store that holds one, they stop at start with
   `FATAL: policy recovery failed: decode policy '<id>'`. Delete such policies before rolling back.

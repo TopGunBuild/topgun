@@ -94,6 +94,10 @@ Every key is checked: each op of a batch, each entry of an OR-Map push and each 
 - an id containing `:` (such as a `urn:` subject) never fills a key placeholder;
 - an id outside the topic name characters (`A-Z a-z 0-9 _ - . : /`) never fills a topic placeholder, since such a topic cannot exist.
 
+**A `keyPattern` does not narrow reads.** Reads name no key, so a read rule on a map opens every key of it: scope reads by map (for example one map per visitor), not by key.
+
+**Rolling back drops key scoping at creation.** The admin API of a server version before `keyPattern` ignores the field: a policy created there with a `keyPattern` is stored without it and covers every key. After a rollback, re-create key-scoped policies only on a version that knows the field.
+
 Topics and counters are matched by name like maps, so `{auth.tenant}.signal.{auth.id}` admits a caller to its own topic only.
 
 **Upgrade and rollback.** A policy without a placeholder or `keyPattern` is stored exactly as before. One with either is stored in an encoding earlier server versions do not read: started on such a store they stop with `FATAL: policy recovery failed: … decode policy '<id>'`, so delete these policies before rolling back. A policy stored by an earlier version with `{` or `}` in its `mapPattern` stops this version the same way; before upgrading, list the policies (`GET /api/admin/policies`) and look for `{`. The [troubleshooting guide](/docs/guides/troubleshooting) has the way out.

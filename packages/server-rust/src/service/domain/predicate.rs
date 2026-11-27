@@ -77,8 +77,10 @@ pub fn evaluate_predicate(predicate: &PredicateNode, ctx: &EvalContext) -> bool 
 }
 
 /// Evaluates a permission-policy condition (`TG-AUTHZ-002`) with no resource:
-/// every `resource.…` reference is unknown. [`evaluate_policy_condition_on`]
-/// is the entry the policy evaluator uses.
+/// a comparison with any `resource.…` reference is unknown, a null check on
+/// `resource.map` or `resource.key` is definitive (both are null), and a null
+/// check on any other `resource` reference is unknown.
+/// [`evaluate_policy_condition_on`] is the entry the policy evaluator uses.
 ///
 /// An attribute `auth` or `auth.…` names the authenticated principal
 /// (`ctx.auth`) and is never read from the record, so no record content can

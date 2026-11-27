@@ -257,9 +257,9 @@ This guide covers common issues you may encounter when using TopGun, organized b
 
 ### A policy is named at startup with `is not a known condition namespace` or `now names the evaluated`
 
-**Symptom:** A `WARN` line at startup: `policy <id>: <reference> is not a known condition namespace; the condition now fails closed: as an allow it does not match, as a deny it applies`, or `policy <id>: resource.map now names the evaluated map, not a record field`.
+**Symptom:** A `WARN` line at startup: `policy <id>: <reference> is not a known condition namespace; the condition now fails closed: as an allow it does not match, as a deny it applies`, `policy <id>: resource.map now names the evaluated map, not a record field`, or `policy <id>: resource.key now names the evaluated key; it used to resolve to nothing`.
 
-**Cause:** the policy's condition was stored by an earlier version and this version reads it differently. A reference outside `auth`, `data` and `resource.map` / `resource.key` was a comparison that was always false; it is now unknown, so an allow with it does not match and a deny with it applies. A `resource.map` or `resource.key` that read a record field now names the evaluated map or key.
+**Cause:** the policy's condition was stored by an earlier version and this version reads it differently. A reference outside `auth`, `data` and `resource.map` / `resource.key` is now unknown, so an allow with it does not match and a deny with it applies: before, such a `value_ref` never resolved and its comparison was false, and an attribute `resource…` read a record field of that name. An attribute `resource.map` or `resource.key` that read a record field now names the evaluated map or key. A `value_ref` `resource.map` or `resource.key` used to resolve to nothing and now names the evaluated map or key, so a stored allow such as `data.owner == resource.key` can start to match.
 
 **Solution:** if the new meaning is not what the policy intends, delete it and re-create it with a condition the admin API accepts. The line repeats at every start while the policy is stored.
 

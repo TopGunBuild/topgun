@@ -28,7 +28,7 @@ pub use durable::DurablePolicyStore;
 /// carrying this role in a JWT claim. The string is still reserved so that
 /// untrusted mint paths (token exchange) strip it before signing, preventing a
 /// self-granted `admin` role from satisfying a policy condition that references
-/// `$auth.roles`.
+/// `auth.roles`.
 pub const RESERVED_ADMIN_ROLE: &str = "admin";
 
 /// Roles that an external/untrusted token must never be able to inject. Stripped
@@ -691,6 +691,12 @@ impl PolicyStore for InMemoryPolicyStore {
 // PolicyEvaluator
 // ---------------------------------------------------------------------------
 
+/// Policies that have already logged an unfilled placeholder in this process.
+/// Process-wide, not per evaluator, because HTTP `/sync` builds an evaluator
+/// per request: each policy is logged once, not on every request.
+static UNFILLED_LOGGED: std::sync::LazyLock<DashMap<String, ()>> =
+    std::sync::LazyLock::new(DashMap::new);
+
 /// Evaluates permission policies for a given principal, action, and map.
 ///
 /// Uses deny-wins semantics: if any matching policy denies, the result is
@@ -712,9 +718,6 @@ pub struct PolicyEvaluator {
     /// Whether the tenant boundary (TG-TEN-001) is enforced by the
     /// authorization middleware that holds this evaluator.
     tenancy: bool,
-    /// Policies that have already logged an unfilled placeholder: each is
-    /// logged once, not on every evaluation.
-    unfilled_logged: DashMap<String, ()>,
 }
 
 impl PolicyEvaluator {
@@ -726,7 +729,6 @@ impl PolicyEvaluator {
             store,
             admin_subjects: Arc::new(HashSet::new()),
             tenancy: false,
-            unfilled_logged: DashMap::new(),
         }
     }
 
@@ -743,7 +745,6 @@ impl PolicyEvaluator {
             store,
             admin_subjects,
             tenancy: false,
-            unfilled_logged: DashMap::new(),
         }
     }
 
@@ -976,7 +977,7 @@ impl PolicyEvaluator {
                 }
             };
         if let Some(placeholder) = unfilled {
-            if self.unfilled_logged.insert(policy.id.clone(), ()).is_none() {
+            if UNFILLED_LOGGED.insert(policy.id.clone(), ()).is_none() {
                 tracing::warn!(
                     "policy {}: {} has no single-segment value for this principal; \
                      the policy fails closed: as an allow it does not match, as a deny it applies",
@@ -1864,7 +1865,8 @@ mod tests {
         let dispatch = tracing::Dispatch::new(subscriber);
         let _second_dispatcher = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new());
 
-        let eval = configured(vec![rule(
+        // The id is used by no other test: the logged set is process-wide.
+        let store = make_store_with(vec![rule(
             "log-once",
             "t.conv.{auth.id}",
             None,
@@ -1872,13 +1874,23 @@ mod tests {
             PolicyEffect::Allow,
             None,
         )]);
+        store
+            .configured
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Two evaluators over one store, as two HTTP `/sync` requests build them.
+        let evaluators = [
+            PolicyEvaluator::new(store.clone()),
+            PolicyEvaluator::new(store),
+        ];
         let colon = tenanted("a.b", None);
         tracing::dispatcher::with_default(&dispatch, || {
-            for _ in 0..2 {
-                let decision = read(&eval, Some(&colon), "t.conv.a")
-                    .now_or_never()
-                    .expect("an in-memory store answers at once");
-                assert_eq!(decision, Denied);
+            for eval in &evaluators {
+                for _ in 0..2 {
+                    let decision = read(eval, Some(&colon), "t.conv.a")
+                        .now_or_never()
+                        .expect("an in-memory store answers at once");
+                    assert_eq!(decision, Denied);
+                }
             }
         });
         let log = String::from_utf8(
