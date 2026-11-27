@@ -1555,7 +1555,7 @@ pub fn value_t_is_the_scheduled_instant() {
         let key_id: u64 = op
             .key
             .strip_prefix("hot-")
-            .map_or_else(|| op.id.as_deref().expect("op id"), |hot| hot)
+            .unwrap_or_else(|| op.id.as_deref().expect("op id"))
             .parse()
             .expect("key id");
         assert_eq!(field("bucket"), key_id % 7);
