@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Added (server): guest principals, which never get the admin bypass (`TG-AUTHZ-005`).** With
+  `TOPGUN_GUEST_CLAIM` naming a top-level JWT claim, a token whose claim is `true` is a guest and
+  one where it is absent or `false` a user; any other value refuses the token, on the WebSocket
+  handshake and on HTTP `/sync`. Unset, every token is a user. Conditions gain `auth.kind`
+  (`"user"` or `"guest"`). A guest is held to the policies even when its `sub` is listed in
+  `TOPGUN_ADMIN_SUBJECTS`. The app backend mints guest tokens; TopGun ships no mint endpoint. The
+  claim `tg_link` is reserved: a token whose `tg_link` is not a string is refused, whether or not
+  guests are on, and a string is ignored. The server refuses to start when `TOPGUN_GUEST_CLAIM` is
+  empty, not Unicode, set with `TOPGUN_NO_AUTH`, names `sub`, `roles`, `exp`, `iat`, `nbf`, `iss`,
+  `aud` or `tg_link`, or names the tenant claim, and when `TOPGUN_TENANT_CLAIM` is `tg_link`. The
+  startup summary line reports `guest_claim`. Earlier binaries ignore `TOPGUN_GUEST_CLAIM`, so
+  after a rollback guest tokens are users there.
 - **Added (server): policy templates scope one policy set to each principal's own maps, keys and
   topics (`TG-AUTHZ-003`, `TG-AUTHZ-004`).** A whole `mapPattern` segment `{auth.id}` or
   `{auth.tenant}` matches only the caller's own value (`{auth.tenant}.visitor.{auth.id}.**`), and an
@@ -42,8 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{auth: {id: 'bob'}}` in its value, or escape a deny by leaving it out. Such conditions now read
   the principal for every operator, also in policies stored before the upgrade and in JSON
   `condition` nodes; nothing needs re-creating. A reference the principal cannot answer — no
-  authenticated caller, or an `auth.…` field other than `id`, `roles` and, for a tenanted caller,
-  `tenant` — is unknown: an allow
+  authenticated caller, or an `auth.…` field other than `id`, `roles`, `kind` and, for a tenanted
+  caller, `tenant` — is unknown: an allow
   does not match and a deny applies, also for the documented forms such as
   `data.ownerId != auth.id`, whose deny did not apply to an anonymous caller before. `auth == null`
   and `auth != null` are unchanged. An operation evaluated without a record — a read, a remove, an

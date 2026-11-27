@@ -335,7 +335,7 @@ The TopGun server detects RSA keys automatically (by checking for `-----BEGIN`) 
 
 ## JWT token structure
 
-TopGun reads only the `sub` and `roles` claims from the JWT payload:
+TopGun takes the caller from the `sub` and `roles` claims (and checks `exp`, and `iss` / `aud` when they are configured). It also reads the tenant claim when `TOPGUN_TENANT_CLAIM` is set, the guest claim when `TOPGUN_GUEST_CLAIM` is set (see [Guest tokens](#guest-tokens)), and checks the type of the reserved `tg_link` claim:
 
 export const jwtPayloadCode = `{
   "sub": "user_123",    // User ID — required per RFC 7519
@@ -347,6 +347,44 @@ export const jwtPayloadCode = `{
 <div className="not-prose">
   <CodeBlock title="Expected JWT payload" language="json" code={jwtPayloadCode} />
 </div>
+
+---
+
+## Guest tokens
+
+An anonymous visitor (a shopper on a store page, a reader of a public board) can get an identity of its own: a **guest token**. TopGun does not mint guest tokens; your app backend does, with the same secret or key it signs user tokens with.
+
+Turn guest principals on by naming the claim that marks a guest token:
+
+```bash
+TOPGUN_GUEST_CLAIM=tg_guest
+```
+
+With the variable set, a token whose `tg_guest` claim is `true` is a guest; a token without the claim, or with `false`, is a user. Any other value (`"true"`, `1`, `null`, an object) refuses the token, on the WebSocket handshake and on HTTP `/sync`, before a custom validator runs. With the variable unset, every token is a user and the claim is never read. The server refuses to start (exit 1) when the variable is set but empty, is not valid Unicode, is set together with `TOPGUN_NO_AUTH`, names `sub`, `roles`, `exp`, `iat`, `nbf`, `iss`, `aud` or `tg_link`, or names the same claim as `TOPGUN_TENANT_CLAIM`. The startup summary line reports `guest_claim` (`off` or the claim name).
+
+A guest token from your backend looks like this:
+
+```json
+{
+  "sub": "guest_4f9c2e7a1b8d4c6e9a0f3b5d7e1c2a48",
+  "tg_guest": true,
+  "exp": 1699000900
+}
+```
+
+How to mint them safely:
+
+- **Generate the `sub` on the server.** Make it at least 128 random bits, once per visitor, and keep it server-side or in a cookie your backend signs, so that minting again for the same visitor returns the same `sub`. Deriving `sub` from a value the client controls (a raw cookie value, a device id the client chose) is unsafe: anyone can claim another visitor's identity by sending that value.
+- **Keep guest subs apart from user ids**, for example with a prefix no user id carries, or write policies that branch on `auth.kind`.
+- **Give guest tokens a short `exp`.**
+- **Never put the `admin` role in a guest token.** The admin HTTP API admits any token with that role and does not read the guest claim.
+- **Create your policies before you admit guests.** With no policy ever configured, every operation is allowed, guests included.
+
+In policies, a guest is `auth.kind == 'guest'` and a user `auth.kind == 'user'` (see [RBAC conditions](/docs/guides/rbac#conditions)). A guest never gets the policy admin bypass: a guest whose `sub` is listed in `TOPGUN_ADMIN_SUBJECTS` is evaluated against the policies like anyone else.
+
+`tg_link` is reserved for linking a guest to the user it becomes; it is not honoured yet. A token whose `tg_link` is a string is admitted and the claim is ignored; one whose `tg_link` has any other type is refused. This check runs whether or not `TOPGUN_GUEST_CLAIM` is set.
+
+Server versions before guest principals ignore `TOPGUN_GUEST_CLAIM`: if you roll back, guest tokens are users there, and a guest whose `sub` is on `TOPGUN_ADMIN_SUBJECTS` would get the bypass. Keeping guest subs apart from user ids avoids that.
 
 ---
 
