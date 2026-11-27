@@ -2206,23 +2206,25 @@ impl Interleave {
         S: Sink<Message> + Unpin,
     {
         let idle = self.active.is_none();
-        match msg {
-            OutboundMessage::Binary(data) if data.len() > chunk_len => {
-                let data = Bytes::from(data);
-                match (passable(&data), idle) {
-                    (true, true) => self.active = Some(chunk_frames(data, chunk_len)),
-                    (true, false) => self.waiting.push_back(WaitingLarge::Passable(data)),
-                    (false, true) => write_frames(sender, chunk_frames(data, chunk_len)).await?,
-                    (false, false) => self.waiting.push_back(WaitingLarge::Ordered(data)),
-                }
-                Ok(())
-            }
+        // A large message of either binary variant must reach the arms below:
+        // `send_outbound_message` would write all of its `CHUNK`s at once, also
+        // between the `CHUNK`s of the active message (`TG-WS-004`).
+        let data = match msg {
+            OutboundMessage::Binary(data) if data.len() > chunk_len => Bytes::from(data),
+            OutboundMessage::Shared(data) if data.len() > chunk_len => data,
             close @ OutboundMessage::Close(_) if !idle => {
                 self.close = Some(close);
-                Ok(())
+                return Ok(());
             }
-            msg => send_outbound_message(sender, msg, framing).await,
+            msg => return send_outbound_message(sender, msg, framing).await,
+        };
+        match (passable(&data), idle) {
+            (true, true) => self.active = Some(chunk_frames(data, chunk_len)),
+            (true, false) => self.waiting.push_back(WaitingLarge::Passable(data)),
+            (false, true) => write_frames(sender, chunk_frames(data, chunk_len)).await?,
+            (false, false) => self.waiting.push_back(WaitingLarge::Ordered(data)),
         }
+        Ok(())
     }
 }
 
@@ -2386,10 +2388,9 @@ async fn send_outbound_message<S>(
 where
     S: Sink<Message> + Unpin,
 {
-    match msg {
-        OutboundMessage::Binary(data) => {
-            write_frames(sender, outbound_frames(Bytes::from(data), framing)).await?;
-        }
+    let data = match msg {
+        OutboundMessage::Binary(data) => Bytes::from(data),
+        OutboundMessage::Shared(data) => data,
         OutboundMessage::Close(reason) => {
             let close_frame = reason.map(|r| CloseFrame {
                 code: CloseCode::Normal,
@@ -2398,8 +2399,8 @@ where
             let _ = sender.send(Message::Close(close_frame)).await;
             return Err(());
         }
-    }
-    Ok(())
+    };
+    write_frames(sender, outbound_frames(data, framing)).await
 }
 
 /// The most bytes a `CHUNK`'s header can take: a three-entry map, its keys,
@@ -3561,12 +3562,10 @@ mod tests {
 
         let mut frames = Vec::new();
         while let Some(outbound) = rx.recv().await {
-            match outbound {
-                OutboundMessage::Binary(bytes) => frames.push(bytes),
-                OutboundMessage::Close(reason) => {
-                    panic!("an op batch must not close the connection: {reason:?}")
-                }
-            }
+            let Some(bytes) = outbound.payload() else {
+                panic!("an op batch must not close the connection: {outbound:?}")
+            };
+            frames.push(bytes.to_vec());
         }
         frames
     }
@@ -3996,12 +3995,10 @@ mod tests {
         drop(tx);
         let mut frames = Vec::new();
         while let Some(outbound) = rx.recv().await {
-            match outbound {
-                OutboundMessage::Binary(bytes) => frames.push(bytes),
-                OutboundMessage::Close(reason) => {
-                    panic!("the exchange must not close the connection: {reason:?}")
-                }
-            }
+            let Some(bytes) = outbound.payload() else {
+                panic!("the exchange must not close the connection: {outbound:?}")
+            };
+            frames.push(bytes.to_vec());
         }
         decode_frames(&frames)
     }
@@ -4120,12 +4117,10 @@ mod tests {
         drop(tx);
         let mut frames = Vec::new();
         while let Some(outbound) = rx.recv().await {
-            match outbound {
-                OutboundMessage::Binary(bytes) => frames.push(bytes),
-                OutboundMessage::Close(reason) => {
-                    panic!("the exchange must not close the connection: {reason:?}")
-                }
-            }
+            let Some(bytes) = outbound.payload() else {
+                panic!("the exchange must not close the connection: {outbound:?}")
+            };
+            frames.push(bytes.to_vec());
         }
         frames
     }
@@ -5491,6 +5486,36 @@ mod writer_tests {
     }
 
     #[tokio::test]
+    async fn writer_frames_a_shared_message_as_binary() {
+        let mut h = harness(false).await;
+        let lengths = [16, F + 1];
+        let expected: Vec<Vec<u8>> = lengths
+            .iter()
+            .enumerate()
+            .map(|(message, &len)| payload(message, len))
+            .collect();
+        for bytes in &expected {
+            h.tx.send(OutboundMessage::Shared(Bytes::from(bytes.clone())))
+                .await
+                .expect("queue open");
+        }
+
+        let got = read_messages(&mut h.client_stream, lengths.len(), Duration::from_secs(30)).await;
+        for (at, (got, want)) in got.iter().zip(&expected).enumerate() {
+            assert!(got[..] == want[..], "message {at} differs");
+        }
+        let frames = h.tap.frames.lock().clone();
+        let want_wire: Vec<Vec<(u8, bool, usize)>> =
+            lengths.iter().map(|&len| expected_shapes(len)).collect();
+        assert_eq!(
+            wire_messages(&frames),
+            want_wire,
+            "frame shapes on the wire"
+        );
+        assert!(!h.writer.is_finished(), "the writer ended");
+    }
+
+    #[tokio::test]
     async fn writer_answers_ping_between_fragments() {
         let mut h = harness(true).await;
         let message = payload(1, 4_400_000);
@@ -6249,6 +6274,27 @@ mod writer_tests {
             want.extend(chunks("O", 3));
             want.push(whole("s1"));
             assert_eq!(seen, want, "ordered message {id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_large_shared_message_waits_for_the_answer() {
+        for id in 0..2 {
+            let p = big_passable(0, 3 * C);
+            let o = big_ordered(id, 3 * C);
+            let s1 = small(1);
+            let queued = vec![
+                OutboundMessage::Binary(p.clone()),
+                OutboundMessage::Shared(Bytes::from(o.clone())),
+                OutboundMessage::Binary(s1.clone()),
+            ];
+            let mut h = harness_queued(false, true, queued).await;
+            let got = read_messages(&mut h.client_stream, 7, Duration::from_secs(30)).await;
+            let seen = label(&got, &[("P", &p), ("O", &o), ("s1", &s1)]);
+            let mut want = chunks("P", 3);
+            want.extend(chunks("O", 3));
+            want.push(whole("s1"));
+            assert_eq!(seen, want, "shared ordered message {id}");
         }
     }
 

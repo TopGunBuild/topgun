@@ -5046,8 +5046,8 @@ mod tests {
     )> {
         let mut updates = Vec::new();
         while let Ok(msg) = rx.try_recv() {
-            if let crate::network::connection::OutboundMessage::Binary(bytes) = msg {
-                if let Ok(decoded) = rmp_serde::from_slice::<topgun_core::messages::Message>(&bytes)
+            if let Some(bytes) = msg.payload() {
+                if let Ok(decoded) = rmp_serde::from_slice::<topgun_core::messages::Message>(bytes)
                 {
                     if let topgun_core::messages::Message::QueryUpdate { payload } = decoded {
                         updates.push((payload.change_type, payload.key, payload.value));
@@ -10292,9 +10292,9 @@ mod tests {
     ) -> Vec<ServerEventPayload> {
         let mut events = Vec::new();
         while let Ok(msg) = rx.try_recv() {
-            if let crate::network::connection::OutboundMessage::Binary(bytes) = msg {
+            if let Some(bytes) = msg.payload() {
                 if let Ok(Message::ServerEvent { payload }) =
-                    rmp_serde::from_slice::<Message>(&bytes)
+                    rmp_serde::from_slice::<Message>(bytes)
                 {
                     events.push(payload);
                 }
@@ -15717,8 +15717,8 @@ mod tests {
         ) -> Received {
             let mut received = Received::default();
             while let Ok(msg) = rx.try_recv() {
-                if let crate::network::connection::OutboundMessage::Binary(bytes) = msg {
-                    match rmp_serde::from_slice::<Message>(&bytes) {
+                if let Some(bytes) = msg.payload() {
+                    match rmp_serde::from_slice::<Message>(bytes) {
                         Ok(Message::ServerEvent { payload }) => received.events.push(payload),
                         Ok(Message::QueryUpdate { payload }) => {
                             received.updates.push((payload.change_type, payload.key));

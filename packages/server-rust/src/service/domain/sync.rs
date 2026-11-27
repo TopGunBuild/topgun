@@ -3010,13 +3010,35 @@ mod tests {
     ) -> Vec<topgun_core::messages::ServerEventPayload> {
         let mut events = Vec::new();
         while let Ok(msg) = rx.try_recv() {
-            if let crate::network::connection::OutboundMessage::Binary(bytes) = msg {
-                if let Ok(Message::ServerEvent { payload }) = rmp_serde::from_slice(&bytes) {
+            if let Some(bytes) = msg.payload() {
+                if let Ok(Message::ServerEvent { payload }) = rmp_serde::from_slice(bytes) {
                     events.push(payload);
                 }
             }
         }
         events
+    }
+
+    #[test]
+    fn received_events_decodes_a_shared_frame() {
+        let event = Message::ServerEvent {
+            payload: topgun_core::messages::ServerEventPayload {
+                map_name: "tags".to_string(),
+                key: "tag-1".to_string(),
+                ..Default::default()
+            },
+        };
+        let bytes = rmp_serde::to_vec_named(&event).expect("encodes");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(crate::network::connection::OutboundMessage::Shared(
+            bytes::Bytes::from(bytes),
+        ))
+        .expect("queue open");
+
+        let events = received_events(&mut rx);
+        assert_eq!(events.len(), 1, "the shared frame is decoded");
+        assert_eq!(events[0].map_name, "tags");
+        assert_eq!(events[0].key, "tag-1");
     }
 
     #[tokio::test]
@@ -5891,11 +5913,11 @@ mod tests {
         fn drain_or_adds(rx: &mut tokio::sync::mpsc::Receiver<OutboundMessage>) -> Vec<String> {
             let mut keys = Vec::new();
             while let Ok(message) = rx.try_recv() {
-                let OutboundMessage::Binary(bytes) = message else {
+                let Some(bytes) = message.payload() else {
                     continue;
                 };
                 if let Ok(Message::ServerEvent { payload }) =
-                    rmp_serde::from_slice::<Message>(&bytes)
+                    rmp_serde::from_slice::<Message>(bytes)
                 {
                     if matches!(payload.event_type, ServerEventType::OR_ADD) {
                         keys.push(payload.key);

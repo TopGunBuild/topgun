@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use bytes::Bytes;
 use dashmap::DashMap;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, RwLock};
@@ -43,10 +44,26 @@ pub enum ConnectionKind {
 /// Message to be sent outbound to a connection.
 #[derive(Debug)]
 pub enum OutboundMessage {
-    /// A binary payload (MsgPack-encoded).
+    /// A binary payload (MsgPack-encoded) owned by one connection.
     Binary(Vec<u8>),
+    /// A binary payload (MsgPack-encoded) encoded once and shared by every
+    /// connection it is sent to; the writer frames it exactly as `Binary`.
+    Shared(Bytes),
     /// A close frame with an optional reason.
     Close(Option<String>),
+}
+
+impl OutboundMessage {
+    /// The bytes a binary frame carries, whichever variant holds them;
+    /// `None` for a close frame.
+    #[must_use]
+    pub fn payload(&self) -> Option<&[u8]> {
+        match self {
+            Self::Binary(bytes) => Some(bytes),
+            Self::Shared(bytes) => Some(bytes),
+            Self::Close(_) => None,
+        }
+    }
 }
 
 /// Outcome of a best-effort broadcast send to a (possibly slow) consumer.
@@ -1338,10 +1355,10 @@ mod tests {
 
         assert!(full.is_cancelled(), "the full target is disconnected");
         assert!(!open.is_cancelled(), "the other target is not");
-        match open_rx.try_recv() {
-            Ok(OutboundMessage::Binary(bytes)) => assert_eq!(bytes, vec![7, 7]),
-            other => panic!("the open target receives the bytes: {other:?}"),
-        }
+        let received = open_rx
+            .try_recv()
+            .expect("the open target receives the bytes");
+        assert_eq!(received.payload(), Some(&[7, 7][..]));
         assert!(
             flagged_rx.try_recv().is_err(),
             "a flagged target receives nothing"
