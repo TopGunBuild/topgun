@@ -81,6 +81,12 @@ pub struct NetworkConfig {
     /// token must then carry a valid tenant in that claim. `None` (default) turns
     /// it off and the claim is never read. Set from `TOPGUN_TENANT_CLAIM`.
     pub tenant_claim: Option<String>,
+    /// Name of the top-level JWT claim that marks a guest token, looked up
+    /// verbatim. `Some` turns guest principals on: a token whose claim is
+    /// `true` is a guest, one where it is absent or `false` a user, and any
+    /// other value is refused. `None` (default) makes every token a user's and
+    /// the claim is never read. Set from `TOPGUN_GUEST_CLAIM`.
+    pub guest_claim: Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -104,6 +110,7 @@ impl Default for NetworkConfig {
             jwt_issuer: None,
             jwt_audience: None,
             tenant_claim: None,
+            guest_claim: None,
         }
     }
 }

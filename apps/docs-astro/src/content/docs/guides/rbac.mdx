@@ -37,7 +37,7 @@ There is exactly one authorization layer — RBAC. Admission is a guard, not a s
 
 Authorization runs on every client operation (`read`, `write`, `remove`):
 
-1. **Admin bypass** — a principal whose roles include `admin` is always allowed.
+1. **Admin bypass** — a user whose subject (`sub`) is listed in the server's `TOPGUN_ADMIN_SUBJECTS` is always allowed. A role claim never grants it, `admin` included, and a [guest](/docs/guides/authentication#guest-tokens) never gets it, whatever its `sub`.
 2. **Permissive default** — if the policy store is empty, all operations are allowed, so an unconfigured deployment behaves exactly as before. RBAC "activates" the moment you create your first policy.
 3. **Allow-list once active** — with at least one policy present, a map is evaluated against the policies whose pattern matches it. The principal needs a matching `allow` for the action.
 4. **Deny-wins** — if any matching policy denies the action, the result is `Deny`, regardless of allow rules.
@@ -194,7 +194,7 @@ What a delete does not do:
 
 ## Conditions
 
-A policy can carry a condition that is evaluated against the record `data`, the caller's auth context and the evaluated resource. Conditions reference `data.<field>`, `auth.id` / `auth.roles` / `auth.tenant`, and `resource.map` / `resource.key` (the map and key being evaluated). The simplest way to express one is the `conditionExpr` string, a CEL-like expression parsed server-side:
+A policy can carry a condition that is evaluated against the record `data`, the caller's auth context and the evaluated resource. Conditions reference `data.<field>`, `auth.id` / `auth.roles` / `auth.kind` / `auth.tenant`, and `resource.map` / `resource.key` (the map and key being evaluated). The simplest way to express one is the `conditionExpr` string, a CEL-like expression parsed server-side:
 
 ```bash
 # Owners can write only their own records
@@ -217,7 +217,7 @@ data.role in auth.roles || data.public == true
 data.status == 'draft' && auth.id == 'alice'
 ```
 
-`auth.…` always names the authenticated caller, never the record, so a value that carries its own `auth` field cannot impersonate anyone; a `conditionExpr` cannot reference a record field named `auth` (or `resource`); a JSON `condition` whose `value_ref` is `data.auth.…` still reads that record field. The caller's fields are `id`, `roles` and, when tenancy is on, `tenant`. Without an authenticated caller, or for any other `auth.…` field, a comparison is unknown: it does not satisfy an `allow` and makes a `deny` apply. `auth == null` and `auth != null` test whether there is a caller.
+`auth.…` always names the authenticated caller, never the record, so a value that carries its own `auth` field cannot impersonate anyone; a `conditionExpr` cannot reference a record field named `auth` (or `resource`); a JSON `condition` whose `value_ref` is `data.auth.…` still reads that record field. The caller's fields are `id`, `roles`, `kind` (`'user'`, or `'guest'` for a [guest token](/docs/guides/authentication#guest-tokens)) and, when tenancy is on, `tenant`. Without an authenticated caller, or for any other `auth.…` field, a comparison is unknown: it does not satisfy an `allow` and makes a `deny` apply. `auth == null` and `auth != null` test whether there is a caller.
 
 `resource.map` and `resource.key` name the map and key being evaluated, never a record field: `resource.key == auth.id` holds only on the caller's own key. An operation with no key (a read, a counter, a topic) has no `resource.key`: a comparison with it is unknown, and `resource.key == null` is true. The admin API refuses any other reference — a `value_ref` outside `auth`, `data` and `resource`, bare `resource`, or another `resource` field (`resource.to` is reserved). A condition stored by an earlier version with such a reference loads with one startup `WARN` naming the policy, and is now unknown: an allow with it does not match, a deny with it applies. Because `resource` names the evaluated resource, a `conditionExpr` cannot reference a record field named `resource`.
 
@@ -225,7 +225,7 @@ Supported operators: `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `contains`, `contai
 
 ## Roles
 
-Roles come from the authenticated principal (the JWT validated on the WebSocket handshake — see [Authentication](/docs/guides/authentication)). A role claim never bypasses policies, `admin` included: only subjects listed in the server's `TOPGUN_ADMIN_SUBJECTS` skip policy evaluation. Roles are matched inside conditions via `auth.roles` (e.g. `data.role in auth.roles`).
+Roles come from the authenticated principal (the JWT validated on the WebSocket handshake — see [Authentication](/docs/guides/authentication)). A role claim never bypasses policies, `admin` included: only users whose subject is listed in the server's `TOPGUN_ADMIN_SUBJECTS` skip policy evaluation, never a guest token with the same `sub`. `auth.kind == 'guest'` lets a policy hold guests to their own rules (e.g. a `deny` of writes with that condition). Roles are matched inside conditions via `auth.roles` (e.g. `data.role in auth.roles`).
 
 ## Persistence
 

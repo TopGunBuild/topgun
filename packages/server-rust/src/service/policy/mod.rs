@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use topgun_core::messages::base::PredicateNode;
+use topgun_core::types::PrincipalKind;
 use utoipa::ToSchema;
 
 // rmpv is used for auth context construction in PolicyEvaluator::evaluate.
@@ -845,8 +846,8 @@ impl PolicyEvaluator {
     /// names none, where an allow with a `keyPattern` does not match and a
     /// deny with one applies.
     ///
-    /// Policy conditions see the principal as `auth` (`id`, `roles` and, for
-    /// a tenanted principal, `tenant`), the record as `data`, and the
+    /// Policy conditions see the principal as `auth` (`id`, `roles`, `kind`
+    /// and, for a tenanted principal, `tenant`), the record as `data`, and the
     /// evaluated resource `{map, key?}` as `resource` (`TG-AUTHZ-002`,
     /// `TG-AUTHZ-003`).
     pub async fn evaluate_key(
@@ -862,9 +863,11 @@ impl PolicyEvaluator {
         // Admin bypass is server-anchored: only subjects on the configured
         // allow-list bypass policy checks. A `roles: ["admin"]` JWT claim is
         // deliberately NOT sufficient — privilege must originate from server
-        // configuration, not from a (possibly self-granted) token claim.
+        // configuration, not from a (possibly self-granted) token claim. A
+        // guest never gets it: its `sub` comes from whoever minted the guest
+        // token, so it may collide with an admin subject (TG-AUTHZ-005).
         if let Some(p) = principal {
-            if self.admin_subjects.contains(&p.id) {
+            if p.kind == PrincipalKind::User && self.admin_subjects.contains(&p.id) {
                 return PolicyDecision::Allow;
             }
         }
@@ -897,6 +900,10 @@ impl PolicyEvaluator {
                             .map(|r| rmpv::Value::String(r.clone().into()))
                             .collect(),
                     ),
+                ),
+                (
+                    rmpv::Value::String("kind".into()),
+                    rmpv::Value::String(p.kind.as_str().into()),
                 ),
             ];
             if let Some(tenant) = &p.tenant {
@@ -1184,6 +1191,7 @@ mod tests {
             id: "admin1".to_string(),
             roles: vec!["admin".to_string()],
             tenant: None,
+            kind: PrincipalKind::User,
         }
     }
 
@@ -1192,6 +1200,7 @@ mod tests {
             id: "user1".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
+            kind: PrincipalKind::User,
         }
     }
 
@@ -1374,6 +1383,7 @@ mod tests {
             id: id.to_string(),
             roles: roles.iter().map(|r| (*r).to_string()).collect(),
             tenant: None,
+            kind: PrincipalKind::User,
         }
     }
 
@@ -1656,6 +1666,7 @@ mod tests {
             id: id.to_string(),
             roles: Vec::new(),
             tenant: tenant.map(str::to_string),
+            kind: PrincipalKind::User,
         }
     }
 
@@ -1946,37 +1957,118 @@ mod tests {
         assert_eq!(write_key(&deny, Some(&none), "m", None).await, Denied);
     }
 
+    fn guest(id: &str) -> topgun_core::Principal {
+        topgun_core::Principal {
+            kind: PrincipalKind::Guest,
+            ..tenanted(id, Some("acme"))
+        }
+    }
+
     #[tokio::test]
-    async fn auth_kind_is_unknown_until_guest_principals_exist() {
+    async fn guest_kind_reaches_policy_conditions() {
         let alice = tenanted("alice", Some("acme"));
-        let forged_kind = forged("kind", s("guest"));
-        let allow = configured(vec![rule(
-            "guest",
-            "*",
-            None,
-            PermissionAction::Write,
-            PolicyEffect::Allow,
-            Some("auth.kind == 'guest'"),
-        )]);
-        assert_eq!(
-            allow
-                .evaluate(Some(&alice), PermissionAction::Write, "m", &forged_kind)
-                .await,
-            Denied
-        );
+        let visitor = guest("v1");
         let deny = configured(vec![
             allow_all(),
             rule(
-                "guest",
-                "*",
+                "no-guest-writes",
+                "**",
                 None,
                 PermissionAction::Write,
                 PolicyEffect::Deny,
                 Some("auth.kind == 'guest'"),
             ),
         ]);
-        assert_eq!(write_key(&deny, Some(&alice), "m", None).await, Denied);
-        assert_eq!(write_key(&deny, None, "m", None).await, Denied);
+        // The record cannot speak for the caller's kind.
+        let forged_user = forged("kind", s("user"));
+        assert_eq!(
+            deny.evaluate(
+                Some(&visitor),
+                PermissionAction::Write,
+                "acme.m",
+                &forged_user
+            )
+            .await,
+            Denied
+        );
+        assert_eq!(
+            write_key(&deny, Some(&visitor), "acme.m", Some("k")).await,
+            Denied
+        );
+        assert_eq!(
+            write_key(&deny, Some(&alice), "acme.m", Some("k")).await,
+            Allowed
+        );
+        // Without a principal `auth.kind` stays unknown, so the deny applies.
+        assert_eq!(write_key(&deny, None, "acme.m", None).await, Denied);
+
+        let allow = configured(vec![rule(
+            "guest-only",
+            "*",
+            None,
+            PermissionAction::Write,
+            PolicyEffect::Allow,
+            Some("auth.kind == 'guest'"),
+        )]);
+        let forged_guest = forged("kind", s("guest"));
+        assert_eq!(
+            allow
+                .evaluate(Some(&alice), PermissionAction::Write, "m", &forged_guest)
+                .await,
+            Denied
+        );
+        assert_eq!(write_key(&allow, Some(&visitor), "m", None).await, Allowed);
+    }
+
+    #[tokio::test]
+    async fn admin_bypass_applies_only_to_users() {
+        let admin_user = tenanted("ops", None);
+        let admin_guest = topgun_core::Principal {
+            kind: PrincipalKind::Guest,
+            ..tenanted("ops", None)
+        };
+        let actions = [
+            PermissionAction::Read,
+            PermissionAction::Write,
+            PermissionAction::Remove,
+            PermissionAction::All,
+        ];
+        // No policy at all: only the bypass can allow.
+        let eval =
+            PolicyEvaluator::with_admin_subjects(make_store_with(vec![]), admin_subjects(&["ops"]));
+        for action in actions {
+            assert_eq!(
+                eval.evaluate(Some(&admin_user), action, "any.map", &rmpv::Value::Nil)
+                    .await,
+                Allowed,
+                "{action:?}: an admin user bypasses"
+            );
+            assert_eq!(
+                eval.evaluate(Some(&admin_guest), action, "any.map", &rmpv::Value::Nil)
+                    .await,
+                Denied,
+                "{action:?}: a guest with an admin subject is held to the policies"
+            );
+        }
+        // With a policy that matches, the guest gets exactly what it grants.
+        let store = make_store_with(vec![rule(
+            "read-only",
+            "*",
+            None,
+            PermissionAction::Read,
+            PolicyEffect::Allow,
+            None,
+        )]);
+        let eval = PolicyEvaluator::with_admin_subjects(store, admin_subjects(&["ops"]));
+        assert_eq!(read(&eval, Some(&admin_guest), "m").await, Allowed);
+        assert_eq!(
+            write_key(&eval, Some(&admin_guest), "m", None).await,
+            Denied
+        );
+        assert_eq!(
+            write_key(&eval, Some(&admin_user), "m", None).await,
+            Allowed
+        );
     }
 
     #[tokio::test]

@@ -3217,17 +3217,17 @@ weaker than a test.
   stored before this rule. **Excluded:** query predicates (`evaluate_predicate`), where `auth.…`
   is a record path, as in the client's local evaluation.
 - **Statement:** in a policy condition, a leaf attribute or `value_ref` `auth` or `auth.…` resolves
-  only from the authenticated principal (`{id, roles}`, and `tenant` for a principal that carries
-  one); the record is never consulted for it. A
+  only from the authenticated principal (`{id, roles, kind}`, and `tenant` for a principal that
+  carries one); the record is never consulted for it. A
   reference that does not resolve there — no principal, or a field it does not carry — makes its
   leaf (other than `IsNull` / `IsNotNull`) unknown, and the condition is decided in three-valued
   logic with unknown counting as not matching for an allow and as matching for a deny (`Not`
   flips it). This is a sound over-approximation of Kleene evaluation — a leaf with an unresolved
   `auth` reference is unknown even where the record side alone would be false — and it never fails
   open. `conditionExpr` refuses a field reference `data.auth…` or `data.resource…` on either side.
-- **Stated limits:** the principal carries only `id`, `roles` and, when it has one, `tenant`, so
-  every other `auth.…` field — `tenant` of a principal without one, and `kind` — is unknown (an
-  allow on it never matches, a deny on it always applies). A stored condition whose
+- **Stated limits:** the principal carries only `id`, `roles`, `kind` (`"user"` or `"guest"`)
+  and, when it has one, `tenant`, so every other `auth.…` field — `tenant` of a principal without
+  one included — is unknown (an allow on it never matches, a deny on it always applies). A stored condition whose
   compared field was a record field named `auth` now names the principal. JSON conditions are not
   validated: their `value_ref` `data.auth.…` still reads the record.
 - **Maintaining code:** `service/domain/predicate.rs` `evaluate_policy_condition`,
@@ -3279,7 +3279,7 @@ weaker than a test.
   `t.{auth.id}.secret` covers `t.x.secret` but not that principal's own `t.a.b.secret`; an id with
   a `:` never fills a key placeholder, and one outside the topic charset never fills a topic
   placeholder. A stored `{auth.tenant}` policy loads with tenancy off and is unfilled for every
-  principal without a tenant. `auth.kind` is unknown for every principal. A record field named
+  principal without a tenant. A record field named
   `resource` cannot be referenced from a `conditionExpr`. Single-node only.
 - **Maintaining code:** `service/policy/mod.rs` `split_pattern`, `resolve_pattern`,
   `glob_matches`, `validate_policy`, `PolicyEvaluator::applies_to`, `StoredPolicy` and its
@@ -3290,7 +3290,7 @@ weaker than a test.
   `unfilled_placeholder_never_widens_an_allow_and_narrows_no_deny`,
   `unfilled_placeholder_logs_once_per_policy`, `tenant_placeholder_is_filled_from_the_principal_not_the_name`,
   `a_condition_on_an_unknown_namespace_fails_closed`, `auth_value_carries_tenant`,
-  `auth_kind_is_unknown_until_guest_principals_exist`,
+  `guest_kind_reaches_policy_conditions`,
   `scoped_policies_are_unreadable_to_older_binaries_and_plain_ones_unchanged`,
   `stored_conditions_on_unknown_namespaces_load_with_one_warning` (`mod.rs`);
   `policy_resource_fields_read_the_resource_not_the_record` (`predicate.rs`);
@@ -3325,6 +3325,32 @@ weaker than a test.
   `tests/integration-rust/policy-templating.test.ts`.
 - **Violation consequence:** a visitor overwrites another visitor's key by forging ownership in
   the value, or a batch smuggles a foreign key behind an own one.
+- **Status:** decided, **enforced**.
+
+### TG-AUTHZ-005: The policy bypass is granted only to a user principal whose subject is on the server's admin list
+
+- **Scope:** `PolicyEvaluator::evaluate_key` (every path of TG-AUTHZ-002), for a principal from a
+  client token (WebSocket handshake or HTTP `/sync`, one path: `AuthHandler::verify_token`).
+  **Excluded:** the admin HTTP API, which admits a token by its `admin` role.
+- **Statement:** a principal skips policy evaluation only when its kind is `User` and its subject
+  (`Principal.id`) is in the server-configured `TOPGUN_ADMIN_SUBJECTS` set. A role claim, `admin`
+  included, never grants it. A principal of kind `Guest` — a token whose `TOPGUN_GUEST_CLAIM`
+  claim is `true` — is evaluated against the policies whatever its subject. The kind is fixed when
+  the token is verified: the guest claim is `true` (guest), absent or `false` (user), and any other
+  value refuses the token before the custom validator runs; with `TOPGUN_GUEST_CLAIM` unset every
+  token is a user.
+- **Stated limits:** the admin HTTP API checks only the `admin` role and does not read the guest
+  claim, so a guest token must not carry that role. Binaries before guest principals ignore
+  `TOPGUN_GUEST_CLAIM`, so after a rollback a guest is a user there. With no policy ever
+  configured every operation is allowed, guests included. Single-node only.
+- **Maintaining code:** `service/policy/mod.rs` `PolicyEvaluator::evaluate_key`;
+  `network/handlers/auth.rs` `AuthHandler::verify_token`; `bin/topgun_server.rs`
+  `guest_claim_from_env`.
+- **Enforcing test:** `admin_bypass_applies_only_to_users`, `allow_listed_subject_bypasses_policies`,
+  `admin_role_claim_alone_does_not_bypass`, `admin_subject_match_is_by_id_not_role` (`mod.rs`);
+  `guest_claim_decides_kind_and_refuses_non_booleans` (`auth.rs`).
+- **Violation consequence:** a visitor whose backend-minted `sub` collides with an admin subject,
+  or who claims the `admin` role, reads and writes every map of the node.
 - **Status:** decided, **enforced**.
 
 ### TG-TEN-001: With tenancy on, a client reaches only the names its tenant owns

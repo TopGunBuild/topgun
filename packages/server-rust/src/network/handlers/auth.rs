@@ -12,6 +12,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use topgun_core::messages::{AuthFailData, AuthMessage, AuthRequiredMessage, Message};
+use topgun_core::types::PrincipalKind;
 use topgun_core::Principal;
 use tracing::{debug, warn};
 
@@ -137,6 +138,9 @@ pub struct AuthHandler {
     audience: Option<String>,
     /// Name of the JWT claim carrying the tenant; `None` keeps tenancy off.
     tenant_claim: Option<String>,
+    /// Name of the JWT claim that marks a guest token; `None` makes every
+    /// token a user's.
+    guest_claim: Option<String>,
 }
 
 impl AuthHandler {
@@ -151,11 +155,12 @@ impl AuthHandler {
             issuer: None,
             audience: None,
             tenant_claim: None,
+            guest_claim: None,
         }
     }
 
     /// Builds the handler from the server's configured token rules (secret,
-    /// validator, iss/aud, tenant claim), so the WebSocket handshake and HTTP
+    /// validator, iss/aud, tenant claim, guest claim), so the WebSocket handshake and HTTP
     /// `/sync` are built from one place and cannot drift apart.
     #[must_use]
     pub(crate) fn from_state(jwt_secret: &str, state: &AppState) -> Self {
@@ -165,6 +170,7 @@ impl AuthHandler {
                 state.config.jwt_audience.clone(),
             )
             .with_tenant_claim(state.config.tenant_claim.clone())
+            .with_guest_claim(state.config.guest_claim.clone())
     }
 
     /// Enables request-path issuer/audience validation (audit F7). Each is
@@ -185,6 +191,15 @@ impl AuthHandler {
     #[must_use]
     pub fn with_tenant_claim(mut self, tenant_claim: Option<String>) -> Self {
         self.tenant_claim = tenant_claim;
+        self
+    }
+
+    /// Turns guest principals on (`Some(claim)`): a token whose top-level
+    /// `claim` is `true` names a guest, one where it is absent or `false` a
+    /// user, and any other value is refused. `None` keeps every token a user's.
+    #[must_use]
+    pub fn with_guest_claim(mut self, guest_claim: Option<String>) -> Self {
+        self.guest_claim = guest_claim;
         self
     }
 
@@ -265,15 +280,17 @@ impl AuthHandler {
     }
 
     /// The whole client token path: signature and key, iss/aud, `exp` with
-    /// `leeway`, claims to `Principal`, the tenant check, then the custom
-    /// validator. The WebSocket handshake and HTTP `/sync` both admit through
+    /// `leeway`, claims to `Principal`, the tenant check, the guest and
+    /// `tg_link` checks, then the custom validator. The WebSocket handshake and HTTP `/sync` both admit through
     /// this one function, so neither can admit a token the other refuses.
     ///
     /// # Errors
     ///
     /// Returns the reason the token is refused: the key cannot be parsed, the
     /// JWT does not verify, `sub` is missing, the tenant claim is missing or
-    /// invalid while tenancy is on, or the custom validator refuses it.
+    /// invalid while tenancy is on, the guest claim is not a boolean while
+    /// guest principals are on, `tg_link` is present and not a string, or the
+    /// custom validator refuses it.
     pub(crate) async fn verify_token(&self, token: &str, leeway: u64) -> Result<Principal, String> {
         let (algorithm, key) = decode_jwt_key(&self.jwt_secret)?;
         let mut validation = Validation::new(algorithm);
@@ -321,6 +338,27 @@ impl AuthHandler {
             ),
         };
 
+        // Like the tenant, both run before the custom validator, so a validator
+        // never sees an invalid guest claim or `tg_link`.
+        let kind = match self.guest_claim.as_deref() {
+            None => PrincipalKind::User,
+            Some(claim) => match raw_claims.get(claim) {
+                None | Some(serde_json::Value::Bool(false)) => PrincipalKind::User,
+                Some(serde_json::Value::Bool(true)) => PrincipalKind::Guest,
+                Some(_) => return Err(format!("invalid guest claim `{claim}` in JWT")),
+            },
+        };
+        // `tg_link` is reserved for linking a guest to the user it becomes, and
+        // is checked whether or not guests are on, so that tokens minted today
+        // cannot mean something else once it is honoured. Nothing reads it yet.
+        match raw_claims.get("tg_link") {
+            None => {}
+            Some(serde_json::Value::String(_)) => {
+                debug!(user_id = %user_id, "tg_link claim ignored: it is reserved");
+            }
+            Some(_) => return Err("invalid tg_link claim in JWT".to_string()),
+        }
+
         if let Some(ref validator) = self.auth_validator {
             let ctx = AuthValidationContext {
                 user_id: user_id.clone(),
@@ -330,12 +368,13 @@ impl AuthHandler {
             validator.validate(&ctx).await?;
         }
 
-        debug!(user_id = %user_id, ?roles, "JWT verified successfully");
+        debug!(user_id = %user_id, ?roles, ?kind, "JWT verified successfully");
 
         Ok(Principal {
             id: user_id,
             roles,
             tenant,
+            kind,
         })
     }
 }
@@ -917,6 +956,90 @@ RQIDAQAB
                 .await
                 .unwrap_or_else(|e| panic!("{extra}: refused: {e:?}"));
             assert_eq!(principal.tenant, None, "{extra}");
+        }
+    }
+
+    // ── Guest claim and the reserved `tg_link` ───────────────────────────────
+
+    const GUEST_CLAIM: &str = "tg_guest";
+
+    /// Runs one handshake through a counting validator; returns the result,
+    /// the frames sent and the validator's calls.
+    async fn guarded_handshake(
+        guest_claim: Option<&str>,
+        extra: &serde_json::Value,
+    ) -> (Result<Principal, AuthError>, usize, usize) {
+        use std::sync::atomic::Ordering;
+        let (validator, calls) = super::tenant_cases::counting_validator();
+        let handler = AuthHandler::new(TEST_SECRET.to_owned(), Some(validator))
+            .with_guest_claim(guest_claim.map(str::to_string));
+        let token = super::tenant_cases::token(TEST_SECRET, extra);
+        let (result, frames) = handshake(&handler, token).await;
+        (result, frames, calls.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn guest_claim_decides_kind_and_refuses_non_booleans() {
+        use serde_json::json;
+        let admitted = [
+            (json!({ GUEST_CLAIM: true }), PrincipalKind::Guest),
+            (json!({}), PrincipalKind::User),
+            (json!({ GUEST_CLAIM: false }), PrincipalKind::User),
+        ];
+        for (extra, kind) in admitted {
+            let (result, frames, calls) = guarded_handshake(Some(GUEST_CLAIM), &extra).await;
+            let principal = result.unwrap_or_else(|e| panic!("{extra}: refused: {e:?}"));
+            assert_eq!(principal.kind, kind, "{extra}");
+            assert_eq!((frames, calls), (0, 1), "{extra}");
+        }
+        for extra in [
+            json!({ GUEST_CLAIM: "true" }),
+            json!({ GUEST_CLAIM: 1 }),
+            json!({ GUEST_CLAIM: null }),
+            json!({ GUEST_CLAIM: {} }),
+            json!({ GUEST_CLAIM: [true] }),
+        ] {
+            let (result, frames, calls) = guarded_handshake(Some(GUEST_CLAIM), &extra).await;
+            match result {
+                Err(AuthError::InvalidToken { reason }) => {
+                    assert!(reason.contains("invalid guest claim"), "{extra}: {reason}");
+                }
+                other => panic!("{extra}: expected InvalidToken, got {other:?}"),
+            }
+            assert_eq!(frames, 1, "{extra}: exactly one AUTH_FAIL");
+            assert_eq!(
+                calls, 0,
+                "{extra}: the validator never sees an invalid guest claim"
+            );
+        }
+        // Guests off: the claim is never read, whatever it holds.
+        for extra in [json!({ GUEST_CLAIM: true }), json!({ GUEST_CLAIM: "x" })] {
+            let (result, _, _) = guarded_handshake(None, &extra).await;
+            let principal = result.unwrap_or_else(|e| panic!("{extra}: refused: {e:?}"));
+            assert_eq!(principal.kind, PrincipalKind::User, "{extra}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tg_link_is_reserved_not_honoured() {
+        use serde_json::json;
+        for guest_claim in [Some(GUEST_CLAIM), None] {
+            let extra = json!({ "tg_link": "g1", GUEST_CLAIM: true });
+            let (result, frames, calls) = guarded_handshake(guest_claim, &extra).await;
+            let principal = result.unwrap_or_else(|e| panic!("{guest_claim:?}: refused: {e:?}"));
+            assert_eq!(principal.id, "u1", "the link names no one yet");
+            assert_eq!((frames, calls), (0, 1), "{guest_claim:?}");
+            for link in [json!(5), json!(null), json!(true), json!({ "sub": "g1" })] {
+                let extra = json!({ "tg_link": link });
+                let (result, frames, calls) = guarded_handshake(guest_claim, &extra).await;
+                match result {
+                    Err(AuthError::InvalidToken { reason }) => {
+                        assert!(reason.contains("invalid tg_link claim"), "{link}: {reason}");
+                    }
+                    other => panic!("{guest_claim:?} {link}: expected InvalidToken, got {other:?}"),
+                }
+                assert_eq!((frames, calls), (1, 0), "{guest_claim:?} {link}");
+            }
         }
     }
 

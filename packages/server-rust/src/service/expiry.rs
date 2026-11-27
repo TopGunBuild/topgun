@@ -919,6 +919,7 @@ mod tests {
                 id: "user-a".to_string(),
                 roles: vec![],
                 tenant: Some("acme".to_string()),
+                kind: topgun_core::types::PrincipalKind::User,
             });
         }
         Operation::ClientOp {

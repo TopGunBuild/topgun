@@ -2430,6 +2430,7 @@ mod tests {
     use topgun_core::messages::base::Query;
     use topgun_core::messages::search::SearchOptions;
     use topgun_core::messages::{BatchMessage, ClientOp, OpBatchMessage, OpBatchPayload};
+    use topgun_core::types::PrincipalKind;
 
     /// Frames `body` as one length-prefixed batch inner item (4-byte big-endian
     /// length header + body), matching the wire framing the unpacker expects.
@@ -2740,6 +2741,7 @@ mod tests {
             id: "writer-1".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
+            kind: PrincipalKind::User,
         }
     }
 
@@ -4186,6 +4188,7 @@ mod tests {
             id: "writer-2".to_string(),
             roles: vec!["user".to_string()],
             tenant: None,
+            kind: PrincipalKind::User,
         };
         // One partition, so the frames do not depend on the order two
         // sub-batches happened to finish in.

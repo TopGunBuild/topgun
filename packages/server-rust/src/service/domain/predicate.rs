@@ -2497,8 +2497,8 @@ mod tests {
         rmpv::Value::String(v.into())
     }
 
-    /// The principal as `PolicyEvaluator::evaluate` builds it for a principal
-    /// without a tenant: `{id, roles}`.
+    /// The `id` and `roles` of the principal as `PolicyEvaluator::evaluate`
+    /// builds it; these tests read neither its `kind` nor its `tenant`.
     fn principal(id: &str, roles: &[&str]) -> rmpv::Value {
         make_map(vec![
             ("id", s(id)),

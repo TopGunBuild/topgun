@@ -561,9 +561,9 @@ fn admin_bind_posture(no_auth: bool, bind_addr: &str, allow_public_override: boo
 
 /// Parses `TOPGUN_TENANT_CLAIM`: the name of the top-level JWT claim carrying
 /// the tenant. Unset turns tenancy off (`Ok(None)`). Set but empty, set but not
-/// valid Unicode, or set while `TOPGUN_NO_AUTH` is on is fatal — a value the
-/// operator set is never read as unset, and a tenant boundary needs a token to
-/// draw it from.
+/// valid Unicode, set while `TOPGUN_NO_AUTH` is on, or naming the reserved
+/// `tg_link` is fatal — a value the operator set is never read as unset, and a
+/// tenant boundary needs a token to draw it from.
 fn tenant_claim_from_env(
     raw: Option<std::ffi::OsString>,
     no_auth: bool,
@@ -582,6 +582,47 @@ fn tenant_claim_from_env(
             "tenancy: TOPGUN_TENANT_CLAIM requires authentication; TOPGUN_NO_AUTH is on"
                 .to_string(),
         );
+    }
+    if claim == "tg_link" {
+        return Err("tenancy: TOPGUN_TENANT_CLAIM names the reserved claim `tg_link`".to_string());
+    }
+    Ok(Some(claim))
+}
+
+/// Parses `TOPGUN_GUEST_CLAIM`: the name of the top-level JWT claim that marks
+/// a guest token. Unset turns guest principals off (`Ok(None)`). Set but
+/// empty, set but not valid Unicode, set while `TOPGUN_NO_AUTH` is on, naming a
+/// claim the server already reads (`sub`, `roles`, the registered time, issuer
+/// and audience claims, the reserved `tg_link`) or naming the tenant claim is
+/// fatal: such a claim would decide two things at once.
+fn guest_claim_from_env(
+    raw: Option<std::ffi::OsString>,
+    no_auth: bool,
+    tenant_claim: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let claim = raw
+        .into_string()
+        .map_err(|_| "guests: TOPGUN_GUEST_CLAIM is not valid Unicode".to_string())?;
+    if claim.is_empty() {
+        return Err("guests: TOPGUN_GUEST_CLAIM is set but empty".to_string());
+    }
+    if no_auth {
+        return Err(
+            "guests: TOPGUN_GUEST_CLAIM requires authentication; TOPGUN_NO_AUTH is on".to_string(),
+        );
+    }
+    if ["sub", "roles", "exp", "iat", "nbf", "iss", "aud", "tg_link"].contains(&claim.as_str()) {
+        return Err(format!(
+            "guests: TOPGUN_GUEST_CLAIM names the reserved claim `{claim}`"
+        ));
+    }
+    if tenant_claim == Some(claim.as_str()) {
+        return Err(format!(
+            "guests: TOPGUN_GUEST_CLAIM names the tenant claim `{claim}`"
+        ));
     }
     Ok(Some(claim))
 }
@@ -604,6 +645,7 @@ fn log_boot_summary(
     policies_loaded: usize,
     rbac_configured: bool,
     tenant_claim: Option<&str>,
+    guest_claim: Option<&str>,
     expiry_sweep: &SweepConfig,
     store_engine: &str,
     engine: &EngineSettings,
@@ -629,6 +671,7 @@ fn log_boot_summary(
         // Quoted when on, so a claim that is itself named `off` cannot read as
         // tenancy off.
         tenant_claim = %tenant_claim.map_or_else(|| "off".to_string(), |c| format!("{c:?}")),
+        guest_claim = %guest_claim.map_or_else(|| "off".to_string(), |c| format!("{c:?}")),
         expiry_sweep_interval_ms = expiry_sweep.interval_ms,
         expiry_sweep_rows_per_sec = expiry_sweep.rows_per_sec,
         store_engine,
@@ -868,6 +911,17 @@ async fn main() -> anyhow::Result<()> {
 
     let tenant_claim = match tenant_claim_from_env(std::env::var_os("TOPGUN_TENANT_CLAIM"), no_auth)
     {
+        Ok(claim) => claim,
+        Err(fatal) => {
+            eprintln!("{fatal}");
+            std::process::exit(1);
+        }
+    };
+    let guest_claim = match guest_claim_from_env(
+        std::env::var_os("TOPGUN_GUEST_CLAIM"),
+        no_auth,
+        tenant_claim.as_deref(),
+    ) {
         Ok(claim) => claim,
         Err(fatal) => {
             eprintln!("{fatal}");
@@ -1297,6 +1351,7 @@ async fn main() -> anyhow::Result<()> {
         policies_loaded,
         rbac_configured,
         tenant_claim.as_deref(),
+        guest_claim.as_deref(),
         &sweep_config,
         match backend {
             StorageBackend::Rocksdb => "rocksdb",
@@ -1394,6 +1449,7 @@ async fn main() -> anyhow::Result<()> {
                 jwt_audience,
                 trust_forwarded_for,
                 tenant_claim,
+                guest_claim,
                 ..NetworkConfig::default()
             },
             jwt_secret,
@@ -2105,7 +2161,8 @@ mod tests {
     }
 
     use super::{
-        admin_bind_posture, log_boot_summary, tenant_claim_from_env, BindPosture, SweepConfig,
+        admin_bind_posture, guest_claim_from_env, log_boot_summary, tenant_claim_from_env,
+        BindPosture, SweepConfig,
     };
     use super::{EvictionConfig, WriteBehindConfig};
     use std::io;
@@ -2202,6 +2259,8 @@ mod tests {
         // binary builds `NetworkConfig.tenant_claim` from.
         let tenant_on = tenant_claim_from_env(Some("org_id".into()), false).unwrap();
         let tenant_off = tenant_claim_from_env(None, false).unwrap();
+        let guest_on = guest_claim_from_env(Some("tg_guest".into()), false, None).unwrap();
+        let guest_off = guest_claim_from_env(None, false, None).unwrap();
         // Parsed as the binary parses them, to values neither default has.
         let sweep = SweepConfig::from_env_values(Some("12345"), Some("777"), 5000).unwrap();
         // Resolved as the binary resolves them: 192 is no default, and the
@@ -2210,8 +2269,10 @@ mod tests {
             super::EngineSettings::resolve(Some(std::ffi::OsStr::new("192"))).expect("192");
         let engine_unset = super::EngineSettings::resolve(None).expect("unset");
         tracing::subscriber::with_default(subscriber, || {
-            for (tenant_claim, engine) in [(&tenant_on, &engine_set), (&tenant_off, &engine_unset)]
-            {
+            for (tenant_claim, guest_claim, engine) in [
+                (&tenant_on, &guest_on, &engine_set),
+                (&tenant_off, &guest_off, &engine_unset),
+            ] {
                 log_boot_summary(
                     &EvictionConfig::default(),
                     &write_behind_config,
@@ -2220,6 +2281,7 @@ mod tests {
                     0,
                     false,
                     tenant_claim.as_deref(),
+                    guest_claim.as_deref(),
                     &sweep,
                     "rocksdb",
                     engine,
@@ -2258,6 +2320,11 @@ mod tests {
         assert!(
             rendered.contains("tenant_claim=\"org_id\"") && rendered.contains("tenant_claim=off"),
             "the operator-facing boot line must name the EFFECTIVE tenant claim, or off; \
+             captured: {rendered}"
+        );
+        assert!(
+            rendered.contains("guest_claim=\"tg_guest\"") && rendered.contains("guest_claim=off"),
+            "the operator-facing boot line must name the EFFECTIVE guest claim, or off; \
              captured: {rendered}"
         );
         assert!(
@@ -2345,6 +2412,86 @@ mod tests {
         assert_eq!(
             tenant_claim_from_env(Some(std::ffi::OsString::from_vec(vec![b't', 0xff])), false),
             Err("tenancy: TOPGUN_TENANT_CLAIM is not valid Unicode".to_string())
+        );
+    }
+
+    #[test]
+    fn tenant_claim_naming_tg_link_is_fatal() {
+        assert_eq!(
+            tenant_claim_from_env(Some("tg_link".into()), false),
+            Err("tenancy: TOPGUN_TENANT_CLAIM names the reserved claim `tg_link`".to_string())
+        );
+    }
+
+    #[test]
+    fn guest_claim_unset_is_guests_off() {
+        assert_eq!(guest_claim_from_env(None, false, None), Ok(None));
+        assert_eq!(guest_claim_from_env(None, true, Some("tenant")), Ok(None));
+    }
+
+    #[test]
+    fn guest_claim_set_is_taken_verbatim() {
+        assert_eq!(
+            guest_claim_from_env(Some("tg_guest".into()), false, Some("tenant")),
+            Ok(Some("tg_guest".to_string()))
+        );
+        assert_eq!(
+            guest_claim_from_env(Some("https://example.com/guest".into()), false, None),
+            Ok(Some("https://example.com/guest".to_string()))
+        );
+    }
+
+    #[test]
+    fn guest_claim_empty_is_fatal() {
+        assert_eq!(
+            guest_claim_from_env(Some("".into()), false, None),
+            Err("guests: TOPGUN_GUEST_CLAIM is set but empty".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guest_claim_not_unicode_is_fatal_not_unset() {
+        use std::os::unix::ffi::OsStringExt;
+        assert_eq!(
+            guest_claim_from_env(
+                Some(std::ffi::OsString::from_vec(vec![b'g', 0xff])),
+                false,
+                None
+            ),
+            Err("guests: TOPGUN_GUEST_CLAIM is not valid Unicode".to_string())
+        );
+    }
+
+    #[test]
+    fn guest_claim_with_no_auth_is_fatal() {
+        assert_eq!(
+            guest_claim_from_env(Some("tg_guest".into()), true, None),
+            Err(
+                "guests: TOPGUN_GUEST_CLAIM requires authentication; TOPGUN_NO_AUTH is on"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn guest_claim_naming_a_claim_the_server_reads_is_fatal() {
+        for claim in ["sub", "roles", "exp", "iat", "nbf", "iss", "aud", "tg_link"] {
+            assert_eq!(
+                guest_claim_from_env(Some(claim.into()), false, None),
+                Err(format!(
+                    "guests: TOPGUN_GUEST_CLAIM names the reserved claim `{claim}`"
+                )),
+                "{claim}"
+            );
+        }
+    }
+
+    #[test]
+    fn guest_claim_equal_to_the_tenant_claim_is_fatal() {
+        assert_eq!(
+            guest_claim_from_env(Some("org".into()), false, Some("org")),
+            Err("guests: TOPGUN_GUEST_CLAIM names the tenant claim `org`".to_string())
         );
     }
 
