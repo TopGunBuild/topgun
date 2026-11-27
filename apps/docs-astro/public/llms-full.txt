@@ -1343,7 +1343,7 @@ TOPGUN_GUEST_CLAIM=tg_guest
 
 With the variable set, a token whose `tg_guest` claim is `true` is a guest; a token without the claim, or with `false`, is a user. Any other value (`"true"`, `1`, `null`, an object) refuses the token, on the WebSocket handshake and on HTTP `/sync`, before a custom validator runs. With the variable unset, every token is a user and the claim is never read. The server refuses to start (exit 1) when the variable is set but empty, is not valid Unicode, is set together with `TOPGUN_NO_AUTH`, names `sub`, `roles`, `exp`, `iat`, `nbf`, `iss`, `aud` or `tg_link`, or names the same claim as `TOPGUN_TENANT_CLAIM`. The startup summary line reports `guest_claim` (`off` or the claim name).
 
-A guest token from your backend looks like this:
+A guest token from your backend looks like this; with `TOPGUN_TENANT_CLAIM` set, the backend puts the tenant claim in it too, since a guest token without it is refused like any other token:
 
 ```json
 {
