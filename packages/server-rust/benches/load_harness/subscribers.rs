@@ -978,6 +978,84 @@ pub struct SubscriberMeasurement {
     pub quiesce_wait: Duration,
     pub check: CheckOutcome,
     pub metrics: ServerMetrics,
+    /// Whether the server under test is built from the sources of
+    /// [`BEFORE_SERVER`]; `None` when `git` could not tell.
+    pub before_server: Option<bool>,
+}
+
+/// The server sources the "before" figures are taken on. That server drops a
+/// reader at its first lost live event (`TG-LIVE-003`), which at the matrix
+/// rate is the measured outcome, not a broken run.
+pub const BEFORE_SERVER: &str = "e040f7ee";
+
+/// The outbound channel capacity of a connection on [`BEFORE_SERVER`]. A
+/// reader whose own unread frames reached it may have stopped reading
+/// itself, so its disconnect is the harness's, not the server's.
+const BEFORE_CHANNEL_CAPACITY: i64 = 256;
+
+/// Whether `packages/server-rust/src` of the working tree equals
+/// [`BEFORE_SERVER`]'s; `None` when `git` cannot answer.
+pub fn server_src_is_before() -> Option<bool> {
+    let status = std::process::Command::new("git")
+        .args([
+            "diff",
+            "--quiet",
+            BEFORE_SERVER,
+            "--",
+            ":/packages/server-rust/src",
+        ])
+        .status()
+        .ok()?;
+    match status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// The "before" server's recorded outcome of an arm whose readers it
+/// dropped: every disconnect the server counted was `channel_full`, and no
+/// reader's own backlog reached the channel capacity.
+#[derive(Debug, Clone, Serialize)]
+pub struct BeforeOutcome {
+    pub kind: &'static str,
+    pub disconnects: u64,
+    pub slow_reader_disconnects: u64,
+    pub channel_full: u64,
+    pub max_unread_frames: i64,
+}
+
+/// The mechanical predicate of [`BeforeOutcome`]; `None` when it does not
+/// hold or nothing was disconnected.
+pub fn before_outcome(
+    before_server: Option<bool>,
+    disconnects: u64,
+    slow_reader_disconnects: u64,
+    metrics: &ServerMetrics,
+    max_unread_frames: i64,
+) -> Option<BeforeOutcome> {
+    let total = disconnects + slow_reader_disconnects;
+    let losses = metrics.live_event_loss_disconnects_total.as_ref()?;
+    let (mut channel_full, mut other) = (0u64, 0u64);
+    for (series, value) in losses {
+        if series.contains("cause=\"channel_full\"") {
+            channel_full += *value as u64;
+        } else {
+            other += *value as u64;
+        }
+    }
+    let holds = before_server == Some(true)
+        && total > 0
+        && other == 0
+        && channel_full >= total
+        && max_unread_frames < BEFORE_CHANNEL_CAPACITY;
+    holds.then_some(BeforeOutcome {
+        kind: "readers_disconnected",
+        disconnects,
+        slow_reader_disconnects,
+        channel_full,
+        max_unread_frames,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1024,6 +1102,10 @@ pub struct SubscribersBlock {
     pub views_unchecked: u64,
     pub views_disconnected: u64,
     pub server_metrics: ServerMetrics,
+    pub before_server: Option<bool>,
+    /// Set when the "before" server dropped readers (see [`before_outcome`]);
+    /// those disconnects then do not invalidate the run.
+    pub before_outcome: Option<BeforeOutcome>,
 }
 
 impl SubscribersBlock {
@@ -1054,6 +1136,13 @@ impl SubscribersBlock {
             disconnects += u64::from(s.disconnected);
         }
         let secs = duration_secs as f64;
+        let before_outcome = before_outcome(
+            m.before_server,
+            disconnects,
+            slow.disconnects,
+            &m.metrics,
+            m.max_unread_frames,
+        );
         Self {
             config: config.clone(),
             subscriptions: m.subscriptions,
@@ -1082,6 +1171,8 @@ impl SubscribersBlock {
             views_unchecked: m.check.views_unchecked,
             views_disconnected: m.check.views_disconnected,
             server_metrics: m.metrics.clone(),
+            before_server: m.before_server,
+            before_outcome,
         }
     }
 
@@ -1094,7 +1185,7 @@ impl SubscribersBlock {
         if self.view_mismatches > 0 {
             reasons.push("view_mismatch");
         }
-        if self.disconnects > 0 {
+        if self.disconnects > 0 && self.before_outcome.is_none() {
             reasons.push("disconnect");
         }
         if !self.quiesced {
@@ -1246,7 +1337,61 @@ pub fn resp_replaces_and_chunks_reassemble() {
     assert_eq!(r.push(chunk(true, b)).expect("chunk"), Some(whole));
 }
 
-pub const SELF_TESTS: [(&str, fn()); 3] = [
+/// The "before" server's disconnects with `channel_full` and a reader backlog
+/// below the channel capacity are its recorded outcome; on any other server,
+/// with another cause, or with the backlog at the capacity, they invalidate.
+pub fn before_outcome_only_on_the_before_server() {
+    let metrics = |full: f64, other: f64| ServerMetrics {
+        live_event_loss_disconnects_total: Some(BTreeMap::from([
+            (
+                "topgun_live_event_loss_disconnects_total{cause=\"channel_full\"}".to_string(),
+                full,
+            ),
+            (
+                "topgun_live_event_loss_disconnects_total{cause=\"encode_failed\"}".to_string(),
+                other,
+            ),
+        ])),
+        ..ServerMetrics::default()
+    };
+    let block = |before: Option<bool>, m: ServerMetrics, backlog: i64| {
+        let mut states = vec![ReaderState::new(false, ["q".to_string()])];
+        states[0].disconnected = true;
+        let measurement = SubscriberMeasurement {
+            subscriptions: 1,
+            snapshots_at_warmup_start: 1,
+            states,
+            max_unread_frames: backlog,
+            quiesced: true,
+            quiesce_wait: Duration::ZERO,
+            check: CheckOutcome::default(),
+            metrics: m,
+            before_server: before,
+        };
+        SubscribersBlock::of(&measurement, &SubscriberConfig::default(), 1)
+    };
+    let before = block(Some(true), metrics(1.0, 0.0), 127);
+    assert_eq!(
+        before.before_outcome.as_ref().map(|o| o.kind),
+        Some("readers_disconnected")
+    );
+    assert!(!before.invalid_reasons().contains(&"disconnect"));
+    for after in [
+        block(Some(false), metrics(1.0, 0.0), 127),
+        block(None, metrics(1.0, 0.0), 127),
+        block(Some(true), metrics(1.0, 1.0), 127),
+        block(Some(true), metrics(1.0, 0.0), 256),
+    ] {
+        assert!(after.before_outcome.is_none());
+        assert!(after.invalid_reasons().contains(&"disconnect"));
+    }
+}
+
+pub const SELF_TESTS: [(&str, fn()); 4] = [
+    (
+        "before_outcome_only_on_the_before_server",
+        before_outcome_only_on_the_before_server,
+    ),
     (
         "delivery_latency_is_from_the_scheduled_instant",
         delivery_latency_is_from_the_scheduled_instant,

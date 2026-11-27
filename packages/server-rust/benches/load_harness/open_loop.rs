@@ -883,6 +883,7 @@ async fn measure_subscribers(
         quiesce_wait,
         check,
         metrics: ServerMetrics::scrape(&render()),
+        before_server: subscribers::server_src_is_before(),
     })
 }
 

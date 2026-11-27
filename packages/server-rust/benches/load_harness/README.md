@@ -206,7 +206,7 @@ The identities `scheduled = sent + unsent` and `sent = acked + refused_permanent
 | `debug_build` | the harness was built with debug assertions |
 | `reader_behind` | subscriber arm: a reader's unread inbound frames exceeded 100 000, so its figures measure the harness, not the server |
 | `view_mismatch` | subscriber arm: after quiesce a view differs from a fresh query (`subscribers.view_mismatches > 0`) |
-| `disconnect` | subscriber arm: the server closed a reader that is not a slow reader |
+| `disconnect` | subscriber arm: the server closed a reader that is not a slow reader, unless `subscribers.before_outcome` is set (below) |
 | `not_quiesced` | subscriber arm: the readers still received frames 300 s after the writers stopped, so the views were checked while deliveries were in flight |
 | `view_unchecked` | subscriber arm: a fresh query of a subscription without a limit came back clamped (`has_more`, `max_query_records`), so its view could not be compared |
 
@@ -277,15 +277,17 @@ subscribers: {
   slow_readers: { readers, frames, resnapshots, disconnects },
   max_unread_frames, quiesced, quiesce_wait_ms,
   view_mismatches, views_checked, views_unchecked, views_disconnected,
-  server_metrics: { live_event_loss_disconnects_total, live_resnapshots, fanout_lane, live_stage }  // series → value, or null
+  server_metrics: { live_event_loss_disconnects_total, live_resnapshots, fanout_lane, live_stage },  // series → value, or null
+  before_server,    // packages/server-rust/src equals e040f7ee's (git diff --quiet), null when git cannot tell
+  before_outcome: { kind: "readers_disconnected", disconnects, slow_reader_disconnects, channel_full, max_unread_frames } | null
 }
 ```
 
-A disconnect of a reader that is not slow invalidates the run (`disconnect`); a slow reader's disconnect is a result and is counted in `slow_readers.disconnects`.
+A disconnect of a reader that is not slow invalidates the run (`disconnect`); a slow reader's disconnect is a result and is counted in `slow_readers.disconnects`. The one exception is the "before" server, `e040f7ee`, which drops a reader at its first lost live event (`TG-LIVE-003`): when `before_server` is `true`, every disconnect the server counted in `topgun_live_event_loss_disconnects_total` has `cause="channel_full"` (at least as many as the readers that were disconnected, none of another cause), and no reader's unread frames reached 256 (the connection's outbound channel capacity, so the reader kept reading), the report sets `before_outcome` and the disconnects do not invalidate the run: they are that server's measured outcome. A reader backlog of 256 or more, another cause, or any other server leaves the run invalid.
 
 ### Arm matrix
 
-Every arm runs the same writes: `null` store, 10⁴ writes/s, 200 connections, batches of 10, 10 s warm-up, 30 s window, with `TOPGUN_EVICTION_INTERVAL_MS=3600000` so that the eviction tick's tail (TODO-941, below) does not swamp the fan-out cost being compared:
+Every arm runs the same writes: `null` store, 10⁴ writes/s (2·10³ in the two reference arms), 200 connections, batches of 10, 10 s warm-up, 30 s window. `TOPGUN_EVICTION_INTERVAL_MS=3600000` is a measurement choice, set in every arm: at 10⁴ writes/s the eviction tick's tail (TODO-941, below) would swamp the fan-out cost being compared.
 
 ```bash
 COMMON="--scenario open_loop --store null --rate 10000 --batch-size 10 --connections 200 --warmup 10 --duration 30"
@@ -300,8 +302,10 @@ export TOPGUN_EVICTION_INTERVAL_MS=3600000
 | `T5-sorted` | `T5` flags + `--sub-sort t:desc --sub-limit 100` | the same with a sorted, limited window (reported only) |
 | `slow-reader` | `T5` flags + `--slow-readers 1 --slow-reader-subs 30 --slow-reader-frame-us 2000` | one reader at 1 frame / 2 ms holding 30 subscriptions beside `T5` |
 | `re-snapshot` | `T5` flags + `--slow-readers 1 --slow-reader-subs 30 --slow-reader-frame-us 20000` | the same reader ten times slower, so that it falls behind for certain (reported only) |
+| `T5-2k` | `--rate 2000` + `T5` flags | reference: `T5` at a rate the `e040f7ee` server keeps its readers at, for a before/after comparison at equal offered load |
+| `T6-2k` | `--rate 2000` + `T6` flags | reference: `T6` at the same rate |
 
-Three runs of each arm, every run a separate process. A run is read only when it is valid. Figures for T5, T6, the slow reader and the `A0` ratio come from a Linux host (see below); a Mac run checks only that the arm is valid (no mismatch, no unexpected disconnect), because of the APFS `F_FULLFSYNC` cap and the shared CPUs.
+Three runs of each arm, every run a separate process, interleaved (each repetition runs every arm once). `--rate` in the reference arms comes after `$COMMON`'s and overrides it. A run is read only when it is valid. Figures for T5, T6, the slow reader and the `A0` ratio come from a Linux host (see below); a Mac run checks only that the arm is valid (no mismatch, no unexpected disconnect), because of the APFS `F_FULLFSYNC` cap and the shared CPUs.
 
 ## A/A and ABAB series
 
