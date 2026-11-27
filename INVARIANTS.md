@@ -3124,7 +3124,12 @@ weaker than a test.
   `ORMapDiffRequest`, `JournalRead` / `JournalSubscribe` / `ListResolvers` when they name a map,
   `TopicSubscribe` (topic), `CounterRequest` (counter name); writes — `ClientOp`, `OpBatch` (every op), `ORMapPushDiff`,
   `EntryProcess`, `EntryProcessBatch`, `RegisterResolver`, `UnregisterResolver`, `TopicPublish`
-  (topic), `CounterSync` (counter name). (2) `JournalRead` and `JournalSubscribe` **without** a map
+  (topic), `CounterSync` (counter name). A write that names keys is evaluated once per key it
+  writes — the key of a `ClientOp`, of every op of an `OpBatch`, of every entry of an
+  `ORMapPushDiff`, of an `EntryProcess`, every key of an `EntryProcessBatch` — and one denied key
+  refuses the whole operation under the map of that op; a write that names no key, and every
+  read, is evaluated with no key (TG-AUTHZ-004). An LWW or OR-Map remove is classified as a
+  write; no production path evaluates `remove` (tracked, TODO-1043). (2) `JournalRead` and `JournalSubscribe` **without** a map
   are admitted, and the journal keeps every event of a map the principal may not read: a read
   filters before its page limit, so `has_more` and the page count only visible events; a live
   subscription is checked per event at delivery, with the principal it was made with and the
@@ -3170,7 +3175,7 @@ weaker than a test.
   read or subscription without a map withholds events of unreadable maps but not their sequence
   numbers, so the gaps in the sequence show that, and when, such events were written.
 - **Maintaining code:** `service/middleware/authorization.rs` `classify_operation`,
-  `reserved_target_map_name`; `service/domain/journal.rs` `JournalStore::read` and
+  `extract_targets`, `reserved_target_map_name`; `service/domain/journal.rs` `JournalStore::read` and
   `subscribers_for`, `subscribe`, `unsubscribe`; `service/domain/query.rs` `QueryRegistry`;
   `service/domain/search/registry.rs` `SubscriptionRegistry`;
   `service/domain/coordination_lock.rs` `LockRegistry::release`; `service/domain/crdt.rs`
@@ -3185,7 +3190,8 @@ weaker than a test.
   `journal_read_without_a_map_returns_only_readable_maps`,
   `journal_subscription_without_a_map_is_delivered_only_readable_maps`,
   `reserved_map_events_reach_no_client_under_no_auth` and
-  `counter_request_is_held_to_the_read_policy_of_its_counter`, in `authorization.rs`'s test
+  `counter_request_is_held_to_the_read_policy_of_its_counter` and
+  `key_pattern_is_checked_against_every_key_an_operation_writes`, in `authorization.rs`'s test
   module; `a_connection_cannot_remove_another_connections_query_subscription` and
   `connections_choosing_the_same_query_id_keep_separate_subscriptions` (`query.rs`),
   `search_subscriptions_are_owned_by_the_connection_that_made_them` (`search/mod.rs`),
@@ -3211,15 +3217,17 @@ weaker than a test.
   stored before this rule. **Excluded:** query predicates (`evaluate_predicate`), where `auth.…`
   is a record path, as in the client's local evaluation.
 - **Statement:** in a policy condition, a leaf attribute or `value_ref` `auth` or `auth.…` resolves
-  only from the authenticated principal (`{id, roles}`); the record is never consulted for it. A
+  only from the authenticated principal (`{id, roles}`, and `tenant` for a principal that carries
+  one); the record is never consulted for it. A
   reference that does not resolve there — no principal, or a field it does not carry — makes its
   leaf (other than `IsNull` / `IsNotNull`) unknown, and the condition is decided in three-valued
   logic with unknown counting as not matching for an allow and as matching for a deny (`Not`
   flips it). This is a sound over-approximation of Kleene evaluation — a leaf with an unresolved
   `auth` reference is unknown even where the record side alone would be false — and it never fails
   open. `conditionExpr` refuses a field reference `data.auth…` or `data.resource…` on either side.
-- **Stated limits:** the principal carries only `id` and `roles`, so every other `auth.…` field is
-  unknown (an allow on it never matches, a deny on it always applies). A stored condition whose
+- **Stated limits:** the principal carries only `id`, `roles` and, when it has one, `tenant`, so
+  every other `auth.…` field — `tenant` of a principal without one, and `kind` — is unknown (an
+  allow on it never matches, a deny on it always applies). A stored condition whose
   compared field was a record field named `auth` now names the principal. JSON conditions are not
   validated: their `value_ref` `data.auth.…` still reads the record.
 - **Maintaining code:** `service/domain/predicate.rs` `evaluate_policy_condition`,
@@ -3233,6 +3241,90 @@ weaker than a test.
 - **Violation consequence:** a writer satisfies an allow written for another caller, or escapes a
   deny, by putting an `auth` object in its value or leaving it out; a deny that needs the caller
   stops applying to an anonymous one.
+- **Status:** decided, **enforced**.
+
+
+### TG-AUTHZ-003: A policy placeholder matches only the principal's own whole segment, and a condition reference the server does not know fails closed
+
+- **Scope:** permission policies as `PolicyEvaluator::evaluate_key` decides them (every path of
+  TG-AUTHZ-002), their upsert (`create_policy`) and their load from the durable store.
+  **Excluded:** query predicates (`evaluate_predicate`), where `resource.…` is a record path.
+- **Statement:** (1) In `mapPattern` (segments split at `.`) and `keyPattern` (split at `:`), a
+  whole segment `{auth.id}` or `{auth.tenant}` matches the input segment at its position only when
+  the principal's value is fillable — a principal is present, the value is present, non-empty and
+  free of the pattern's separator — and byte-equal to that segment; a `*` in the value is a
+  literal, and the value is never interpolated into the pattern and re-globbed. `{auth.tenant}` is
+  filled from the principal's tenant, never from the evaluated name. (2) A placeholder that is not
+  fillable never widens an allow and never narrows a deny: an allow does not match; a deny's map
+  segment matches as one `*`; a deny's `keyPattern` applies to every key. The first time a policy
+  meets one in the process it logs one `WARN` naming the policy and the placeholder. (3) The
+  stores pre-filter candidates with every placeholder as one `*`, a superset of the exact match.
+  (4) In a condition, `resource.map` / `resource.key` (attribute, `value_ref` or null check) name
+  the evaluated map and key, never a record field. A leaf is unknown, in the three-valued logic of
+  TG-AUTHZ-002, when its `value_ref` names a namespace other than `auth`, `data` and `resource`,
+  when it names bare `resource` or a `resource` field other than `map` and `key` (`resource.to`
+  is reserved), or when it names `resource.key` on an operation with no key (a null check there
+  is definitive: the key is null). (5) Upsert refuses (400, naming the field) a brace outside a
+  whole placeholder, an unknown placeholder, a partial-star segment, `{auth.tenant}` while
+  tenancy is off, and a condition reference that is unknown whatever the resource: a `value_ref`
+  in a namespace other than `auth`, `data` and `resource`, bare `resource`, and a `resource`
+  field other than `map` and `key`. `resource.key` is accepted: it is unknown only when an
+  operation with no key is evaluated. (6) A policy that uses a
+  placeholder or a `keyPattern` is persisted with `scopedMapPattern` instead of `mapPattern`, so
+  binaries built before it refuse the store at start rather than widen the policy; a plain policy
+  keeps the earlier bytes. A stored plain row whose `mapPattern` has a brace, and a stored row the
+  pattern grammar or the `keyPattern` rule refuses, stop the start. A stored condition whose
+  meaning this rule changes loads with one startup `WARN` naming the policy and the reference.
+- **Stated limits:** an id with a `.` (`a.b`) never fills a map placeholder, so a deny
+  `t.{auth.id}.secret` covers `t.x.secret` but not that principal's own `t.a.b.secret`; an id with
+  a `:` never fills a key placeholder, and one outside the topic charset never fills a topic
+  placeholder. A stored `{auth.tenant}` policy loads with tenancy off and is unfilled for every
+  principal without a tenant. `auth.kind` is unknown for every principal. A record field named
+  `resource` cannot be referenced from a `conditionExpr`. Single-node only.
+- **Maintaining code:** `service/policy/mod.rs` `split_pattern`, `resolve_pattern`,
+  `glob_matches`, `validate_policy`, `PolicyEvaluator::applies_to`, `StoredPolicy` and its
+  conversions, `condition_meaning_change`; `service/domain/predicate.rs`
+  `evaluate_policy_condition_on`, `evaluate_leaf`, `evaluate_null_check`, `resource_field`;
+  `network/handlers/admin.rs` `create_policy`.
+- **Enforcing test:** `placeholder_segment_matches_only_the_principals_own_whole_segment`,
+  `unfilled_placeholder_never_widens_an_allow_and_narrows_no_deny`,
+  `unfilled_placeholder_logs_once_per_policy`, `tenant_placeholder_is_filled_from_the_principal_not_the_name`,
+  `a_condition_on_an_unknown_namespace_fails_closed`, `auth_value_carries_tenant`,
+  `auth_kind_is_unknown_until_guest_principals_exist`,
+  `scoped_policies_are_unreadable_to_older_binaries_and_plain_ones_unchanged`,
+  `stored_conditions_on_unknown_namespaces_load_with_one_warning` (`mod.rs`);
+  `policy_resource_fields_read_the_resource_not_the_record` (`predicate.rs`);
+  `policy_upsert_refuses_malformed_templates` (`admin.rs`); at the wire
+  `tests/integration-rust/policy-templating.test.ts` and, two-binary,
+  `tests/integration-rust/policy-rollback.test.ts`.
+- **Violation consequence:** a visitor reads or writes another visitor's or another tenant's map
+  or topic; a policy that cannot be filled grants access or stops denying; a forged record field
+  `resource` decides a condition; an older binary reads a templated policy as a literal and
+  serves wider access than was stored.
+- **Status:** decided, **enforced**.
+
+### TG-AUTHZ-004: A `keyPattern` is checked against every key a write names
+
+- **Scope:** write rules with a `keyPattern`, on the operation pipeline and HTTP `/sync`
+  (TG-AUTHZ-001).
+- **Statement:** a `keyPattern` is accepted only on a `write` rule (upsert refuses it on `read`,
+  `remove` and `all`, and an empty one). Every key a write names (TG-AUTHZ-001 clause 1) is
+  evaluated on its own against the rules of its map; a key a rule's `keyPattern` does not match is
+  not covered by that rule, and one denied key refuses the whole operation. A write that names no
+  key (`CounterSync`, `TopicPublish`, `RegisterResolver`, `UnregisterResolver`, an
+  `ORMapPushDiff` or `EntryProcessBatch` with no entries) is evaluated with none: an allow with a
+  `keyPattern` does not match it and a deny with one applies.
+- **Stated limits:** removes are evaluated as writes, so a write rule's `keyPattern` governs them
+  and no `remove` rule may carry one (TODO-1043).
+- **Maintaining code:** `service/middleware/authorization.rs` `extract_targets`,
+  `evaluate_and_dispatch`; `service/policy/mod.rs` `PolicyEvaluator::evaluate_key`,
+  `applies_to`, `validate_policy`.
+- **Enforcing test:** `key_pattern_is_checked_against_every_key_an_operation_writes`
+  (`authorization.rs`), `unfilled_key_pattern_in_a_deny_denies_every_key` (`mod.rs`),
+  `policy_list_returns_key_pattern` (`admin.rs`); at the wire the forged-`ownerId` case of
+  `tests/integration-rust/policy-templating.test.ts`.
+- **Violation consequence:** a visitor overwrites another visitor's key by forging ownership in
+  the value, or a batch smuggles a foreign key behind an own one.
 - **Status:** decided, **enforced**.
 
 ### TG-TEN-001: With tenancy on, a client reaches only the names its tenant owns

@@ -28,7 +28,7 @@ pub use durable::DurablePolicyStore;
 /// carrying this role in a JWT claim. The string is still reserved so that
 /// untrusted mint paths (token exchange) strip it before signing, preventing a
 /// self-granted `admin` role from satisfying a policy condition that references
-/// `$auth.roles`.
+/// `auth.roles`.
 pub const RESERVED_ADMIN_ROLE: &str = "admin";
 
 /// Roles that an external/untrusted token must never be able to inject. Stripped
@@ -85,12 +85,27 @@ pub enum GateDecision {
 }
 
 /// A single permission rule binding a map pattern + action to an allow/deny effect.
+///
+/// Persisted through [`StoredPolicy`]: a policy that uses no placeholder and no
+/// `key_pattern` keeps the encoding of earlier versions byte for byte; one that
+/// uses either is written in a scoped encoding earlier versions refuse to
+/// decode, so they stop at start instead of widening it (`TG-AUTHZ-003`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(
+    rename_all = "camelCase",
+    try_from = "StoredPolicy",
+    into = "StoredPolicy"
+)]
 pub struct PermissionPolicy {
     pub id: String,
-    /// Glob pattern: "*" matches all, "users.*" matches "users.profiles", etc.
+    /// `.`-segment pattern: `*` is one segment, `**` zero or more, a lone `*`
+    /// everything; a whole segment `{auth.id}` or `{auth.tenant}` is the
+    /// principal's own value.
     pub map_pattern: String,
+    /// `:`-segment pattern over the keys a write names, same grammar; write
+    /// rules only (`TG-AUTHZ-004`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub key_pattern: Option<String>,
     pub action: PermissionAction,
     pub effect: PolicyEffect,
     /// Optional predicate condition. When present, policy only applies if
@@ -100,6 +115,88 @@ pub struct PermissionPolicy {
     pub condition: Option<PredicateNode>,
 }
 
+/// The persisted row of a [`PermissionPolicy`].
+///
+/// Field order and names of a plain policy are those of earlier versions, so
+/// its bytes do not change. A scoped policy names its map pattern
+/// `scopedMapPattern` and has no `mapPattern`: a binary built before
+/// placeholders fails to decode it (missing field) and refuses to start,
+/// instead of reading a placeholder as a literal or dropping `keyPattern`.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredPolicy {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    map_pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    scoped_map_pattern: Option<String>,
+    action: PermissionAction,
+    effect: PolicyEffect,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    condition: Option<PredicateNode>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    key_pattern: Option<String>,
+}
+
+impl From<PermissionPolicy> for StoredPolicy {
+    fn from(policy: PermissionPolicy) -> Self {
+        let scoped = policy.key_pattern.is_some() || has_placeholder(&policy.map_pattern, '.');
+        let (map_pattern, scoped_map_pattern) = if scoped {
+            (None, Some(policy.map_pattern))
+        } else {
+            (Some(policy.map_pattern), None)
+        };
+        Self {
+            id: policy.id,
+            map_pattern,
+            scoped_map_pattern,
+            action: policy.action,
+            effect: policy.effect,
+            condition: policy.condition,
+            key_pattern: policy.key_pattern,
+        }
+    }
+}
+
+impl TryFrom<StoredPolicy> for PermissionPolicy {
+    type Error = String;
+
+    /// Applies the pattern grammar and the `keyPattern`/action rule to a
+    /// stored row (not the tenancy or condition-namespace rules, so a policy
+    /// stored under other settings still loads), and logs a condition whose
+    /// meaning this version changes.
+    fn try_from(row: StoredPolicy) -> Result<Self, String> {
+        let map_pattern = match (row.map_pattern, row.scoped_map_pattern) {
+            (Some(plain), None) => {
+                if row.key_pattern.is_some() {
+                    return Err("a plain row carries keyPattern".to_string());
+                }
+                if plain.contains(['{', '}']) {
+                    return Err(format!(
+                        "mapPattern {plain:?} contains a brace; a policy stored before \
+                         placeholders existed is not read as a template"
+                    ));
+                }
+                plain
+            }
+            (None, Some(scoped)) => scoped,
+            _ => return Err("exactly one of mapPattern and scopedMapPattern".to_string()),
+        };
+        let policy = Self {
+            id: row.id,
+            map_pattern,
+            key_pattern: row.key_pattern,
+            action: row.action,
+            effect: row.effect,
+            condition: row.condition,
+        };
+        validate_patterns(&policy, None).map_err(|refusal| refusal.message)?;
+        if let Some(warning) = condition_meaning_change(&policy) {
+            tracing::warn!("{warning}");
+        }
+        Ok(policy)
+    }
+}
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -147,10 +244,127 @@ pub trait PolicyStore: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Glob matching
+// Pattern grammar and matching
 // ---------------------------------------------------------------------------
 
-/// Matches a glob pattern against an input string using dot-separated segments.
+/// A principal value a pattern segment can name (`TG-AUTHZ-003`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placeholder {
+    Id,
+    Tenant,
+}
+
+impl Placeholder {
+    fn token(self) -> &'static str {
+        match self {
+            Self::Id => "{auth.id}",
+            Self::Tenant => "{auth.tenant}",
+        }
+    }
+
+    fn parse(segment: &str) -> Option<Self> {
+        match segment {
+            "{auth.id}" => Some(Self::Id),
+            "{auth.tenant}" => Some(Self::Tenant),
+            _ => None,
+        }
+    }
+
+    /// The principal's value when it fills one segment: present, non-empty
+    /// and free of the pattern's separator. Never read from the evaluated name.
+    fn fill(self, principal: Option<&topgun_core::Principal>, sep: char) -> Option<&str> {
+        let value = match self {
+            Self::Id => principal.map(|p| p.id.as_str()),
+            Self::Tenant => principal.and_then(|p| p.tenant.as_deref()),
+        }?;
+        (!value.is_empty() && !value.contains(sep)).then_some(value)
+    }
+}
+
+/// One pattern segment once placeholders are resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Segment<'a> {
+    /// Compared byte for byte; a `*` inside it has no glob meaning.
+    Literal(&'a str),
+    One,
+    Any,
+}
+
+/// Splits a pattern at `sep` outside braces, so a placeholder's inner `.`
+/// does not cut it in two.
+fn split_pattern(pattern: &str, sep: char) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut in_brace = false;
+    for (i, c) in pattern.char_indices() {
+        match c {
+            '{' => in_brace = true,
+            '}' => in_brace = false,
+            c if c == sep && !in_brace => {
+                segments.push(&pattern[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    segments.push(&pattern[start..]);
+    segments
+}
+
+fn has_placeholder(pattern: &str, sep: char) -> bool {
+    split_pattern(pattern, sep)
+        .into_iter()
+        .any(|seg| Placeholder::parse(seg).is_some())
+}
+
+/// Resolves a stored pattern's segments. A placeholder takes the principal's
+/// value; one that is not fillable is recorded in `unfilled` and becomes one
+/// `*` segment when `unfilled_as_one`, else the pattern matches nothing
+/// (`None`).
+fn resolve_pattern<'a>(
+    pattern: &'a str,
+    sep: char,
+    principal: Option<&'a topgun_core::Principal>,
+    unfilled_as_one: bool,
+    unfilled: &mut Option<Placeholder>,
+) -> Option<Vec<Segment<'a>>> {
+    let mut resolved = Vec::new();
+    for seg in split_pattern(pattern, sep) {
+        resolved.push(match seg {
+            "*" => Segment::One,
+            "**" => Segment::Any,
+            seg => match Placeholder::parse(seg) {
+                None => Segment::Literal(seg),
+                Some(placeholder) => {
+                    if let Some(value) = placeholder.fill(principal, sep) {
+                        Segment::Literal(value)
+                    } else {
+                        *unfilled = Some(placeholder);
+                        if !unfilled_as_one {
+                            return None;
+                        }
+                        Segment::One
+                    }
+                }
+            },
+        });
+    }
+    Some(resolved)
+}
+
+/// Whether resolved pattern segments match `input`. A lone `*` matches
+/// everything (historical "match everything" behavior).
+fn segments_match(pattern: &str, resolved: &[Segment], input: &str, sep: char) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    let inp: Vec<&str> = input.split(sep).collect();
+    match_segments(resolved, &inp)
+}
+
+/// Matches a map pattern against a map name, every placeholder taken as one
+/// `*` segment: the store pre-filter. It returns a superset of the policies
+/// whose pattern matches for any principal, so it never drops a deny.
 ///
 /// Segment semantics:
 /// - A lone `"*"` matches any input (historical "match everything" behavior).
@@ -163,61 +377,244 @@ pub trait PolicyStore: Send + Sync {
 ///   on `users.*` alone could be dodged by choosing a shallower/deeper map name.
 /// - Any other segment matches literally.
 fn glob_matches(pattern: &str, input: &str) -> bool {
-    // A lone "*" matches everything (equivalent to "**"), kept as a fast path and
-    // for backward compatibility with existing allow/deny-all policies.
-    if pattern == "*" {
-        return true;
-    }
-
-    let pat_segs: Vec<&str> = pattern.split('.').collect();
-    let inp_segs: Vec<&str> = input.split('.').collect();
-
-    glob_match_segments(&pat_segs, &inp_segs)
+    let mut unfilled = None;
+    resolve_pattern(pattern, '.', None, true, &mut unfilled)
+        .is_some_and(|resolved| segments_match(pattern, &resolved, input, '.'))
 }
 
-/// Recursive segment matcher backing [`glob_matches`].
-///
-/// `**` matches zero or more input segments; `*` matches exactly one; every other
-/// pattern segment must equal the corresponding input segment.
-fn glob_match_segments(pat: &[&str], inp: &[&str]) -> bool {
+/// Recursive segment matcher: `Any` matches zero or more input segments, `One`
+/// exactly one, and a literal must equal the corresponding input segment.
+fn match_segments(pat: &[Segment], inp: &[&str]) -> bool {
     match pat.first() {
         // Pattern exhausted: match iff input is also exhausted.
         None => inp.is_empty(),
-        Some(&"**") => {
+        Some(Segment::Any) => {
             // Try consuming 0, 1, 2, ... input segments against the remaining
             // pattern. Zero-consumption first so `users.**` matches `users`.
             for skip in 0..=inp.len() {
-                if glob_match_segments(&pat[1..], &inp[skip..]) {
+                if match_segments(&pat[1..], &inp[skip..]) {
                     return true;
                 }
             }
             false
         }
-        // `*` consumes exactly one input segment.
-        Some(&"*") => !inp.is_empty() && glob_match_segments(&pat[1..], &inp[1..]),
-        // Literal segment must match exactly.
-        Some(seg) => !inp.is_empty() && *seg == inp[0] && glob_match_segments(&pat[1..], &inp[1..]),
+        Some(Segment::One) => !inp.is_empty() && match_segments(&pat[1..], &inp[1..]),
+        Some(Segment::Literal(seg)) => {
+            !inp.is_empty() && *seg == inp[0] && match_segments(&pat[1..], &inp[1..])
+        }
     }
 }
 
-/// Checks that every `.`-segment of a policy pattern that contains `*` is
-/// exactly `*` or `**`.
-///
-/// The matcher treats any other segment literally, so `users/*` or `a*` would
-/// silently match only the name spelled with a star rather than the names the
-/// author meant.
+/// Why a policy is refused, and the request field it is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyRefusal {
+    pub field: &'static str,
+    pub message: String,
+}
+
+impl PolicyRefusal {
+    fn new(field: &'static str, message: String) -> Self {
+        Self { field, message }
+    }
+}
+
+/// Checks one pattern's grammar: each segment is a literal, `*`, `**` or a
+/// whole placeholder; a `{` or `}` anywhere else and a partial star are
+/// refused. With `tenancy` `Some(false)`, `{auth.tenant}` is refused too.
+fn validate_pattern(
+    pattern: &str,
+    sep: char,
+    field: &'static str,
+    tenancy: Option<bool>,
+) -> Result<(), PolicyRefusal> {
+    for seg in split_pattern(pattern, sep) {
+        if let Some(placeholder) = Placeholder::parse(seg) {
+            if placeholder == Placeholder::Tenant && tenancy == Some(false) {
+                return Err(PolicyRefusal::new(
+                    field,
+                    format!(
+                        "{field} uses {{auth.tenant}} but tenancy is off \
+                         (TOPGUN_TENANT_CLAIM is unset): no principal carries a tenant"
+                    ),
+                ));
+            }
+        } else if seg.contains(['{', '}']) {
+            return Err(PolicyRefusal::new(
+                field,
+                format!(
+                    "{field} segment {seg:?} has a brace but is not a whole placeholder; \
+                     the placeholders are {{auth.id}} and {{auth.tenant}}, each a whole segment"
+                ),
+            ));
+        } else if seg.contains('*') && seg != "*" && seg != "**" {
+            return Err(PolicyRefusal::new(
+                field,
+                format!(
+                    "{field} segment {seg:?} contains `*` but is neither `*` nor `**`; \
+                     it would match only a name spelled with that star"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The pattern rules: grammar of `mapPattern` and `keyPattern`, and
+/// `keyPattern` on write rules only. `tenancy` `None` skips the tenancy rule,
+/// as loading a stored row does.
+fn validate_patterns(
+    policy: &PermissionPolicy,
+    tenancy: Option<bool>,
+) -> Result<(), PolicyRefusal> {
+    validate_pattern(&policy.map_pattern, '.', "mapPattern", tenancy)?;
+    if let Some(key_pattern) = &policy.key_pattern {
+        if key_pattern.is_empty() {
+            return Err(PolicyRefusal::new(
+                "keyPattern",
+                "keyPattern is empty; omit it to match every key".to_string(),
+            ));
+        }
+        match policy.action {
+            PermissionAction::Write => {}
+            PermissionAction::Remove => {
+                return Err(PolicyRefusal::new(
+                    "keyPattern",
+                    "keyPattern is not accepted on a remove rule: removes are evaluated as \
+                     writes, so a remove rule would never apply; put it on a write rule"
+                        .to_string(),
+                ))
+            }
+            PermissionAction::Read | PermissionAction::All => {
+                return Err(PolicyRefusal::new(
+                    "keyPattern",
+                    "keyPattern is accepted only on a write rule: reads and keyless \
+                     operations carry no key"
+                        .to_string(),
+                ))
+            }
+        }
+        validate_pattern(key_pattern, ':', "keyPattern", tenancy)?;
+    }
+    Ok(())
+}
+
+/// The one rule an upserted policy must pass (`TG-AUTHZ-003`, `TG-AUTHZ-004`):
+/// the pattern grammar, `keyPattern` on write rules only, `{auth.tenant}` only
+/// while tenancy is on, and a condition whose references are all known.
 ///
 /// # Errors
 ///
-/// Returns the first segment that contains `*` and is neither `*` nor `**`.
-pub fn validate_map_pattern(pattern: &str) -> Result<(), &str> {
-    match pattern
-        .split('.')
-        .find(|seg| seg.contains('*') && *seg != "*" && *seg != "**")
-    {
-        Some(seg) => Err(seg),
-        None => Ok(()),
+/// The first rule the policy breaks. A condition refusal names the field
+/// `condition`; a caller that took the condition from `conditionExpr` names
+/// that field instead.
+pub fn validate_policy(policy: &PermissionPolicy, tenancy: bool) -> Result<(), PolicyRefusal> {
+    validate_patterns(policy, Some(tenancy))?;
+    if let Some(condition) = &policy.condition {
+        if let Some(reference) = first_unknown_reference(condition) {
+            let message = match reference.kind {
+                ReferenceKind::Reserved => {
+                    format!("{} is reserved and not supported yet", reference.path)
+                }
+                ReferenceKind::ResourceField => format!(
+                    "{} is not a resource field; the fields are resource.map and resource.key",
+                    reference.path
+                ),
+                ReferenceKind::Namespace | ReferenceKind::ResourceNow => format!(
+                    "{} is not in a condition namespace; a reference names auth, data or resource",
+                    reference.path
+                ),
+            };
+            return Err(PolicyRefusal::new("condition", message));
+        }
     }
+    Ok(())
+}
+
+/// How a condition reference reads in policy scope, where it differs from
+/// earlier versions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReferenceKind {
+    /// `resource.to`: reserved, unknown.
+    Reserved,
+    /// Bare `resource` or another `resource.…` field: unknown.
+    ResourceField,
+    /// A `value_ref` outside `auth`, `data` and `resource`: unknown.
+    Namespace,
+    /// `resource.map` / `resource.key`: now the evaluated resource.
+    ResourceNow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Reference {
+    path: String,
+    kind: ReferenceKind,
+    value_ref: bool,
+}
+
+/// Every reference of a condition tree whose policy-scope reading is not that
+/// of a record field or a known namespace, in tree order.
+fn special_references(node: &PredicateNode, out: &mut Vec<Reference>) {
+    use crate::service::domain::predicate::{is_policy_namespace, resource_field, ResourceField};
+    let classify = |path: &str, is_value_ref: bool| -> Option<ReferenceKind> {
+        match resource_field(path) {
+            Some(ResourceField::Map | ResourceField::Key) => Some(ReferenceKind::ResourceNow),
+            Some(ResourceField::Other) if path == "resource.to" => Some(ReferenceKind::Reserved),
+            Some(ResourceField::Other) => Some(ReferenceKind::ResourceField),
+            None if is_value_ref && !is_policy_namespace(path) => Some(ReferenceKind::Namespace),
+            None => None,
+        }
+    };
+    for (path, is_value_ref) in [(&node.attribute, false), (&node.value_ref, true)] {
+        if let Some(path) = path {
+            if let Some(kind) = classify(path, is_value_ref) {
+                out.push(Reference {
+                    path: path.clone(),
+                    kind,
+                    value_ref: is_value_ref,
+                });
+            }
+        }
+    }
+    for child in node.children.as_deref().unwrap_or(&[]) {
+        special_references(child, out);
+    }
+}
+
+fn first_unknown_reference(condition: &PredicateNode) -> Option<Reference> {
+    let mut refs = Vec::new();
+    special_references(condition, &mut refs);
+    refs.into_iter()
+        .find(|r| r.kind != ReferenceKind::ResourceNow)
+}
+
+/// The startup warning for a stored policy whose condition this version reads
+/// differently (`TG-AUTHZ-003`): a reference that is now unknown, or a
+/// `resource.map` / `resource.key` that was a record field. `None` for a
+/// policy whose meaning is unchanged.
+fn condition_meaning_change(policy: &PermissionPolicy) -> Option<String> {
+    let mut refs = Vec::new();
+    special_references(policy.condition.as_ref()?, &mut refs);
+    // An unknown reference changes more than a renamed one, so it is named first.
+    let reference = refs
+        .iter()
+        .find(|r| r.kind != ReferenceKind::ResourceNow)
+        .or_else(|| refs.first())?;
+    let field = reference.path.trim_start_matches("resource.");
+    Some(match reference.kind {
+        ReferenceKind::ResourceNow if reference.value_ref => format!(
+            "policy {}: {} now names the evaluated {field}; it used to resolve to nothing",
+            policy.id, reference.path
+        ),
+        ReferenceKind::ResourceNow => format!(
+            "policy {}: {} now names the evaluated {field}, not a record field",
+            policy.id, reference.path
+        ),
+        _ => format!(
+            "policy {}: {} is not a known condition namespace; the condition now fails \
+             closed: as an allow it does not match, as a deny it applies",
+            policy.id, reference.path
+        ),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +690,12 @@ impl PolicyStore for InMemoryPolicyStore {
 // ---------------------------------------------------------------------------
 // PolicyEvaluator
 // ---------------------------------------------------------------------------
+
+/// Policies that have already logged an unfilled placeholder in this process.
+/// Process-wide, not per evaluator, because HTTP `/sync` builds an evaluator
+/// per request: each policy is logged once, not on every request.
+static UNFILLED_LOGGED: std::sync::LazyLock<DashMap<String, ()>> =
+    std::sync::LazyLock::new(DashMap::new);
 
 /// Evaluates permission policies for a given principal, action, and map.
 ///
@@ -424,10 +827,8 @@ impl PolicyEvaluator {
         }
     }
 
-    /// Evaluates whether the given principal may perform `action` on `map_name`.
-    ///
-    /// Constructs an auth context from `principal` so that policy conditions
-    /// can reference `$auth.id` and `$auth.roles` via variable references.
+    /// Evaluates whether the given principal may perform `action` on
+    /// `map_name`, for an operation that names no key.
     pub async fn evaluate(
         &self,
         principal: Option<&topgun_core::Principal>,
@@ -435,7 +836,28 @@ impl PolicyEvaluator {
         map_name: &str,
         data: &rmpv::Value,
     ) -> PolicyDecision {
-        use crate::service::domain::predicate::{evaluate_policy_condition, EvalContext};
+        self.evaluate_key(principal, action, map_name, None, data)
+            .await
+    }
+
+    /// Evaluates whether the given principal may perform `action` on `key` of
+    /// `map_name` (`TG-AUTHZ-004`); `key` is `None` for an operation that
+    /// names none, where an allow with a `keyPattern` does not match and a
+    /// deny with one applies.
+    ///
+    /// Policy conditions see the principal as `auth` (`id`, `roles` and, for
+    /// a tenanted principal, `tenant`), the record as `data`, and the
+    /// evaluated resource `{map, key?}` as `resource` (`TG-AUTHZ-002`,
+    /// `TG-AUTHZ-003`).
+    pub async fn evaluate_key(
+        &self,
+        principal: Option<&topgun_core::Principal>,
+        action: PermissionAction,
+        map_name: &str,
+        key: Option<&str>,
+        data: &rmpv::Value,
+    ) -> PolicyDecision {
+        use crate::service::domain::predicate::{evaluate_policy_condition_on, EvalContext};
 
         // Admin bypass is server-anchored: only subjects on the configured
         // allow-list bypass policy checks. A `roles: ["admin"]` JWT claim is
@@ -451,15 +873,18 @@ impl PolicyEvaluator {
             return PolicyDecision::Deny;
         };
 
-        // Filter to policies that apply to this action.
+        // Filter to policies that apply to this action and this resource.
         let action_matches: Vec<&PermissionPolicy> = policies
             .iter()
             .filter(|p| p.action == action || p.action == PermissionAction::All)
+            .filter(|p| applies_to(p, principal, map_name, key))
             .collect();
 
-        // Build the auth rmpv::Value once, outside the per-policy loop.
+        // Build the auth rmpv::Value once, outside the per-policy loop. A
+        // field the principal does not carry is absent, so a condition on it
+        // is unknown (TG-AUTHZ-002).
         let auth_value = principal.map(|p| {
-            rmpv::Value::Map(vec![
+            let mut fields = vec![
                 (
                     rmpv::Value::String("id".into()),
                     rmpv::Value::String(p.id.clone().into()),
@@ -473,8 +898,26 @@ impl PolicyEvaluator {
                             .collect(),
                     ),
                 ),
-            ])
+            ];
+            if let Some(tenant) = &p.tenant {
+                fields.push((
+                    rmpv::Value::String("tenant".into()),
+                    rmpv::Value::String(tenant.clone().into()),
+                ));
+            }
+            rmpv::Value::Map(fields)
         });
+        let mut resource_value = vec![(
+            rmpv::Value::String("map".into()),
+            rmpv::Value::String(map_name.into()),
+        )];
+        if let Some(key) = key {
+            resource_value.push((
+                rmpv::Value::String("key".into()),
+                rmpv::Value::String(key.into()),
+            ));
+        }
+        let resource_value = rmpv::Value::Map(resource_value);
 
         // Evaluate conditions and collect policies that pass.
         let mut effective: Vec<&PermissionPolicy> = Vec::new();
@@ -484,10 +927,10 @@ impl PolicyEvaluator {
                     auth: auth_value.as_ref(),
                     data,
                 };
-                // An unresolved `auth` reference must neither make an allow
-                // match nor keep a deny from applying (TG-AUTHZ-002).
+                // An unknown reference must neither make an allow match nor
+                // keep a deny from applying (TG-AUTHZ-002, TG-AUTHZ-003).
                 let unknown = policy.effect == PolicyEffect::Deny;
-                if !evaluate_policy_condition(condition, &ctx, unknown) {
+                if !evaluate_policy_condition_on(condition, &ctx, unknown, &resource_value) {
                     continue;
                 }
             }
@@ -508,6 +951,44 @@ impl PolicyEvaluator {
     }
 }
 
+/// Whether `policy`'s patterns match `map_name` and `key` for `principal`
+/// (`TG-AUTHZ-003`, `TG-AUTHZ-004`). A placeholder the principal cannot
+/// fill never widens an allow and never narrows a deny: an allow does not
+/// match, a deny's map segment matches as one `*`, and a deny's
+/// `keyPattern` matches every key, as it does on an operation with no key.
+fn applies_to(
+    policy: &PermissionPolicy,
+    principal: Option<&topgun_core::Principal>,
+    map_name: &str,
+    key: Option<&str>,
+) -> bool {
+    let deny = policy.effect == PolicyEffect::Deny;
+    let mut unfilled = None;
+    let fits = resolve_pattern(&policy.map_pattern, '.', principal, deny, &mut unfilled)
+        .is_some_and(|resolved| segments_match(&policy.map_pattern, &resolved, map_name, '.'))
+        && match (&policy.key_pattern, key) {
+            (None, _) => true,
+            (Some(_), None) => deny,
+            (Some(key_pattern), Some(key)) => {
+                match resolve_pattern(key_pattern, ':', principal, false, &mut unfilled) {
+                    Some(resolved) => segments_match(key_pattern, &resolved, key, ':'),
+                    None => deny,
+                }
+            }
+        };
+    if let Some(placeholder) = unfilled {
+        if UNFILLED_LOGGED.insert(policy.id.clone(), ()).is_none() {
+            tracing::warn!(
+                "policy {}: {} has no single-segment value for this principal; \
+                 the policy fails closed: as an allow it does not match, as a deny it applies",
+                policy.id,
+                placeholder.token()
+            );
+        }
+    }
+    fits
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -516,20 +997,31 @@ impl PolicyEvaluator {
 mod tests {
     use super::*;
 
-    // -- validate_map_pattern --
+    // -- validate_pattern --
+
+    fn refused_segment(pattern: &str) -> Option<String> {
+        validate_pattern(pattern, '.', "mapPattern", Some(true))
+            .err()
+            .map(|refusal| refusal.message)
+    }
 
     #[test]
     fn a_pattern_segment_with_a_partial_star_is_refused_by_name() {
-        assert_eq!(validate_map_pattern("users/*"), Err("users/*"));
-        assert_eq!(validate_map_pattern("a*"), Err("a*"));
-        assert_eq!(validate_map_pattern("a.b*"), Err("b*"));
-        assert_eq!(validate_map_pattern("a*.b*"), Err("a*"));
+        for (pattern, segment) in [
+            ("users/*", "users/*"),
+            ("a*", "a*"),
+            ("a.b*", "b*"),
+            ("a*.b*", "a*"),
+        ] {
+            let message = refused_segment(pattern).expect(pattern);
+            assert!(message.contains(&format!("{segment:?}")), "{message}");
+        }
     }
 
     #[test]
     fn whole_segment_stars_and_literal_patterns_are_accepted() {
         for pattern in ["*", "**", "a.**", "*.orders", "users/x"] {
-            assert_eq!(validate_map_pattern(pattern), Ok(()), "{pattern}");
+            assert_eq!(refused_segment(pattern), None, "{pattern}");
         }
     }
 
@@ -609,6 +1101,7 @@ mod tests {
         let policy = PermissionPolicy {
             id: "p1".to_string(),
             map_pattern: "users.*".to_string(),
+            key_pattern: None,
             action: PermissionAction::Read,
             effect: PolicyEffect::Allow,
             condition: None,
@@ -625,6 +1118,7 @@ mod tests {
         let policy = PermissionPolicy {
             id: "p2".to_string(),
             map_pattern: "*".to_string(),
+            key_pattern: None,
             action: PermissionAction::Write,
             effect: PolicyEffect::Deny,
             condition: None,
@@ -649,6 +1143,7 @@ mod tests {
             .upsert_policy(PermissionPolicy {
                 id: "p1".to_string(),
                 map_pattern: "users.*".to_string(),
+                key_pattern: None,
                 action: PermissionAction::Read,
                 effect: PolicyEffect::Allow,
                 condition: None,
@@ -659,6 +1154,7 @@ mod tests {
             .upsert_policy(PermissionPolicy {
                 id: "p2".to_string(),
                 map_pattern: "posts.*".to_string(),
+                key_pattern: None,
                 action: PermissionAction::Read,
                 effect: PolicyEffect::Allow,
                 condition: None,
@@ -787,6 +1283,7 @@ mod tests {
         let store = make_store_with(vec![PermissionPolicy {
             id: "p1".to_string(),
             map_pattern: "users.*".to_string(),
+            key_pattern: None,
             action: PermissionAction::Read,
             effect: PolicyEffect::Allow,
             condition: None,
@@ -811,6 +1308,7 @@ mod tests {
             PermissionPolicy {
                 id: "allow".to_string(),
                 map_pattern: "users.*".to_string(),
+                key_pattern: None,
                 action: PermissionAction::Read,
                 effect: PolicyEffect::Allow,
                 condition: None,
@@ -818,6 +1316,7 @@ mod tests {
             PermissionPolicy {
                 id: "deny".to_string(),
                 map_pattern: "*".to_string(),
+                key_pattern: None,
                 action: PermissionAction::All,
                 effect: PolicyEffect::Deny,
                 condition: None,
@@ -854,6 +1353,7 @@ mod tests {
         let store = make_store_with(vec![PermissionPolicy {
             id: "conditional".to_string(),
             map_pattern: "*".to_string(),
+            key_pattern: None,
             action: PermissionAction::Read,
             effect: PolicyEffect::Allow,
             condition: Some(false_condition),
@@ -906,6 +1406,7 @@ mod tests {
                 .map(|(i, (effect, expr))| PermissionPolicy {
                     id: format!("p{i}"),
                     map_pattern: "*".to_string(),
+                    key_pattern: None,
                     action,
                     effect: *effect,
                     condition: expr.map(|e| {
@@ -948,6 +1449,7 @@ mod tests {
         let store = make_store_with(vec![PermissionPolicy {
             id: "stored".to_string(),
             map_pattern: "m".to_string(),
+            key_pattern: None,
             action: PermissionAction::Write,
             effect: PolicyEffect::Allow,
             condition: Some(stored),
@@ -1144,6 +1646,571 @@ mod tests {
         assert_eq!(
             write(&role, Some(&editor), &forged_admin).await,
             PolicyDecision::Deny
+        );
+    }
+
+    // -- Templated patterns, keyPattern and condition namespaces --
+
+    fn tenanted(id: &str, tenant: Option<&str>) -> topgun_core::Principal {
+        topgun_core::Principal {
+            id: id.to_string(),
+            roles: Vec::new(),
+            tenant: tenant.map(str::to_string),
+        }
+    }
+
+    fn rule(
+        id: &str,
+        map_pattern: &str,
+        key_pattern: Option<&str>,
+        action: PermissionAction,
+        effect: PolicyEffect,
+        condition: Option<&str>,
+    ) -> PermissionPolicy {
+        PermissionPolicy {
+            id: id.to_string(),
+            map_pattern: map_pattern.to_string(),
+            key_pattern: key_pattern.map(str::to_string),
+            action,
+            effect,
+            condition: condition.map(|e| {
+                expr_parser::parse_permission_expr(e).unwrap_or_else(|err| panic!("'{e}': {err}"))
+            }),
+        }
+    }
+
+    fn allow_all() -> PermissionPolicy {
+        rule(
+            "allow-all",
+            "*",
+            None,
+            PermissionAction::All,
+            PolicyEffect::Allow,
+            None,
+        )
+    }
+
+    fn configured(policies: Vec<PermissionPolicy>) -> PolicyEvaluator {
+        let store = make_store_with(policies);
+        store
+            .configured
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        PolicyEvaluator::new(store)
+    }
+
+    async fn read(
+        eval: &PolicyEvaluator,
+        who: Option<&topgun_core::Principal>,
+        map: &str,
+    ) -> PolicyDecision {
+        eval.evaluate(who, PermissionAction::Read, map, &rmpv::Value::Nil)
+            .await
+    }
+
+    async fn write_key(
+        eval: &PolicyEvaluator,
+        who: Option<&topgun_core::Principal>,
+        map: &str,
+        key: Option<&str>,
+    ) -> PolicyDecision {
+        eval.evaluate_key(who, PermissionAction::Write, map, key, &rmpv::Value::Nil)
+            .await
+    }
+
+    use PolicyDecision::{Allow as Allowed, Deny as Denied};
+
+    #[tokio::test]
+    async fn placeholder_segment_matches_only_the_principals_own_whole_segment() {
+        let eval = configured(vec![rule(
+            "conv",
+            "t.conv.{auth.id}",
+            None,
+            PermissionAction::Read,
+            PolicyEffect::Allow,
+            None,
+        )]);
+        let alice = tenanted("alice", None);
+        assert_eq!(read(&eval, Some(&alice), "t.conv.alice").await, Allowed);
+        assert_eq!(read(&eval, Some(&alice), "t.conv.bob").await, Denied);
+        assert_eq!(read(&eval, Some(&alice), "t.conv.alice.x").await, Denied);
+        let dotted = tenanted("a.b", None);
+        assert_eq!(read(&eval, Some(&dotted), "t.conv.a.b").await, Denied);
+        let star = tenanted("*", None);
+        assert_eq!(read(&eval, Some(&star), "t.conv.*").await, Allowed);
+        assert_eq!(read(&eval, Some(&star), "t.conv.bob").await, Denied);
+    }
+
+    #[tokio::test]
+    async fn unfilled_placeholder_never_widens_an_allow_and_narrows_no_deny() {
+        // An allow with a placeholder admits no missing principal and no empty id.
+        let allow = configured(vec![rule(
+            "conv",
+            "t.conv.{auth.id}",
+            None,
+            PermissionAction::Read,
+            PolicyEffect::Allow,
+            None,
+        )]);
+        assert_eq!(read(&allow, None, "t.conv.x").await, Denied);
+        let empty = tenanted("", None);
+        assert_eq!(read(&allow, Some(&empty), "t.conv.").await, Denied);
+
+        // A deny's unfilled segment matches as exactly one segment.
+        let deny = configured(vec![
+            allow_all(),
+            rule(
+                "secret",
+                "t.{auth.id}.secret",
+                None,
+                PermissionAction::All,
+                PolicyEffect::Deny,
+                None,
+            ),
+        ]);
+        let dotted = tenanted("a.b", None);
+        assert_eq!(read(&deny, Some(&dotted), "t.x.secret").await, Denied);
+        assert_eq!(read(&deny, Some(&dotted), "t.x.y.secret").await, Allowed);
+        assert_eq!(read(&deny, None, "t.x.secret").await, Denied);
+        assert_eq!(read(&deny, None, "t.x.public").await, Allowed);
+    }
+
+    #[tokio::test]
+    async fn unfilled_key_pattern_in_a_deny_denies_every_key() {
+        let deny = configured(vec![
+            allow_all(),
+            rule(
+                "presence",
+                "t.presence",
+                Some("{auth.id}:*"),
+                PermissionAction::Write,
+                PolicyEffect::Deny,
+                None,
+            ),
+        ]);
+        let colon = tenanted("a:b", None);
+        for key in ["a:b:1", "a:1", "x", "b:1"] {
+            assert_eq!(
+                write_key(&deny, Some(&colon), "t.presence", Some(key)).await,
+                Denied,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            write_key(&deny, Some(&colon), "t.other", Some("x")).await,
+            Allowed
+        );
+        // A filled deny reaches only the principal's own keys.
+        let alice = tenanted("alice", None);
+        assert_eq!(
+            write_key(&deny, Some(&alice), "t.presence", Some("alice:1")).await,
+            Denied
+        );
+        assert_eq!(
+            write_key(&deny, Some(&alice), "t.presence", Some("bob:1")).await,
+            Allowed
+        );
+
+        // The matching allow never matches for that principal.
+        let allow = configured(vec![rule(
+            "presence",
+            "t.presence",
+            Some("{auth.id}:*"),
+            PermissionAction::Write,
+            PolicyEffect::Allow,
+            None,
+        )]);
+        for key in ["a:b:1", "a:1", "a:b"] {
+            assert_eq!(
+                write_key(&allow, Some(&colon), "t.presence", Some(key)).await,
+                Denied,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            write_key(&allow, Some(&alice), "t.presence", Some("alice:tab1")).await,
+            Allowed
+        );
+    }
+
+    #[test]
+    fn unfilled_placeholder_logs_once_per_policy() {
+        use futures_util::FutureExt;
+        use std::sync::{Mutex, PoisonError};
+
+        #[derive(Clone)]
+        struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for CapturedLog {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let writer = CapturedLog(Arc::clone(&captured));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        // Scoped, never global; a second live dispatcher makes every thread ask
+        // all subscribers, so another test reaching the same `warn!` first
+        // cannot settle its interest as "nobody listens".
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _second_dispatcher = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new());
+
+        // The id is used by no other test: the logged set is process-wide.
+        let store = make_store_with(vec![rule(
+            "log-once",
+            "t.conv.{auth.id}",
+            None,
+            PermissionAction::Read,
+            PolicyEffect::Allow,
+            None,
+        )]);
+        store
+            .configured
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Two evaluators over one store, as two HTTP `/sync` requests build them.
+        let evaluators = [
+            PolicyEvaluator::new(store.clone()),
+            PolicyEvaluator::new(store),
+        ];
+        let colon = tenanted("a.b", None);
+        tracing::dispatcher::with_default(&dispatch, || {
+            for eval in &evaluators {
+                for _ in 0..2 {
+                    let decision = read(eval, Some(&colon), "t.conv.a")
+                        .now_or_never()
+                        .expect("an in-memory store answers at once");
+                    assert_eq!(decision, Denied);
+                }
+            }
+        });
+        let log = String::from_utf8(
+            captured
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        )
+        .expect("utf-8 log");
+        let warnings: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("policy log-once: {auth.id} has no single-segment value"))
+            .collect();
+        assert_eq!(warnings.len(), 1, "{log}");
+    }
+
+    #[tokio::test]
+    async fn auth_value_carries_tenant() {
+        let acme = tenanted("v1", Some("acme"));
+        let globex = tenanted("v1", Some("globex"));
+        let none = tenanted("v1", None);
+        let allow = configured(vec![rule(
+            "tenant",
+            "*",
+            None,
+            PermissionAction::Write,
+            PolicyEffect::Allow,
+            Some("auth.tenant == 'acme'"),
+        )]);
+        assert_eq!(write_key(&allow, Some(&acme), "m", None).await, Allowed);
+        assert_eq!(write_key(&allow, Some(&globex), "m", None).await, Denied);
+        assert_eq!(write_key(&allow, Some(&none), "m", None).await, Denied);
+        let forged_tenant = forged("tenant", s("acme"));
+        assert_eq!(
+            allow
+                .evaluate(Some(&none), PermissionAction::Write, "m", &forged_tenant)
+                .await,
+            Denied
+        );
+
+        let deny = configured(vec![
+            allow_all(),
+            rule(
+                "not-acme",
+                "*",
+                None,
+                PermissionAction::Write,
+                PolicyEffect::Deny,
+                Some("auth.tenant != 'acme'"),
+            ),
+        ]);
+        assert_eq!(write_key(&deny, Some(&acme), "m", None).await, Allowed);
+        assert_eq!(write_key(&deny, Some(&globex), "m", None).await, Denied);
+        assert_eq!(write_key(&deny, Some(&none), "m", None).await, Denied);
+    }
+
+    #[tokio::test]
+    async fn auth_kind_is_unknown_until_guest_principals_exist() {
+        let alice = tenanted("alice", Some("acme"));
+        let forged_kind = forged("kind", s("guest"));
+        let allow = configured(vec![rule(
+            "guest",
+            "*",
+            None,
+            PermissionAction::Write,
+            PolicyEffect::Allow,
+            Some("auth.kind == 'guest'"),
+        )]);
+        assert_eq!(
+            allow
+                .evaluate(Some(&alice), PermissionAction::Write, "m", &forged_kind)
+                .await,
+            Denied
+        );
+        let deny = configured(vec![
+            allow_all(),
+            rule(
+                "guest",
+                "*",
+                None,
+                PermissionAction::Write,
+                PolicyEffect::Deny,
+                Some("auth.kind == 'guest'"),
+            ),
+        ]);
+        assert_eq!(write_key(&deny, Some(&alice), "m", None).await, Denied);
+        assert_eq!(write_key(&deny, None, "m", None).await, Denied);
+    }
+
+    #[tokio::test]
+    async fn a_condition_on_an_unknown_namespace_fails_closed() {
+        let alice = tenanted("alice", None);
+        let x = rec(vec![("x", rmpv::Value::Integer(1.into()))]);
+        let cases: Vec<(Vec<PermissionPolicy>, rmpv::Value, PolicyDecision)> = vec![
+            (
+                vec![
+                    allow_all(),
+                    rule(
+                        "d",
+                        "*",
+                        None,
+                        PermissionAction::Write,
+                        PolicyEffect::Deny,
+                        Some("data.x == foo.y"),
+                    ),
+                ],
+                x.clone(),
+                Denied,
+            ),
+            (
+                vec![rule(
+                    "a",
+                    "*",
+                    None,
+                    PermissionAction::Write,
+                    PolicyEffect::Allow,
+                    Some("data.x == foo.y"),
+                )],
+                x.clone(),
+                Denied,
+            ),
+            (
+                vec![rule(
+                    "a",
+                    "*",
+                    None,
+                    PermissionAction::Write,
+                    PolicyEffect::Allow,
+                    Some("!(resource.to == 'x')"),
+                )],
+                x.clone(),
+                Denied,
+            ),
+            (
+                vec![
+                    allow_all(),
+                    rule(
+                        "d",
+                        "*",
+                        None,
+                        PermissionAction::Write,
+                        PolicyEffect::Deny,
+                        Some("data.a == 1 && data.b == foo.y"),
+                    ),
+                ],
+                rec(vec![("a", rmpv::Value::Integer(2.into()))]),
+                Allowed,
+            ),
+        ];
+        for (i, (policies, data, expected)) in cases.into_iter().enumerate() {
+            let eval = configured(policies);
+            assert_eq!(
+                eval.evaluate(Some(&alice), PermissionAction::Write, "m", &data)
+                    .await,
+                expected,
+                "case {i}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tenant_placeholder_is_filled_from_the_principal_not_the_name() {
+        let eval = configured(vec![rule(
+            "visitor",
+            "{auth.tenant}.visitor.{auth.id}.**",
+            None,
+            PermissionAction::All,
+            PolicyEffect::Allow,
+            None,
+        )]);
+        let acme_v1 = tenanted("v1", Some("acme"));
+        let no_tenant = tenanted("v1", None);
+        for (who, map, expected) in [
+            (&acme_v1, "acme.visitor.v1.cart", Allowed),
+            (&acme_v1, "globex.visitor.v1.cart", Denied),
+            (&acme_v1, "acme.visitor.v2.cart", Denied),
+            (&no_tenant, "acme.visitor.v1.cart", Denied),
+        ] {
+            assert_eq!(read(&eval, Some(who), map).await, expected, "read {map}");
+            assert_eq!(
+                write_key(&eval, Some(who), map, Some("k")).await,
+                expected,
+                "write {map}"
+            );
+        }
+    }
+
+    /// The persisted shape of a policy before placeholders existed.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct EarlierPolicy {
+        id: String,
+        map_pattern: String,
+        action: PermissionAction,
+        effect: PolicyEffect,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        condition: Option<PredicateNode>,
+    }
+
+    fn decode(bytes: &[u8]) -> Result<PermissionPolicy, String> {
+        rmp_serde::from_slice::<PermissionPolicy>(bytes).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn scoped_policies_are_unreadable_to_older_binaries_and_plain_ones_unchanged() {
+        // (a) A plain policy encodes exactly as before.
+        for condition in [None, Some("data.ownerId == auth.id")] {
+            let plain = rule(
+                "plain",
+                "users.**",
+                None,
+                PermissionAction::Write,
+                PolicyEffect::Allow,
+                condition,
+            );
+            let earlier = EarlierPolicy {
+                id: plain.id.clone(),
+                map_pattern: plain.map_pattern.clone(),
+                action: plain.action,
+                effect: plain.effect,
+                condition: plain.condition.clone(),
+            };
+            assert_eq!(
+                rmp_serde::to_vec_named(&plain).unwrap(),
+                rmp_serde::to_vec_named(&earlier).unwrap()
+            );
+        }
+
+        // (b) A scoped row does not decode into the earlier shape.
+        for scoped in [
+            rule(
+                "s1",
+                "t.{auth.id}",
+                None,
+                PermissionAction::Read,
+                PolicyEffect::Allow,
+                None,
+            ),
+            rule(
+                "s2",
+                "t.presence",
+                Some("{auth.id}:*"),
+                PermissionAction::Write,
+                PolicyEffect::Deny,
+                None,
+            ),
+        ] {
+            let bytes = rmp_serde::to_vec_named(&scoped).unwrap();
+            let err = rmp_serde::from_slice::<EarlierPolicy>(&bytes).unwrap_err();
+            assert!(err.to_string().contains("mapPattern"), "{err}");
+
+            // (d) It round-trips through this version.
+            let back = decode(&bytes).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{scoped:?}"));
+        }
+
+        // (c) A plain row with a brace is refused, not read as a template.
+        let legacy = rmp_serde::to_vec_named(&EarlierPolicy {
+            id: "legacy".to_string(),
+            map_pattern: "t.{auth.id}".to_string(),
+            action: PermissionAction::Read,
+            effect: PolicyEffect::Allow,
+            condition: None,
+        })
+        .unwrap();
+        assert!(decode(&legacy).is_err());
+
+        // (e) A scoped row with a keyPattern on a read rule is refused.
+        let read_key = rmp_serde::to_vec_named(&StoredPolicy {
+            id: "rk".to_string(),
+            map_pattern: None,
+            scoped_map_pattern: Some("t.presence".to_string()),
+            action: PermissionAction::Read,
+            effect: PolicyEffect::Allow,
+            condition: None,
+            key_pattern: Some("{auth.id}:*".to_string()),
+        })
+        .unwrap();
+        assert!(decode(&read_key).is_err());
+
+        // (f) A scoped {auth.tenant} row loads whatever the tenancy setting.
+        let tenant = rule(
+            "tenant",
+            "{auth.tenant}.visitor.**",
+            None,
+            PermissionAction::Read,
+            PolicyEffect::Allow,
+            None,
+        );
+        assert!(decode(&rmp_serde::to_vec_named(&tenant).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn stored_conditions_on_unknown_namespaces_load_with_one_warning() {
+        let stored = |id: &str, expr: &str| {
+            let bytes = rmp_serde::to_vec_named(&EarlierPolicy {
+                id: id.to_string(),
+                map_pattern: "m".to_string(),
+                action: PermissionAction::Write,
+                effect: PolicyEffect::Deny,
+                condition: Some(expr_parser::parse_permission_expr(expr).unwrap()),
+            })
+            .unwrap();
+            decode(&bytes).unwrap_or_else(|e| panic!("{id} must load: {e}"))
+        };
+        for (id, expr, reference) in [
+            ("ns", "data.x == foo.y", "foo.y"),
+            ("rx", "resource.x == 'v'", "resource.x"),
+            ("rmap", "resource.map == 'm'", "resource.map"),
+            ("bare", "resource == 'x'", "resource"),
+        ] {
+            let warning = condition_meaning_change(&stored(id, expr))
+                .unwrap_or_else(|| panic!("{id} must warn"));
+            assert!(
+                warning.starts_with(&format!("policy {id}: {reference} ")),
+                "{warning}"
+            );
+        }
+        assert_eq!(
+            condition_meaning_change(&stored("plain", "data.x == auth.id")),
+            None
         );
     }
 }

@@ -10,6 +10,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Added (server): policy templates scope one policy set to each principal's own maps, keys and
+  topics (`TG-AUTHZ-003`, `TG-AUTHZ-004`).** A whole `mapPattern` segment `{auth.id}` or
+  `{auth.tenant}` matches only the caller's own value (`{auth.tenant}.visitor.{auth.id}.**`), and an
+  optional `keyPattern` on a write rule, split at `:`, limits the keys it covers
+  (`keyPattern: "{auth.id}:*"`); every key a write names is checked. A placeholder the caller
+  cannot fill — no caller, an empty value, or a value containing the separator — never makes an
+  allow match and never stops a deny, and is logged once per policy. Conditions gain
+  `resource.map` and `resource.key` (the evaluated map and key) and `auth.tenant`. The admin API
+  refuses a malformed placeholder, a `keyPattern` on a rule other than `write`, `{auth.tenant}`
+  with tenancy off, and a condition reference outside `auth`, `data`, `resource.map` and
+  `resource.key` (`resource.to` is reserved).
+- **Changed (server): a policy condition that references an unknown namespace now fails closed.**
+  A `value_ref` outside `auth`, `data` and `resource`, and bare `resource` or a `resource` field
+  other than `map` and `key`, make their comparison unknown: an allow does not match and a deny
+  applies, also under `!`. Before, such a `value_ref` never resolved, so its comparison was
+  false, and an attribute `resource…` read a record field of that name. A stored attribute
+  `resource.map` or `resource.key` now names the evaluated map or key instead of a record field,
+  and a stored `value_ref` `resource.map` or `resource.key`, which used to resolve to nothing,
+  now names the evaluated map or key too, so a stored allow such as `data.owner == resource.key`
+  can start to match. Each stored policy whose meaning changes is named by one `WARN` at start.
+- **Rollback note (server):** a policy that uses a placeholder or a `keyPattern` is stored in an
+  encoding earlier binaries do not read: on a store that holds one, they stop at start with
+  `FATAL: policy recovery failed: decode policy '<id>'`. Delete such policies before rolling back.
+  A policy stored by an earlier binary whose `mapPattern` contains `{` or `}` stops this one at
+  start the same way; the troubleshooting guide has the way out.
 - **Security (server): a permission-policy condition's `auth.…` now reads the authenticated
   caller, never the written record (`TG-AUTHZ-002`).** A condition comparing `auth`, `auth.<f>` or
   `auth.<f>.<g>` with a literal (`auth.id == 'bob'`), or `auth.<f>` with another `auth.<g>`, was
@@ -17,7 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{auth: {id: 'bob'}}` in its value, or escape a deny by leaving it out. Such conditions now read
   the principal for every operator, also in policies stored before the upgrade and in JSON
   `condition` nodes; nothing needs re-creating. A reference the principal cannot answer — no
-  authenticated caller, or an `auth.…` field other than `id` and `roles` — is unknown: an allow
+  authenticated caller, or an `auth.…` field other than `id`, `roles` and, for a tenanted caller,
+  `tenant` — is unknown: an allow
   does not match and a deny applies, also for the documented forms such as
   `data.ownerId != auth.id`, whose deny did not apply to an anonymous caller before. `auth == null`
   and `auth != null` are unchanged. An operation evaluated without a record — a read, a remove, an

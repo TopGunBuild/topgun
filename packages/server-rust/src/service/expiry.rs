@@ -899,6 +899,7 @@ mod tests {
                 .upsert_policy(PermissionPolicy {
                     id: id.to_string(),
                     map_pattern: pattern.to_string(),
+                    key_pattern: None,
                     action: PermissionAction::All,
                     effect: PolicyEffect::Deny,
                     condition: None,

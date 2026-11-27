@@ -60,7 +60,8 @@ A policy is a single rule binding a map pattern + action to an allow/deny effect
 | Field | Type | Meaning |
 |-------|------|---------|
 | `id` | string | Stable identifier. Generated as a UUID if omitted on create. |
-| `mapPattern` | string (glob) | `*` matches all maps; `users.*` matches `users.profiles`, `users.settings`, etc. |
+| `mapPattern` | string (glob) | `*` matches all maps; `users.*` matches `users.profiles`, `users.settings`, etc. A whole segment `{auth.id}` or `{auth.tenant}` is the caller's own value (see [templates](#templates-placeholders-and-keypattern)). |
+| `keyPattern` | string (optional) | Write rules only: the keys of the map the rule covers, split at `:` (`{auth.id}:*`). Omitted, the rule covers every key. |
 | `action` | `read` \| `write` \| `remove` \| `all` | The operation governed. `all` covers every action. |
 | `effect` | `allow` \| `deny` | Whether a match grants or denies access. |
 | `condition` | predicate (optional) | Rule only applies when the condition evaluates true against the record data and auth context. |
@@ -68,6 +69,38 @@ A policy is a single rule binding a map pattern + action to an allow/deny effect
 ### Map patterns
 
 Patterns split map names on `.`. A segment that is exactly `*` matches one segment, so `users.*` matches `users.profiles` but not `users` or `users.a.b`; a segment that is exactly `**` matches zero or more, so `users.**` covers the whole `users` namespace. A lone `*` matches every map. Any other segment is compared literally, including one that contains a `*`: `users/*` or `user*` matches only the map spelled that way, not the maps you probably meant. Name maps with `.` between their parts and put wildcards in whole segments.
+
+### Templates: placeholders and keyPattern
+
+One policy set can scope every caller to its own data. In `mapPattern`, a segment that is exactly `{auth.id}` matches only the caller's own id, and `{auth.tenant}` only the caller's own tenant:
+
+```json
+{ "mapPattern": "{auth.tenant}.visitor.{auth.id}.**", "action": "all", "effect": "allow" }
+```
+
+With this rule, visitor `v1` of tenant `acme` reads and writes `acme.visitor.v1.cart` and nothing under `acme.visitor.v2` or `globex.visitor.v1`. A placeholder fills one whole segment; it is compared byte for byte, so an id `*` matches only a segment spelled `*`. `{auth.tenant}` is filled from the caller's token, never from the map name, and is accepted only while tenancy is on. Any other `{` or `}` in a pattern is refused.
+
+A write rule can also carry a `keyPattern`, matched against each key a write names, with `:` between segments and the same placeholders:
+
+```json
+{ "mapPattern": "acme.cart", "keyPattern": "{auth.id}", "action": "write", "effect": "allow" }
+```
+
+Every key is checked: each op of a batch, each entry of an OR-Map push and each key of an entry-processor batch, and one key the rules do not allow refuses the whole operation. Because the key decides, a visitor cannot write another visitor's key by putting a forged owner in the value, which an `auth.id == data.ownerId` condition alone cannot stop. A `keyPattern` is accepted only on `write` rules: reads name no key, and removes are evaluated as writes, so a write rule's `keyPattern` covers them. A write that names no key — a counter, a topic publish, a resolver registration — is not matched by an allow with a `keyPattern`, and a deny with one applies to it.
+
+**A caller that cannot fill a placeholder never gains access.** A placeholder is unfilled when there is no authenticated caller, when the value is empty, or when it contains the pattern's separator. Then an allow does not match; a deny still applies, with the unfilled map segment matching any one segment and an unfilled `keyPattern` matching every key. The server logs one `WARN` per policy the first time it meets one. So pick subjects that fit:
+
+- an id containing `.` never fills a map placeholder — and a deny `t.{auth.id}.secret` covers `t.x.secret` but not that caller's own `t.a.b.secret` when its id is `a.b`;
+- an id containing `:` (such as a `urn:` subject) never fills a key placeholder;
+- an id outside the topic name characters (`A-Z a-z 0-9 _ - . : /`) never fills a topic placeholder, since such a topic cannot exist.
+
+**A `keyPattern` does not narrow reads.** Reads name no key, so a read rule on a map opens every key of it: scope reads by map (for example one map per visitor), not by key.
+
+**Rolling back drops key scoping at creation.** The admin API of a server version before `keyPattern` ignores the field: a policy created there with a `keyPattern` is stored without it and covers every key. After a rollback, re-create key-scoped policies only on a version that knows the field.
+
+Topics and counters are matched by name like maps, so `{auth.tenant}.signal.{auth.id}` admits a caller to its own topic only.
+
+**Upgrade and rollback.** A policy without a placeholder or `keyPattern` is stored exactly as before. One with either is stored in an encoding earlier server versions do not read: started on such a store they stop with `FATAL: policy recovery failed: … decode policy '<id>'`, so delete these policies before rolling back. A policy stored by an earlier version with `{` or `}` in its `mapPattern` stops this version the same way; before upgrading, list the policies (`GET /api/admin/policies`) and look for `{`. The [troubleshooting guide](/docs/guides/troubleshooting) has the way out.
 
 ### Tenants
 
@@ -161,7 +194,7 @@ What a delete does not do:
 
 ## Conditions
 
-A policy can carry a condition that is evaluated against the record `data` and the caller's auth context. Conditions reference `data.<field>` and `auth.id` / `auth.roles`. The simplest way to express one is the `conditionExpr` string, a CEL-like expression parsed server-side:
+A policy can carry a condition that is evaluated against the record `data`, the caller's auth context and the evaluated resource. Conditions reference `data.<field>`, `auth.id` / `auth.roles` / `auth.tenant`, and `resource.map` / `resource.key` (the map and key being evaluated). The simplest way to express one is the `conditionExpr` string, a CEL-like expression parsed server-side:
 
 ```bash
 # Owners can write only their own records
@@ -184,7 +217,9 @@ data.role in auth.roles || data.public == true
 data.status == 'draft' && auth.id == 'alice'
 ```
 
-`auth.…` always names the authenticated caller, never the record, so a value that carries its own `auth` field cannot impersonate anyone; a `conditionExpr` cannot reference a record field named `auth` (or `resource`); a JSON `condition` whose `value_ref` is `data.auth.…` still reads that record field. The caller's fields are `id` and `roles` only. Without an authenticated caller, or for any other `auth.…` field, a comparison is unknown: it does not satisfy an `allow` and makes a `deny` apply. `auth == null` and `auth != null` test whether there is a caller.
+`auth.…` always names the authenticated caller, never the record, so a value that carries its own `auth` field cannot impersonate anyone; a `conditionExpr` cannot reference a record field named `auth` (or `resource`); a JSON `condition` whose `value_ref` is `data.auth.…` still reads that record field. The caller's fields are `id`, `roles` and, when tenancy is on, `tenant`. Without an authenticated caller, or for any other `auth.…` field, a comparison is unknown: it does not satisfy an `allow` and makes a `deny` apply. `auth == null` and `auth != null` test whether there is a caller.
+
+`resource.map` and `resource.key` name the map and key being evaluated, never a record field: `resource.key == auth.id` holds only on the caller's own key. An operation with no key (a read, a counter, a topic) has no `resource.key`: a comparison with it is unknown, and `resource.key == null` is true. The admin API refuses any other reference — a `value_ref` outside `auth`, `data` and `resource`, bare `resource`, or another `resource` field (`resource.to` is reserved). A condition stored by an earlier version with such a reference loads with one startup `WARN` naming the policy, and is now unknown: an allow with it does not match, a deny with it applies. Because `resource` names the evaluated resource, a `conditionExpr` cannot reference a record field named `resource`.
 
 Supported operators: `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `contains`, `containsAll`, `containsAny`, `startsWith`, `endsWith`, combined with `&&`, `||`, `!`, and parentheses. Values are strings (`'...'`), numbers, or booleans. If you prefer to pass a structured predicate directly, send a `condition` JSON object instead — it takes precedence over `conditionExpr`.
 

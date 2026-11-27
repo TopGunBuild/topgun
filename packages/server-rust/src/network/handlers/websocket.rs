@@ -2951,6 +2951,7 @@ mod tests {
             PermissionPolicy {
                 id: "allow-notes".to_string(),
                 map_pattern: FOLD_MAP.to_string(),
+                key_pattern: None,
                 action: PermissionAction::Write,
                 effect: PolicyEffect::Allow,
                 condition: None,
@@ -2958,6 +2959,7 @@ mod tests {
             PermissionPolicy {
                 id: "deny-blocked".to_string(),
                 map_pattern: FOLD_MAP.to_string(),
+                key_pattern: None,
                 action: PermissionAction::Write,
                 effect: PolicyEffect::Deny,
                 condition: Some(PredicateNode {
@@ -4156,6 +4158,7 @@ mod tests {
         vec![PermissionPolicy {
             id: "allow-own-notes".to_string(),
             map_pattern: FOLD_MAP.to_string(),
+            key_pattern: None,
             action: PermissionAction::Write,
             effect: PolicyEffect::Allow,
             condition: Some(

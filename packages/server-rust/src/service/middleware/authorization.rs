@@ -124,8 +124,7 @@ where
         let Some(action) = action else {
             return Box::pin(self.inner.call(op));
         };
-        let batch_ops_data = extract_batch_ops_data(&op);
-        let data = extract_data(&op);
+        let targets = extract_targets(&op, &map_name);
         let fut = self.inner.call(op);
         Box::pin(async move {
             // Single fail-closed gate shared with the HTTP sync read path.
@@ -136,16 +135,7 @@ where
             match evaluator.should_evaluate().await {
                 GateDecision::AllowAll => fut.await,
                 GateDecision::Evaluate => {
-                    evaluate_and_dispatch(
-                        evaluator,
-                        principal,
-                        action,
-                        map_name,
-                        batch_ops_data,
-                        data,
-                        fut,
-                    )
-                    .await
+                    evaluate_and_dispatch(evaluator, principal, action, targets, fut).await
                 }
                 GateDecision::Deny => Err(OperationError::Forbidden { map_name }),
             }
@@ -203,18 +193,58 @@ where
 // Operation classification helpers
 // ---------------------------------------------------------------------------
 
-/// Extracts per-op `(map_name, data)` pairs for `OpBatch` operations.
-fn extract_batch_ops_data(op: &Operation) -> Option<Vec<(String, rmpv::Value)>> {
+/// One resource an operation touches: the map (or topic, counter) it names,
+/// the key it writes when it names one, and the record value conditions see.
+struct Target {
+    map_name: String,
+    key: Option<String>,
+    data: rmpv::Value,
+}
+
+/// Every resource an operation touches, each evaluated on its own
+/// (`TG-AUTHZ-004`): one per op of an `OpBatch`, per entry of an
+/// `ORMapPushDiff` and per key of an `EntryProcessBatch`. An operation that
+/// names no key is one keyless target under its classified name, so a
+/// `keyPattern` allow does not match it and a `keyPattern` deny applies.
+fn extract_targets(op: &Operation, map_name: &str) -> Vec<Target> {
+    let keyed = |key: &str, data: rmpv::Value| Target {
+        map_name: map_name.to_string(),
+        key: Some(key.to_string()),
+        data,
+    };
+    let keyless = || Target {
+        map_name: map_name.to_string(),
+        key: None,
+        data: rmpv::Value::Nil,
+    };
     match op {
-        Operation::OpBatch { payload, .. } => Some(
-            payload
-                .payload
-                .ops
-                .iter()
-                .map(|client_op| (client_op.map_name.clone(), extract_op_data(client_op)))
-                .collect(),
-        ),
-        _ => None,
+        Operation::OpBatch { payload, .. } => payload
+            .payload
+            .ops
+            .iter()
+            .map(|client_op| Target {
+                map_name: client_op.map_name.clone(),
+                key: Some(client_op.key.clone()),
+                data: extract_op_data(client_op),
+            })
+            .collect(),
+        Operation::ClientOp { payload, .. } => vec![keyed(
+            &payload.payload.key,
+            extract_op_data(&payload.payload),
+        )],
+        Operation::ORMapPushDiff { payload, .. } if !payload.payload.entries.is_empty() => payload
+            .payload
+            .entries
+            .iter()
+            .map(|entry| keyed(&entry.key, rmpv::Value::Nil))
+            .collect(),
+        Operation::EntryProcess { payload, .. } => vec![keyed(&payload.key, rmpv::Value::Nil)],
+        Operation::EntryProcessBatch { payload, .. } if !payload.keys.is_empty() => payload
+            .keys
+            .iter()
+            .map(|key| keyed(key, rmpv::Value::Nil))
+            .collect(),
+        _ => vec![keyless()],
     }
 }
 
@@ -223,37 +253,31 @@ async fn evaluate_and_dispatch<F>(
     evaluator: Arc<PolicyEvaluator>,
     principal: Option<topgun_core::Principal>,
     action: PermissionAction,
-    map_name: String,
-    batch_ops_data: Option<Vec<(String, rmpv::Value)>>,
-    data: rmpv::Value,
+    targets: Vec<Target>,
     fut: F,
 ) -> Result<OperationResponse, OperationError>
 where
     F: Future<Output = Result<OperationResponse, OperationError>>,
 {
-    // For OpBatch, evaluate each op individually. If any op is denied,
-    // reject the entire batch (fail-closed atomicity).
-    if let Some(ops_data) = batch_ops_data {
-        for (op_map_name, op_data) in &ops_data {
-            let decision = evaluator
-                .evaluate(principal.as_ref(), action, op_map_name, op_data)
-                .await;
-            if decision == PolicyDecision::Deny {
-                return Err(OperationError::Forbidden {
-                    map_name: op_map_name.clone(),
-                });
-            }
+    // Every target is evaluated; one denied target refuses the whole
+    // operation (fail-closed atomicity), attributed to that target's map.
+    for target in targets {
+        let decision = evaluator
+            .evaluate_key(
+                principal.as_ref(),
+                action,
+                &target.map_name,
+                target.key.as_deref(),
+                &target.data,
+            )
+            .await;
+        if decision == PolicyDecision::Deny {
+            return Err(OperationError::Forbidden {
+                map_name: target.map_name,
+            });
         }
-        return fut.await;
     }
-
-    let decision = evaluator
-        .evaluate(principal.as_ref(), action, &map_name, &data)
-        .await;
-    match decision {
-        PolicyDecision::Allow => fut.await,
-        PolicyDecision::Deny => Err(OperationError::Forbidden { map_name }),
-    }
+    fut.await
 }
 
 /// Reserved internal map-name prefixes. Maps under these belong to the server's
@@ -682,20 +706,6 @@ fn extract_op_data(op: &topgun_core::messages::base::ClientOp) -> rmpv::Value {
         .unwrap_or(rmpv::Value::Nil)
 }
 
-/// Extracts record data from write operations for record-level condition evaluation.
-///
-/// For `ClientOp` operations the record value is extracted via `extract_op_data`.
-/// For `OpBatch`, returns `Nil` — per-op evaluation handles individual ops directly.
-/// For all other operations `rmpv::Value::Nil` is returned because either no
-/// record data is present (reads, meta-ops) or extraction is not meaningful
-/// at the middleware level.
-fn extract_data(op: &Operation) -> rmpv::Value {
-    match op {
-        Operation::ClientOp { payload, .. } => extract_op_data(&payload.payload),
-        _ => rmpv::Value::Nil,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -773,6 +783,7 @@ mod tests {
             .upsert_policy(PermissionPolicy {
                 id: "deny-all".to_string(),
                 map_pattern: "*".to_string(),
+                key_pattern: None,
                 action: crate::service::policy::PermissionAction::All,
                 effect: PolicyEffect::Deny,
                 condition: None,
@@ -872,6 +883,7 @@ mod tests {
             .upsert_policy(PermissionPolicy {
                 id: "allow-read-all".to_string(),
                 map_pattern: "*".to_string(),
+                key_pattern: None,
                 action: PermissionAction::Read,
                 effect: PolicyEffect::Allow,
                 condition: None,
@@ -926,6 +938,7 @@ mod tests {
         PermissionPolicy {
             id: "owner-write".to_string(),
             map_pattern: "*".to_string(),
+            key_pattern: None,
             action: PermissionAction::Write,
             effect: PolicyEffect::Allow,
             condition: Some(
@@ -1185,6 +1198,7 @@ mod tests {
             .upsert_policy(PermissionPolicy {
                 id: "allow-read-all".to_string(),
                 map_pattern: "*".to_string(),
+                key_pattern: None,
                 action: PermissionAction::Read,
                 effect: PolicyEffect::Allow,
                 condition: None,
@@ -1214,6 +1228,7 @@ mod tests {
             .upsert_policy(PermissionPolicy {
                 id: "allow-read-all".to_string(),
                 map_pattern: "*".to_string(),
+                key_pattern: None,
                 action: PermissionAction::Read,
                 effect: PolicyEffect::Allow,
                 condition: None,
@@ -1506,6 +1521,7 @@ mod tests {
                 .upsert_policy(PermissionPolicy {
                     id: "allow-all".to_string(),
                     map_pattern: "*".to_string(),
+                    key_pattern: None,
                     action: PermissionAction::All,
                     effect: PolicyEffect::Allow,
                     condition: None,
@@ -2187,6 +2203,7 @@ mod tests {
                     .upsert_policy(PermissionPolicy {
                         id: id.to_string(),
                         map_pattern: pattern.to_string(),
+                        key_pattern: None,
                         action,
                         effect,
                         condition: None,
@@ -2593,6 +2610,7 @@ mod tests {
                     .upsert_policy(PermissionPolicy {
                         id: "allow-all".to_string(),
                         map_pattern: "*".to_string(),
+                        key_pattern: None,
                         action: PermissionAction::All,
                         effect: PolicyEffect::Allow,
                         condition: None,
@@ -3109,6 +3127,164 @@ mod tests {
                     .collect();
                 assert_admitted(&mut svc, &calls, as_principal(ops, Some(&who)), &who.id).await;
             }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn key_pattern_is_checked_against_every_key_an_operation_writes() {
+        use crate::service::policy::{PermissionPolicy, PolicyEffect};
+        use topgun_core::messages::{base, messaging, sync};
+
+        let store = Arc::new(InMemoryPolicyStore::new());
+        store
+            .upsert_policy(PermissionPolicy {
+                id: "presence".to_string(),
+                map_pattern: "t.*".to_string(),
+                key_pattern: Some("{auth.id}:*".to_string()),
+                action: PermissionAction::Write,
+                effect: PolicyEffect::Allow,
+                condition: None,
+            })
+            .await
+            .unwrap();
+        let mut svc =
+            AuthorizationLayer::new(Arc::new(PolicyEvaluator::new(store))).layer(AlwaysOkService);
+
+        let ctx = |service_name: &'static str| {
+            let mut ctx = OperationContext::new(1, service_name, make_timestamp(), 5000);
+            ctx.caller_origin = CallerOrigin::Client;
+            ctx.principal = Some(Principal {
+                id: "alice".to_string(),
+                roles: vec![],
+                tenant: None,
+            });
+            ctx
+        };
+        let client_op = |map: &str, key: &str, op_type: Option<&str>| base::ClientOp {
+            map_name: map.to_string(),
+            key: key.to_string(),
+            op_type: op_type.map(str::to_string),
+            ..Default::default()
+        };
+        let single = |key: &str, op_type: Option<&str>| Operation::ClientOp {
+            ctx: ctx(service_names::CRDT),
+            payload: sync::ClientOpMessage {
+                payload: client_op("t.presence", key, op_type),
+            },
+        };
+        let batch = |ops: &[(&str, &str)]| Operation::OpBatch {
+            ctx: ctx(service_names::CRDT),
+            payload: sync::OpBatchMessage {
+                payload: sync::OpBatchPayload {
+                    ops: ops
+                        .iter()
+                        .map(|(map, key)| client_op(map, key, None))
+                        .collect(),
+                    ..Default::default()
+                },
+            },
+        };
+        let push_diff = |keys: &[&str]| Operation::ORMapPushDiff {
+            ctx: ctx(service_names::SYNC),
+            payload: sync::ORMapPushDiff {
+                payload: sync::ORMapPushDiffPayload {
+                    map_name: "t.presence".to_string(),
+                    entries: keys
+                        .iter()
+                        .map(|k| sync::ORMapEntry {
+                            key: (*k).to_string(),
+                            records: vec![],
+                            tombstones: vec![],
+                        })
+                        .collect(),
+                },
+            },
+        };
+        let processor = messaging::EntryProcessor {
+            name: "p".to_string(),
+            code: "return value;".to_string(),
+            args: None,
+        };
+        let entry_process = |key: &str| Operation::EntryProcess {
+            ctx: ctx(service_names::PERSISTENCE),
+            payload: messaging::EntryProcessData {
+                request_id: "r".to_string(),
+                map_name: "t.presence".to_string(),
+                key: key.to_string(),
+                processor: processor.clone(),
+            },
+        };
+        let entry_process_batch = |keys: &[&str]| Operation::EntryProcessBatch {
+            ctx: ctx(service_names::PERSISTENCE),
+            payload: messaging::EntryProcessBatchData {
+                request_id: "r".to_string(),
+                map_name: "t.presence".to_string(),
+                keys: keys.iter().map(|k| (*k).to_string()).collect(),
+                processor: processor.clone(),
+            },
+        };
+        let counter_sync = Operation::CounterSync {
+            ctx: ctx(service_names::PERSISTENCE),
+            payload: messaging::CounterStatePayload {
+                name: "t.presence".to_string(),
+                state: messaging::PNCounterState {
+                    p: std::collections::HashMap::new(),
+                    n: std::collections::HashMap::new(),
+                },
+            },
+        };
+
+        let admitted = vec![
+            ("own key", single("alice:tab1", None)),
+            (
+                "own batch",
+                batch(&[("t.presence", "alice:1"), ("t.cursor", "alice:2")]),
+            ),
+            ("own push diff", push_diff(&["alice:1", "alice:2"])),
+            ("own entry process", entry_process("alice:1")),
+            (
+                "own entry batch",
+                entry_process_batch(&["alice:1", "alice:2"]),
+            ),
+        ];
+        for (label, op) in admitted {
+            let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+            assert!(result.is_ok(), "{label}: {result:?}");
+        }
+
+        // Each refusal names the map of the op, entry or key that was denied.
+        let refused = vec![
+            ("foreign key", single("bob:tab1", None)),
+            ("bare id", single("alice", None)),
+            ("deeper key", single("alice:a:b", None)),
+            ("foreign remove", single("bob:tab1", Some("REMOVE"))),
+            (
+                "batch, second op foreign",
+                batch(&[("t.presence", "alice:1"), ("t.cursor", "bob:1")]),
+            ),
+            (
+                "push diff, second entry foreign",
+                push_diff(&["alice:1", "bob:1"]),
+            ),
+            ("entry process", entry_process("bob:1")),
+            (
+                "entry batch, second key foreign",
+                entry_process_batch(&["alice:1", "bob:1"]),
+            ),
+            ("keyless counter", counter_sync),
+        ];
+        for (label, op) in refused {
+            let denied = if label.starts_with("batch") {
+                "t.cursor"
+            } else {
+                "t.presence"
+            };
+            let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+            assert!(
+                matches!(&result, Err(OperationError::Forbidden { map_name }) if map_name == denied),
+                "{label}: {result:?}"
+            );
         }
     }
 }

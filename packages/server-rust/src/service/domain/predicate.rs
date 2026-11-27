@@ -76,7 +76,11 @@ pub fn evaluate_predicate(predicate: &PredicateNode, ctx: &EvalContext) -> bool 
     evaluate_scoped(predicate, ctx, None)
 }
 
-/// Evaluates a permission-policy condition (`TG-AUTHZ-002`).
+/// Evaluates a permission-policy condition (`TG-AUTHZ-002`) with no resource:
+/// a comparison with any `resource.…` reference is unknown, a null check on
+/// `resource.map` or `resource.key` is definitive (both are null), and a null
+/// check on any other `resource` reference is unknown.
+/// [`evaluate_policy_condition_on`] is the entry the policy evaluator uses.
 ///
 /// An attribute `auth` or `auth.…` names the authenticated principal
 /// (`ctx.auth`) and is never read from the record, so no record content can
@@ -98,15 +102,56 @@ pub fn evaluate_policy_condition(
     ctx: &EvalContext,
     unknown: bool,
 ) -> bool {
-    evaluate_scoped(predicate, ctx, Some(unknown))
+    evaluate_scoped(
+        predicate,
+        ctx,
+        Some(PolicyScope {
+            unknown,
+            resource: None,
+        }),
+    )
 }
 
-/// `policy_unknown` is `None` in query scope and, in policy scope, the value an
-/// unresolved `auth` reference takes at this depth.
+/// Evaluates a permission-policy condition against the evaluated resource
+/// `{map, key?}` (`TG-AUTHZ-002`, `TG-AUTHZ-003`).
+///
+/// As [`evaluate_policy_condition`], and in addition `resource.map` and
+/// `resource.key` (attribute or `value_ref`) name the evaluated map and key,
+/// never a record field. A leaf is `unknown` when it names `resource.key` and
+/// the operation has no key, when it names `resource` or any `resource.…`
+/// field other than `map` and `key`, or when its `value_ref` names a namespace
+/// other than `auth`, `data` and `resource`. A null check on `resource.map` or
+/// `resource.key` is definitive (an absent key is null); one on any other
+/// `resource` reference is unknown.
+#[must_use]
+pub fn evaluate_policy_condition_on(
+    predicate: &PredicateNode,
+    ctx: &EvalContext,
+    unknown: bool,
+    resource: &rmpv::Value,
+) -> bool {
+    evaluate_scoped(
+        predicate,
+        ctx,
+        Some(PolicyScope {
+            unknown,
+            resource: Some(resource),
+        }),
+    )
+}
+
+/// Policy scope: the value an unknown leaf takes at this depth, and the
+/// evaluated resource. Query scope carries none, so it cannot see a resource.
+#[derive(Clone, Copy)]
+struct PolicyScope<'a> {
+    unknown: bool,
+    resource: Option<&'a rmpv::Value>,
+}
+
 fn evaluate_scoped(
     predicate: &PredicateNode,
     ctx: &EvalContext,
-    policy_unknown: Option<bool>,
+    scope: Option<PolicyScope>,
 ) -> bool {
     match predicate.op {
         // L2 combinators
@@ -114,13 +159,13 @@ fn evaluate_scoped(
             let children = predicate.children.as_deref().unwrap_or(&[]);
             children
                 .iter()
-                .all(|child| evaluate_scoped(child, ctx, policy_unknown))
+                .all(|child| evaluate_scoped(child, ctx, scope))
         }
         PredicateOp::Or => {
             let children = predicate.children.as_deref().unwrap_or(&[]);
             children
                 .iter()
-                .any(|child| evaluate_scoped(child, ctx, policy_unknown))
+                .any(|child| evaluate_scoped(child, ctx, scope))
         }
         PredicateOp::Not => {
             let children = predicate.children.as_deref().unwrap_or(&[]);
@@ -131,13 +176,17 @@ fn evaluate_scoped(
                 // The negation flips which outcome counts as safe, so an
                 // unknown child must take the opposite value for `Not` to
                 // return the caller's `unknown`.
-                !evaluate_scoped(&children[0], ctx, policy_unknown.map(|u| !u))
+                let flipped = scope.map(|s| PolicyScope {
+                    unknown: !s.unknown,
+                    ..s
+                });
+                !evaluate_scoped(&children[0], ctx, flipped)
             }
         }
         // Null-check operators (don't require a value field)
-        PredicateOp::IsNull | PredicateOp::IsNotNull => evaluate_null_check(predicate, ctx),
+        PredicateOp::IsNull | PredicateOp::IsNotNull => evaluate_null_check(predicate, ctx, scope),
         // L1 leaf operators (require attribute + value)
-        _ => evaluate_leaf(predicate, ctx, policy_unknown),
+        _ => evaluate_leaf(predicate, ctx, scope),
     }
 }
 
@@ -232,24 +281,29 @@ pub fn execute_query(entries: Vec<(String, rmpv::Value)>, query: &Query) -> Vec<
 /// Evaluates a leaf predicate (Eq, Neq, Gt, Gte, Lt, Lte, Like, Regex, In, Between).
 ///
 /// Attribute lookup uses dot-path traversal to support nested fields (e.g., `"address.city"`).
-/// Comparison value is resolved from `value_ref` (if set) or `value` field. If `value_ref`
-/// cannot be resolved (unknown namespace or missing field), the predicate returns `false`.
+/// Comparison value is resolved from `value_ref` (if set) or `value` field. In query scope a
+/// `value_ref` that cannot be resolved (unknown namespace or missing field) makes the
+/// predicate `false`.
 ///
-/// In policy scope (`policy_unknown` is `Some`) an `auth` attribute reads the
-/// principal, and an unresolved `auth` reference on either side yields the
-/// scope's unknown value (see `evaluate_policy_condition`).
-fn evaluate_leaf(
-    predicate: &PredicateNode,
-    ctx: &EvalContext,
-    policy_unknown: Option<bool>,
-) -> bool {
-    if let Some(unknown) = policy_unknown {
-        let unresolved =
-            |path: &str| auth_path(path).is_some_and(|rest| resolve_auth(ctx, &rest).is_none());
+/// In policy scope (`scope` is `Some`) an `auth` attribute reads the
+/// principal and a `resource.map` / `resource.key` reference reads the
+/// resource; a reference that is unknown there (see
+/// `evaluate_policy_condition_on`) yields the scope's unknown value before the
+/// record side is read.
+fn evaluate_leaf(predicate: &PredicateNode, ctx: &EvalContext, scope: Option<PolicyScope>) -> bool {
+    if let Some(scope) = scope {
+        let unresolved = |path: &str| {
+            auth_path(path).is_some_and(|rest| resolve_auth(ctx, &rest).is_none())
+                || resource_field(path)
+                    .is_some_and(|field| resolve_resource(scope.resource, field).is_none())
+        };
         if predicate.attribute.as_deref().is_some_and(unresolved)
-            || predicate.value_ref.as_deref().is_some_and(unresolved)
+            || predicate
+                .value_ref
+                .as_deref()
+                .is_some_and(|r| unresolved(r) || !is_policy_namespace(r))
         {
-            return unknown;
+            return scope.unknown;
         }
     }
 
@@ -257,7 +311,9 @@ fn evaluate_leaf(
         return false;
     };
 
-    let resolved = if let Some(rest) = policy_unknown.and_then(|_| auth_path(attribute)) {
+    let resolved = if let (Some(scope), Some(field)) = (scope, resource_field(attribute)) {
+        resolve_resource(scope.resource, field)
+    } else if let Some(rest) = auth_path(attribute).filter(|_| scope.is_some()) {
         resolve_auth(ctx, &rest)
     } else {
         let segments: Vec<&str> = attribute.split('.').collect();
@@ -280,7 +336,11 @@ fn evaluate_leaf(
 
     // Resolve comparison value: value_ref takes precedence over value
     let expected = if let Some(ref_str) = &predicate.value_ref {
-        let Some(resolved) = resolve_value_ref(ref_str, ctx) else {
+        let resolved = match (scope, resource_field(ref_str)) {
+            (Some(scope), Some(field)) => resolve_resource(scope.resource, field),
+            _ => resolve_value_ref(ref_str, ctx),
+        };
+        let Some(resolved) = resolved else {
             return false;
         };
         resolved
@@ -320,10 +380,29 @@ fn evaluate_leaf(
 /// Attribute lookup uses dot-path traversal to support nested fields (e.g., `"address.city"`).
 /// The `auth` namespace is resolved against `ctx.auth`: bare `"auth"` checks whether auth
 /// context itself is absent; `"auth.X"` checks whether a field in the auth map is absent.
-fn evaluate_null_check(predicate: &PredicateNode, ctx: &EvalContext) -> bool {
+/// In policy scope `resource.map` / `resource.key` are checked in the resource (an absent
+/// key is null), and any other `resource` reference is unknown.
+fn evaluate_null_check(
+    predicate: &PredicateNode,
+    ctx: &EvalContext,
+    scope: Option<PolicyScope>,
+) -> bool {
     let Some(attribute) = &predicate.attribute else {
         return false;
     };
+
+    if let (Some(scope), Some(field)) = (scope, resource_field(attribute)) {
+        if field == ResourceField::Other {
+            return scope.unknown;
+        }
+        let value = resolve_resource(scope.resource, field);
+        let is_null = value.as_ref().is_none_or(rmpv::Value::is_nil);
+        return match predicate.op {
+            PredicateOp::IsNull => is_null,
+            PredicateOp::IsNotNull => !is_null,
+            _ => false,
+        };
+    }
 
     if attribute == "auth" {
         // Bare "auth" — check whether the auth context itself is absent.
@@ -527,12 +606,52 @@ fn resolve_auth(ctx: &EvalContext, segments: &[&str]) -> Option<rmpv::Value> {
         .and_then(|principal| resolve_dot_path(principal, segments))
 }
 
+/// A field of the evaluated resource a policy condition can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResourceField {
+    Map,
+    Key,
+    /// Bare `resource` or any other field: reserved (`resource.to`) or not
+    /// defined, so unknown in policy scope and refused at upsert.
+    Other,
+}
+
+/// The resource field a reference names, or `None` when it is not a
+/// `resource` reference.
+pub(crate) fn resource_field(path: &str) -> Option<ResourceField> {
+    if path == "resource" {
+        return Some(ResourceField::Other);
+    }
+    path.strip_prefix("resource.").map(|field| match field {
+        "map" => ResourceField::Map,
+        "key" => ResourceField::Key,
+        _ => ResourceField::Other,
+    })
+}
+
+/// Whether a `value_ref` names a namespace a policy condition knows.
+pub(crate) fn is_policy_namespace(value_ref: &str) -> bool {
+    let namespace = value_ref.split('.').next().unwrap_or(value_ref);
+    matches!(namespace, "auth" | "data" | "resource")
+}
+
+/// Reads a field of the resource; `None` when it is absent or not defined.
+fn resolve_resource(resource: Option<&rmpv::Value>, field: ResourceField) -> Option<rmpv::Value> {
+    let name = match field {
+        ResourceField::Map => "map",
+        ResourceField::Key => "key",
+        ResourceField::Other => return None,
+    };
+    resolve_dot_path(resource?, &[name])
+}
+
 /// Resolves a variable reference string against an `EvalContext`.
 ///
 /// The `ref_str` format is `"namespace.path"` where:
 /// - `"auth"` namespace maps to `ctx.auth` (returns `None` if auth is `None`)
 /// - `"data"` namespace maps to `ctx.data`
-/// - Any other namespace returns `None` (unknown namespace = safe false)
+/// - Any other namespace returns `None`: in query scope the leaf is then
+///   `false`; in policy scope the leaf is unknown before this is reached
 ///
 /// After the namespace is resolved, the remaining path segments are traversed
 /// via `resolve_dot_path`. An empty path after the namespace returns the root value.
@@ -2378,7 +2497,8 @@ mod tests {
         rmpv::Value::String(v.into())
     }
 
-    /// The principal as `PolicyEvaluator::evaluate` builds it: `{id, roles}`.
+    /// The principal as `PolicyEvaluator::evaluate` builds it for a principal
+    /// without a tenant: `{id, roles}`.
     fn principal(id: &str, roles: &[&str]) -> rmpv::Value {
         make_map(vec![
             ("id", s(id)),
@@ -2541,6 +2661,174 @@ mod tests {
         assert!(!evaluate_predicate(
             &by_ref,
             &EvalContext::data_only(&owned)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn policy_resource_fields_read_the_resource_not_the_record() {
+        let on = |node: &PredicateNode,
+                  auth: Option<&rmpv::Value>,
+                  data: &rmpv::Value,
+                  resource: &rmpv::Value,
+                  unknown: bool| {
+            evaluate_policy_condition_on(node, &EvalContext { auth, data }, unknown, resource)
+        };
+        let resource = |map: &str, key: Option<&str>| {
+            let mut fields = vec![("map", s(map))];
+            if let Some(key) = key {
+                fields.push(("key", s(key)));
+            }
+            make_map(fields)
+        };
+        let empty = make_map(vec![]);
+        let alice = principal("alice", &[]);
+        let bob = principal("bob", &[]);
+
+        // resource.key == auth.id: the key, not a record field, decides.
+        let own_key = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("resource.key".to_string()),
+            value_ref: Some("auth.id".to_string()),
+            ..Default::default()
+        };
+        let forged_key = make_map(vec![("resource", make_map(vec![("key", s("bob"))]))]);
+        assert!(on(
+            &own_key,
+            Some(&alice),
+            &empty,
+            &resource("m", Some("alice")),
+            false
+        ));
+        assert!(!on(
+            &own_key,
+            Some(&bob),
+            &forged_key,
+            &resource("m", Some("alice")),
+            false
+        ));
+        // The same as a value_ref.
+        let own_key_ref = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("auth.id".to_string()),
+            value_ref: Some("resource.key".to_string()),
+            ..Default::default()
+        };
+        assert!(on(
+            &own_key_ref,
+            Some(&alice),
+            &empty,
+            &resource("m", Some("alice")),
+            false
+        ));
+        assert!(!on(
+            &own_key_ref,
+            Some(&bob),
+            &forged_key,
+            &resource("m", Some("alice")),
+            false
+        ));
+
+        // resource.map is the evaluated map, whatever the record says.
+        let map_m = leaf(PredicateOp::Eq, "resource.map", s("m"));
+        let forged_map = make_map(vec![("resource", make_map(vec![("map", s("m"))]))]);
+        assert!(!on(
+            &map_m,
+            Some(&alice),
+            &forged_map,
+            &resource("n", None),
+            false
+        ));
+        assert!(on(
+            &map_m,
+            Some(&alice),
+            &empty,
+            &resource("m", None),
+            false
+        ));
+
+        // Keyless: resource.key is unknown in both polarities, forged or not.
+        let key_k = leaf(PredicateOp::Eq, "resource.key", s("k"));
+        let key_not_k = leaf(PredicateOp::Neq, "resource.key", s("k"));
+        let forged_k = make_map(vec![("resource", make_map(vec![("key", s("k"))]))]);
+        assert!(!on(
+            &key_k,
+            Some(&alice),
+            &forged_k,
+            &resource("m", None),
+            false
+        ));
+        assert!(on(
+            &key_not_k,
+            Some(&alice),
+            &empty,
+            &resource("m", None),
+            true
+        ));
+
+        // Null checks read the resource: a keyless op has a null key.
+        let null = |op: PredicateOp, attribute: &str| PredicateNode {
+            op,
+            attribute: Some(attribute.to_string()),
+            ..Default::default()
+        };
+        let key_set = null(PredicateOp::IsNotNull, "resource.key");
+        let key_unset = null(PredicateOp::IsNull, "resource.key");
+        assert!(!on(
+            &key_set,
+            Some(&alice),
+            &forged_k,
+            &resource("m", None),
+            false
+        ));
+        assert!(on(
+            &key_unset,
+            Some(&alice),
+            &forged_k,
+            &resource("m", None),
+            false
+        ));
+        assert!(on(
+            &key_set,
+            Some(&alice),
+            &empty,
+            &resource("m", Some("k")),
+            false
+        ));
+        assert!(!on(
+            &key_unset,
+            Some(&alice),
+            &empty,
+            &resource("m", Some("k")),
+            true
+        ));
+        // Any other resource field is unknown, also in a null check.
+        let to_set = null(PredicateOp::IsNotNull, "resource.to");
+        let forged_to = make_map(vec![("resource", make_map(vec![("to", s("x"))]))]);
+        assert!(!on(
+            &to_set,
+            Some(&alice),
+            &forged_to,
+            &resource("m", None),
+            false
+        ));
+        assert!(on(
+            &to_set,
+            Some(&alice),
+            &empty,
+            &resource("m", None),
+            true
+        ));
+
+        // Query scope: resource.map is a record path.
+        assert!(evaluate_predicate(
+            &map_m,
+            &EvalContext::data_only(&forged_map)
+        ));
+        assert!(!evaluate_predicate(&map_m, &EvalContext::data_only(&empty)));
+        assert!(evaluate_predicate(
+            &key_set,
+            &EvalContext::data_only(&forged_k)
         ));
     }
 }
