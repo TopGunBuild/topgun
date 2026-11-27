@@ -756,6 +756,15 @@ async fn subscribers_e2e_self_test(observability: Arc<ObservabilityHandle>) -> b
             expiry_sweep_interval_ms: 0,
             expiry_sweep_rows_per_sec: 0,
         };
+        // Every value carries its batch's scheduled instant, a multiple of
+        // the aggregate batch interval (5 ops / 500 per s = 10 ms) after t0.
+        let held_t = measured.held_t();
+        assert!(!held_t.is_empty(), "the readers hold values");
+        assert!(
+            held_t.iter().all(|t| t % 10_000 == 0),
+            "t is the scheduled instant: {:?}",
+            held_t.iter().find(|t| *t % 10_000 != 0)
+        );
         let report = open_loop::report(&measured, &config, ctx).expect("report");
         server.drain().await;
         let s = report.subscribers.expect("the arm is on");

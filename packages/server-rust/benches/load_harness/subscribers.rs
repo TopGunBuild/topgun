@@ -267,6 +267,11 @@ pub enum ReaderFrame {
         change: ChangeEventType,
     },
     Resp(QueryRespPayload),
+    /// An `ERROR`, which names no query.
+    Error {
+        code: u32,
+        message: String,
+    },
     ServerEvent,
     Pong,
     Other,
@@ -283,6 +288,10 @@ impl ReaderFrame {
             },
             Ok(Message::QueryResp(m)) => Self::Resp(m.payload),
             Ok(Message::ServerEvent { .. }) => Self::ServerEvent,
+            Ok(Message::Error { payload }) => Self::Error {
+                code: payload.code,
+                message: payload.message,
+            },
             Ok(Message::Pong(_)) => Self::Pong,
             _ => Self::Other,
         }
@@ -326,6 +335,8 @@ pub struct ReaderState {
     pub anomalies: u64,
     pub latency: Histogram<u64>,
     pub disconnected: bool,
+    /// Query id → subscribes sent again whose answer is still expected.
+    pub resent: Arc<std::sync::Mutex<HashMap<String, u32>>>,
 }
 
 impl ReaderState {
@@ -342,6 +353,7 @@ impl ReaderState {
             anomalies: 0,
             latency: Histogram::new_with_bounds(1, HIST_MAX_US, 3).expect("valid bounds"),
             disconnected: false,
+            resent: Arc::default(),
         }
     }
 
@@ -388,16 +400,18 @@ impl ReaderState {
                     return false;
                 }
                 *view = resp.results.into_iter().map(|e| (e.key, e.value)).collect();
-                if self.snapshotted.insert(resp.query_id) {
-                    true
-                } else {
-                    // Before the writes start a second answer is the reply to
-                    // a subscribe sent again, not a re-snapshot.
-                    if timing.is_some() {
-                        self.resnapshots += 1;
-                    }
-                    false
+                if self.snapshotted.insert(resp.query_id.clone()) {
+                    return true;
                 }
+                // The answer to a subscribe sent again lands within seconds of
+                // it, before the window; it is not a re-snapshot.
+                let before_window = timing.is_none_or(|t| at < t.window_start);
+                let mut resent = self.resent.lock().expect("resent map");
+                match resent.get_mut(&resp.query_id) {
+                    Some(n) if *n > 0 && before_window => *n -= 1,
+                    _ => self.resnapshots += 1,
+                }
+                false
             }
             ReaderFrame::ServerEvent => {
                 if in_window {
@@ -406,7 +420,7 @@ impl ReaderState {
                 false
             }
             ReaderFrame::Pong => false,
-            ReaderFrame::Other => {
+            ReaderFrame::Error { .. } | ReaderFrame::Other => {
                 self.anomalies += 1;
                 false
             }
@@ -430,6 +444,8 @@ struct Shared {
     timing: OnceLock<Timing>,
     snapshots: AtomicU64,
     snapshot_notify: Notify,
+    /// Frames no reader could attribute, e.g. an `ERROR` shedding a subscribe.
+    anomalies: AtomicU64,
     /// Nanoseconds since `epoch` of the last non-`PONG` frame any reader got.
     last_frame_ns: AtomicU64,
     epoch: Instant,
@@ -498,6 +514,7 @@ impl ReaderSet {
         let shared = Arc::new(Shared {
             timing: OnceLock::new(),
             snapshots: AtomicU64::new(0),
+            anomalies: AtomicU64::new(0),
             snapshot_notify: Notify::new(),
             last_frame_ns: AtomicU64::new(0),
             epoch: Instant::now(),
@@ -507,6 +524,7 @@ impl ReaderSet {
         let mut subscriptions = 0;
         for (conn, slow, subs) in plan {
             let snapshotted = Arc::new(std::sync::Mutex::new(HashSet::new()));
+            let resent = Arc::new(std::sync::Mutex::new(HashMap::new()));
             readers.push(spawn_reader(
                 Arc::clone(&pool),
                 conn,
@@ -515,6 +533,7 @@ impl ReaderSet {
                 config.slow_reader_frame_us,
                 Arc::clone(&shared),
                 Arc::clone(&snapshotted),
+                Arc::clone(&resent),
             ));
             subscriptions += subs.len() as u64;
             subscribing.spawn(subscribe_reader(
@@ -523,6 +542,7 @@ impl ReaderSet {
                 subs,
                 config.clone(),
                 snapshotted,
+                resent,
                 Arc::clone(&shared),
             ));
         }
@@ -550,10 +570,12 @@ impl ReaderSet {
                 .is_err()
             {
                 bail!(
-                    "{} of {} subscription snapshots arrived, then none for {:?}",
+                    "{} of {} subscription snapshots arrived, then none for {:?} \
+                     ({} frames no reader could attribute)",
                     self.shared.snapshots.load(Ordering::Acquire),
                     self.subscriptions,
-                    SNAPSHOT_TIMEOUT
+                    SNAPSHOT_TIMEOUT,
+                    self.shared.anomalies.load(Ordering::Acquire)
                 );
             }
         }
@@ -615,6 +637,7 @@ async fn subscribe_reader(
     subs: Vec<u64>,
     config: SubscriberConfig,
     snapshotted: Arc<std::sync::Mutex<HashSet<String>>>,
+    resent: Arc<std::sync::Mutex<HashMap<String, u32>>>,
     shared: Arc<Shared>,
 ) -> Result<()> {
     let mut pending: VecDeque<u64> = subs.into();
@@ -638,6 +661,11 @@ async fn subscribe_reader(
         }
         for (i, sent) in &mut unanswered {
             if sent.elapsed() >= RESUBSCRIBE_AFTER {
+                *resent
+                    .lock()
+                    .expect("resent map")
+                    .entry(sub_id(*i))
+                    .or_default() += 1;
                 pool.send_to(conn, &query_sub(sub_id(*i), config.query(*i), false))
                     .await?;
                 *sent = Instant::now();
@@ -660,6 +688,7 @@ fn spawn_reader(
     slow_frame_us: u64,
     shared: Arc<Shared>,
     snapshotted: Arc<std::sync::Mutex<HashSet<String>>>,
+    resent: Arc<std::sync::Mutex<HashMap<String, u32>>>,
 ) -> Reader {
     let (tx, mut rx) = mpsc::unbounded_channel::<Inbound>();
     let backlog = Arc::new(AtomicI64::new(0));
@@ -696,6 +725,7 @@ fn spawn_reader(
         let backlog = Arc::clone(&backlog);
         tokio::spawn(async move {
             let mut state = ReaderState::new(slow, query_ids);
+            state.resent = resent;
             let mut reassembly = Reassembly::default();
             while let Some(inbound) = rx.recv().await {
                 let (at, bytes) = match inbound {
@@ -723,7 +753,12 @@ fn spawn_reader(
                         ReaderFrame::Resp(resp) => Some(resp.query_id.clone()),
                         _ => None,
                     };
-                    if state.apply(frame, at, shared.timing.get()) {
+                    let anomalies = state.anomalies;
+                    let first_snapshot = state.apply(frame, at, shared.timing.get());
+                    shared
+                        .anomalies
+                        .fetch_add(state.anomalies - anomalies, Ordering::AcqRel);
+                    if first_snapshot {
                         if let Some(id) = resp_id {
                             snapshotted.lock().expect("snapshot set").insert(id);
                         }
@@ -791,10 +826,14 @@ pub fn compare_view(
     ViewDiff { mismatches }
 }
 
-/// A fresh result the check cannot compare: the server clamped an unlimited
-/// query (`max_query_records`).
+/// A fresh result the check cannot compare: the server cut it short of what
+/// the query asks for (`max_query_records`), which `has_more` with fewer rows
+/// than the limit, or with no limit, tells.
 fn truncated(query: &Query, resp: &QueryRespPayload) -> bool {
-    query.limit.is_none() && resp.has_more == Some(true)
+    resp.has_more == Some(true)
+        && query
+            .limit
+            .is_none_or(|limit| resp.results.len() < limit as usize)
 }
 
 /// Runs one one-shot query per subscription index, `CHECK_IN_FLIGHT` at a
@@ -840,7 +879,14 @@ async fn fresh_results(
                 let Some(message) = reassembly.push(bytes)? else {
                     continue;
                 };
-                if let ReaderFrame::Resp(resp) = ReaderFrame::decode(&message) {
+                let resp = match ReaderFrame::decode(&message) {
+                    ReaderFrame::Resp(resp) => resp,
+                    ReaderFrame::Error { code, message } => {
+                        bail!("a fresh query was answered with ERROR {code}: {message}")
+                    }
+                    _ => continue,
+                };
+                {
                     let i: u64 = resp
                         .query_id
                         .strip_prefix("fresh-")
@@ -869,6 +915,8 @@ pub struct CheckOutcome {
     pub views_checked: u64,
     /// Views of connected readers whose fresh result was truncated.
     pub views_unchecked: u64,
+    /// Why the fresh queries could not be run, when they could not.
+    pub error: Option<String>,
     /// Views of readers the server disconnected: not compared, since a
     /// disconnected reader is behind by design; the disconnect itself is
     /// reported (and invalidates the run unless the reader is slow).
@@ -896,7 +944,15 @@ pub async fn check_views(
             }
         }
     }
-    let fresh = fresh_results(addr, jwt_secret, config, wanted).await?;
+    let fresh = match fresh_results(addr, jwt_secret, config, wanted.clone()).await {
+        Ok(fresh) => fresh,
+        Err(e) => {
+            // The run's own figures stand; only its views go unchecked.
+            outcome.views_unchecked = wanted.len() as u64;
+            outcome.error = Some(format!("{e:#}"));
+            return Ok(outcome);
+        }
+    };
     for state in states {
         if state.disconnected {
             continue;
@@ -981,6 +1037,12 @@ pub struct SubscriberMeasurement {
     /// Whether the server under test is built from the sources of
     /// [`BEFORE_SERVER`]; `None` when `git` could not tell.
     pub before_server: Option<bool>,
+    /// The writers' wake lag p99.9 over warm-up and window, in µs, and its
+    /// bound (`--max-wake-lag-ms`): a harness that kept its own schedule
+    /// through warm-up, when the before server drops readers, also kept
+    /// reading them.
+    pub harness_wake_lag_p999_us: u64,
+    pub max_wake_lag_ms: u64,
 }
 
 /// The server sources the "before" figures are taken on. That server drops a
@@ -993,24 +1055,38 @@ pub const BEFORE_SERVER: &str = "e040f7ee";
 /// itself, so its disconnect is the harness's, not the server's.
 const BEFORE_CHANNEL_CAPACITY: i64 = 256;
 
-/// Whether `packages/server-rust/src` of the working tree equals
-/// [`BEFORE_SERVER`]'s; `None` when `git` cannot answer.
+/// Whether the server sources this binary was compiled from equal
+/// [`BEFORE_SERVER`]'s: `src` of the crate's own directory (not the process's
+/// working directory, which may be another checkout) has no change against
+/// it and no untracked file. `None` when `git` cannot answer.
 pub fn server_src_is_before() -> Option<bool> {
-    let status = std::process::Command::new("git")
-        .args([
-            "diff",
-            "--quiet",
-            BEFORE_SERVER,
-            "--",
-            ":/packages/server-rust/src",
-        ])
-        .status()
-        .ok()?;
-    match status.code() {
-        Some(0) => Some(true),
-        Some(1) => Some(false),
-        _ => None,
+    src_matches(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        BEFORE_SERVER,
+    )
+}
+
+/// Whether `dir/src` equals `base`'s, untracked files included.
+fn src_matches(dir: &std::path::Path, base: &str) -> Option<bool> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .ok()
+    };
+    let diff = git(&["diff", "--quiet", base, "--", "src"])?;
+    let same = match diff.status.code() {
+        Some(0) => true,
+        Some(1) => false,
+        _ => return None,
+    };
+    let status = git(&["status", "--porcelain", "--", "src"])?;
+    if !status.status.success() {
+        return None;
     }
+    Some(same && status.stdout.is_empty())
 }
 
 /// The "before" server's recorded outcome of an arm whose readers it
@@ -1033,6 +1109,7 @@ pub fn before_outcome(
     slow_reader_disconnects: u64,
     metrics: &ServerMetrics,
     max_unread_frames: i64,
+    harness_ok: bool,
 ) -> Option<BeforeOutcome> {
     let total = disconnects + slow_reader_disconnects;
     let losses = metrics.live_event_loss_disconnects_total.as_ref()?;
@@ -1048,7 +1125,8 @@ pub fn before_outcome(
         && total > 0
         && other == 0
         && channel_full >= total
-        && max_unread_frames < BEFORE_CHANNEL_CAPACITY;
+        && max_unread_frames < BEFORE_CHANNEL_CAPACITY
+        && harness_ok;
     holds.then_some(BeforeOutcome {
         kind: "readers_disconnected",
         disconnects,
@@ -1103,6 +1181,12 @@ pub struct SubscribersBlock {
     pub views_disconnected: u64,
     pub server_metrics: ServerMetrics,
     pub before_server: Option<bool>,
+    /// The writers' wake lag p99.9 over warm-up and window, and whether it is
+    /// within `--max-wake-lag-ms` (else `generator_saturated`).
+    pub harness_wake_lag_warmup_window_p999_ms: f64,
+    pub harness_wake_lag_ok: bool,
+    /// Why the fresh-query check could not run; its views count as unchecked.
+    pub check_error: Option<String>,
     /// Set when the "before" server dropped readers (see [`before_outcome`]);
     /// those disconnects then do not invalidate the run.
     pub before_outcome: Option<BeforeOutcome>,
@@ -1136,12 +1220,15 @@ impl SubscribersBlock {
             disconnects += u64::from(s.disconnected);
         }
         let secs = duration_secs as f64;
+        let harness_wake_lag_ok =
+            m.harness_wake_lag_p999_us <= m.max_wake_lag_ms.saturating_mul(1000);
         let before_outcome = before_outcome(
             m.before_server,
             disconnects,
             slow.disconnects,
             &m.metrics,
             m.max_unread_frames,
+            harness_wake_lag_ok,
         );
         Self {
             config: config.clone(),
@@ -1172,6 +1259,9 @@ impl SubscribersBlock {
             views_disconnected: m.check.views_disconnected,
             server_metrics: m.metrics.clone(),
             before_server: m.before_server,
+            harness_wake_lag_warmup_window_p999_ms: m.harness_wake_lag_p999_us as f64 / 1000.0,
+            harness_wake_lag_ok,
+            check_error: m.check.error.clone(),
             before_outcome,
         }
     }
@@ -1179,6 +1269,9 @@ impl SubscribersBlock {
     /// The validity reasons this block adds.
     pub fn invalid_reasons(&self) -> Vec<&'static str> {
         let mut reasons = Vec::new();
+        if !self.harness_wake_lag_ok {
+            reasons.push("generator_saturated");
+        }
         if self.max_unread_frames > READER_BEHIND_FRAMES {
             reasons.push("reader_behind");
         }
@@ -1301,16 +1394,19 @@ pub fn resp_replaces_and_chunks_reassemble() {
     let now = Instant::now();
     let timing = Timing {
         t0: now,
-        window_start: now,
-        window_end: now,
+        window_start: now + Duration::from_secs(1),
+        window_end: now + Duration::from_secs(3),
     };
+    state.resent.lock().expect("resent").insert("q".into(), 1);
     assert!(state.apply(ReaderFrame::decode(&resp(&["a", "b"])), now, None));
-    assert!(!state.apply(ReaderFrame::decode(&resp(&["a"])), now, None));
+    let after_t0 = now + Duration::from_millis(500);
+    assert!(!state.apply(ReaderFrame::decode(&resp(&["a"])), after_t0, Some(&timing)));
     assert_eq!(
         state.resnapshots, 0,
-        "a second answer before t0 is no re-snapshot"
+        "the answer to a resent subscribe, after t0, is no re-snapshot"
     );
-    assert!(!state.apply(ReaderFrame::decode(&resp(&["c"])), now, Some(&timing)));
+    let in_window = now + Duration::from_secs(2);
+    assert!(!state.apply(ReaderFrame::decode(&resp(&["c"])), in_window, Some(&timing)));
     assert_eq!(state.resnapshots, 1);
     assert_eq!(state.views["q"].keys().collect::<Vec<_>>(), vec!["c"]);
 
@@ -1354,7 +1450,7 @@ pub fn before_outcome_only_on_the_before_server() {
         ])),
         ..ServerMetrics::default()
     };
-    let block = |before: Option<bool>, m: ServerMetrics, backlog: i64| {
+    let block_lag = |before: Option<bool>, m: ServerMetrics, backlog: i64, lag_us: u64| {
         let mut states = vec![ReaderState::new(false, ["q".to_string()])];
         states[0].disconnected = true;
         let measurement = SubscriberMeasurement {
@@ -1367,9 +1463,12 @@ pub fn before_outcome_only_on_the_before_server() {
             check: CheckOutcome::default(),
             metrics: m,
             before_server: before,
+            harness_wake_lag_p999_us: lag_us,
+            max_wake_lag_ms: 5,
         };
         SubscribersBlock::of(&measurement, &SubscriberConfig::default(), 1)
     };
+    let block = |before, m, backlog| block_lag(before, m, backlog, 5_000);
     let before = block(Some(true), metrics(1.0, 0.0), 127);
     assert_eq!(
         before.before_outcome.as_ref().map(|o| o.kind),
@@ -1381,16 +1480,106 @@ pub fn before_outcome_only_on_the_before_server() {
         block(None, metrics(1.0, 0.0), 127),
         block(Some(true), metrics(1.0, 1.0), 127),
         block(Some(true), metrics(1.0, 0.0), 256),
+        block(Some(true), metrics(0.0, 0.0), 127),
+        block(Some(true), ServerMetrics::default(), 127),
+        block_lag(Some(true), metrics(1.0, 0.0), 127, 5_001),
     ] {
         assert!(after.before_outcome.is_none());
         assert!(after.invalid_reasons().contains(&"disconnect"));
     }
+    let starved = block_lag(Some(true), metrics(1.0, 0.0), 127, 5_001);
+    assert!(starved.invalid_reasons().contains(&"generator_saturated"));
 }
 
-pub const SELF_TESTS: [(&str, fn()); 4] = [
+/// The before-server check reads the tree the binary was compiled from,
+/// whatever the working directory, and an untracked file under `src` or a
+/// change against the base makes it false.
+pub fn before_server_is_the_compiled_tree() {
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(elsewhere.path()).expect("cd");
+    let answered = server_src_is_before();
+    std::env::set_current_dir(cwd).expect("cd back");
+    assert!(
+        answered.is_some(),
+        "git answers from the crate's own directory"
+    );
+
+    let repo = tempfile::tempdir().expect("tempdir");
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args([
+                "-c",
+                "user.name=h",
+                "-c",
+                "user.email=h@h",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&["init", "-q"]);
+    std::fs::create_dir(repo.path().join("src")).expect("mkdir");
+    std::fs::write(repo.path().join("src/a.rs"), "a").expect("write");
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    assert_eq!(src_matches(repo.path(), &base), Some(true));
+    std::fs::write(repo.path().join("src/b.rs"), "b").expect("write");
+    assert_eq!(
+        src_matches(repo.path(), &base),
+        Some(false),
+        "untracked file"
+    );
+    std::fs::remove_file(repo.path().join("src/b.rs")).expect("rm");
+    std::fs::write(repo.path().join("src/a.rs"), "changed").expect("write");
+    assert_eq!(src_matches(repo.path(), &base), Some(false), "changed file");
+}
+
+/// A fresh result is uncomparable only when the server cut it short of the
+/// query: `has_more` with no limit or with fewer rows than the limit.
+pub fn truncated_only_short_of_the_query() {
+    let rows = |n: usize, more: bool| QueryRespPayload {
+        results: (0..n)
+            .map(|i| topgun_core::messages::QueryResultEntry {
+                key: i.to_string(),
+                value: rmpv::Value::Nil,
+            })
+            .collect(),
+        has_more: more.then_some(true),
+        ..Default::default()
+    };
+    let limited = |limit| Query {
+        limit: Some(limit),
+        ..Query::default()
+    };
+    assert!(truncated(&Query::default(), &rows(3, true)));
+    assert!(!truncated(&Query::default(), &rows(3, false)));
+    assert!(!truncated(&limited(3), &rows(3, true)), "a full page");
+    assert!(
+        truncated(&limited(5), &rows(3, true)),
+        "clamped below the limit"
+    );
+}
+
+pub const SELF_TESTS: [(&str, fn()); 6] = [
     (
         "before_outcome_only_on_the_before_server",
         before_outcome_only_on_the_before_server,
+    ),
+    (
+        "before_server_is_the_compiled_tree",
+        before_server_is_the_compiled_tree,
+    ),
+    (
+        "truncated_only_short_of_the_query",
+        truncated_only_short_of_the_query,
     ),
     (
         "delivery_latency_is_from_the_scheduled_instant",

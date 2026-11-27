@@ -20,7 +20,7 @@
     clippy::cast_sign_loss
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -369,6 +369,8 @@ struct ConnTally {
     ack: Histogram<u64>,
     service: Histogram<u64>,
     wake_lag: Histogram<u64>,
+    /// Wake lag over warm-up and window, which the subscriber arm reads.
+    wake_lag_run: Histogram<u64>,
     behind_schedule_sends: u64,
     max_behind_us: u64,
     /// Connections given up on (0 or 1 per connection before the merge).
@@ -386,6 +388,7 @@ impl ConnTally {
             ack: new_histogram(),
             service: new_histogram(),
             wake_lag: new_histogram(),
+            wake_lag_run: new_histogram(),
             behind_schedule_sends: 0,
             max_behind_us: 0,
             abandoned: 0,
@@ -404,6 +407,9 @@ impl ConnTally {
             .expect("same histogram bounds");
         self.wake_lag
             .add(&other.wake_lag)
+            .expect("same histogram bounds");
+        self.wake_lag_run
+            .add(&other.wake_lag_run)
             .expect("same histogram bounds");
         self.abandoned += other.abandoned;
         self.behind_schedule_sends += other.behind_schedule_sends;
@@ -633,10 +639,10 @@ async fn drive_connection(
         let reached_early = now < scheduled;
         if reached_early {
             tokio::time::sleep_until(scheduled).await;
+            let lag = micros(Instant::now() - scheduled).max(1);
+            tally.wake_lag_run.saturating_record(lag);
             if in_window {
-                tally
-                    .wake_lag
-                    .saturating_record(micros(Instant::now() - scheduled).max(1));
+                tally.wake_lag.saturating_record(lag);
             }
         } else if in_window {
             let behind = micros(now - scheduled);
@@ -841,7 +847,11 @@ pub async fn run(
     drop(pool);
     let subscribers = match readers {
         Some(readers) => {
-            Some(measure_subscribers(readers, server, jwt_secret, &config.subs, render).await?)
+            let mut m =
+                measure_subscribers(readers, server, jwt_secret, &config.subs, render).await?;
+            m.harness_wake_lag_p999_us = tally.wake_lag_run.value_at_quantile(0.999);
+            m.max_wake_lag_ms = config.max_wake_lag_ms;
+            Some(m)
         }
         None => None,
     };
@@ -856,6 +866,19 @@ pub async fn run(
         store_failure,
         subscribers,
     })
+}
+
+impl Measurement {
+    /// The `t` of every value the readers hold at the end of the run.
+    pub fn held_t(&self) -> Vec<u64> {
+        self.subscribers
+            .iter()
+            .flat_map(|s| &s.states)
+            .flat_map(|state| state.views.values())
+            .flat_map(HashMap::values)
+            .filter_map(subscribers::value_t)
+            .collect()
+    }
 }
 
 /// Drains the readers to quiesce, stops them, checks their views and reads
@@ -884,6 +907,8 @@ async fn measure_subscribers(
         check,
         metrics: ServerMetrics::scrape(&render()),
         before_server: subscribers::server_src_is_before(),
+        harness_wake_lag_p999_us: 0,
+        max_wake_lag_ms: 0,
     })
 }
 
@@ -1084,7 +1109,11 @@ fn validity(
         reasons.push("debug_build");
     }
     if let Some(block) = subscribers {
-        reasons.extend(block.invalid_reasons());
+        for reason in block.invalid_reasons() {
+            if !reasons.contains(&reason) {
+                reasons.push(reason);
+            }
+        }
     }
     Validity {
         valid: reasons.is_empty(),
