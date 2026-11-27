@@ -114,9 +114,10 @@ pub const AUTH_FAIL_TOKEN_EXPIRED: u32 = 4401;
 /// principal than the connection's (`TG-AUTH-001`).
 pub const AUTH_FAIL_PRINCIPAL_CHANGED: u32 = 4409;
 
-/// Why a client token was refused. `expired` is set only for a token whose
-/// signature and claims are otherwise sound and whose `exp` has passed, so the
-/// client can tell "fetch a fresh token" apart from every other refusal.
+/// Why a client token was refused. `expired` is set when the token's signature
+/// verified and its `exp` plus the leeway has passed; once it has expired its
+/// other claims are not checked. It lets the client tell "fetch a fresh token"
+/// apart from every other refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TokenRefusal {
     pub(crate) reason: String,
@@ -260,8 +261,8 @@ impl AuthHandler {
     ///
     /// On failure, sends exactly one `AUTH_FAIL` via the outbound channel and
     /// returns `Err(AuthError)`. The caller should close the connection. A token
-    /// refused only because it has expired gets `code` 4401, so a client whose
-    /// clock is behind the server's learns to fetch a fresh token.
+    /// whose signature verified and whose `exp` has passed gets `code` 4401, so
+    /// a client whose clock is behind the server's learns to fetch a fresh token.
     ///
     /// The `leeway` parameter specifies the clock skew tolerance in seconds.
     /// Tokens expired within this window are still accepted to handle clock
@@ -336,7 +337,8 @@ impl AuthHandler {
     /// # Errors
     ///
     /// As [`verify_token`](Self::verify_token); `expired` is set when the
-    /// signature verified and `exp` plus `leeway` has passed.
+    /// signature verified and `exp` plus `leeway` has passed; `nbf`, `iss`,
+    /// `aud` and the server's own claim checks do not run on such a token.
     pub(crate) async fn verify_token_with_expiry(
         &self,
         token: &str,

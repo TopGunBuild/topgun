@@ -618,18 +618,6 @@ async fn handle_socket(mut socket: ServerSocket, state: AppState, chunked: bool)
                             if let Some(at) = deadline {
                                 expiry.as_mut().reset(at);
                             }
-                            // The bound device is named; a presented device
-                            // token is ignored, so a refresh never re-binds.
-                            let meta = handle.metadata.read().await;
-                            let ack = TopGunMessage::AuthAck(AuthAckData {
-                                user_id: meta.principal.as_ref().map(|p| p.id.clone()),
-                                device_id: meta.device_id.clone(),
-                                ..Default::default()
-                            });
-                            drop(meta);
-                            if let Ok(bytes) = rmp_serde::to_vec_named(&ack) {
-                                let _ = handle.tx.send(OutboundMessage::Binary(bytes)).await;
-                            }
                         }
                         Err((code, reason)) => {
                             warn!(reason = %reason, "in-band token refresh refused; closing {:?}", conn_id);
@@ -760,6 +748,8 @@ fn expiry_deadline(
 /// (`TG-AUTH-001`): the new token's `exp` when it verified and names the same
 /// tenant, id, kind and set of roles; otherwise the `AUTH_FAIL` code (4401
 /// expired, 4409 another principal, none for any other refusal) and the reason.
+/// An accepted refresh is acknowledged here with `AUTH_ACK`, naming the bound
+/// device; a presented device token is ignored, so a refresh never re-binds.
 /// The stored principal is never replaced: a refresh extends a connection, it
 /// never changes who it is.
 async fn refresh_principal(
@@ -783,6 +773,17 @@ async fn refresh_principal(
             && roles(current) == roles(&presented)
     });
     if same {
+        let ack = TopGunMessage::AuthAck(AuthAckData {
+            user_id: Some(presented.id),
+            device_id: meta.device_id.clone(),
+            ..Default::default()
+        });
+        if let Ok(bytes) = rmp_serde::to_vec_named(&ack) {
+            // Never waits: a read loop parked on a client that does not read
+            // would not poll the expiry, and the connection would outlive the
+            // token. A full channel drops the ack.
+            let _ = handle.try_send(OutboundMessage::Binary(bytes));
+        }
         Ok(exp)
     } else {
         Err((
@@ -5064,6 +5065,31 @@ mod tests {
             refresh_principal(&handle, Err(expired)).await,
             Err((Some(AUTH_FAIL_TOKEN_EXPIRED), "ExpiredSignature".into()))
         );
+        // An accepted refresh never waits on a full outbound channel: the read
+        // loop that runs it must keep polling the connection's expiry.
+        let (full, _full_rx) = state.registry.register(
+            ConnectionKind::Client,
+            &ConnectionConfig {
+                outbound_channel_capacity: 1,
+                ..ConnectionConfig::default()
+            },
+        );
+        full.metadata.write().await.principal = Some(stored.clone());
+        assert!(
+            full.try_send(OutboundMessage::Close(None)),
+            "fills the channel"
+        );
+        let refreshed = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            refresh_principal(&full, Ok((stored.clone(), 7))),
+        )
+        .await;
+        assert_eq!(
+            refreshed,
+            Ok(Ok(7)),
+            "the refresh did not wait on the full channel"
+        );
+
         let invalid = TokenRefusal::from("InvalidSignature".to_string());
         assert_eq!(
             refresh_principal(&handle, Err(invalid)).await,

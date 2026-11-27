@@ -47,21 +47,25 @@ interface Session {
   client: TestClient;
   /** When the socket closed (ms since the epoch); `undefined` while open. */
   closedAt: () => number | undefined;
+  /** The close code the client saw: 1000 for the server's Close frame, 1006 for none. */
+  closeCode: () => number | undefined;
 }
 
 /** Opens a raw socket; with `tok`, authenticates with it and waits for the ack. */
 async function open(port: number, tok?: string): Promise<Session> {
   const client = await createRustTestClient(port, { autoAuth: false });
   let closedAt: number | undefined;
-  client.ws.on('close', () => {
+  let closeCode: number | undefined;
+  client.ws.on('close', (code: number) => {
     closedAt = Date.now();
+    closeCode = code;
   });
   if (tok !== undefined) {
     await client.waitForMessage('AUTH_REQUIRED', 8000);
     client.send({ type: 'AUTH', token: tok });
     await client.waitForMessage('AUTH_ACK', 8000);
   }
-  return { client, closedAt: () => closedAt };
+  return { client, closedAt: () => closedAt, closeCode: () => closeCode };
 }
 
 /** Frames of `type` the client received from index `from` on. */
@@ -137,6 +141,7 @@ describe('Integration: sockets close at token expiry (TG-AUTH-001)', () => {
     // The server closes right behind the AUTH_FAIL, not when its teardown
     // gives up on the writer two seconds later.
     expect(session.closedAt()! - failAt).toBeLessThan(1000);
+    expect(session.closeCode()).toBe(1000);
     const fail = received(session.client, 'AUTH_FAIL');
     expect(fail).toHaveLength(1);
     expect(fail[0].code).toBe(4401);
@@ -185,6 +190,7 @@ describe('Integration: sockets close at token expiry (TG-AUTH-001)', () => {
     const fail = received(client, 'AUTH_FAIL');
     expect(fail).toHaveLength(1);
     expect(fail[0].code).toBe(4409);
+    expect(session.closeCode()).toBe(1000);
   });
 
   test('an AUTH on a NO_AUTH server is ignored', async () => {
