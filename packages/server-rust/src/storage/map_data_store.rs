@@ -536,27 +536,6 @@ pub struct AppliedWatermarks {
     pub max_version: u64,
 }
 
-/// Writes of a [`FlushCommit`] the store refused on their own (a map name it
-/// does not take, a map it cannot give an id), by index in `writes`. Nothing
-/// of such a commit is written.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordRefused {
-    /// Indices into [`FlushCommit::writes`].
-    pub indices: Vec<usize>,
-}
-
-impl std::fmt::Display for RecordRefused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "the store refused the writes at {:?} of the commit; nothing was written",
-            self.indices
-        )
-    }
-}
-
-impl std::error::Error for RecordRefused {}
-
 /// Longest part of a refused map name or key an admission error repeats, in
 /// bytes: the error reaches log lines and a client's error text, so it never
 /// carries a whole name or key an attacker chose the size of.
@@ -638,13 +617,23 @@ impl std::fmt::Display for StoreInconsistent {
 
 impl std::error::Error for StoreInconsistent {}
 
-/// The largest charge one plain record may have, its key included, in bytes
-/// (`TG-WB-012`). The charge is the structural estimate the byte bound uses;
-/// an LWW value encodes below twice it and an OR slot below three times it,
-/// so an admitted record encodes below 192 MiB — far below RocksDB's
-/// per-entry limit and the WAL frame's `u32` length — while one client
-/// message (at most 2 MiB) is charged below 5 MiB and is never refused.
+/// The largest charge one record may have, its key included, in bytes
+/// (`TG-WB-012`): a plain write is checked against it before it changes
+/// anything, and an in-place OR write against its key's whole slot. The charge
+/// is the structural estimate the byte bound uses; an LWW value encodes below
+/// twice it and an OR slot below three times it, so an admitted record encodes
+/// below 192 MiB — far below RocksDB's per-entry limit and the WAL frame's
+/// `u32` length. One client message (at most 2 MiB) is charged at most about
+/// 28 MiB, the estimate counting 14 bytes for an integer of one wire byte, so
+/// no single client value reaches it.
 pub const MAX_RECORD_CHARGE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The counter of writes refused at one of the write-behind's bounds, labelled
+/// `bound` (`keys`, `bytes`, `record`). Declared here, beside the per-record
+/// cap, because both the write-behind and the record store's in-place guard
+/// count under `bound="record"`, and the record store cannot name the
+/// write-behind's private module (`TG-WB-012`: one series for the record cap).
+pub(crate) const CAPACITY_REFUSALS_COUNTER: &str = "topgun_write_behind_capacity_refusals_total";
 
 /// A write refused at admission because one record would exceed
 /// [`MAX_RECORD_CHARGE_BYTES`] (`TG-WB-012`).
@@ -855,6 +844,17 @@ pub trait MapDataStore: Send + Sync {
     /// must then leave the key unchanged.
     fn admit_in_place(&self, _map: &str, _key: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    /// The per-record cap this store enforces, in charge bytes (`TG-WB-012`).
+    ///
+    /// One value for both checks: a plain write is refused against it at
+    /// admission, and the record store's in-place guard refuses an in-place
+    /// write that would grow a slot past it. Reading it from the store, not a
+    /// constant, keeps the two checks on the same value when a store sizes
+    /// its cap for tests.
+    fn max_record_charge(&self) -> u64 {
+        MAX_RECORD_CHARGE_BYTES
     }
 
     /// Whether a put to `map` can be stored: the map holds an id, or one is

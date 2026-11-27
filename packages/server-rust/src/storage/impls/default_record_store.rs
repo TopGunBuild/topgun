@@ -11,16 +11,155 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 
 use crate::storage::engine::{
-    FetchResult, IterationCursor, PutIfAbsentOutcome, SlotInit, StorageEngine,
+    FetchResult, IterationCursor, PutIfAbsentOutcome, SlotInit, StorageEngine, UpdateInPlaceOutcome,
 };
 use crate::storage::key_writer::KeyWriteToken;
-use crate::storage::map_data_store::{Loaded, MapDataStore, WriteSource};
+use crate::storage::map_data_store::{
+    Loaded, MapDataStore, RecordTooLarge, WriteSource, CAPACITY_REFUSALS_COUNTER,
+};
 use crate::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
 use crate::storage::record::{Record, RecordMetadata, RecordValue};
 use crate::storage::record_store::{
     CallerProvenance, MutateOutcome, RecordStore, KEY_WRITER_MISMATCH_CONTEXT,
 };
 use crate::storage::wal::OrDelta;
+
+/// How far below the cap `cap` a slot is cloned before an in-place mutation.
+///
+/// It must exceed the most charge one message can add to a slot: the charge
+/// estimator counts up to 14 bytes for one wire byte (an integer), so a
+/// message at the 2 MiB transport cap adds up to about 28 MiB. Half the cap
+/// (32 MiB at the production cap) covers it, and stays above zero at a
+/// test-sized cap.
+fn in_place_margin(cap: u64) -> u64 {
+    cap / 2
+}
+
+/// What the in-place record-size guard saw while the mutation ran.
+#[derive(Default)]
+struct InPlaceGuard {
+    /// The cap the write is held to; `None` when it owes none.
+    cap: Option<u64>,
+    /// The slot was near enough to the cap to be cloned before the mutation.
+    cloned: bool,
+    /// The cost the refused mutation would have given the slot.
+    refused: Option<u64>,
+}
+
+impl InPlaceGuard {
+    /// Runs `mutate` on `value` under the guard's cap, if any; a refused
+    /// mutation leaves `value` and the census as they were and reports no
+    /// change and no witness.
+    fn mutate(
+        &mut self,
+        value: &mut RecordValue,
+        cost_of: &dyn Fn(&RecordValue) -> u64,
+        mutate: &mut dyn FnMut(&mut RecordValue) -> MutateOutcome,
+    ) -> MutateOutcome {
+        let Some(cap) = self.cap else {
+            return mutate(value);
+        };
+        let before = cost_of(value);
+        // Only a slot this close to the cap can be pushed past it by one
+        // message, so only such a slot pays for the clone and the walk after.
+        let restore = (before > cap - in_place_margin(cap)).then(|| value.clone());
+        self.cloned = restore.is_some();
+        let mutated = mutate(value);
+        if let Some(restore) = restore {
+            let after = cost_of(value);
+            if mutated.changed && after > cap && after > before {
+                // Refused before it changes anything: the census charges the
+                // closure made go back before the slot does (`TG-OR-008`).
+                undo_census(value, &restore);
+                *value = restore;
+                self.refused = Some(after);
+                return MutateOutcome {
+                    changed: false,
+                    witness: None,
+                };
+            }
+        }
+        mutated
+    }
+}
+
+impl InPlaceGuard {
+    /// After the engine call: refuses a mutation the guard undid, counted in
+    /// the one series of the record cap (`TG-WB-012`). A slot grown past the
+    /// cap from below the clone threshold had no clone to restore: it is
+    /// admitted and said once; the cost read is the engine's own re-cost of
+    /// this write, so this walks nothing.
+    fn settle(&self, map: &str, key: &str, outcome: &UpdateInPlaceOutcome) -> anyhow::Result<()> {
+        let Some(cap) = self.cap else {
+            return Ok(());
+        };
+        if let Some(charge) = self.refused {
+            metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "record").increment(1);
+            return Err(RecordTooLarge::new(map, key, charge, cap).into());
+        }
+        if let UpdateInPlaceOutcome::Written { cell, .. } = outcome {
+            let cost = cell.lock().metadata.cost;
+            if !self.cloned && cost > cap {
+                tracing::error!(
+                    map,
+                    key,
+                    cost,
+                    cap,
+                    "record size: an in-place write grew {map}/{key} past the per-record cap by more than one message; admitted"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The OR census of one slot value: live entries, their tag bytes, and the
+/// tombstone tag bytes. A legacy tombstone-only value counts its tags as
+/// tombstones, as the merge's normalization keeps them; any other value counts
+/// nothing.
+fn or_census(value: &RecordValue) -> (u64, u64, u64) {
+    let tag_bytes = |tags: &[String]| tags.iter().map(|t| t.len() as u64).sum::<u64>();
+    match value {
+        RecordValue::OrMap {
+            records,
+            tombstones,
+        } => (
+            records.len() as u64,
+            records.iter().map(|e| e.tag.len() as u64).sum(),
+            tag_bytes(tombstones),
+        ),
+        RecordValue::OrTombstones { tags } => (0, 0, tag_bytes(tags)),
+        RecordValue::Lww { .. } => (0, 0, 0),
+    }
+}
+
+/// Takes back the census charges a refused mutation made: the mutate closures
+/// charge the process-wide live census and tombstone bytes as they change the
+/// slot, so putting the old value back must move the counters back by the
+/// same difference. One call per changed figure, in the direction it needs,
+/// so no difference is ever taken below zero.
+fn undo_census(mutated: &RecordValue, restored: &RecordValue) {
+    use crate::storage::record::{
+        add_live_census, add_tombstone_bytes, sub_live_census, sub_tombstone_bytes,
+    };
+    let (live_now, tags_now, tombs_now) = or_census(mutated);
+    let (live_was, tags_was, tombs_was) = or_census(restored);
+    if live_now > live_was {
+        sub_live_census(live_now - live_was, 0);
+    } else if live_was > live_now {
+        add_live_census(live_was - live_now, 0);
+    }
+    if tags_now > tags_was {
+        sub_live_census(0, tags_now - tags_was);
+    } else if tags_was > tags_now {
+        add_live_census(0, tags_was - tags_now);
+    }
+    if tombs_now > tombs_was {
+        sub_tombstone_bytes(tombs_now - tombs_was);
+    } else if tombs_was > tombs_now {
+        add_tombstone_bytes(tombs_was - tombs_now);
+    }
+}
 
 /// Returns the current wall-clock time as milliseconds since the Unix epoch.
 ///
@@ -100,6 +239,31 @@ impl DefaultRecordStore {
             self.data_store.admit_in_place(&self.name, key)?;
         }
         Ok(())
+    }
+
+    /// The record-size guard of an in-place write of `provenance`, holding the
+    /// per-record cap the write is held to, or none when it owes none
+    /// (`TG-WB-012`).
+    ///
+    /// Every [`CallerProvenance`] is named, so a new one cannot slip past:
+    /// - `Client`, `CrdtMerge` write through to the data store, which buffers
+    ///   and stores them: capped;
+    /// - `Backup`, `Replication`, `Load` do not write through here, are never
+    ///   buffered and never reach the store: not capped by this guard;
+    /// - a null store keeps nothing, so nothing it holds can reach an engine's
+    ///   size limit: not capped.
+    fn in_place_guard(&self, provenance: CallerProvenance) -> InPlaceGuard {
+        let writes_through = match provenance {
+            CallerProvenance::Client | CallerProvenance::CrdtMerge => true,
+            CallerProvenance::Backup | CallerProvenance::Replication | CallerProvenance::Load => {
+                false
+            }
+        };
+        InPlaceGuard {
+            cap: (writes_through && !self.data_store.is_null())
+                .then(|| self.data_store.max_record_charge()),
+            ..InPlaceGuard::default()
+        }
     }
 
     /// Refuses a writer token that was acquired for another `(map, key)` than
@@ -417,6 +581,19 @@ impl RecordStore for DefaultRecordStore {
     /// write-behind bound (keys or bytes) it is refused before anything is
     /// loaded or mutated, so a refused op leaves the cell, the engine and the
     /// WAL as they were (`TG-WB-011`).
+    ///
+    /// Such a write is also held to the per-record cap `C` the data store
+    /// reports (`TG-WB-012`), decided around the mutation because an OR
+    /// write's growth is known only once it has run. A slot costing more than
+    /// `C − C/2` before the mutation is cloned; if the mutation then grows it,
+    /// and grows it past `C`, the census charges are taken back, the clone is
+    /// put back, nothing is written through, and the write is refused with
+    /// [`RecordTooLarge`], counted under `bound="record"`. A mutation that does
+    /// not grow the slot is never refused, so an oversized slot can always
+    /// shrink. The key and byte bounds come first, so a write they refuse is
+    /// never counted here. A slot grown past `C` from below the clone
+    /// threshold — more than one message's growth — is admitted and logged at
+    /// `ERROR`.
     async fn update_in_place(
         &self,
         writer: &KeyWriteToken<'_>,
@@ -425,8 +602,6 @@ impl RecordStore for DefaultRecordStore {
         provenance: CallerProvenance,
         mutate: &mut (dyn for<'a> FnMut(&'a mut RecordValue) -> MutateOutcome + Send),
     ) -> anyhow::Result<bool> {
-        use crate::storage::engine::UpdateInPlaceOutcome;
-
         self.refuse_foreign_token("update_in_place", writer, key)?;
         self.admit_in_place_write(key, provenance)?;
         let now = now_millis();
@@ -443,8 +618,9 @@ impl RecordStore for DefaultRecordStore {
         // and the closure's borrow of `witness` ends with the last engine call,
         // which makes the captured delta readable at the write-through below.
         let mut witness: Option<OrDelta> = None;
+        let mut guard = self.in_place_guard(provenance);
         let mut engine_mutate = |value: &mut RecordValue| {
-            let mutated = mutate(value);
+            let mutated = guard.mutate(value, &cost_of, &mut *mutate);
             witness = mutated.witness;
             mutated.changed
         };
@@ -521,6 +697,7 @@ impl RecordStore for DefaultRecordStore {
             }
         };
 
+        guard.settle(&self.name, key, &outcome)?;
         let (cell, inserted) = match outcome {
             UpdateInPlaceOutcome::Absent
             | UpdateInPlaceOutcome::Unchanged
@@ -3197,6 +3374,324 @@ mod tests {
     // TG-KEY-002: a writer token acquired for another key is refused by every
     // mutator, and nothing is written.
     // -----------------------------------------------------------------------
+
+    mod record_cap {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+
+        use super::materialize::{or_value, store_over, MAP};
+        use super::*;
+        use crate::service::domain::crdt::{apply_or_delta, normalize_to_or_map};
+        use crate::storage::datastores::{WalBootstrap, WriteBehindConfig, WriteBehindDataStore};
+        use crate::storage::map_data_store::RecordTooLarge;
+        use crate::storage::record::{
+            add_live_census, add_tombstone_bytes, live_census, sub_live_census, tombstone_bytes,
+            OrMapEntry,
+        };
+        use crate::storage::record_store::MutateOutcome;
+        use crate::storage::tombstone_gauge::{with_gauge_sink, IsolatedGauge};
+        use crate::storage::wal::{OrDelta, Wal, WalEntry};
+
+        const RECORD: &str = "topgun_write_behind_capacity_refusals_total{bound=\"record\"}";
+        const OVERGROWN: &str = "past the per-record cap by more than one message; admitted";
+
+        /// The value of the series `name` in a Prometheus rendering, if present.
+        fn rendered(rendered: &str, name: &str) -> Option<f64> {
+            rendered
+                .lines()
+                .find(|line| line.starts_with(name))
+                .and_then(|line| line.rsplit(' ').next())
+                .and_then(|v| v.parse().ok())
+        }
+
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        /// A WAL that only counts its frames, so a test sees whether a write
+        /// reached the log, as a snapshot or as a witnessed delta.
+        #[derive(Default)]
+        struct CountingWal {
+            frames: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl Wal for CountingWal {
+            async fn append(&self, _partition: u32, _entry: &WalEntry) -> anyhow::Result<()> {
+                self.frames.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+
+            async fn mark_applied(&self, _partition: u32, _sequence: u64) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn unapplied(&self, _partition: u32) -> anyhow::Result<Vec<WalEntry>> {
+                Ok(Vec::new())
+            }
+
+            fn durable_applied(&self, _partition: u32) -> Option<u64> {
+                Some(0)
+            }
+        }
+
+        fn entry(tag: &str, value_len: usize) -> OrMapEntry {
+            OrMapEntry {
+                value: Value::String("v".repeat(value_len)),
+                tag: tag.to_string(),
+                timestamp: Timestamp {
+                    millis: 1_000_000,
+                    counter: 0,
+                    node_id: "node-1".to_string(),
+                },
+                ttl_ms: None,
+            }
+        }
+
+        /// An `OR_ADD` through the record store, charging the census as the
+        /// CRDT service's closure does.
+        async fn add(
+            store: &DefaultRecordStore,
+            key: &str,
+            new_entry: OrMapEntry,
+        ) -> anyhow::Result<bool> {
+            let mut new_entry = Some(new_entry);
+            let mut merge_add = |value: &mut RecordValue| {
+                normalize_to_or_map(value);
+                let entry = new_entry.take().expect("runs once");
+                let witness = OrDelta::Add {
+                    entry: entry.clone(),
+                };
+                let tag_len = entry.tag.len() as u64;
+                let outcome = apply_or_delta(OrDelta::Add { entry }, value);
+                if outcome.added {
+                    add_live_census(1, tag_len);
+                    let removed = outcome.live_removed as u64;
+                    sub_live_census(removed, removed * tag_len);
+                }
+                MutateOutcome {
+                    changed: true,
+                    witness: outcome.added.then_some(witness),
+                }
+            };
+            store
+                .update_in_place(
+                    &KeyWriteToken::for_test(store.name(), key),
+                    key,
+                    Some(or_value(&[], &[])),
+                    CallerProvenance::CrdtMerge,
+                    &mut merge_add,
+                )
+                .await
+        }
+
+        /// An `OR_REMOVE` through the record store, charging the census as the
+        /// CRDT service's closure does.
+        async fn remove(store: &DefaultRecordStore, key: &str, tag: &str) -> anyhow::Result<bool> {
+            let mut apply_remove = |value: &mut RecordValue| {
+                normalize_to_or_map(value);
+                let outcome = apply_or_delta(
+                    OrDelta::Remove {
+                        tag: tag.to_string(),
+                    },
+                    value,
+                );
+                let removed = outcome.live_removed as u64;
+                sub_live_census(removed, removed * tag.len() as u64);
+                if outcome.new_tombstone {
+                    add_tombstone_bytes(tag.len() as u64);
+                }
+                MutateOutcome {
+                    changed: true,
+                    witness: None,
+                }
+            };
+            store
+                .update_in_place(
+                    &KeyWriteToken::for_test(store.name(), key),
+                    key,
+                    Some(or_value(&[], &[])),
+                    CallerProvenance::CrdtMerge,
+                    &mut apply_remove,
+                )
+                .await
+        }
+
+        /// The slot of `key` and its cost metadata, as the engine holds them.
+        fn slot(store: &DefaultRecordStore, key: &str) -> (RecordValue, u64) {
+            let cell = store.storage().test_slot(key).expect("resident slot");
+            let record = cell.lock();
+            (record.value.clone(), record.metadata.cost)
+        }
+
+        fn refused_at_the_cap(result: anyhow::Result<bool>) -> bool {
+            result
+                .expect_err("refused")
+                .downcast_ref::<RecordTooLarge>()
+                .is_some()
+        }
+
+        // `TG-WB-012`, the in-place half: with a test cap `C` (so the clone
+        // margin is `C / 2`), a mutation that would grow a slot past `C` from
+        // above `C − C/2` is refused and leaves the slot, its cost, the buffer,
+        // the WAL and the census as they were; one that stays at or below `C` is
+        // admitted; one that grows a slot past `C` from below the margin is
+        // admitted and logged; a remove of a held tag shrinks an oversized slot.
+        #[test]
+        fn an_or_write_that_would_grow_a_slot_past_the_cap_is_refused_before_it_changes_anything() {
+            const CAP: u64 = 4_000;
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let log = Captured::default();
+            let writer = log.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .with_max_level(tracing::Level::ERROR)
+                .finish();
+            let records = || {
+                rendered(&handle.render(), RECORD)
+                    .unwrap_or(0.0)
+                    .to_string()
+            };
+            metrics::with_local_recorder(&recorder, || {
+                crate::storage::wal::with_thread_subscriber(subscriber, || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("runtime");
+                    let sink = Arc::new(IsolatedGauge::new());
+                    runtime.block_on(with_gauge_sink(sink, async {
+                        let wal = Arc::new(CountingWal::default());
+                        let write_behind = WriteBehindDataStore::new_with_wal(
+                            Arc::new(NullDataStore) as Arc<dyn MapDataStore>,
+                            WriteBehindConfig {
+                                flush_interval_ms: 600_000,
+                                max_record_charge: CAP,
+                                ..WriteBehindConfig::default()
+                            },
+                            Some(WalBootstrap {
+                                wal: Arc::clone(&wal) as Arc<dyn Wal>,
+                                sequence_start: 1,
+                            }),
+                        );
+                        let frames = || wal.frames.load(Ordering::SeqCst);
+                        let store = store_over(
+                            Arc::clone(&write_behind) as Arc<dyn MapDataStore>,
+                            Box::new(HashMapStorage::new()),
+                            Vec::new(),
+                        );
+
+                        // Seed above the margin, below the cap.
+                        assert!(add(&store, "k", entry("s1", 2_500)).await.expect("seed"));
+                        let (seeded, seeded_cost) = slot(&store, "k");
+                        assert!(seeded_cost > CAP - CAP / 2 && seeded_cost < CAP);
+                        assert_eq!(frames(), 1, "an admitted add is framed");
+                        let pending = write_behind.pending_operation_count();
+                        let census = (live_census(), tombstone_bytes());
+
+                        // An add past the cap.
+                        assert!(refused_at_the_cap(
+                            add(&store, "k", entry("x1", 1_500)).await
+                        ));
+                        assert_eq!(records(), "1", "counted under bound=record");
+                        assert_eq!(slot(&store, "k"), (seeded.clone(), seeded_cost));
+                        assert_eq!(write_behind.pending_operation_count(), pending);
+                        assert_eq!(frames(), 1, "a refused write frames nothing");
+                        assert_eq!((live_census(), tombstone_bytes()), census);
+
+                        // A remove of a tag the slot does not hold grows it.
+                        let absent = "t".repeat(1_500);
+                        assert!(refused_at_the_cap(remove(&store, "k", &absent).await));
+                        assert_eq!(records(), "2");
+                        assert_eq!(slot(&store, "k"), (seeded, seeded_cost));
+                        assert_eq!(write_behind.pending_operation_count(), pending);
+                        assert_eq!(frames(), 1, "a refused write frames nothing");
+                        assert_eq!((live_census(), tombstone_bytes()), census);
+
+                        // An add that keeps the slot at or below the cap.
+                        assert!(add(&store, "k", entry("a2", 1_000))
+                            .await
+                            .expect("admitted"));
+                        assert!(slot(&store, "k").1 <= CAP);
+                        assert_eq!(records(), "2");
+
+                        // From below the margin past the cap in one mutation.
+                        assert!(add(&store, "big", entry("b0", 100))
+                            .await
+                            .expect("admitted"));
+                        assert!(add(&store, "big", entry("b1", 5_000))
+                            .await
+                            .expect("admitted"));
+                        let (_, grown) = slot(&store, "big");
+                        assert!(grown > CAP);
+                        // A remove of a held tag shrinks the oversized slot, even
+                        // when it stays above the cap.
+                        assert!(remove(&store, "big", "b0").await.expect("admitted"));
+                        let shrunk = slot(&store, "big").1;
+                        assert!(shrunk < grown && shrunk > CAP);
+                        assert_eq!(records(), "2");
+                    }));
+                });
+            });
+            let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+            assert_eq!(log.matches(OVERGROWN).count(), 1, "{log}");
+            assert!(log.contains(&format!("{MAP}/big")), "{log}");
+        }
+
+        // `M = C / 2` exceeds the most charge one message can add to an OR
+        // slot: the worst value per wire byte is a positive fixint, charged
+        // 14 bytes by the estimator for one byte on the wire. An entry whose
+        // value fills the largest ingress message with them stays below the
+        // margin at the production cap. Changing the message caps or the
+        // estimator fails this test.
+        #[test]
+        fn one_message_grows_an_or_slot_by_less_than_the_clone_margin() {
+            use crate::network::config::{ConnectionConfig, NetworkConfig};
+            use crate::storage::map_data_store::MAX_RECORD_CHARGE_BYTES;
+            use crate::storage::record::estimated_cost;
+
+            let message_cap = ConnectionConfig::default()
+                .ws_max_message_size
+                .max(NetworkConfig::default().max_body_size);
+            let wire = rmpv::Value::Array(vec![rmpv::Value::from(1_u8); message_cap]);
+            let mut encoded = Vec::new();
+            rmpv::encode::write_value(&mut encoded, &wire).expect("encode");
+            assert!(
+                encoded.len() >= message_cap,
+                "the value alone fills the message"
+            );
+            let value = crate::service::domain::crdt::rmpv_to_value(&wire);
+            let one_entry = RecordValue::OrMap {
+                records: vec![OrMapEntry {
+                    value,
+                    tag: String::new(),
+                    timestamp: Timestamp {
+                        millis: 0,
+                        counter: 0,
+                        node_id: String::new(),
+                    },
+                    ttl_ms: None,
+                }],
+                tombstones: Vec::new(),
+            };
+            let growth = estimated_cost(&one_entry);
+            assert!(
+                growth < in_place_margin(MAX_RECORD_CHARGE_BYTES),
+                "one message adds {growth} bytes of charge, the margin is {}",
+                in_place_margin(MAX_RECORD_CHARGE_BYTES)
+            );
+        }
+    }
 
     mod foreign_token {
         use std::sync::Mutex;

@@ -406,6 +406,14 @@ pub(super) fn lww(text: &str, millis: u64) -> RecordValue {
     }
 }
 
+/// A value whose encoding is larger than the 8 MiB a write-behind pass may
+/// carry. Taken first, it is admitted whole and the pass is cut before the
+/// next entry, so a test can store one write in a pass of its own while a
+/// later one stays queued.
+pub(super) fn past_the_pass_byte_limit(millis: u64) -> RecordValue {
+    lww(&"x".repeat(8 * 1024 * 1024), millis)
+}
+
 /// A `Store` frame of `MAP`, as write-behind appends one.
 pub(super) fn store_frame(key: &str, value: &RecordValue, sequence: u64) -> WalEntry {
     let timestamp = match value {
@@ -1167,9 +1175,9 @@ async fn a03_a_partition_whose_watermark_moved_by_coalescing_gets_its_row() {
 
     // Two writes of one key in R: the second retires the first, whose
     // sequence resolves at once, so R's watermark moves without R storing.
-    wb.add(MAP, &r_keys[1], &lww("r1", 2), 0).await.unwrap();
+    wb.add(MAP, &r_keys[1], &lww("r1", 2), 1).await.unwrap();
     let retired = wb.test_max_assigned_wal_sequence(R);
-    wb.add(MAP, &r_keys[1], &lww("r1-again", 3), 0)
+    wb.add(MAP, &r_keys[1], &lww("r1-again", 3), 1)
         .await
         .unwrap();
     let survivor = wb.test_max_assigned_wal_sequence(R);
@@ -1180,11 +1188,16 @@ async fn a03_a_partition_whose_watermark_moved_by_coalescing_gets_its_row() {
     );
     assert!(survivor > retired && retired > r_row);
 
-    wb.add(MAP, &q_keys[1], &lww("q1", 4), 0).await.unwrap();
+    wb.add(MAP, &q_keys[1], &past_the_pass_byte_limit(4), 0)
+        .await
+        .unwrap();
     let q_seq = wb.test_max_assigned_wal_sequence(Q);
 
     // R's survivor is refused, so the only commit that can carry R's row is
-    // the commit of Q's entry.
+    // the commit of Q's entry. A refused commit refuses its whole pass, so
+    // Q's entry is stored only in a pass without R's survivor: its earlier
+    // store time puts it first, and its value, past the pass byte limit, cuts
+    // that pass before the survivor.
     node.engine
         .fail_writes_holding(Some(record_key(&node.engine, &r_keys[1])));
     let q_record = record_key(&node.engine, &q_keys[1]);
@@ -1318,14 +1331,19 @@ async fn a05_the_engine_watermark_never_decreases_across_commits_and_restarts() 
     let node = Node::open(&root, WalFsyncPolicy::PerOp).expect("store-mode reopen");
     node.recover().await.expect("recovery");
     let wb = node.write_behind(wb_config()).await;
-    wb.add(MAP, &p_keys[3], &lww("p-again", 10), 0)
+    wb.add(MAP, &p_keys[3], &lww("p-again", 10), 1)
         .await
         .unwrap();
     assert!(wb.test_max_assigned_wal_sequence(P) > p_stored);
     // The registry row exists since the first run, so the record key is known.
     node.engine
         .fail_writes_holding(Some(record_key(&node.engine, &p_keys[3])));
-    wb.add(MAP, &q_key, &lww("q", 11), 0).await.unwrap();
+    // A refused commit refuses its whole pass, so Q's entry is committed only
+    // in a pass without P's: its earlier store time puts it first, and its
+    // value, past the pass byte limit, cuts that pass before P's entry.
+    wb.add(MAP, &q_key, &past_the_pass_byte_limit(11), 0)
+        .await
+        .unwrap();
     let q_seq = wb.test_max_assigned_wal_sequence(Q);
     let q_record = record_key(&node.engine, &q_key);
     let mark = node.engine.mark();
@@ -4529,11 +4547,14 @@ async fn v10_a_write_after_a_restart_takes_a_sequence_above_every_stored_version
     let (j, k) = (keys[0].as_str(), keys[1].as_str());
 
     // A flush stores K at its sequence b while J's earlier sequence a stays
-    // unresolved: the watermark holds below a, so K's version row is kept.
+    // unresolved: the watermark holds below a, so K's version row is kept. A
+    // refused commit refuses its whole pass, so K is stored only in a pass
+    // without J: its earlier store time puts it first, and its value, past
+    // the pass byte limit, cuts that pass before J.
     let node = ArmedNode::open(&root);
     node.store.refuse_keys(&[j]);
     let wb = node.write_behind(wb_config_short_stop()).await;
-    wb.add(MAP, j, &lww("j", 1), 1).await.expect("add J");
+    wb.add(MAP, j, &lww("j", 1), 3).await.expect("add J");
     let segments = stream_files(&root.wal_dir());
     let segment = segments
         .values()
@@ -4541,7 +4562,8 @@ async fn v10_a_write_after_a_restart_takes_a_sequence_above_every_stored_version
         .expect("a stream segment")
         .clone();
     let cut_len = std::fs::metadata(&segment).expect("segment").len();
-    wb.add(MAP, k, &lww("v1", 2), 2).await.expect("add K");
+    let v1 = past_the_pass_byte_limit(2);
+    wb.add(MAP, k, &v1, 2).await.expect("add K");
     let frames = node.unapplied().await;
     assert_eq!(frames.len(), 2, "J's and K's frames: {frames:?}");
     let (a, b) = (frames[0], frames[1]);
@@ -4590,7 +4612,8 @@ async fn v10_a_write_after_a_restart_takes_a_sequence_above_every_stored_version
     // The crash before the new write is flushed: the store keeps refusing it.
     let _ = wb.hard_flush().await;
     drop(wb);
-    assert_eq!(node.value(k).await, Some(lww("v1", 2)), "not flushed");
+    // Compared, not printed: the value is larger than a pass may carry.
+    assert!(node.value(k).await == Some(v1), "not flushed");
     node.close().await;
 
     // Restart: the new write is recovered.

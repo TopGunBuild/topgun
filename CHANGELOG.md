@@ -28,6 +28,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   data.auth.<f>`) now reads the principal and has to be re-authored; a record field `auth` used
   only on the right (`data.x == data.auth.y`) still reads the record. Query predicates are
   unchanged.
+- **Changed (server): one refused flush commit starts a store-wide hold (`TG-WB-009`).** When the
+  store refuses a flush commit, every write of the pass goes back to the buffer unchanged, and the
+  server does not call the store for 0.5 s, then for 1, 2, 4 and 5 s while it keeps refusing; each
+  retry is an ordinary pass over everything due, and the first accepted pass ends the hold. Before,
+  a refused commit was split in halves down to single writes, a write refused on its own got a
+  retry schedule of its own, a hold began only after both halves were refused, and a one-write
+  probe ended it. Those mechanisms existed for a record the store refuses on its own, which is now
+  refused before it is acknowledged or stops the node. A store that refuses every commit is called
+  15 times in the first minute. The shutdown drain keeps a hold in force when the stop begins and
+  retries a refused commit on the same lengths until `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`,
+  instead of splitting it, so a stop while the store refuses can take up to that long; what it did
+  not store stays in the write-ahead log and replays at the next start.
+- **Changed (server): the retry warning and the refusal age follow the hold.**
+  `Write-behind entries are being retried: the store refuses them` is logged when a hold begins and
+  then at most once per 30 s, with the fields `buffered`, `oldest_refusal_age_s`, `hold`,
+  `refused_passes` and `error`, which now carries the whole error chain of the last refused
+  commit; the fields `retrying`, `attempts`, `map` and `key` are gone.
+  `topgun_write_behind_oldest_refusal_age_seconds` is now the time since the first refused commit
+  of the hold in force, 0 when no hold is in force; before, it read 0 when a hold began.
+- **Changed (server): an in-place OR-Map write is held to the per-record limit (`TG-WB-012`).** An
+  OR add, an OR remove, a tombstone prune or a client's push diff that would grow its key's slot
+  past 64 MiB of estimated size is refused before it changes anything, with the temporary
+  `record too large: …` error, counted in
+  `topgun_write_behind_capacity_refusals_total{bound="record"}`; so is an OR remove of a tag the
+  key does not hold, which adds a tombstone. A write that does not grow the slot is always
+  admitted, so a key at the limit shrinks as its entries are removed.
+- **Changed (server): a buffered value that cannot be encoded stops the node (`TG-WB-010`).** The
+  flush logs the broken-store line with `cause="inconsistent"` and `site="encode"`, and the node
+  exits 72, instead of retrying the value for ever; at the next start recovery keeps that write's
+  frame unapplied with `cause="prepare"`. No such value is known.
+- **Removed (server): `topgun_write_behind_retrying_entries`.** No write is refused on its own any
+  more; watch `topgun_write_behind_store_hold` and
+  `topgun_write_behind_oldest_refusal_age_seconds`.
 - **Fixed (server): an acknowledged write whose stored value exceeded 4 GiB is no longer lost
   silently.** RocksDB drops a batch entry above its per-entry limit with a status its Rust binding
   does not return, and wrote the rest of the batch — the key's version row and the advanced
@@ -44,8 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this store`); and one plain record is limited to 64 MiB of estimated size, its key included
   (`record too large: …`, counted in `topgun_write_behind_capacity_refusals_total{bound="record"}`).
   Each is the temporary `internal` error (500); before, such a write was acknowledged and then
-  retried by the flush for the life of the process. An in-place OR-Map write is not checked against
-  the record limit yet.
+  retried by the flush for the life of the process.
 - **Changed (server): the store's own consistency failures stop the node.** A flush commit that
   meets a record version row or a registry row that does not decode, a version or applied-watermark
   regression, or a malformed next-map-id row was retried for ever; it now stops the node with exit
@@ -543,9 +575,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     wait. Check the disk; a restart replays the WAL.
   - **Collection and sealing.** The active segment is sealed once it holds 8 MiB or 30 to 35 s
     after its first frame; a sealed segment is deleted once every partition with a frame in it is
-    covered by the watermark the store holds. One write the store refuses for ever therefore
+    covered by the watermark the store holds. While the store refuses, one unstored write therefore
     keeps every segment that holds a later frame of its partition, which under ongoing writes is
-    the WAL of the whole node, not only of its partition, until it is stored (TODO-824); watch
+    the WAL of the whole node, not only of its partition, until it is stored; watch
     `topgun_wal_retained_bytes_total`.
   - **Metrics.** `topgun_wal_retained_bytes{partition}` is removed; `topgun_wal_retained_bytes_total`
     stays. New: `topgun_wal_fsyncs_total`, `topgun_wal_fsync_seconds`, `topgun_wal_group_frames`,
@@ -788,38 +820,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one store call per write (on RocksDB not synced at once; see "When the store is synced"
   above). A pass that one of those limits cut is followed by the next one
   without waiting for `TOPGUN_WRITEBEHIND_FLUSH_INTERVAL_MS`, so a full buffer is emptied in a
-  few passes. What changes for whoever runs the server:
-  - **One refused record no longer holds up the others.** When the storage refuses a commit of
-    several writes, the server splits it in two halves and commits each, again and again, until
-    the refused record is alone; every other write of the pass is stored in that pass, at a
-    cost of at most 20 extra commits for a pass of 1000. The refused record is retried on its
-    own schedule, as before. One place in every pass is kept for the oldest refused write
-    that is due, so a refused write is not starved by a stream of new ones.
-  - **A new rule for leaving the storage alone.** The server now takes the storage for down
-    when both halves of a refused commit are refused — after three calls — instead of after
-    three refusals in a row. The hold lengths and the probe are unchanged. The first refused
-    commit after the storage came back is split down to single writes and starts no hold, so
-    two refused records do not keep the storage on hold. Two records the storage refuses in
-    one pass still start one hold even though the storage is up; no such record is known for
-    the embedded store.
+  few passes. What a refused commit does is in the store-wide hold entry at the top of this
+  section. What changes for whoever runs the server:
   - **Shutdown stores the buffer in the same batches.** The drain at a stop runs passes of the
     same limits, each a store commit that the clean stop then syncs, so a clean stop leaves
     nothing to replay; after a failed stop the drained writes' frames stay in the WAL and replay
-    at the next start. A refused
-    drain commit is split down to single writes for as long as
-    `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS` allows; a write it could not store is applied from
-    the write-ahead log at the next start, and one refused write no longer makes the drain give
-    up on the rest. A commit that has started is not cut, so a stop can overrun the timeout by
-    one commit.
+    at the next start. A commit that has started is not cut, so a stop can overrun
+    `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS` by one commit.
   - **`TOPGUN_WRITEBEHIND_BATCH_SIZE` stays without effect.** The pass limits are fixed; the
     setting is still accepted so that a configuration that sets it still starts.
   - **New metrics:** `topgun_write_behind_flush_passes_total` (passes that committed at least
     one write) and `topgun_write_behind_flush_pass_entries_total` (writes those passes
     stored), both from the first scrape, and the histogram
     `topgun_write_behind_flush_pass_seconds` (how long one committed pass took).
-    `topgun_write_behind_flush_refusals_total` now counts refused commits, each half of a
-    split commit on its own, and `topgun_write_behind_retrying_entries` counts writes refused
-    on their own, so it reads 0 when a hold begins.
+    `topgun_write_behind_flush_refusals_total` now counts refused commits.
 
 - **Changed (on-disk format):** each write-ahead-log partition's applied watermark — how far the
   WAL has been stored — lives in the data directory, committed in the same batch as the records
@@ -975,10 +989,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write the storage refuses stays in the server's write buffer, stays readable, and is
   retried until the storage takes it — a storage outage of any length loses no
   acknowledged write on a running server. The retry limit is gone (it was never a
-  setting). The server spaces its retries, so a storage that is down is called at most
-  20 times in the first minute, and less often after that, however many writes are
-  waiting, and after the storage returns
-  every waiting write is attempted within about 6 s. What changes for whoever runs the
+  setting). The server spaces its retries, however many writes are waiting; how is in the
+  store-wide hold entry at the top of this section. What changes for whoever runs the
   server, and what remains:
   - **During an outage the write buffer fills, and then new writes are refused.** Nothing
     leaves the buffer while the storage refuses, so once `TOPGUN_WRITEBEHIND_CAPACITY`
@@ -987,31 +999,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     already buffered are still accepted. `TOPGUN_WRITEBEHIND_CAPACITY=0` together with a
     storage that refuses writes is not supported: nothing then limits the buffer.
   - **New log lines and metrics.** One warning, at most every 30 s, says that writes are
-    being retried and names one of them; one line says when the backlog has cleared.
+    being retried; one line says when the backlog has cleared.
     After an outage has lasted `TOPGUN_WAL_WATERMARK_STALL_BOUND_MS` (60 s by default)
     the existing `WAL watermark stalled` error is also logged, every 6 s per affected
-    partition, until the storage returns; that is expected. Five new metrics,
+    partition, until the storage returns; that is expected. Four new metrics,
     `topgun_write_behind_flush_refusals_total`, `…_buffered_entries`,
-    `…_retrying_entries`, `…_oldest_refusal_age_seconds` and `…_store_hold`, show the
+    `…_oldest_refusal_age_seconds` and `…_store_hold`, show the
     backlog; `topgun_write_behind_buffered_entries` is the one to watch against the
     capacity.
-  - **A record the storage never accepts is retried for ever.** The server cannot tell a
-    storage that is down from a record the storage rejects. Such a record keeps one
-    place in the buffer, and enough of them fill it; there is then no time by which
-    every other waiting write is stored, although a new write the storage accepts is
-    stored within about 6 s of the moment it is due. Three refusals in a row also make
-    the server leave the storage alone for a while, even when the storage is up and
-    only those records are refused.
   - **Cleanup of deleted records stops on the whole server while any write is
     refused,** and that partition's write-ahead log is not collected. For an outage that
-    ends this is intended; for a record the storage never accepts it lasts until the
-    record is written again or the server restarts.
+    ends this is intended.
   - **A write the storage refuses while the server starts** — during recovery from the
     write-ahead log — is not retried this way: the server serves the previous value of
     that record until its next restart.
-  - **Shutdown during an outage** tries each buffered write once and can take the full
-    `TOPGUN_WRITEBEHIND_SHUTDOWN_TIMEOUT_MS`; what it could not store is applied from
-    the write-ahead log at the next start.
   - **Postgres was not measured,** and no performance measurement was made.
 - **Changed (client):** the client now applies the server's map-name rule before anything
   is stored, so a bad name fails at the call that used it instead of coming back later as a

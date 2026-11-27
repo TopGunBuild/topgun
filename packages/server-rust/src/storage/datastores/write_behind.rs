@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -17,11 +17,13 @@ use topgun_core::PARTITION_COUNT;
 use tracing::{error, info, warn};
 
 use crate::storage::engine::SlotCell;
+#[cfg(test)]
+use crate::storage::map_data_store::MAX_RECORD_CHARGE_BYTES;
 use crate::storage::map_data_store::{
     check_map_name, check_tenant, merkle_leaf_hash, CommitDurability, DropOutcome, FlushCommit,
-    LeafSink, Loaded, MapDataStore, MapNameRefused, MerkleLeaf, PutValue, RecordRefused,
-    RecordTooLarge, ScanBatch, ScanCursor, ScanOrder, StoreBrokenCause, StoreErrorClass,
-    StoreInconsistent, StoreWrite, WriteSource, MAX_RECORD_CHARGE_BYTES,
+    LeafSink, Loaded, MapDataStore, MapNameRefused, MerkleLeaf, PutValue, RecordTooLarge,
+    ScanBatch, ScanCursor, ScanOrder, StoreBrokenCause, StoreErrorClass, StoreInconsistent,
+    StoreWrite, WriteSource, CAPACITY_REFUSALS_COUNTER,
 };
 // The one routing function of WAL partitions; the version row key uses it too.
 use crate::storage::map_data_store::wal_partition as partition_for;
@@ -78,12 +80,11 @@ pub struct WriteBehindConfig {
     /// value configurations copied from the documented example. It is kept so
     /// that a configuration which sets it still loads.
     pub batch_size: u32,
-    /// The wait after the first refusal of an entry is twice this, and the
-    /// first length of a store-wide hold is this, in milliseconds; each
-    /// doubles with every further refusal, up to `backoff_cap_ms`.
+    /// The length of the store-wide hold a refused commit starts, in
+    /// milliseconds; it doubles with every further commit refused in a row,
+    /// up to `backoff_cap_ms`.
     pub backoff_base_ms: u64,
-    /// The longest wait between two attempts of one entry, and the longest
-    /// store-wide hold, in milliseconds.
+    /// The longest store-wide hold, in milliseconds.
     pub backoff_cap_ms: u64,
     /// Soft bound on the number of buffered keys. `0` disables the check.
     ///
@@ -104,7 +105,7 @@ pub struct WriteBehindConfig {
     /// ```text
     /// pending_count  <=  C - 1 + W + H
     /// H              <=  min(L, C - 1 + W)      L = 1000 entries per pass
-    /// H              <=  1                      while a store-wide hold is in force
+    /// H              =   0                      while a store-wide hold is in force
     /// ```
     ///
     /// - `W` is a cohort, not an instant: the writes of distinct keys that
@@ -124,10 +125,9 @@ pub struct WriteBehindConfig {
     /// How long the bound is met: while the store refuses, nothing leaves the
     /// buffer, so the count stays at the bound until the store accepts again,
     /// and for that long every write of a key that is not buffered is refused.
-    /// An entry waiting for its next attempt is in its queue, not in a pass,
-    /// and adds nothing to `H`; a hold puts back every entry of the pass that
-    /// was not stored, and a pass during a hold holds at most the one entry it
-    /// probes the store with.
+    /// A refused commit puts every entry of its pass back on its queue, and no
+    /// pass takes anything while the hold it starts is in force, so a hold
+    /// adds nothing to `H`.
     ///
     /// Precondition, which the callers uphold and this store does not
     /// enforce: one writer per key at a time (`TG-KEY-001`).
@@ -171,7 +171,7 @@ pub struct WriteBehindConfig {
     /// buffered_bytes  <=  B - 1 + W_b + H_b
     /// W_b             <=  W × S_max
     /// H_b             <=  min(L, N_held) × S_max      L = 1000 entries per pass
-    /// H_b             <=  S_max                       while a store-wide hold is in force
+    /// H_b             =   0                           while a store-wide hold is in force
     /// ```
     ///
     /// - `W_b` is the cohort of counter increments of writes admitted while
@@ -214,7 +214,7 @@ pub struct WriteBehindConfig {
     /// It must sit an order of magnitude above the longest LEGITIMATE
     /// non-advance, or the alarm fires on correct behaviour. The default is
     /// derived from the OTHER defaults in this struct (the flush interval + the
-    /// longest wait between two attempts of a refused entry, and clear of the
+    /// longest store-wide hold, and clear of the
     /// shutdown timeout; there is no write delay), so raising `backoff_cap_ms`,
     /// `flush_interval_ms` or
     /// `shutdown_timeout_ms` requires raising this alongside them. A store that
@@ -1014,9 +1014,6 @@ struct TestParks {
     /// Parks `hard_flush` once the shutdown flag is set, before the flush
     /// loop is joined.
     after_shutdown_flag: Mutex<Option<ParkGate>>,
-    /// Parks the flush task between the choice of a probe and its removal
-    /// from its queue.
-    between_probe_choice_and_removal: Mutex<Option<ParkGate>>,
     /// Parks the next `flushed_watermark` between its two reads, blocking its
     /// thread: `(reached, release)`.
     fence: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
@@ -1088,16 +1085,6 @@ pub(crate) struct DelayedEntry {
     pub buffered_at: tokio::time::Instant,
     /// Global ordering counter for fairness during flush.
     pub sequence: u64,
-    /// Number of failed flush attempts so far.
-    pub retry_count: u32,
-    /// When the store may next be asked to take this entry; `None` until the
-    /// store has refused it once. Monotonic, so a test can drive it with a
-    /// paused clock and a wall-clock step cannot move it.
-    pub next_attempt: Option<tokio::time::Instant>,
-    /// When the store first refused this key's buffered entry; `None` until
-    /// then. Written by the refusal only and never moved by a later one, so
-    /// it says for how long the store has been refusing the key.
-    pub first_refused: Option<tokio::time::Instant>,
     /// WAL sequences whose frames this entry carries; resolved together at the
     /// entry's terminal outcome.
     ///
@@ -1114,8 +1101,8 @@ pub(crate) struct DelayedEntry {
 }
 
 impl DelayedEntry {
-    /// The entry of a first buffered write of a key: never refused, carrying
-    /// the one WAL sequence of its own frame.
+    /// The entry of a first buffered write of a key, carrying the one WAL
+    /// sequence of its own frame.
     fn fresh(
         map: &str,
         key: &str,
@@ -1133,94 +1120,31 @@ impl DelayedEntry {
             store_time,
             buffered_at: tokio::time::Instant::now(),
             sequence,
-            retry_count: 0,
-            next_attempt: None,
-            first_refused: None,
             wal_sequences: BTreeSet::from([wal_seq]),
         }
     }
 
     /// What a write that replaces a queued entry takes from it: its place in
-    /// the flush schedule and its retry state, which belong to the key and not
-    /// to one write of it. Without the retry state a key that is rewritten
-    /// while the store refuses it would be attempted in every pass.
+    /// the flush schedule, which belongs to the key and not to one write of
+    /// it.
     ///
     /// The charge is not inherited: it is the memory of this write's value,
     /// and the replaced entry's charge leaves the counter with it.
     fn inherit_from(&mut self, replaced: &DelayedEntry) {
         self.store_time = replaced.store_time;
         self.buffered_at = replaced.buffered_at;
-        self.retry_count = replaced.retry_count;
-        self.next_attempt = replaced.next_attempt;
-        self.first_refused = replaced.first_refused;
     }
 
-    /// Where a pass attempts this entry: the never-refused ones first, in the
-    /// order they were written, then the refused ones, the one whose time came
-    /// longest ago first. A refused entry therefore never stands between a key
-    /// the store has not spoken about and the store.
-    fn pass_order(&self) -> (bool, i64, Option<tokio::time::Instant>, u64) {
-        if self.retry_count == 0 {
-            (false, self.store_time, None, self.sequence)
-        } else {
-            (true, 0, self.next_attempt, self.sequence)
-        }
+    /// Where a pass attempts this entry: in the order the keys were first
+    /// written. `store_time` decides before `sequence` because a rewritten
+    /// queued entry keeps its `store_time` and takes a new, larger sequence.
+    fn pass_order(&self) -> (i64, u64) {
+        (self.store_time, self.sequence)
     }
 
-    /// Whether a flush pass that began at `now` may take this entry.
-    fn is_due(&self, deadline: i64, now: tokio::time::Instant) -> bool {
-        self.store_time <= deadline && self.next_attempt.is_none_or(|at| at <= now)
-    }
-}
-
-/// The earlier of two first-refusal instants; an absent one is "no value", not
-/// the earliest.
-fn earlier_refusal(
-    a: Option<tokio::time::Instant>,
-    b: Option<tokio::time::Instant>,
-) -> Option<tokio::time::Instant> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    }
-}
-
-/// What a probe compares of a due entry, and the entry's sequence, which only
-/// breaks ties.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ProbeRank {
-    never_refused: bool,
-    store_time: i64,
-    next_attempt: Option<tokio::time::Instant>,
-    sequence: u64,
-}
-
-impl ProbeRank {
-    fn of(entry: &DelayedEntry) -> Self {
-        Self {
-            never_refused: entry.retry_count == 0,
-            store_time: entry.store_time,
-            next_attempt: entry.next_attempt,
-            sequence: entry.sequence,
-        }
-    }
-
-    /// Whether `self` is a better probe than `other`. A never-refused entry
-    /// goes before a refused one, and of the never-refused the newest: a key
-    /// written during a hold is then the next probe, however many refused keys
-    /// are buffered. Of the refused the one whose time came longest ago, so
-    /// successive probes walk them in turn. `store_time` decides before
-    /// `sequence` because a rewritten queued entry keeps its `store_time` and
-    /// takes a new, larger sequence.
-    fn before(&self, other: &Self) -> bool {
-        match (self.never_refused, other.never_refused) {
-            (true, false) => true,
-            (false, true) => false,
-            (true, true) => (self.store_time, self.sequence) > (other.store_time, other.sequence),
-            (false, false) => {
-                (self.next_attempt, self.sequence) < (other.next_attempt, other.sequence)
-            }
-        }
+    /// Whether a flush pass may take this entry.
+    fn is_due(&self, deadline: i64) -> bool {
+        self.store_time <= deadline
     }
 }
 
@@ -1269,9 +1193,7 @@ impl PartitionQueue {
         self.entries.remove(&(map.to_string(), key.to_string()))
     }
 
-    /// Collects all entries whose `store_time` is at or before the deadline,
-    /// whatever their next attempt time: the shutdown drain gives every
-    /// buffered entry one last attempt.
+    /// Collects all entries whose `store_time` is at or before the deadline.
     ///
     /// Eligible entries are removed from the queue and returned in no
     /// particular order.
@@ -1292,60 +1214,20 @@ impl PartitionQueue {
         ready
     }
 
-    /// The rank of the entry a probe would take from this queue, with that
-    /// entry's `(map, key)`; `None` when nothing in the queue is due.
-    pub fn best_due(
-        &self,
-        deadline: i64,
-        now: tokio::time::Instant,
-    ) -> Option<(ProbeRank, (String, String))> {
-        self.entries
-            .iter()
-            .filter(|(_, entry)| entry.is_due(deadline, now))
-            .map(|(key, entry)| (ProbeRank::of(entry), key))
-            .reduce(|best, candidate| {
-                if candidate.0.before(&best.0) {
-                    candidate
-                } else {
-                    best
-                }
-            })
-            .map(|(rank, key)| (rank, key.clone()))
-    }
-
     /// Removes and returns the queued entry of the key, whatever entry
     /// sequence it carries now; `None` when the key has no queued entry.
     ///
-    /// By key and not by sequence: a writer that replaced the entry after it
-    /// was chosen as the probe left the key's buffered entry in its place,
-    /// with the same schedule and the newer value, and that is what the probe
-    /// has to carry.
+    /// By key and not by sequence: a writer that replaced the entry after a
+    /// pass collected it left the key's buffered entry in its place, with the
+    /// same schedule and the newer value, and that is what the pass has to
+    /// carry.
     pub fn take(&mut self, map: &str, key: &str) -> Option<DelayedEntry> {
         self.remove(map, key)
     }
 
-    /// How many queued entries the store has refused at least once, the
-    /// earliest first refusal among them, and the earliest `buffered_at` of
-    /// any queued entry, refused or not. One walk gives all three.
-    pub fn retrying_and_oldest(
-        &self,
-    ) -> (
-        u64,
-        Option<tokio::time::Instant>,
-        Option<tokio::time::Instant>,
-    ) {
-        let mut count = 0;
-        let mut earliest = None;
-        let mut oldest_buffered: Option<tokio::time::Instant> = None;
-        for entry in self.entries.values() {
-            oldest_buffered =
-                Some(oldest_buffered.map_or(entry.buffered_at, |t| t.min(entry.buffered_at)));
-            if entry.retry_count > 0 {
-                count += 1;
-                earliest = earlier_refusal(earliest, entry.first_refused);
-            }
-        }
-        (count, earliest, oldest_buffered)
+    /// The earliest `buffered_at` of any queued entry.
+    pub fn oldest_buffered(&self) -> Option<tokio::time::Instant> {
+        self.entries.values().map(|entry| entry.buffered_at).min()
     }
 
     /// Re-inserts an entry that failed flush and needs retry, and reports
@@ -1399,8 +1281,7 @@ impl PartitionQueue {
     ///
     /// The queued entry also takes the earlier `store_time`, as a coalesce
     /// does, so a key rewritten during a store outage keeps its original flush
-    /// schedule — and, for the same reason, the larger refusal count, the later
-    /// next attempt and the earlier first refusal of the two.
+    /// schedule.
     ///
     /// Runs under the caller's shard guard, which is what stops the queued
     /// entry being drained between the lookup and the merge.
@@ -1418,13 +1299,6 @@ impl PartitionQueue {
             .extend(retired.wal_sequences.iter().copied());
         survivor.store_time = survivor.store_time.min(retired.store_time);
         survivor.buffered_at = survivor.buffered_at.min(retired.buffered_at);
-        // The retry schedule belongs to the key, not to one entry of it: a key
-        // rewritten while the store refuses it must not be attempted more
-        // often than a key that is left alone, and must not look as if the
-        // store had begun to refuse it only now.
-        survivor.retry_count = survivor.retry_count.max(retired.retry_count);
-        survivor.next_attempt = survivor.next_attempt.max(retired.next_attempt);
-        survivor.first_refused = earlier_refusal(survivor.first_refused, retired.first_refused);
         true
     }
 
@@ -1839,11 +1713,9 @@ fn register_store_broken_metrics() {
 
 /// Counts store calls of the flush task that returned an error.
 const FLUSH_REFUSALS_COUNTER: &str = "topgun_write_behind_flush_refusals_total";
-/// Buffered entries the store has refused at least once, as of the last pass.
-const RETRYING_ENTRIES_GAUGE: &str = "topgun_write_behind_retrying_entries";
 /// The buffered-key count the capacity check uses.
 const BUFFERED_ENTRIES_GAUGE: &str = "topgun_write_behind_buffered_entries";
-/// Seconds since the store first refused the entry it has refused longest.
+/// Seconds since the first refused commit of the store-wide hold in force.
 const OLDEST_REFUSAL_AGE_GAUGE: &str = "topgun_write_behind_oldest_refusal_age_seconds";
 /// 1 while a store-wide hold is in force.
 const STORE_HOLD_GAUGE: &str = "topgun_write_behind_store_hold";
@@ -1853,9 +1725,6 @@ const FLUSH_PASSES_COUNTER: &str = "topgun_write_behind_flush_passes_total";
 const FLUSH_PASS_ENTRIES_COUNTER: &str = "topgun_write_behind_flush_pass_entries_total";
 /// Seconds one committed flush pass took, one observation per pass.
 const FLUSH_PASS_SECONDS_HISTOGRAM: &str = "topgun_write_behind_flush_pass_seconds";
-/// Writes of keys that were not buffered, refused because the buffer was at
-/// its capacity.
-const CAPACITY_REFUSALS_COUNTER: &str = "topgun_write_behind_capacity_refusals_total";
 /// The buffered values' memory in charge units, the counter the byte bound
 /// reads; set at the end of every pass.
 const BUFFERED_BYTES_GAUGE: &str = "topgun_write_behind_buffered_bytes";
@@ -1870,15 +1739,8 @@ const OLDEST_ENTRY_AGE_GAUGE: &str = "topgun_write_behind_oldest_entry_age_secon
 fn register_retry_metrics() {
     metrics::describe_counter!(
         FLUSH_REFUSALS_COUNTER,
-        "Commits of the write-behind flush task that the store refused, each half of a \
-         halved commit and each probe counted on its own"
-    );
-    metrics::describe_gauge!(
-        RETRYING_ENTRIES_GAUGE,
-        "Buffered write-behind entries the store has refused on their own at least once — \
-         alone in a commit, by a record-level refusal, or as a probe — as of the last pass. \
-         Entries a store-wide hold put back are not counted, so this reads 0 at a hold's start \
-         and then about the number of refused probes"
+        "Commits of the write-behind flush task that the store refused; each refused commit \
+         starts or renews a store-wide hold"
     );
     metrics::describe_gauge!(
         BUFFERED_ENTRIES_GAUGE,
@@ -1887,14 +1749,14 @@ fn register_retry_metrics() {
     );
     metrics::describe_gauge!(
         OLDEST_REFUSAL_AGE_GAUGE,
-        "Seconds the store has been refusing the buffered entry it has refused longest, 0 when \
-         none is refused. The node-wide flushed watermark, and with it tombstone pruning on \
-         every map of the node, has stood for at least this long"
+        "Seconds since the first refused commit of the store-wide hold in force, 0 when no hold \
+         is in force. The node-wide flushed watermark, and with it tombstone pruning on every \
+         map of the node, has stood for at least this long"
     );
     metrics::describe_gauge!(
         STORE_HOLD_GAUGE,
-        "1 while a store-wide hold is in force, from the pass that started it until a probe is \
-         accepted, else 0"
+        "1 while a store-wide hold is in force, from the refused commit that started it until a \
+         pass is accepted, else 0"
     );
     metrics::describe_counter!(
         FLUSH_PASSES_COUNTER,
@@ -1939,7 +1801,6 @@ fn register_retry_metrics() {
     metrics::counter!(CAPACITY_REFUSALS_COUNTER, "bound" => "record").increment(0);
     metrics::counter!(FLUSH_PASSES_COUNTER).increment(0);
     metrics::counter!(FLUSH_PASS_ENTRIES_COUNTER).increment(0);
-    metrics::gauge!(RETRYING_ENTRIES_GAUGE).set(0.0);
     metrics::gauge!(BUFFERED_ENTRIES_GAUGE).set(0.0);
     metrics::gauge!(BUFFERED_BYTES_GAUGE).set(0.0);
     metrics::gauge!(OLDEST_REFUSAL_AGE_GAUGE).set(0.0);
@@ -2362,17 +2223,13 @@ pub struct WriteBehindDataStore {
     #[cfg(test)]
     admission_probes: AtomicU64,
     /// Keys whose put encoding fails, because no value a test can build fails
-    /// to encode, and a record that cannot be encoded must be refused alone.
+    /// to encode.
     #[cfg(test)]
     encode_refusals: Mutex<BTreeSet<(String, String)>>,
-    /// Whether a store-wide hold is in force. The flush task owns the hold;
-    /// this mirrors it for readers outside that task.
-    store_hold: AtomicBool,
-    /// Probes refused in a row in the current hold, mirrored like the hold.
-    failed_probes: AtomicU32,
-    /// Set by a refusal and cleared by the walk that finds no refused entry,
-    /// so a pass on a store that refuses nothing pays one load and no walk.
-    retrying: AtomicBool,
+    /// The store-wide hold as the flush task last left it. The flush task
+    /// owns the hold; this mirrors it for readers outside that task, and the
+    /// shutdown drain takes it over, so a stop honours a hold in force.
+    store_hold: Mutex<HoldState>,
     /// Closed tenants and the in-flight writes a tenant drop waits for.
     tenant_closes: TenantCloses,
 }
@@ -2598,9 +2455,7 @@ impl WriteBehindDataStore {
             admission_probes: AtomicU64::new(0),
             #[cfg(test)]
             encode_refusals: Mutex::new(BTreeSet::new()),
-            store_hold: AtomicBool::new(false),
-            failed_probes: AtomicU32::new(0),
-            retrying: AtomicBool::new(false),
+            store_hold: Mutex::new(HoldState::default()),
             tenant_closes: TenantCloses::new(),
         });
 
@@ -2781,19 +2636,38 @@ impl WriteBehindDataStore {
     /// (`TG-WB-006`).
     async fn drain_for_shutdown(&self, deadline: tokio::time::Instant) -> usize {
         // Passes of the flush task's limits over every queued entry, whatever
-        // its write delay or next attempt: on shutdown we want everything. A
-        // refused entry abandons only itself, so the rest of its pass and the
-        // later passes are still stored.
+        // its write delay: on shutdown we want everything. The drain continues
+        // the flush task's hold: no commit starts before a hold in force ends,
+        // and a refused commit is retried on the hold lengths until the
+        // deadline (`TG-WB-009`).
+        let mut schedule = RetrySchedule::continuing(self.hold_state());
         let mut drained_entries = 0usize;
         let mut abandoned: Vec<DelayedEntry> = Vec::new();
         let mut broken: Option<StoreBrokenCause> = None;
         let mut stopped = false;
         loop {
-            let pass = self.drain_pass(deadline).await;
+            if let Some(until) = schedule.hold_until {
+                // Nothing queued, nothing to wait for.
+                if self.queues.iter().all(|queue| queue.entries.is_empty()) {
+                    break;
+                }
+                // A commit may start only before the deadline.
+                if until >= deadline {
+                    stopped = true;
+                    break;
+                }
+                tokio::time::sleep_until(until).await;
+            }
+            let pass = self.drain_pass(&mut schedule, deadline).await;
             if pass.taken == 0 {
                 break;
             }
-            drained_entries += pass.taken;
+            // A refused commit's entries are back on their queues and are
+            // counted when a later pass or the stop takes them for good.
+            drained_entries += match pass.batch.end {
+                BatchEnd::Refused => pass.batch.abandoned.len(),
+                _ => pass.taken,
+            };
             abandoned.extend(pass.batch.abandoned);
             match pass.batch.end {
                 BatchEnd::Broken(cause) => {
@@ -2805,7 +2679,7 @@ impl WriteBehindDataStore {
                     stopped = true;
                     break;
                 }
-                BatchEnd::Resolved | BatchEnd::Held => {}
+                BatchEnd::Resolved | BatchEnd::Refused => {}
             }
             // Between passes, so the drain never starves the runtime.
             tokio::task::yield_now().await;
@@ -2813,9 +2687,10 @@ impl WriteBehindDataStore {
 
         if stopped {
             let abandoned_by_passes = abandoned.len();
-            // Past the deadline or at a broken store no commit is made any
-            // more: what is still queued — also entries reinserted by
-            // concurrent retry paths — is drained and abandoned in one go,
+            // Past the deadline, under a hold that lasts until it, or at a
+            // broken store no commit is made any more: what is still queued —
+            // also entries reinserted by concurrent retry paths — is drained
+            // and abandoned in one go,
             // deliberately never registered, since it never enters a commit
             // and an ownership that is taken and released with no call in
             // between is a state no observer can see.
@@ -3177,26 +3052,12 @@ impl WriteBehindDataStore {
         handle
     }
 
-    /// Parks the flush task the next time it has chosen a probe, before it
-    /// removes the entry from its queue, so a writer can replace the entry in
-    /// between. One-shot and held by this store instance.
-    #[cfg(test)]
-    pub(crate) fn test_park_between_probe_choice_and_removal(&self) -> TestParkHandle {
-        let (gate, handle) = TestParkHandle::arm();
-        *self
-            .test_parks
-            .between_probe_choice_and_removal
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate);
-        handle
-    }
-
-    /// Whether a store-wide hold is in force: from the trip until a probe is
-    /// accepted, including the stretch after the hold time has passed and
-    /// before a probe has been made.
+    /// Whether a store-wide hold is in force: from the refused commit that
+    /// started it until a pass is accepted, including the stretch after the
+    /// hold time has passed and before the next pass has been made.
     #[cfg(test)]
     pub(crate) fn test_store_hold_active(&self) -> bool {
-        self.store_hold.load(Ordering::SeqCst)
+        self.hold_state().until.is_some()
     }
 
     /// From now on the encoding of every put of `(map, key)` fails.
@@ -3206,15 +3067,6 @@ impl WriteBehindDataStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert((map.to_string(), key.to_string()));
-    }
-
-    /// Undoes [`Self::test_refuse_encoding`] for `(map, key)`.
-    #[cfg(test)]
-    pub(crate) fn test_accept_encoding(&self, map: &str, key: &str) {
-        self.encode_refusals
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&(map.to_string(), key.to_string()));
     }
 
     /// The injected encoding failure of `entry`'s put, if one is set: what
@@ -3233,34 +3085,6 @@ impl WriteBehindDataStore {
                 entry.key
             )
         })
-    }
-
-    /// Probes refused in a row in the current hold.
-    #[cfg(test)]
-    pub(crate) fn test_failed_probes(&self) -> u32 {
-        self.failed_probes.load(Ordering::SeqCst)
-    }
-
-    /// `(retry_count, next_attempt)` of the entry queued for a key; `None`
-    /// when the key has no queued entry.
-    #[cfg(test)]
-    pub(crate) fn test_retry_state(
-        &self,
-        map: &str,
-        key: &str,
-    ) -> Option<(u32, Option<tokio::time::Instant>)> {
-        let queue = self.queues.get(&partition_for(map, key))?;
-        let entry = queue.entries.get(&(map.to_string(), key.to_string()))?;
-        Some((entry.retry_count, entry.next_attempt))
-    }
-
-    /// When the store first refused the entry queued for a key; `None` when
-    /// the key has no queued entry or the entry was never refused.
-    #[cfg(test)]
-    pub(crate) fn test_first_refused(&self, map: &str, key: &str) -> Option<tokio::time::Instant> {
-        let queue = self.queues.get(&partition_for(map, key))?;
-        let entry = queue.entries.get(&(map.to_string(), key.to_string()))?;
-        entry.first_refused
     }
 
     /// When the queued entry of the key was first buffered, if one is queued.
@@ -4136,7 +3960,7 @@ impl WriteBehindDataStore {
             let retired = existing.sequence;
             let replaced = existing.charge;
             let mut coalesced = entry;
-            // A coalesce keeps the original store_time and the retry state.
+            // A coalesce keeps the original store_time and buffered time.
             coalesced.inherit_from(&existing);
             let subsumed = Self::coalesce_wal_sequences(
                 survivor_subsumes,
@@ -4340,8 +4164,8 @@ fn fault_store_panic_armed() -> bool {
     fault_store_panic_path().is_some_and(std::path::Path::exists)
 }
 
-/// The fault-injection seams of every commit the flush task, a probe or the
-/// shutdown drain makes, consulted before the inner store is reached.
+/// The fault-injection seams of every commit a flush pass or the shutdown
+/// drain makes, consulted before the inner store is reached.
 #[allow(clippy::unnecessary_wraps)]
 fn injected_store_fault() -> anyhow::Result<()> {
     // Panic here, before the inner store is reached, so the background flush
@@ -4365,8 +4189,6 @@ fn injected_store_fault() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Refusals of one entry from which the retry warning is emitted.
-const RETRY_WARN_ATTEMPTS: u32 = 3;
 /// The retry warning is emitted at most once per this interval.
 const RETRY_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 /// The end-of-pass report walks every queue at most once per this interval
@@ -4384,8 +4206,9 @@ const PASS_MAX_ENTRIES: usize = 1000;
 /// than the limit is still stored, alone.
 const PASS_MAX_VALUE_BYTES: usize = 8 * 1024 * 1024;
 
-/// How long the store is left alone after the `attempt`-th refusal:
-/// `min(base << attempt, cap)`, for every `attempt`.
+/// How long the store is left alone after a refused commit that follows
+/// `attempt` refused ones in a row: `min(base << attempt, cap)`, for every
+/// `attempt`.
 ///
 /// Refusals are not limited, so `attempt` grows for as long as the store
 /// refuses; a shift that would lose bits is past any cap.
@@ -4399,33 +4222,28 @@ fn retry_backoff(base_ms: u64, cap_ms: u64, attempt: u32) -> std::time::Duration
 
 /// What the flush task remembers between passes about a store that refuses.
 ///
-/// Owned by the flush task alone, so it needs no lock; the store carries
-/// atomics that mirror the hold for readers outside the task.
+/// Owned by the flush task alone, so it needs no lock; the store carries a
+/// `Mutex<HoldState>` that mirrors the hold for readers outside the task.
 #[derive(Default)]
 struct RetrySchedule {
-    /// Set from the pass that trips the hold until a probe is accepted. Until
-    /// this instant no pass takes anything from a queue; from it on, a pass
-    /// takes one entry only, the probe.
+    /// Set by a refused commit until a pass is accepted. Until this instant
+    /// no pass takes anything from a queue or calls the store; from it on,
+    /// the next pass is an ordinary one over everything that is due.
     hold_until: Option<tokio::time::Instant>,
-    /// Probes refused in a row since the hold began.
-    failed_probes: u32,
-    /// An entry reached the warning threshold or a hold began, and the
-    /// backlog has not cleared since.
-    warning_armed: bool,
+    /// When the first refused commit of the hold in force returned; `None`
+    /// while no hold is in force.
+    hold_began: Option<tokio::time::Instant>,
+    /// Commits refused in a row; an accepted commit resets it, so the next
+    /// hold starts at the backoff base again.
+    refused_passes: u32,
     /// When the warning was last emitted; `None` when it has not been since
-    /// the backlog was last clear.
+    /// the last hold ended.
     last_warning: Option<tokio::time::Instant>,
-    /// The most recently refused entry, as the warning's example.
-    example: Option<RefusedExample>,
+    /// The full error chain of the last refused commit, for the warning.
+    last_error: Option<String>,
     /// The inner store reported itself broken: no pass calls it again
     /// (`TG-WB-010`).
     store_broken: bool,
-    /// Armed when a probe is accepted: the next refused commit of two or
-    /// more entries is halved down to single entries instead of starting a
-    /// hold, because a store that just took the probe is not known to be down.
-    /// Disarmed once that commit is resolved, or when a hold starts by any
-    /// other path; never armed at process start.
-    split_to_singles: bool,
     /// How many times a hold has begun or ended. The report compares it with
     /// the count its last walk saw, so a hold that ends and another that
     /// begins between two reports still walks at once.
@@ -4435,41 +4253,50 @@ struct RetrySchedule {
     last_walk: Option<LastWalk>,
 }
 
+/// The part of a [`RetrySchedule`] that outlives the flush task: the hold in
+/// force, which the shutdown drain continues.
+#[derive(Debug, Clone, Copy, Default)]
+struct HoldState {
+    until: Option<tokio::time::Instant>,
+    began: Option<tokio::time::Instant>,
+    refused_passes: u32,
+}
+
+impl RetrySchedule {
+    /// A schedule that continues `hold`: its first commit waits for the hold
+    /// to end, and its next refusal holds for longer.
+    fn continuing(hold: HoldState) -> Self {
+        Self {
+            hold_until: hold.until,
+            hold_began: hold.began,
+            refused_passes: hold.refused_passes,
+            ..Self::default()
+        }
+    }
+}
+
 /// What the report's last walk of the queues saw.
 struct LastWalk {
     at: tokio::time::Instant,
     /// `RetrySchedule::hold_changes` at the walk.
     hold_changes: u64,
-    /// The walk found a queued entry, so its gauges and the retry warning
-    /// stand until a walk that finds none.
+    /// The walk found a queued entry, so its gauges stand until a walk that
+    /// finds none.
     found_entries: bool,
-}
-
-/// One refused entry, named in the retry warning so an operator has a
-/// concrete write to look at.
-struct RefusedExample {
-    map: String,
-    key: String,
-    attempts: u32,
-    error: String,
 }
 
 /// Which queued entries a pass may take.
 #[derive(Debug, Clone, Copy)]
 enum PassScope {
-    /// A flush pass: the entries written by `deadline` whose next attempt is
-    /// not after `now`.
-    Due {
-        deadline: i64,
-        now: tokio::time::Instant,
-    },
-    /// The shutdown drain: every queued entry, whatever its next attempt,
-    /// because a stop gives each buffered write one last attempt.
+    /// A flush pass: the entries written by `deadline`.
+    Due { deadline: i64 },
+    /// The shutdown drain: every queued entry, because a stop gives each
+    /// buffered write one last attempt.
     Shutdown,
 }
 
 /// An entry a pass took, with the encoding of its put made before any commit
-/// is formed, so a record that cannot be encoded is refused on its own.
+/// is formed, so a record that cannot be encoded never reaches a commit.
 struct PreparedEntry {
     entry: DelayedEntry,
     /// `rmp_serde::to_vec_named` of the put's value; `None` for a remove.
@@ -4482,8 +4309,7 @@ struct PreparedEntry {
 struct PassSelection {
     /// The entries of the pass's commit, in `pass_order`.
     prepared: Vec<PreparedEntry>,
-    /// Entries whose encoding failed, with the error: each is refused alone
-    /// and is in no commit.
+    /// Entries whose encoding failed, with the error; in no commit.
     unencodable: Vec<(DelayedEntry, anyhow::Error)>,
     /// A pass limit stopped the taking while a further candidate was left:
     /// the entry cap with another candidate to take, or the byte cap with its
@@ -4492,43 +4318,30 @@ struct PassSelection {
     cut: bool,
 }
 
-/// How the halving of a refused commit treats it.
-#[derive(Debug, Clone, Copy)]
-enum BisectMode {
-    /// A flush pass: both halves refused means the store refuses, and a hold
-    /// starts, unless the split to single entries is armed.
-    Pass,
-    /// The shutdown drain: no hold at shutdown, so a refused commit is halved
-    /// down to single entries and a refused single entry is abandoned. No
-    /// commit starts after `deadline`, and each is wrapped in a timeout of
-    /// what remains of it.
-    Shutdown { deadline: tokio::time::Instant },
-}
-
-/// How a commit and the halving that followed it ended.
+/// How one commit of the shutdown drain ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BatchEnd {
-    /// Every entry was stored, refused alone, or (at shutdown) abandoned
-    /// alone.
+    /// Every entry was stored or abandoned.
     Resolved,
-    /// Both halves of a commit were refused: a hold started and every entry
-    /// not stored is back on its queue untouched.
-    Held,
-    /// The inner store reported itself broken: no further call; in a pass
-    /// every entry not stored is back untouched, at shutdown it is abandoned.
-    Broken(StoreBrokenCause),
-    /// Shutdown only: the deadline passed before a commit could start; every
+    /// The store refused the commit: every entry is back on its queue, and
+    /// the hold this refusal started or renewed says when the drain may
+    /// commit again.
+    Refused,
+    /// The inner store reported itself broken: no further call, and every
     /// entry not stored is abandoned.
+    Broken(StoreBrokenCause),
+    /// The deadline passed before the commit could start or while it was
+    /// pending; every entry not stored is abandoned.
     DeadlinePassed,
 }
 
-/// The result of [`WriteBehindDataStore::commit_bisect`].
+/// The result of [`WriteBehindDataStore::commit_drain_batch`].
 struct BatchOutcome {
     /// Entries stored and settled.
     stored: usize,
     end: BatchEnd,
-    /// Shutdown only: the entries not stored, their WAL sequences already
-    /// abandoned so they replay at the next start; empty in a pass.
+    /// The entries not stored, their WAL sequences already abandoned so they
+    /// replay at the next start.
     abandoned: Vec<DelayedEntry>,
 }
 
@@ -4539,41 +4352,19 @@ struct DrainPassOutcome {
     batch: BatchOutcome,
 }
 
-/// What one commit of a batch left once its record-level refusals were
-/// resolved, from [`WriteBehindDataStore::commit_resolving_records`].
-struct RecordCommit {
-    /// Entries stored and settled.
-    stored: usize,
-    /// Entries the store refused on their own (`RecordRefused`), with the
-    /// error and when the refusing commit returned; in no commit any more,
-    /// still in flight, for the caller to dispose of.
-    refused_alone: Vec<(DelayedEntry, anyhow::Error, tokio::time::Instant)>,
-    /// The entries no commit stored, still in flight, and why.
-    unstored: Option<Unstored>,
-}
-
-/// Why the entries of a [`RecordCommit`] were not stored.
-enum Unstored {
-    /// A refusal that names no record.
-    Refused(RefusedCommit),
-    /// Shutdown only: the deadline passed before a commit could start, or
-    /// while it was still pending.
-    DeadlinePassed(Vec<PreparedEntry>),
-}
-
-/// A commit the store refused as a whole, made once already.
-struct RefusedCommit {
-    err: anyhow::Error,
-    /// When the refused commit returned.
-    returned: tokio::time::Instant,
-    /// Its entries, none of them stored, in pass order.
-    batch: Vec<PreparedEntry>,
+/// The map and key of the first entry of a commit, which the line of a broken
+/// store names.
+fn first_named(batch: &[PreparedEntry]) -> (String, String) {
+    batch
+        .first()
+        .map(|first| (first.entry.map.clone(), first.entry.key.clone()))
+        .unwrap_or_default()
 }
 
 impl WriteBehindDataStore {
-    /// The one terminal of an entry the store accepted, whether a pass
-    /// attempted it in its turn or as a probe, or the shutdown drain did;
-    /// `applied` are the rows its commit carried.
+    /// The one terminal of an entry the store accepted, whether a pass or
+    /// the shutdown drain committed it; `applied` are the rows its commit
+    /// carried.
     async fn settle_stored(&self, entry: &DelayedEntry, applied: &[(u32, u64)]) {
         // Remove this write's staging slot ONLY if it is still the one that
         // was flushed: a newer coalesced write must survive (`TG-WB-007`).
@@ -4637,69 +4428,6 @@ impl WriteBehindDataStore {
         }
     }
 
-    /// The disposition of an entry the store refused: it stays buffered, with
-    /// its staging slot, its count, its entry sequence pending and its WAL
-    /// sequences live, and is not attempted again before its backoff has
-    /// passed.
-    ///
-    /// `returned` is when the refused call came back. The backoff is counted
-    /// from there and not from the start of the pass, so a store that is slow
-    /// to refuse is still left alone for the whole of it.
-    ///
-    /// Only for an entry refused on its own: a broken store says nothing
-    /// about a record, so its entries go back with [`Self::put_back`].
-    fn requeue_refused(
-        &self,
-        schedule: &mut RetrySchedule,
-        mut entry: DelayedEntry,
-        err: &anyhow::Error,
-        returned: tokio::time::Instant,
-    ) {
-        self.retrying.store(true, Ordering::Relaxed);
-        entry.retry_count = entry.retry_count.saturating_add(1);
-        entry.next_attempt = Some(
-            returned
-                + retry_backoff(
-                    self.config.backoff_base_ms,
-                    self.config.backoff_cap_ms,
-                    entry.retry_count,
-                ),
-        );
-        // Written once: it says since when the store has been refusing the
-        // key, which a later refusal must not move.
-        if entry.first_refused.is_none() {
-            entry.first_refused = Some(returned);
-        }
-        if entry.retry_count >= RETRY_WARN_ATTEMPTS {
-            schedule.warning_armed = true;
-        }
-        schedule.example = Some(RefusedExample {
-            map: entry.map.clone(),
-            key: entry.key.clone(),
-            attempts: entry.retry_count,
-            error: err.to_string(),
-        });
-        self.put_back(entry);
-    }
-
-    /// Chooses, over all queues, the entry a probe attempts, and says which
-    /// queue holds it and which key it belongs to. `None` when nothing is due.
-    fn choose_probe(
-        &self,
-        deadline: i64,
-        now: tokio::time::Instant,
-    ) -> Option<(u32, (String, String))> {
-        let mut best: Option<(ProbeRank, u32, (String, String))> = None;
-        for queue in &self.queues {
-            if let Some((rank, key)) = queue.value().best_due(deadline, now) {
-                if best.as_ref().is_none_or(|(held, _, _)| rank.before(held)) {
-                    best = Some((rank, *queue.key(), key));
-                }
-            }
-        }
-        best.map(|(_, partition, key)| (partition, key))
-    }
-
     /// The encoding of an entry's put, made once before any commit: a
     /// `StoreCell` value is encoded under its cell lock; `None` for a remove.
     // A method for the test seam that refuses an entry's encoding.
@@ -4720,17 +4448,14 @@ impl WriteBehindDataStore {
         }
     }
 
-    /// Takes one pass's entries out of the queues: first the due refused
-    /// entry with the smallest `(next_attempt, sequence)` — the slot that
-    /// keeps a refused entry reachable under sustained load — then entries in
-    /// `pass_order`, until the pass holds [`PASS_MAX_ENTRIES`] or the next
-    /// entry would carry it over [`PASS_MAX_VALUE_BYTES`]; either limit marks
-    /// the selection `cut`. Every taken entry's WAL sequences are registered
-    /// in flight once no queue guard is held. Untaken entries stay queued,
-    /// untouched.
+    /// Takes one pass's entries out of the queues in `pass_order`, until the
+    /// pass holds [`PASS_MAX_ENTRIES`] or the next entry would carry it over
+    /// [`PASS_MAX_VALUE_BYTES`]; either limit marks the selection `cut`.
+    /// Every taken entry's WAL sequences are registered in flight once no
+    /// queue guard is held. Untaken entries stay queued, untouched.
     fn select_pass(&self, scope: PassScope) -> PassSelection {
         let selectable = |entry: &DelayedEntry| match scope {
-            PassScope::Due { deadline, now } => entry.is_due(deadline, now),
+            PassScope::Due { deadline } => entry.is_due(deadline),
             PassScope::Shutdown => true,
         };
         // Collected without removing anything, so an entry the limits leave
@@ -4755,18 +4480,12 @@ impl WriteBehindDataStore {
             );
         }
         candidates.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        // Refused entries sort by `(next_attempt, sequence)` after every
-        // never-refused one, so the first refused candidate is the oldest due.
-        let reserved = candidates.iter().position(|candidate| candidate.0 .0);
-        let order = reserved
-            .into_iter()
-            .chain((0..candidates.len()).filter(|&i| Some(i) != reserved));
 
         let mut prepared: Vec<PreparedEntry> = Vec::new();
         let mut unencodable = Vec::new();
         let mut value_bytes = 0usize;
         let mut cut = false;
-        for i in order {
+        for (_, partition, map, key) in &candidates {
             if prepared.len() + unencodable.len() >= PASS_MAX_ENTRIES {
                 // A collected candidate is left, but it may be gone from its
                 // queue by now (the `continue` below): the run-on pass then
@@ -4775,7 +4494,6 @@ impl WriteBehindDataStore {
                 cut = true;
                 break;
             }
-            let (_, partition, map, key) = &candidates[i];
             // One statement, so the shard guard is a temporary (TG-WB-004).
             // By key: a write that replaced the entry since it was collected
             // inherited its schedule and is taken as it is now. An entry gone
@@ -4806,9 +4524,8 @@ impl WriteBehindDataStore {
                 Err(err) => unencodable.push((entry, err)),
             }
         }
-        // The commit's write order: the reserved entry stands at its own
-        // place, after every never-refused entry, so a halving keeps those in
-        // the earlier half.
+        // The commit's write order: an entry replaced since it was collected
+        // carries a newer sequence than the one it was sorted by.
         prepared.sort_by_key(|prepared| prepared.entry.pass_order());
         PassSelection {
             prepared,
@@ -4924,125 +4641,74 @@ impl WriteBehindDataStore {
         self.settle_stored(&last.entry, applied).await;
     }
 
-    /// Commits `batch`, settles it on `Ok`, and resolves record-level
-    /// refusals on the spot: the writes a commit refused on their own leave
-    /// it and the rest is committed again, with rows planned again, so each
-    /// re-commit is one entry shorter at least.
-    ///
-    /// In a pass every refused commit is counted. At shutdown no commit
-    /// starts once `deadline` has passed, and each is cut at it while it is
-    /// still pending; the settle runs outside that cut, so a commit that
-    /// returned `Ok` is always settled.
-    async fn commit_resolving_records(
-        &self,
-        mut batch: Vec<PreparedEntry>,
-        mode: BisectMode,
-    ) -> RecordCommit {
-        let mut refused_alone = Vec::new();
-        loop {
-            if batch.is_empty() {
-                return RecordCommit {
-                    stored: 0,
-                    refused_alone,
-                    unstored: None,
-                };
-            }
-            let committed = match mode {
-                BisectMode::Pass => self.commit_prepared(&batch).await,
-                BisectMode::Shutdown { deadline } => {
-                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    let cut = if remaining.is_zero() {
-                        None
-                    } else {
-                        tokio::time::timeout(remaining, self.commit_prepared(&batch))
-                            .await
-                            .ok()
-                    };
-                    let Some(committed) = cut else {
-                        return RecordCommit {
-                            stored: 0,
-                            refused_alone,
-                            unstored: Some(Unstored::DeadlinePassed(batch)),
-                        };
-                    };
-                    committed
-                }
-            };
-            let err = match committed {
-                Ok(applied) => {
-                    self.settle_batch(&batch, &applied).await;
-                    return RecordCommit {
-                        stored: batch.len(),
-                        refused_alone,
-                        unstored: None,
-                    };
-                }
-                Err(err) => err,
-            };
-            let returned = tokio::time::Instant::now();
-            if let BisectMode::Pass = mode {
-                metrics::counter!(FLUSH_REFUSALS_COUNTER).increment(1);
-            }
-            let indices: BTreeSet<usize> = err
-                .downcast_ref::<RecordRefused>()
-                .map(|refused| {
-                    refused
-                        .indices
-                        .iter()
-                        .copied()
-                        .filter(|&i| i < batch.len())
-                        .collect()
-                })
-                .unwrap_or_default();
-            // No index inside the commit says nothing about a record: the
-            // commit as a whole is refused.
-            if indices.is_empty() {
-                return RecordCommit {
-                    stored: 0,
-                    refused_alone,
-                    unstored: Some(Unstored::Refused(RefusedCommit {
-                        err,
-                        returned,
-                        batch,
-                    })),
-                };
-            }
-            let reason = format!("{err:#}");
-            let mut rest = Vec::with_capacity(batch.len() - indices.len());
-            for (i, prepared) in batch.into_iter().enumerate() {
-                if indices.contains(&i) {
-                    refused_alone.push((prepared.entry, anyhow::anyhow!("{reason}"), returned));
-                } else {
-                    rest.push(prepared);
-                }
-            }
-            batch = rest;
-        }
-    }
-
-    /// An entry refused on its own: in a pass it waits out its backoff
-    /// (`TG-WB-009`), at shutdown it is abandoned, its frames replayable.
-    fn refuse_alone(
+    /// Commits one drain pass's entries in one call and settles them on
+    /// `Ok`, which ends a hold in force. A refusal puts them back on their
+    /// queues and starts or renews the hold, as in a flush pass
+    /// (`TG-WB-009`), so the drain retries them once it ends. No commit
+    /// starts once `deadline` has passed, and one still pending at it is cut
+    /// and its entries abandoned, their frames replayable; the settle runs
+    /// outside that cut, so a commit that returned `Ok` is always settled. A
+    /// broken store ends the drain with no further call (`TG-WB-010`).
+    async fn commit_drain_batch(
         &self,
         schedule: &mut RetrySchedule,
-        mode: BisectMode,
-        entry: DelayedEntry,
-        err: &anyhow::Error,
-        returned: tokio::time::Instant,
-        out: &mut BatchOutcome,
-    ) {
-        match mode {
-            BisectMode::Pass => self.requeue_refused(schedule, entry, err, returned),
-            BisectMode::Shutdown { .. } => {
-                warn!(
-                    map = %entry.map,
-                    key = %entry.key,
-                    error = %err,
-                    "Inner store error during shutdown drain; entry not persisted"
-                );
-                self.abandon(entry, out);
+        batch: Vec<PreparedEntry>,
+        deadline: tokio::time::Instant,
+    ) -> BatchOutcome {
+        let mut out = BatchOutcome {
+            stored: 0,
+            end: BatchEnd::Resolved,
+            abandoned: Vec::new(),
+        };
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let committed = if remaining.is_zero() {
+            None
+        } else {
+            tokio::time::timeout(remaining, self.commit_prepared(&batch))
+                .await
+                .ok()
+        };
+        let err = match committed {
+            None => {
+                out.end = BatchEnd::DeadlinePassed;
+                for prepared in batch {
+                    self.abandon(prepared.entry, &mut out);
+                }
+                return out;
             }
+            Some(Ok(applied)) => {
+                self.settle_batch(&batch, &applied).await;
+                if schedule.hold_until.is_some() {
+                    self.end_hold(schedule);
+                }
+                out.stored = batch.len();
+                return out;
+            }
+            Some(Err(err)) => err,
+        };
+        let returned = tokio::time::Instant::now();
+        if let StoreErrorClass::StoreBroken(cause) = self.inner.classify_error(&err) {
+            let (map, key) = first_named(&batch);
+            for prepared in batch {
+                self.abandon(prepared.entry, &mut out);
+            }
+            self.record_store_broken(cause, &err, &map, &key, "shutdown_drain");
+            out.end = BatchEnd::Broken(cause);
+            return out;
         }
+        let entries = batch.len();
+        for prepared in batch {
+            self.put_back(prepared.entry);
+        }
+        self.hold_after_refusal(schedule, returned, &err);
+        warn!(
+            entries,
+            error = %format!("{err:#}"),
+            "Inner store refused a shutdown drain commit; the drain retries it once the \
+             store-wide hold ends, until its deadline"
+        );
+        out.end = BatchEnd::Refused;
+        out
     }
 
     /// Gives up on an entry the shutdown drain did not store: never resolved,
@@ -5052,211 +4718,13 @@ impl WriteBehindDataStore {
         out.abandoned.push(entry);
     }
 
-    /// Entries no commit stored that nothing singles out: back on their
-    /// queues untouched in a pass, abandoned at shutdown.
-    fn dispose_unstored(
-        &self,
-        mode: BisectMode,
-        entries: impl IntoIterator<Item = PreparedEntry>,
-        out: &mut BatchOutcome,
-    ) {
-        for prepared in entries {
-            match mode {
-                BisectMode::Pass => self.put_back(prepared.entry),
-                BisectMode::Shutdown { .. } => self.abandon(prepared.entry, out),
-            }
-        }
-    }
-
-    /// Folds one commit's result into `out` and returns the commit if the
-    /// store refused it as a whole. Entries cut by the deadline are disposed
-    /// of here and end the batch.
-    fn absorb(
-        &self,
-        schedule: &mut RetrySchedule,
-        mode: BisectMode,
-        commit: RecordCommit,
-        out: &mut BatchOutcome,
-    ) -> Option<RefusedCommit> {
-        out.stored += commit.stored;
-        for (entry, err, returned) in commit.refused_alone {
-            self.refuse_alone(schedule, mode, entry, &err, returned, out);
-        }
-        match commit.unstored? {
-            Unstored::Refused(refused) => Some(refused),
-            Unstored::DeadlinePassed(batch) => {
-                self.dispose_unstored(mode, batch, out);
-                out.end = BatchEnd::DeadlinePassed;
-                None
-            }
-        }
-    }
-
-    /// Stops at a broken store (`TG-WB-010`): every entry not stored is
-    /// disposed of untouched — a broken store says nothing about a record —
-    /// the failure is recorded once, naming the first entry of the failing
-    /// commit, and no further call is made.
-    #[allow(clippy::too_many_arguments)]
-    fn stop_at_broken_store(
-        &self,
-        schedule: &mut RetrySchedule,
-        mode: BisectMode,
-        cause: StoreBrokenCause,
-        failing: RefusedCommit,
-        rest: impl IntoIterator<Item = PreparedEntry>,
-        out: &mut BatchOutcome,
-    ) {
-        let (map, key) = failing
-            .batch
-            .first()
-            .map(|first| (first.entry.map.clone(), first.entry.key.clone()))
-            .unwrap_or_default();
-        self.dispose_unstored(mode, failing.batch.into_iter().chain(rest), out);
-        let site = match mode {
-            BisectMode::Pass => "flush",
-            BisectMode::Shutdown { .. } => "shutdown_drain",
-        };
-        self.record_store_broken(cause, &failing.err, &map, &key, site);
-        if let BisectMode::Pass = mode {
-            schedule.store_broken = true;
-        }
-        out.end = BatchEnd::Broken(cause);
-    }
-
-    /// Starts the store-wide hold: both halves of a refused commit were
-    /// refused, so it is the store that refuses, not a record.
-    ///
-    /// The warning and the hold gauge say so at once, not at the first
-    /// refused probe: the entries the hold put back are untouched, so no walk
-    /// of the queues would find them refused.
-    fn start_hold(
-        &self,
-        schedule: &mut RetrySchedule,
-        returned: tokio::time::Instant,
-        example: RefusedExample,
-    ) {
-        schedule.failed_probes = 0;
-        schedule.hold_until = Some(
-            returned + retry_backoff(self.config.backoff_base_ms, self.config.backoff_cap_ms, 0),
-        );
-        schedule.hold_changes += 1;
-        schedule.warning_armed = true;
-        schedule.example = Some(example);
-        schedule.split_to_singles = false;
-        self.retrying.store(true, Ordering::Relaxed);
-        self.publish_hold(schedule);
-        self.report_retries(schedule);
-    }
-
-    /// Commits `batch` and resolves a refusal: a record-level refusal refuses
-    /// those entries alone and commits the rest again; any other refusal of a
-    /// single entry refuses it alone, and of two or more halves the batch,
-    /// pass order kept, planning each half's rows just before it.
-    ///
-    /// In a pass, both halves of a commit refused means the store refuses,
-    /// and a hold starts — except for the first refused commit after an
-    /// accepted probe, which is halved down to single entries, as every
-    /// refused commit is at shutdown. A broken store ends the batch with no
-    /// further call.
-    async fn commit_bisect(
-        &self,
-        schedule: &mut RetrySchedule,
-        batch: Vec<PreparedEntry>,
-        mode: BisectMode,
-    ) -> BatchOutcome {
-        let mut out = BatchOutcome {
-            stored: 0,
-            end: BatchEnd::Resolved,
-            abandoned: Vec::new(),
-        };
-        let commit = self.commit_resolving_records(batch, mode).await;
-        let Some(refused) = self.absorb(schedule, mode, commit, &mut out) else {
-            return out;
-        };
-        if let StoreErrorClass::StoreBroken(cause) = self.inner.classify_error(&refused.err) {
-            self.stop_at_broken_store(schedule, mode, cause, refused, [], &mut out);
-            return out;
-        }
-        // Read and disarmed by the first refused commit of two or more
-        // entries; nothing else reads it until this batch is resolved.
-        let to_singles = match mode {
-            BisectMode::Shutdown { .. } => true,
-            BisectMode::Pass => {
-                refused.batch.len() >= 2 && std::mem::take(&mut schedule.split_to_singles)
-            }
-        };
-
-        // Refused commits still to resolve, each made once already, so each
-        // is resolved by its halves; the earlier half is resolved first.
-        let mut todo = vec![refused];
-        while let Some(RefusedCommit {
-            err,
-            returned,
-            mut batch,
-        }) = todo.pop()
-        {
-            if batch.len() == 1 {
-                if let Some(prepared) = batch.pop() {
-                    self.refuse_alone(schedule, mode, prepared.entry, &err, returned, &mut out);
-                }
-                continue;
-            }
-            let example = RefusedExample {
-                map: batch[0].entry.map.clone(),
-                key: batch[0].entry.key.clone(),
-                attempts: batch[0].entry.retry_count,
-                error: err.to_string(),
-            };
-            let right = batch.split_off(batch.len().div_ceil(2));
-            let mut halves = [batch, right].into_iter();
-            let mut refused_halves: Vec<RefusedCommit> = Vec::new();
-            while let Some(half) = halves.next() {
-                let commit = self.commit_resolving_records(half, mode).await;
-                let refused = self.absorb(schedule, mode, commit, &mut out);
-                if out.end == BatchEnd::DeadlinePassed {
-                    let rest = halves
-                        .flatten()
-                        .chain(refused_halves.into_iter().flat_map(|r| r.batch))
-                        .chain(todo.into_iter().flat_map(|r| r.batch));
-                    self.dispose_unstored(mode, rest, &mut out);
-                    return out;
-                }
-                let Some(refused) = refused else {
-                    continue;
-                };
-                if let StoreErrorClass::StoreBroken(cause) = self.inner.classify_error(&refused.err)
-                {
-                    let rest = halves
-                        .flatten()
-                        .chain(refused_halves.into_iter().flat_map(|r| r.batch))
-                        .chain(todo.into_iter().flat_map(|r| r.batch));
-                    self.stop_at_broken_store(schedule, mode, cause, refused, rest, &mut out);
-                    return out;
-                }
-                refused_halves.push(refused);
-            }
-            if refused_halves.len() == 2 && !to_singles {
-                // The store refuses, not a record: what is not stored goes
-                // back as it was, so the refusal is not held against it.
-                let returned = refused_halves[1].returned;
-                let rest = refused_halves
-                    .into_iter()
-                    .flat_map(|r| r.batch)
-                    .chain(todo.into_iter().flat_map(|r| r.batch));
-                self.dispose_unstored(mode, rest, &mut out);
-                self.start_hold(schedule, returned, example);
-                out.end = BatchEnd::Held;
-                return out;
-            }
-            todo.extend(refused_halves.into_iter().rev());
-        }
-        out
-    }
-
     /// One pass of the shutdown drain: takes every queued entry up to the
-    /// limits of a pass, whatever its next attempt, and commits them by
-    /// [`BisectMode::Shutdown`].
-    async fn drain_pass(&self, deadline: tokio::time::Instant) -> DrainPassOutcome {
+    /// limits of a pass and commits them by [`Self::commit_drain_batch`].
+    async fn drain_pass(
+        &self,
+        schedule: &mut RetrySchedule,
+        deadline: tokio::time::Instant,
+    ) -> DrainPassOutcome {
         let selection = self.select_pass(PassScope::Shutdown);
         let taken = selection.prepared.len() + selection.unencodable.len();
         let mut batch = BatchOutcome {
@@ -5274,13 +4742,8 @@ impl WriteBehindDataStore {
             self.abandon(entry, &mut batch);
         }
         if !selection.prepared.is_empty() {
-            // No hold at shutdown: the schedule is the halving's alone.
             let committed = self
-                .commit_bisect(
-                    &mut RetrySchedule::default(),
-                    selection.prepared,
-                    BisectMode::Shutdown { deadline },
-                )
+                .commit_drain_batch(schedule, selection.prepared, deadline)
                 .await;
             batch.stored = committed.stored;
             batch.end = committed.end;
@@ -5289,30 +4752,67 @@ impl WriteBehindDataStore {
         DrainPassOutcome { taken, batch }
     }
 
-    /// The test park between the choice of a probe and its removal.
-    #[cfg(test)]
-    async fn pass_probe_park(&self) {
-        let gate = self
-            .test_parks
-            .between_probe_choice_and_removal
+    /// A refused commit starts the store-wide hold, or renews the one in
+    /// force for longer (`TG-WB-009`): `min(base << k, cap)`, `k` the commits
+    /// refused in a row before this one. Counted from `returned`, when the
+    /// refused commit came back, so a store that is slow to refuse is still
+    /// left alone for the whole of it.
+    fn hold_after_refusal(
+        &self,
+        schedule: &mut RetrySchedule,
+        returned: tokio::time::Instant,
+        err: &anyhow::Error,
+    ) {
+        let in_a_row = schedule.refused_passes;
+        schedule.refused_passes = in_a_row.saturating_add(1);
+        schedule.hold_until = Some(
+            returned
+                + retry_backoff(
+                    self.config.backoff_base_ms,
+                    self.config.backoff_cap_ms,
+                    in_a_row,
+                ),
+        );
+        if schedule.hold_began.is_none() {
+            schedule.hold_began = Some(returned);
+            schedule.hold_changes += 1;
+        }
+        schedule.last_error = Some(format!("{err:#}"));
+        self.publish_hold(schedule);
+    }
+
+    /// An accepted commit ends the hold in force: the store answers again,
+    /// and its next refusal starts a hold at the backoff base.
+    fn end_hold(&self, schedule: &mut RetrySchedule) {
+        schedule.hold_until = None;
+        schedule.hold_began = None;
+        schedule.refused_passes = 0;
+        schedule.hold_changes += 1;
+        self.publish_hold(schedule);
+    }
+
+    /// The hold as the flush task last published it.
+    fn hold_state(&self) -> HoldState {
+        *self
+            .store_hold
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(gate) = gate {
-            gate.pass().await;
-        }
     }
 
     /// Publishes the flush task's hold to the readers outside the task and
     /// to its gauge. A hold is in force for as long as `hold_until` is set —
-    /// also after that instant has passed and before a probe has been
+    /// also after that instant has passed and before a pass has been
     /// accepted. Called where the hold changes, so a pass that changes
     /// nothing sets no gauge for it.
     fn publish_hold(&self, schedule: &RetrySchedule) {
-        self.store_hold
-            .store(schedule.hold_until.is_some(), Ordering::SeqCst);
-        self.failed_probes
-            .store(schedule.failed_probes, Ordering::SeqCst);
+        *self
+            .store_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = HoldState {
+            until: schedule.hold_until,
+            began: schedule.hold_began,
+            refused_passes: schedule.refused_passes,
+        };
         metrics::gauge!(STORE_HOLD_GAUGE).set(if schedule.hold_until.is_some() {
             1.0
         } else {
@@ -5324,114 +4824,90 @@ impl WriteBehindDataStore {
     /// whether its selection was cut by a pass limit (`false` when it made no
     /// selection).
     ///
-    /// The pass never waits on behalf of an entry: when an entry may be
-    /// attempted again is written on the entry, and a later pass honours it.
+    /// A pass takes the due entries in `pass_order` up to the pass limits
+    /// and commits them in one call. A refused commit puts every entry back
+    /// untouched and starts or renews the store-wide hold; while the hold is
+    /// in force no pass takes anything or calls the store, and the first
+    /// pass after it is an ordinary one over everything that is due
+    /// (`TG-WB-009`). A broken store stops the flush (`TG-WB-010`).
     async fn run_flush_pass(
         &self,
         schedule: &mut RetrySchedule,
         deadline: i64,
         now: tokio::time::Instant,
     ) -> (usize, bool) {
-        let base = self.config.backoff_base_ms;
-        let cap = self.config.backoff_cap_ms;
-
         // A broken store stores nothing more in this process (`TG-WB-010`).
         if schedule.store_broken {
             return (0, false);
         }
+        // The store is being left alone: nothing is taken and no call is
+        // made, whoever woke the pass.
+        if schedule.hold_until.is_some_and(|until| now < until) {
+            return (0, false);
+        }
 
         let began = tokio::time::Instant::now();
-        let mut stored = 0;
-        if let Some(until) = schedule.hold_until {
-            // The store is being left alone: nothing is taken and no call is
-            // made, whoever woke the pass.
-            if now < until {
-                return (0, false);
-            }
-            let Some((partition, (map, key))) = self.choose_probe(deadline, now) else {
-                return (0, false);
-            };
-            #[cfg(test)]
-            self.pass_probe_park().await;
-            // No shard guard is held between the choice and the removal
-            // (TG-WB-004), so a writer can replace the chosen entry in
-            // between. The replacement inherited the schedule of the entry it
-            // replaced, so it is due all the same and is the probe. The key's
-            // entry can be gone only through the drain of a shutdown; then
-            // there is nothing to ask the store with and nothing changes.
-            let taken = self
-                .queues
-                .get_mut(&partition)
-                .and_then(|mut queue| queue.take(&map, &key));
-            let Some(probe) = taken else {
-                return (0, false);
-            };
-            self.register_in_flight(partition, &probe.wal_sequences);
-            // The probe is one entry committed alone, whatever refuses it, so
-            // a refusal of it is that entry's alone and never halves anything.
-            let accepted = match self.encode_put(&probe) {
-                Err(err) => {
-                    self.requeue_refused(schedule, probe, &err, tokio::time::Instant::now());
-                    false
-                }
-                Ok(encoded) => {
-                    let outcome = self
-                        .commit_bisect(
-                            schedule,
-                            vec![PreparedEntry {
-                                entry: probe,
-                                encoded,
-                            }],
-                            BisectMode::Pass,
-                        )
-                        .await;
-                    if let BatchEnd::Broken(_) = outcome.end {
-                        return (0, false);
-                    }
-                    stored += outcome.stored;
-                    outcome.stored > 0
-                }
-            };
-            if !accepted {
-                // Read right after the refused commit returned: nothing in
-                // between suspends.
-                let returned = tokio::time::Instant::now();
-                schedule.failed_probes = schedule.failed_probes.saturating_add(1);
-                schedule.hold_until =
-                    Some(returned + retry_backoff(base, cap, schedule.failed_probes));
-                self.publish_hold(schedule);
-                return (0, false);
-            }
-            // The store answers again: the hold ends and this same pass goes
-            // on over everything that is due. A store that just took the probe
-            // is not known to be down, so its next refused commit is halved to
-            // single entries before it may start another hold.
-            schedule.hold_until = None;
-            schedule.hold_changes += 1;
-            schedule.failed_probes = 0;
-            schedule.split_to_singles = true;
-            self.publish_hold(schedule);
-        }
-
-        let selection = self.select_pass(PassScope::Due { deadline, now });
+        let selection = self.select_pass(PassScope::Due { deadline });
         let cut = selection.cut;
-        for (entry, err) in selection.unencodable {
-            // Refused alone before any commit is formed: the store never saw
-            // the record, so it says nothing about the store.
-            self.requeue_refused(schedule, entry, &err, tokio::time::Instant::now());
+        let batch = selection.prepared;
+        let mut unencodable = selection.unencodable.into_iter();
+        if let Some((first, err)) = unencodable.next() {
+            // A buffered value that cannot be encoded fails every later
+            // attempt alike, so the node stops (`TG-WB-010`) instead of
+            // holding the store for it. Every entry of the pass goes back as
+            // it was: its frames stay un-applied and replay at the next start.
+            let (map, key) = (first.map.clone(), first.key.clone());
+            self.put_back(first);
+            for (entry, _) in unencodable {
+                self.put_back(entry);
+            }
+            for prepared in batch {
+                self.put_back(prepared.entry);
+            }
+            let err = err.context("a buffered value could not be encoded");
+            self.record_store_broken(StoreBrokenCause::Inconsistent, &err, &map, &key, "encode");
+            schedule.store_broken = true;
+            return (0, false);
         }
-        if !selection.prepared.is_empty() {
-            stored += self
-                .commit_bisect(schedule, selection.prepared, BisectMode::Pass)
-                .await
-                .stored;
+        if batch.is_empty() {
+            return (0, cut);
         }
-        if stored > 0 {
-            metrics::counter!(FLUSH_PASSES_COUNTER).increment(1);
-            metrics::counter!(FLUSH_PASS_ENTRIES_COUNTER).increment(stored as u64);
-            metrics::histogram!(FLUSH_PASS_SECONDS_HISTOGRAM).record(began.elapsed().as_secs_f64());
+        let err = match self.commit_prepared(&batch).await {
+            Ok(applied) => {
+                self.settle_batch(&batch, &applied).await;
+                if schedule.hold_until.is_some() {
+                    self.end_hold(schedule);
+                }
+                let stored = batch.len();
+                metrics::counter!(FLUSH_PASSES_COUNTER).increment(1);
+                metrics::counter!(FLUSH_PASS_ENTRIES_COUNTER).increment(stored as u64);
+                metrics::histogram!(FLUSH_PASS_SECONDS_HISTOGRAM)
+                    .record(began.elapsed().as_secs_f64());
+                return (stored, cut);
+            }
+            Err(err) => err,
+        };
+        // Read right after the refused commit returned: nothing in between
+        // suspends.
+        let returned = tokio::time::Instant::now();
+        metrics::counter!(FLUSH_REFUSALS_COUNTER).increment(1);
+        let broken = match self.inner.classify_error(&err) {
+            StoreErrorClass::StoreBroken(cause) => Some(cause),
+            StoreErrorClass::Unknown => None,
+        };
+        let (map, key) = first_named(&batch);
+        // The refusal concerns the store, not a record: every entry goes back
+        // as it was, so the refusal is not held against it.
+        for prepared in batch {
+            self.put_back(prepared.entry);
         }
-        (stored, cut)
+        if let Some(cause) = broken {
+            self.record_store_broken(cause, &err, &map, &key, "flush");
+            schedule.store_broken = true;
+        } else {
+            self.hold_after_refusal(schedule, returned, &err);
+        }
+        (0, false)
     }
 
     /// The newest `store_time` a pass may take: an entry whose `store_time` is
@@ -5552,17 +5028,6 @@ impl WriteBehindDataStore {
         Ok(())
     }
 
-    #[cfg(test)]
-    fn max_record_charge(&self) -> u64 {
-        self.config.max_record_charge
-    }
-
-    #[cfg(not(test))]
-    #[allow(clippy::unused_self)]
-    fn max_record_charge(&self) -> u64 {
-        MAX_RECORD_CHARGE_BYTES
-    }
-
     /// Refuses a write once graceful drain is in progress, so any
     /// out-of-order arrival is visible as an error rather than silently lost,
     /// and once the store has failed, because the write would be acked and
@@ -5582,21 +5047,19 @@ impl WriteBehindDataStore {
         }
     }
 
-    /// Reports the buffer and its refused entries at the end of a pass: the
-    /// gauges, one rate-limited warning while any entry is refused, and one
-    /// line when none is left after a warning.
+    /// Reports the buffer and the hold at the end of a pass: the gauges, one
+    /// rate-limited warning while a store-wide hold is in force, and one line
+    /// when a pass is accepted after a warning.
     ///
-    /// The buffered-entries gauge is set on every call. The rest comes from
-    /// one walk of the queues, O(queued entries) and allocation-free: the age
-    /// of the oldest buffered entry, and the refused entries, which are
-    /// reported only while a refusal has happened and the last walk still
-    /// found a refused entry. The walk runs at most once per
-    /// `REPORT_WALK_INTERVAL`, and at once when a store-wide hold has begun or
-    /// ended since the last walk or when the buffer is empty and the last walk
-    /// found entries, so an emptied buffer reads zero age and clears the
-    /// warning without waiting; between walks the call does nothing more. The
-    /// report runs after every pass, and a pass runs every flush interval
-    /// also when nothing is buffered (`flush_loop`).
+    /// The buffered-entries, buffered-bytes and refusal-age gauges, the
+    /// warning and the all-clear are decided on every call. The age of the
+    /// oldest buffered entry comes from one walk of the queues, O(queued
+    /// entries) and allocation-free, which runs at most once per
+    /// `REPORT_WALK_INTERVAL`, and at once when a store-wide hold has begun
+    /// or ended since the last walk or when the buffer is empty and the last
+    /// walk found entries, so an emptied buffer reads zero age. The report
+    /// runs after every pass, and a pass runs every flush interval also when
+    /// nothing is buffered (`flush_loop`).
     fn report_retries(&self, schedule: &mut RetrySchedule) {
         let pending = self.pending_count.load(Ordering::Relaxed);
         metrics::gauge!(BUFFERED_ENTRIES_GAUGE).set(count_as_gauge(pending));
@@ -5604,6 +5067,7 @@ impl WriteBehindDataStore {
         metrics::gauge!(BUFFERED_BYTES_GAUGE)
             .set(self.buffered_bytes.load(Ordering::Relaxed) as f64);
         let now = tokio::time::Instant::now();
+        Self::report_hold(schedule, pending, now);
         if schedule.last_walk.as_ref().is_some_and(|walk| {
             walk.hold_changes == schedule.hold_changes
                 && !(pending == 0 && walk.found_entries)
@@ -5613,18 +5077,11 @@ impl WriteBehindDataStore {
         }
         #[cfg(test)]
         self.report_walks.fetch_add(1, Ordering::SeqCst);
-        let mut retrying = 0u64;
-        let mut earliest = None;
-        let mut oldest_buffered: Option<tokio::time::Instant> = None;
-        for queue in &self.queues {
-            let (count, queue_earliest, queue_oldest) = queue.value().retrying_and_oldest();
-            retrying += count;
-            earliest = earlier_refusal(earliest, queue_earliest);
-            oldest_buffered = match (oldest_buffered, queue_oldest) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
-        }
+        let oldest_buffered = self
+            .queues
+            .iter()
+            .filter_map(|queue| queue.value().oldest_buffered())
+            .min();
         schedule.last_walk = Some(LastWalk {
             at: now,
             hold_changes: schedule.hold_changes,
@@ -5636,57 +5093,47 @@ impl WriteBehindDataStore {
             now.saturating_duration_since(first)
         });
         metrics::gauge!(OLDEST_ENTRY_AGE_GAUGE).set(oldest_entry_age.as_secs_f64());
-        if !self.retrying.load(Ordering::Relaxed) {
-            return;
-        }
-        // Monotonic time since the first refusal, never the entry's
-        // `store_time`: that is supplied by the caller and is not a time at
-        // all for some callers.
-        let oldest_refusal_age = earliest.map_or(std::time::Duration::ZERO, |first| {
-            now.saturating_duration_since(first)
-        });
-        // Also on the walk that finds nothing refused any more: it is the
-        // last walk until the next refusal, and it is what brings both gauges
-        // back to zero.
-        metrics::gauge!(RETRYING_ENTRIES_GAUGE).set(count_as_gauge(retrying));
+    }
+
+    /// The refusal-age gauge, the retry warning and the all-clear: O(1), so
+    /// every report decides them, and the gauge is never older than one pass.
+    fn report_hold(schedule: &mut RetrySchedule, pending: u64, now: tokio::time::Instant) {
+        // Monotonic time since the hold's first refused commit, never an
+        // entry's `store_time`: that is supplied by the caller and is not a
+        // time at all for some callers.
+        let oldest_refusal_age = schedule
+            .hold_began
+            .map_or(std::time::Duration::ZERO, |first| {
+                now.saturating_duration_since(first)
+            });
         metrics::gauge!(OLDEST_REFUSAL_AGE_GAUGE).set(oldest_refusal_age.as_secs_f64());
 
-        // A hold puts its entries back untouched, so during one the walk may
-        // find nothing refused; the backlog is not clear until it ends.
-        if retrying == 0 && schedule.hold_until.is_none() {
-            self.retrying.store(false, Ordering::Relaxed);
+        if schedule.hold_until.is_none() {
             // Only after a warning: a refusal nobody was told about needs no
             // all-clear either.
-            if schedule.last_warning.is_some() {
+            if schedule.last_warning.take().is_some() {
                 tracing::info!(
                     "Write-behind retry backlog cleared: the store accepted every refused entry"
                 );
             }
-            schedule.warning_armed = false;
-            schedule.last_warning = None;
-            schedule.example = None;
+            schedule.last_error = None;
             return;
         }
 
         let due = schedule
             .last_warning
             .is_none_or(|last| now.saturating_duration_since(last) >= RETRY_WARN_INTERVAL);
-        if !(schedule.warning_armed && due) {
+        if !due {
             return;
         }
-        let Some(example) = &schedule.example else {
-            return;
-        };
         // Whole seconds of the age gauge, so the line and the series agree.
         let oldest_refusal_age_s = oldest_refusal_age.as_secs();
         warn!(
-            retrying,
+            buffered = pending,
             oldest_refusal_age_s,
             hold = schedule.hold_until.is_some(),
-            map = %example.map,
-            key = %example.key,
-            attempts = example.attempts,
-            error = %example.error,
+            refused_passes = schedule.refused_passes,
+            error = schedule.last_error.as_deref().unwrap_or(""),
             "Write-behind entries are being retried: the store refuses them"
         );
         schedule.last_warning = Some(now);
@@ -5866,6 +5313,14 @@ impl WriteBehindDataStore {
 
 #[async_trait]
 impl MapDataStore for WriteBehindDataStore {
+    // Tests size the cap through the config; `refuse_oversized` and the
+    // record store's in-place guard both read it here, so they refuse at the
+    // same value. Production keeps the trait's default.
+    #[cfg(test)]
+    fn max_record_charge(&self) -> u64 {
+        self.config.max_record_charge
+    }
+
     async fn add(&self, map: &str, key: &str, value: &RecordValue, now: i64) -> anyhow::Result<()> {
         // One write path, not two: the same code the witness-bearing callers
         // run with the witness set. A second body would let the two drift. The
@@ -7004,6 +6459,16 @@ mod tests {
         accepted: bool,
     }
 
+    /// One commit the flush made to the spy: when it began, when it
+    /// answered, how many writes it carried and whether it was accepted.
+    #[derive(Debug, Clone)]
+    struct SpyCommit {
+        began: tokio::time::Instant,
+        returned: Option<tokio::time::Instant>,
+        writes: usize,
+        accepted: bool,
+    }
+
     /// Test-only data store that records calls and optionally returns pre-seeded values.
     struct SpyDataStore {
         calls: Arc<Mutex<Vec<SpyCall>>>,
@@ -7021,9 +6486,6 @@ mod tests {
         persisted: DashMap<(String, String), RecordValue>,
         /// When set, `remove` returns `Err`.
         fail_remove: std::sync::atomic::AtomicBool,
-        /// Keys whose `add` and `remove` return `Err` while every other key is
-        /// served: a record the store rejects next to a store that works.
-        refused_keys: Mutex<std::collections::HashSet<String>>,
         /// How long `add` and `remove` take to answer. Slept on the runtime's
         /// clock, so a paused clock drives it.
         answer_delay_ms: AtomicU64,
@@ -7035,6 +6497,12 @@ mod tests {
         /// so `load()` answers with what the store was actually given. Off by
         /// default, so no existing expectation about `load()` changes.
         retain_accepted: bool,
+        /// Every `commit`, in the order they began.
+        commits: Mutex<Vec<SpyCommit>>,
+        /// Answers for the next commits, in turn: `false` refuses the commit
+        /// before any write; `true`, or none left, makes it as without a
+        /// script.
+        commit_script: Mutex<std::collections::VecDeque<bool>>,
     }
 
     impl SpyDataStore {
@@ -7046,13 +6514,60 @@ mod tests {
                 add_gate: Mutex::new(None),
                 persisted: DashMap::new(),
                 fail_remove: std::sync::atomic::AtomicBool::new(false),
-                refused_keys: Mutex::new(std::collections::HashSet::new()),
                 answer_delay_ms: AtomicU64::new(0),
                 timeline: Mutex::new(Vec::new()),
                 in_flight: std::sync::atomic::AtomicUsize::new(0),
                 most_in_flight: std::sync::atomic::AtomicUsize::new(0),
                 retain_accepted: false,
+                commits: Mutex::new(Vec::new()),
+                commit_script: Mutex::new(std::collections::VecDeque::new()),
             }
+        }
+
+        /// Every commit so far, in the order they began.
+        fn commits(&self) -> Vec<SpyCommit> {
+            self.commits.lock().unwrap().clone()
+        }
+
+        /// Answers the next commits with `answers`, in turn.
+        fn script_commits(&self, answers: &[bool]) {
+            self.commit_script
+                .lock()
+                .unwrap()
+                .extend(answers.iter().copied());
+        }
+
+        /// The trait's default commit: the writes one at a time, in order,
+        /// through the per-record methods.
+        async fn commit_per_record(&self, commit: &FlushCommit<'_>) -> anyhow::Result<()> {
+            if !commit.applied.is_empty() {
+                anyhow::bail!("this store keeps no applied watermark");
+            }
+            for write in &commit.writes {
+                match write {
+                    StoreWrite::Put {
+                        map,
+                        key,
+                        value: PutValue::Encoded(bytes),
+                        store_time,
+                        ..
+                    } => self.add_encoded(map, key, bytes, *store_time).await?,
+                    StoreWrite::Put {
+                        map,
+                        key,
+                        value: PutValue::Value(value),
+                        store_time,
+                        ..
+                    } => self.add(map, key, value, *store_time).await?,
+                    StoreWrite::Remove {
+                        map,
+                        key,
+                        store_time,
+                        ..
+                    } => self.remove(map, key, *store_time).await?,
+                }
+            }
+            Ok(())
         }
 
         /// A store that keeps what it accepts: `load()` and `held()` answer
@@ -7069,16 +6584,6 @@ mod tests {
             self.set_fail_add(refuse);
             self.fail_remove
                 .store(refuse, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        /// Refuse every call for `key` from now on, whatever the map.
-        fn refuse_key(&self, key: &str) {
-            self.refused_keys.lock().unwrap().insert(key.to_string());
-        }
-
-        /// Lift every per-key refusal.
-        fn accept_every_key(&self) {
-            self.refused_keys.lock().unwrap().clear();
         }
 
         fn set_answer_delay_ms(&self, delay_ms: u64) {
@@ -7161,10 +6666,6 @@ mod tests {
             }
         }
 
-        fn refuses_key(&self, key: &str) -> bool {
-            self.refused_keys.lock().unwrap().contains(key)
-        }
-
         /// The value the inner store was handed for a key, if any.
         fn persisted(&self, map: &str, key: &str) -> Option<RecordValue> {
             self.persisted
@@ -7225,8 +6726,7 @@ mod tests {
             self.answer_delay().await;
             // Read when the call answers, not when it began: a refusal lifted
             // while a slow call is in flight is an accepted call.
-            let refused =
-                self.fail_add.load(std::sync::atomic::Ordering::Relaxed) || self.refuses_key(key);
+            let refused = self.fail_add.load(std::sync::atomic::Ordering::Relaxed);
             self.call_returned(index, !refused);
             if refused {
                 anyhow::bail!("SpyDataStore: simulated inner-store add failure");
@@ -7255,8 +6755,7 @@ mod tests {
             });
             let index = self.call_began(key);
             self.answer_delay().await;
-            let refused = self.fail_remove.load(std::sync::atomic::Ordering::Relaxed)
-                || self.refuses_key(key);
+            let refused = self.fail_remove.load(std::sync::atomic::Ordering::Relaxed);
             self.call_returned(index, !refused);
             if refused {
                 anyhow::bail!("SpyDataStore: simulated inner-store remove failure");
@@ -7343,6 +6842,33 @@ mod tests {
 
         fn is_null(&self) -> bool {
             false
+        }
+
+        async fn commit(&self, commit: &FlushCommit<'_>) -> anyhow::Result<()> {
+            let index = {
+                let mut commits = self.commits.lock().unwrap();
+                commits.push(SpyCommit {
+                    began: tokio::time::Instant::now(),
+                    returned: None,
+                    writes: commit.writes.len(),
+                    accepted: false,
+                });
+                commits.len() - 1
+            };
+            let scripted = self.commit_script.lock().unwrap().pop_front();
+            let result = if scripted == Some(false) {
+                // Wrapped, as an engine error is: the inner cause is what an
+                // operator needs to see.
+                Err(anyhow::anyhow!("the disk refused the write")
+                    .context("SpyDataStore: scripted commit refusal"))
+            } else {
+                self.commit_per_record(commit).await
+            };
+            let mut commits = self.commits.lock().unwrap();
+            commits[index].returned = Some(tokio::time::Instant::now());
+            commits[index].accepted = result.is_ok();
+            drop(commits);
+            result
         }
     }
 
@@ -7702,37 +7228,66 @@ mod tests {
         );
     }
 
-    /// An entry the store refuses is never given up: it stays buffered and
-    /// readable, and its ENTRY sequence stays unresolved, so the flushed
-    /// watermark — the tombstone durability fence — waits below it for as
-    /// long as the inner store has not taken the write. Only the accepted
-    /// store call resolves it.
+    /// A refused commit is never given up: its entries stay buffered and
+    /// readable, and their ENTRY sequences stay unresolved, so the flushed
+    /// watermark — the tombstone durability fence — waits below a refused
+    /// remove for as long as the inner store has not taken it, through every
+    /// hold. Only the accepted retry pass resolves it.
     #[tokio::test(start_paused = true)]
-    async fn a_refused_entry_stays_buffered_and_holds_the_flushed_watermark() {
+    async fn a_refused_tombstone_holds_the_fence_until_the_store_takes_it() {
         let spy = Arc::new(SpyDataStore::retaining());
+        spy.seed(SCHEDULE_MAP, "t", lww("old", 1));
         spy.refuse_everything(true);
         let store = schedule_store(&spy, schedule_config());
-        store.add(SCHEDULE_MAP, "k", &lww("v", 1), 1).await.unwrap();
-        advance(60_000).await;
+        // The remove first, so its sequence is the lowest pending one and only
+        // its own refusal can hold the fence at it.
+        store.remove(SCHEDULE_MAP, "t", 1).await.unwrap();
+        store.add(SCHEDULE_MAP, "k", &lww("v", 1), 2).await.unwrap();
+        let tombstone = queued_sequence(&store, "t").expect("the remove is queued");
+        // The fence as each of the first two refused commits left it, read
+        // inside the hold that commit started.
+        let mut fence_in_holds = Vec::new();
+        for refused in 1..=2 {
+            poll_until(10_000, || {
+                spy.commits().len() == refused && spy.commits()[refused - 1].returned.is_some()
+            })
+            .await
+            .expect("the refused commit returned");
+            fence_in_holds.push((
+                store.test_store_hold_active(),
+                // The fence covers a sequence once it is above it.
+                store.flushed_watermark() <= tombstone,
+            ));
+        }
         let while_refused = (
             store.pending_operation_count(),
             store.load(SCHEDULE_MAP, "k").await.unwrap(),
-            store.flushed_watermark() < store.assigned_write_sequence(),
+            store.load(SCHEDULE_MAP, "t").await.unwrap(),
         );
         spy.refuse_everything(false);
         let drained = poll_until(10_000, || store.test_is_idle()).await.is_some();
+        let commits = spy.commits();
         let after = (
+            commits.iter().filter(|commit| commit.accepted).count(),
+            commits
+                .last()
+                .map(|commit| (commit.writes, commit.accepted)),
             store.pending_operation_count(),
-            store.flushed_watermark() == store.assigned_write_sequence(),
+            store.flushed_watermark() > tombstone,
+            spy.held(SCHEDULE_MAP, "t"),
             spy.held(SCHEDULE_MAP, "k"),
         );
         assert_eq!(
-            (while_refused, drained, after),
+            (fence_in_holds, while_refused, drained, after),
             (
-                (1, Some(lww("v", 1)), true),
+                vec![(true, true), (true, true)],
+                (2, Some(lww("v", 1)), None),
                 true,
-                (0, true, Some(lww("v", 1)))
-            )
+                (1, Some((2, true)), 0, true, None, Some(lww("v", 1)))
+            ),
+            "(hold and fence not past the remove after each refused commit, buffer while \
+             refused, drained, (accepted commits, last commit, buffered, fence past the \
+             remove, stored t, stored k))"
         );
     }
 
@@ -10175,9 +9730,6 @@ mod tests {
             store_time: 0,
             buffered_at: tokio::time::Instant::now(),
             sequence: 1,
-            retry_count: 0,
-            next_attempt: None,
-            first_refused: None,
             wal_sequences: BTreeSet::new(),
         };
 
@@ -10278,11 +9830,11 @@ mod tests {
         );
     }
 
-    /// TG-WB-004: while a refused entry waits out its retry backoff, the queue
-    /// shard it was put back on must stay usable. A write takes that shard lock
-    /// synchronously, so a guard kept alive across the backoff parks the
-    /// writer's worker thread for the whole backoff — the first step of a node
-    /// that stops serving.
+    /// TG-WB-004: while the store-wide hold that a refused commit started is
+    /// in force, the queue shard its entry was put back on must stay usable. A
+    /// write takes that shard lock synchronously, so a guard kept alive across
+    /// the hold parks the writer's worker thread for the whole of it — the
+    /// first step of a node that stops serving.
     ///
     /// The probe write runs as a task of its own and the JOIN is bounded: a
     /// timeout polled around the write itself would block inside the write and
@@ -10294,14 +9846,14 @@ mod tests {
         let spy = Arc::new(SpyDataStore::new());
         spy.set_fail_add(true);
         let calls = spy.calls();
-        // First backoff = min(2000 * 2^1, 5000) = 4000 ms: long enough that the
+        // The first hold = min(4000, 5000) = 4000 ms: long enough that the
         // probe and every later assertion run inside it.
         let store = WriteBehindDataStore::new(
             Arc::clone(&spy) as Arc<dyn MapDataStore>,
             WriteBehindConfig {
                 write_delay_ms: 0,
                 flush_interval_ms: 50,
-                backoff_base_ms: 2000,
+                backoff_base_ms: 4000,
                 ..WriteBehindConfig::default()
             },
         );
@@ -10339,10 +9891,9 @@ mod tests {
         loop {
             let back_on_queue = match store.queues.try_get(&partition) {
                 dashmap::try_result::TryResult::Locked => true,
-                dashmap::try_result::TryResult::Present(queue) => queue
-                    .entries
-                    .get(&refused)
-                    .is_some_and(|entry| entry.retry_count == 1),
+                dashmap::try_result::TryResult::Present(queue) => {
+                    queue.entries.contains_key(&refused)
+                }
                 dashmap::try_result::TryResult::Absent => false,
             };
             if attempts() >= 1 && back_on_queue {
@@ -10386,13 +9937,12 @@ mod tests {
             "the probe must finish inside the first backoff (4000 ms)"
         );
 
-        let retry_count = store
+        let still_queued = store
             .queues
             .get(&partition)
-            .and_then(|queue| queue.entries.get(&refused).map(|entry| entry.retry_count));
-        assert_eq!(
-            retry_count,
-            Some(1),
+            .is_some_and(|queue| queue.entries.contains_key(&refused));
+        assert!(
+            still_queued,
             "the refused entry must still be queued for its second attempt"
         );
     }
@@ -10403,8 +9953,9 @@ mod tests {
     /// While an entry is out of the queue — drained into the flush batch and
     /// waiting behind another key's store call — a write to the same key has
     /// nothing to coalesce with, so it is queued and counted as a new entry.
-    /// When the older entry's attempt then fails, its count, its entry sequence
-    /// and its WAL sequences must pass to that queued write. Dropping the entry
+    /// When the commit that holds the older entry is then refused, the entry's
+    /// count, its entry sequence and its WAL sequences must pass to that queued
+    /// write. Dropping the entry
     /// instead strands all three until restart: the capacity check reads an
     /// inflated count, the flushed watermark stops, and the partition's WAL is
     /// never collected.
@@ -10490,15 +10041,20 @@ mod tests {
             .expect("the newer b is accepted into the buffer");
         proceed.notify_one();
 
+        // The commit of `a` and the older `b` is refused as a whole, so both
+        // go back and a hold begins.
         let deadline = Instant::now() + Duration::from_secs(5);
-        while attempts("b") < 1 {
-            assert!(Instant::now() < deadline, "the older b was never attempted");
+        while !store.test_store_hold_active() {
+            assert!(
+                Instant::now() < deadline,
+                "the commit holding the older b was never refused"
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
-        // What the queued newer write owns once the older entry's attempt has
-        // failed. Recorded, not asserted yet: the accounting below must be the
-        // first thing a failing run reports.
+        // What the queued newer write owns once the commit holding the older
+        // entry has been refused. Recorded, not asserted yet: the accounting
+        // below must be the first thing a failing run reports.
         let mut carried = BTreeSet::new();
         let deadline = Instant::now() + Duration::from_millis(500);
         loop {
@@ -12301,150 +11857,10 @@ mod tests {
         assert_eq!((presented_back, revoked), ((true, true), (true, true)));
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn a_pass_over_refused_entries_ends_without_a_timer_wait() {
-        let spy = Arc::new(SpyDataStore::retaining());
-        let store = schedule_store(&spy, schedule_config());
-        for i in 0..50 {
-            let key = format!("r{i}");
-            spy.refuse_key(&key);
-            store
-                .add(SCHEDULE_MAP, &key, &lww("v", 1), 1)
-                .await
-                .unwrap();
-        }
-        store
-            .add(SCHEDULE_MAP, "healthy", &lww("h", 1), 1)
-            .await
-            .unwrap();
-        let closed_before = store.test_passes_closed();
-        store.soft_flush().await.unwrap();
-        let started = poll_until(10, || spy.call_count() > 0).await;
-        let closed = poll_until(10, || {
-            !store.test_pass_open() && store.test_passes_closed() > closed_before
-        })
-        .await;
-        let healthy_after =
-            poll_until(10_000, || spy.held(SCHEDULE_MAP, "healthy").is_some()).await;
-        assert_eq!(
-            (
-                started.is_some(),
-                closed.is_some(),
-                healthy_after.map(|ms| ms <= 5_110)
-            ),
-            (true, true, Some(true)),
-            "healthy key stored after {healthy_after:?} ms"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn one_refused_entry_costs_one_store_call_per_backoff_and_delays_no_other_key() {
-        let spy = Arc::new(SpyDataStore::retaining());
-        spy.refuse_key("A");
-        let store = schedule_store(&spy, schedule_config());
-        store.add(SCHEDULE_MAP, "A", &lww("a", 1), 1).await.unwrap();
-        let mut slowest = 0u64;
-        let mut all_stored = true;
-        let mut hold_seen = false;
-        for i in 0..60 {
-            let round = tokio::time::Instant::now();
-            let key = format!("h{i}");
-            store
-                .add(SCHEDULE_MAP, &key, &lww("h", 1), 1)
-                .await
-                .unwrap();
-            match poll_until(1_000, || spy.held(SCHEDULE_MAP, &key).is_some()).await {
-                Some(waited) => slowest = slowest.max(waited),
-                None => all_stored = false,
-            }
-            hold_seen |= store.test_store_hold_active();
-            tokio::time::sleep_until(round + tokio::time::Duration::from_millis(1_000)).await;
-        }
-        // Attempts, not calls: a pass that holds A beside a healthy key
-        // commits A twice — the whole pass, then the half A is left alone in.
-        let attempts = store
-            .test_retry_state(SCHEDULE_MAP, "A")
-            .map_or(0, |(retry_count, _)| retry_count);
-        let calls = spy.calls_for("A");
-        assert_eq!(
-            (
-                (5..=15).contains(&attempts),
-                calls <= 2 * attempts as usize,
-                hold_seen,
-                all_stored,
-                slowest <= 210
-            ),
-            (true, true, false, true, true),
-            "attempts(A) = {attempts}, calls(A) = {calls}, slowest healthy key = {slowest} ms"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_rewritten_refused_key_keeps_its_backoff() {
-        let spy = Arc::new(SpyDataStore::retaining());
-        spy.refuse_key("A");
-        let store = schedule_store(&spy, schedule_config());
-        let mut last = lww("a0", 1);
-        store.add(SCHEDULE_MAP, "A", &last, 1).await.unwrap();
-        for i in 1..=100u64 {
-            advance(100).await;
-            last = lww(&format!("a{i}"), i + 1);
-            store.add(SCHEDULE_MAP, "A", &last, 1).await.unwrap();
-        }
-        let calls = spy.calls_for("A");
-        assert_eq!(
-            (calls <= 6, store.load(SCHEDULE_MAP, "A").await.unwrap()),
-            (true, Some(last)),
-            "calls(A) = {calls}"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_superseded_entry_hands_its_backoff_to_the_queued_write() {
-        fn answered(spy: &SpyDataStore) -> usize {
-            spy.timeline()
-                .iter()
-                .filter(|call| call.returned.is_some())
-                .count()
-        }
-        let spy = Arc::new(SpyDataStore::retaining());
-        spy.refuse_key("A");
-        let store = schedule_store(&spy, schedule_config());
-        store
-            .add(SCHEDULE_MAP, "A", &lww("a1", 1), 1)
-            .await
-            .unwrap();
-        let refused_once = poll_until(1_000, || answered(&spy) == 1).await.is_some();
-
-        // The next attempt on A stops inside the store, so the pass holds the
-        // entry out of its queue while A is written again.
-        let (entered, proceed) = spy.install_add_gate();
-        let held_by_a_pass =
-            tokio::time::timeout(tokio::time::Duration::from_secs(30), entered.notified())
-                .await
-                .is_ok();
-        store
-            .add(SCHEDULE_MAP, "A", &lww("a2", 2), 1)
-            .await
-            .unwrap();
-        let queued_before = store.test_retry_state(SCHEDULE_MAP, "A");
-        proceed.notify_one();
-        let refused_twice = poll_until(1_000, || answered(&spy) == 2).await.is_some();
-        let queued_after = store.test_retry_state(SCHEDULE_MAP, "A");
-        assert_eq!(
-            (
-                (refused_once, held_by_a_pass, refused_twice),
-                queued_before,
-                queued_after.map(|(count, next)| (count, next.is_some())),
-                store.pending_operation_count(),
-            ),
-            ((true, true, true), Some((0, None)), Some((2, true)), 1)
-        );
-    }
-
-    /// How many store calls a store that refuses everything gets in 60 s
-    /// with `keys` entries buffered.
-    async fn calls_under_a_full_refusal(keys: usize) -> usize {
+    /// When a store that refuses everything is committed to with `keys`
+    /// entries buffered: the milliseconds of every commit that begins within
+    /// 60 s of the first, counted from the first.
+    async fn commits_under_a_full_refusal(keys: usize) -> Vec<u128> {
         let spy = Arc::new(SpyDataStore::retaining());
         spy.refuse_everything(true);
         let store = schedule_store(&spy, schedule_config());
@@ -12454,18 +11870,575 @@ mod tests {
                 .await
                 .unwrap();
         }
-        advance(60_000).await;
-        spy.call_count()
+        advance(61_000).await;
+        let commits = spy.commits();
+        let Some(first) = commits.first().map(|commit| commit.began) else {
+            return Vec::new();
+        };
+        commits
+            .iter()
+            .map(|commit| commit.began.duration_since(first).as_millis())
+            .filter(|&ms| ms < 60_000)
+            .collect()
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_store_that_refuses_everything_gets_a_bounded_number_of_calls() {
-        let ten = calls_under_a_full_refusal(10).await;
-        let thousand = calls_under_a_full_refusal(1_000).await;
+    async fn a_store_that_refuses_everything_gets_fifteen_calls_a_minute() {
+        // Holds of 500, 1000, 2000 and 4000 ms, then of the 5000 ms cap: a
+        // commit at 0, 0.5, 1.5, 3.5 and 7.5 s and then every 5 s.
+        let expected: Vec<u128> = [0, 500, 1_500, 3_500]
+            .into_iter()
+            .chain((0..11).map(|i| 7_500 + 5_000 * i))
+            .collect();
+        let ten = commits_under_a_full_refusal(10).await;
+        let thousand = commits_under_a_full_refusal(1_000).await;
         assert_eq!(
-            ((8..=20).contains(&ten), (8..=20).contains(&thousand)),
-            (true, true),
-            "calls for 10 keys = {ten}, for 1000 keys = {thousand}"
+            (expected.len(), &ten, &thousand),
+            (15, &expected, &expected),
+            "commits for 10 keys at ms {ten:?}, for 1000 keys at ms {thousand:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_commit_starts_a_hold_after_one_call() {
+        const KEYS: [&str; 4] = ["A", "B", "C", "D"];
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store(&spy, schedule_config());
+        for (store_time, key) in (1i64..).zip(KEYS) {
+            store
+                .add(SCHEDULE_MAP, key, &lww("v", 1), store_time)
+                .await
+                .unwrap();
+        }
+        let sequences = KEYS.map(|key| queued_sequence(&store, key));
+        let bytes = store.buffered_bytes.load(Ordering::Relaxed);
+        // Polled every 10 ms, so it reads the hold well inside its first
+        // 500 ms, before the pass that follows it.
+        let held = poll_until(1_000, || store.test_store_hold_active())
+            .await
+            .is_some();
+        let commits = spy.commits();
+        assert_eq!(
+            (
+                held,
+                commits
+                    .iter()
+                    .map(|commit| commit.writes)
+                    .collect::<Vec<_>>(),
+                KEYS.map(|key| queued_sequence(&store, key)) == sequences,
+                store.pending_operation_count(),
+                store.buffered_bytes.load(Ordering::Relaxed) == bytes,
+                store.test_is_idle(),
+            ),
+            (true, vec![4], true, 4, true, false),
+            "(hold, writes of each commit, every entry queued with its sequence, buffered \
+             keys, buffered bytes unchanged, idle)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_single_entry_commit_starts_a_hold() {
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store(&spy, schedule_config());
+        store.add(SCHEDULE_MAP, "A", &lww("v", 1), 1).await.unwrap();
+        let sequence = queued_sequence(&store, "A");
+        let held = poll_until(1_000, || store.test_store_hold_active())
+            .await
+            .is_some();
+        let commits = spy.commits();
+        assert_eq!(
+            (
+                held,
+                commits
+                    .iter()
+                    .map(|commit| commit.writes)
+                    .collect::<Vec<_>>(),
+                queued_sequence(&store, "A") == sequence,
+                store.pending_operation_count(),
+            ),
+            (true, vec![1], true, 1)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_pass_after_a_hold_stores_everything_due_in_one_call() {
+        const N: usize = 1_000;
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.refuse_everything(true);
+        let store = schedule_store(&spy, schedule_config());
+        for i in 0..N {
+            store
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 1)
+                .await
+                .unwrap();
+        }
+        let held = poll_until(1_000, || store.test_store_hold_active())
+            .await
+            .is_some();
+        spy.refuse_everything(false);
+        let drained = poll_until(6_000, || store.test_is_idle()).await.is_some();
+        let stored = (0..N)
+            .filter(|i| spy.held(SCHEDULE_MAP, &format!("k{i}")).is_some())
+            .count();
+        let accepted: Vec<usize> = spy
+            .commits()
+            .iter()
+            .filter(|commit| commit.accepted)
+            .map(|commit| commit.writes)
+            .collect();
+        assert_eq!(
+            (
+                held,
+                drained,
+                stored,
+                accepted,
+                store.test_store_hold_active()
+            ),
+            (true, true, N, vec![N], false),
+            "(hold, drained, keys stored, writes of each accepted commit, hold after)"
+        );
+    }
+
+    /// Runs a store whose commits are answered by `answers` in turn, with a
+    /// new key written every 100 ms so that something is due whenever a hold
+    /// allows a pass; then refuses one more commit and stops the store inside
+    /// the hold that refusal starts, its drain refused `drain_refusals` times
+    /// and then accepted. Says whether every commit was made, the drain
+    /// stored everything and every refused commit was followed by at least
+    /// the hold its run of refusals had reached — the backoff base at the
+    /// least — with no commit, across the flush and the drain; and whether
+    /// every hold that began after an accepted commit, or at the first one,
+    /// lasted the backoff base.
+    async fn refused_commits_spacing(answers: &[bool], drain_refusals: usize) -> (bool, bool) {
+        const BASE: tokio::time::Duration = tokio::time::Duration::from_millis(500);
+        // A pass begins every flush interval, so the commit a hold allows
+        // begins at most one interval after it ends.
+        const INTERVAL: tokio::time::Duration = tokio::time::Duration::from_millis(100);
+        let spy = Arc::new(SpyDataStore::retaining());
+        spy.script_commits(answers);
+        spy.script_commits(&[false]);
+        spy.script_commits(&vec![false; drain_refusals]);
+        let config = schedule_config();
+        let (base_ms, cap_ms) = (config.backoff_base_ms, config.backoff_cap_ms);
+        let store = schedule_store(&spy, config);
+        let mut i = 0u32;
+        // Ends within one interval of the extra refusal, inside its hold.
+        while spy.commits().len() <= answers.len() && i < 3_000 {
+            store
+                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 1)
+                .await
+                .unwrap();
+            advance(100).await;
+            i += 1;
+        }
+        let drained = store.hard_flush().await.is_ok() && store.pending_operation_count() == 0;
+        let commits = spy.commits();
+        let mut in_a_row = 0u32;
+        let mut spaced = true;
+        for pair in commits.windows(2) {
+            if pair[0].accepted {
+                in_a_row = 0;
+                continue;
+            }
+            let hold = retry_backoff(base_ms, cap_ms, in_a_row);
+            in_a_row += 1;
+            spaced &= hold >= BASE
+                && pair[0]
+                    .returned
+                    .is_some_and(|returned| pair[1].began >= returned + hold);
+        }
+        let first_holds_at_base = commits.windows(2).enumerate().all(|(at, pair)| {
+            let first_of_a_run = !pair[0].accepted && (at == 0 || commits[at - 1].accepted);
+            !first_of_a_run
+                || pair[0]
+                    .returned
+                    .is_some_and(|returned| pair[1].began <= returned + BASE + INTERVAL)
+        });
+        (
+            commits.len() == answers.len() + 1 + drain_refusals + 1 && drained && spaced,
+            first_holds_at_base,
+        )
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn refused_calls_are_at_least_the_base_apart_whatever_the_store_does(
+            answers in proptest::collection::vec(proptest::bool::ANY, 1..=16),
+            drain_refusals in 0usize..=4,
+        ) {
+            let observed =
+                paused_runtime().block_on(refused_commits_spacing(&answers, drain_refusals));
+            proptest::prop_assert_eq!(
+                observed,
+                (true, true),
+                "answers {:?}, drain refusals {}",
+                answers,
+                drain_refusals
+            );
+        }
+    }
+
+    /// A schedule store over a WAL the test keeps, so it reads what the WAL
+    /// was told is applied.
+    fn schedule_store_over_wal(
+        spy: &Arc<crate::storage::map_data_store::WatermarkKeeping<SpyDataStore>>,
+        wal: &Arc<InMemoryTestWal>,
+        config: WriteBehindConfig,
+    ) -> Arc<WriteBehindDataStore> {
+        WriteBehindDataStore::new_with_wal(
+            Arc::clone(spy) as Arc<dyn MapDataStore>,
+            config,
+            Some(WalBootstrap {
+                wal: Arc::clone(wal) as Arc<dyn Wal>,
+                sequence_start: 1,
+            }),
+        )
+    }
+
+    /// The applied watermark of `partition` as the store's row and as the
+    /// WAL was told it.
+    fn applied_of(
+        spy: &crate::storage::map_data_store::WatermarkKeeping<SpyDataStore>,
+        wal: &InMemoryTestWal,
+        partition: u32,
+    ) -> (u64, u64) {
+        let row = spy
+            .applied_watermarks()
+            .expect("applied watermarks")
+            .expect("a store that keeps applied watermarks")
+            .by_partition[partition as usize];
+        (row, wal.durable_applied(partition).unwrap_or(0))
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn an_unencodable_entry_fails_the_store_as_inconsistent() {
+        const KEYS: [&str; 3] = ["A", "B", "C"];
+        let observed = Arc::new(Mutex::new(None));
+        let out = Arc::clone(&observed);
+        let events = events_on_a_paused_clock(async move {
+            let spy = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+                SpyDataStore::retaining(),
+            ));
+            let store = schedule_store_with_wal(
+                &spy,
+                WriteBehindConfig {
+                    flush_interval_ms: 60_000,
+                    ..schedule_config()
+                },
+            );
+            store.test_refuse_encoding(SCHEDULE_MAP, "B");
+            for (store_time, key) in (1i64..).zip(KEYS) {
+                store
+                    .add(SCHEDULE_MAP, key, &lww("v", 1), store_time)
+                    .await
+                    .unwrap();
+            }
+            let wal_sequences = |store: &WriteBehindDataStore| {
+                let mut pending: Vec<u64> = KEYS
+                    .iter()
+                    .flat_map(|key| {
+                        store
+                            .test_pending_wal_sequences(partition_for(SCHEDULE_MAP, key))
+                            .into_iter()
+                            .map(|(sequence, _)| sequence)
+                    })
+                    .collect();
+                pending.sort_unstable();
+                pending.dedup();
+                pending
+            };
+            let before = (
+                KEYS.map(|key| queued_sequence(&store, key)),
+                store.pending_operation_count(),
+                store.buffered_bytes.load(Ordering::Relaxed),
+                wal_sequences(&store),
+            );
+            let lowest = before.0.iter().flatten().copied().min().unwrap();
+            one_requested_pass(&store).await;
+            // Later passes would call the store if anything still ran one.
+            advance(120_000).await;
+            let after = (
+                KEYS.map(|key| queued_sequence(&store, key)),
+                store.pending_operation_count(),
+                store.buffered_bytes.load(Ordering::Relaxed),
+                wal_sequences(&store),
+            );
+            let failure = store
+                .background_failure()
+                .borrow()
+                .as_ref()
+                .map(|failure| failure.cause);
+            let in_flight: usize = KEYS
+                .iter()
+                .map(|key| {
+                    store
+                        .test_in_flight_wal_sequences(partition_for(SCHEDULE_MAP, key))
+                        .len()
+                })
+                .sum();
+            *out.lock().unwrap() = Some((
+                before == after && after.3.len() == KEYS.len(),
+                store.flushed_watermark() <= lowest,
+                in_flight,
+                failure,
+                spy.commits().len(),
+                spy.call_count(),
+            ));
+        });
+        let broken: Vec<&ScheduleEvent> = events
+            .iter()
+            .filter(|event| {
+                event.level == tracing::Level::ERROR
+                    && event.says(
+                        "write-behind store: the durable store is broken and stores nothing \
+                         more in this process; writes are refused from now on and the node stops",
+                    )
+            })
+            .collect();
+        let named: Vec<[Option<&str>; 4]> = broken
+            .iter()
+            .map(|event| {
+                ["cause", "site", "map", "key"]
+                    .map(|field| event.fields.get(field).map(String::as_str))
+            })
+            .collect();
+        assert_eq!(
+            (observed.lock().unwrap().take(), named),
+            (
+                Some((
+                    true,
+                    true,
+                    0,
+                    Some(FailureCause::StoreBroken(StoreBrokenCause::Inconsistent)),
+                    0,
+                    0,
+                )),
+                vec![[
+                    Some("inconsistent"),
+                    Some("encode"),
+                    Some(SCHEDULE_MAP),
+                    Some("B")
+                ]],
+            ),
+            "(every entry queued with its sequences and charge, fence not past the lowest, \
+             sequences in flight, failure, commits, store calls), the broken-store line"
+        );
+    }
+
+    #[test]
+    fn the_refusal_series_follow_the_hold() {
+        const AGE: &str = "topgun_write_behind_oldest_refusal_age_seconds";
+        const HOLD: &str = "topgun_write_behind_store_hold";
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let renders = Arc::new(Mutex::new(Vec::new()));
+        let out = Arc::clone(&renders);
+        let events = metrics::with_local_recorder(&recorder, || {
+            events_on_a_paused_clock(async move {
+                let spy = Arc::new(SpyDataStore::retaining());
+                // Commits at 0.1, 0.6 and 1.6 s refused, the one at 3.6 s
+                // accepted.
+                spy.script_commits(&[false, false, false]);
+                let store = schedule_store(&spy, schedule_config());
+                store.add(SCHEDULE_MAP, "k", &lww("v", 1), 0).await.unwrap();
+                // At 0.5 s inside the first hold, at 1.3 s inside the second.
+                for step_ms in [500, 800] {
+                    advance(step_ms).await;
+                    out.lock().unwrap().push(handle.render());
+                }
+                poll_until(10_000, || store.test_is_idle())
+                    .await
+                    .expect("the store accepts again");
+                advance(200).await;
+                out.lock().unwrap().push(handle.render());
+            })
+        });
+        let renders = renders.lock().unwrap().clone();
+        let series: Vec<(Option<f64>, Option<f64>, bool)> = renders
+            .iter()
+            .map(|rendered| {
+                (
+                    rendered_value(rendered, AGE),
+                    rendered_value(rendered, HOLD),
+                    rendered.contains("topgun_write_behind_retrying"),
+                )
+            })
+            .collect();
+        let warnings: Vec<&ScheduleEvent> = events
+            .iter()
+            .filter(|event| event.level == tracing::Level::WARN && event.says(RETRY_WARNING))
+            .collect();
+        let warning_fields: Vec<Vec<&str>> = warnings
+            .iter()
+            .map(|event| event.fields.keys().map(String::as_str).collect())
+            .collect();
+        let cleared = events
+            .iter()
+            .filter(|event| event.level == tracing::Level::INFO && event.says(BACKLOG_CLEARED))
+            .count();
+        let (first, second) = (series[0].0.unwrap_or(0.0), series[1].0.unwrap_or(0.0));
+        assert_eq!(
+            (
+                first > 0.0 && second > first,
+                series.iter().map(|s| (s.1, s.2)).collect::<Vec<_>>(),
+                series[2].0,
+                warning_fields,
+                warnings
+                    .iter()
+                    .map(|event| event.fields.get("error").map(String::as_str))
+                    .collect::<Vec<_>>(),
+                cleared,
+            ),
+            (
+                true,
+                vec![(Some(1.0), false), (Some(1.0), false), (Some(0.0), false)],
+                Some(0.0),
+                vec![vec![
+                    "buffered",
+                    "error",
+                    "hold",
+                    "message",
+                    "oldest_refusal_age_s",
+                    "refused_passes",
+                ]],
+                vec![Some(
+                    "SpyDataStore: scripted commit refusal: the disk refused the write"
+                )],
+                1,
+            ),
+            "(age rising during the hold, (hold, retrying series rendered) per render, age \
+             after, warning fields, warning error, all-clear lines); ages {series:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::too_many_lines)]
+    async fn the_drain_retries_a_refused_commit_until_its_deadline() {
+        const SHUTDOWN_MS: u64 = 10_000;
+        let config = WriteBehindConfig {
+            // No pass before the stop: the drain makes every commit.
+            flush_interval_ms: 600_000,
+            shutdown_timeout_ms: SHUTDOWN_MS,
+            ..schedule_config()
+        };
+        let partition = 7;
+        let keys = keys_of_partition(partition, 4);
+
+        // Refused twice, then accepted.
+        let spy = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+            SpyDataStore::retaining(),
+        ));
+        let wal = InMemoryTestWal::new();
+        let store = schedule_store_over_wal(&spy, &wal, config.clone());
+        spy.script_commits(&[false, false]);
+        for key in &keys {
+            store.add(SCHEDULE_MAP, key, &lww("v", 1), 1).await.unwrap();
+        }
+        let pending: Vec<u64> = store
+            .test_pending_wal_sequences(partition)
+            .iter()
+            .map(|(sequence, _)| *sequence)
+            .collect();
+        let (lowest, highest) = (
+            *pending.iter().min().expect("the writes are pending"),
+            *pending.iter().max().expect("the writes are pending"),
+        );
+        let drain = tokio::spawn({
+            let store = Arc::clone(&store);
+            async move { store.hard_flush().await }
+        });
+        let mut applied_after_refusals = Vec::new();
+        for refused in 1..=2 {
+            poll_until(10_000, || {
+                let commits = spy.commits();
+                commits.len() == refused && commits[refused - 1].returned.is_some()
+            })
+            .await
+            .expect("the refused commit returned");
+            let (row, marked) = applied_of(&spy, &wal, partition);
+            applied_after_refusals.push(row < lowest && marked < lowest);
+        }
+        let stopped = drain.await.unwrap();
+        let commits = spy.commits();
+        let gaps: Vec<u128> = commits
+            .windows(2)
+            .map(|pair| {
+                pair[1]
+                    .began
+                    .duration_since(pair[0].returned.unwrap())
+                    .as_millis()
+            })
+            .collect();
+        let (row, marked) = applied_of(&spy, &wal, partition);
+        assert_eq!(
+            (
+                stopped.is_ok(),
+                applied_after_refusals,
+                commits
+                    .iter()
+                    .map(|commit| (commit.writes, commit.accepted))
+                    .collect::<Vec<_>>(),
+                gaps,
+                store.pending_operation_count(),
+                keys.iter()
+                    .all(|key| spy.held(SCHEDULE_MAP, key) == Some(lww("v", 1))),
+                row >= highest && marked >= highest,
+            ),
+            (
+                true,
+                vec![true, true],
+                vec![(4, false), (4, false), (4, true)],
+                vec![500, 1_000],
+                0,
+                true,
+                true,
+            ),
+            "(stop, applied below the refused entries after each refusal, commits, gaps \
+             in ms, buffered, stored, applied past them at the end)"
+        );
+
+        // Refused until the deadline.
+        let spy = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
+            SpyDataStore::retaining(),
+        ));
+        spy.refuse_everything(true);
+        let wal = InMemoryTestWal::new();
+        let store = schedule_store_over_wal(&spy, &wal, config);
+        for key in &keys {
+            store.add(SCHEDULE_MAP, key, &lww("v", 1), 1).await.unwrap();
+        }
+        let lowest = store
+            .test_pending_wal_sequences(partition)
+            .iter()
+            .map(|(sequence, _)| *sequence)
+            .min()
+            .expect("the writes are pending");
+        let began = tokio::time::Instant::now();
+        let stopped = store.hard_flush().await;
+        let ended = began.elapsed().as_millis();
+        let commits = spy.commits();
+        let unapplied = wal.unapplied(partition).await.unwrap().len();
+        let (row, marked) = applied_of(&spy, &wal, partition);
+        assert_eq!(
+            (
+                stopped.is_ok(),
+                commits
+                    .iter()
+                    .map(|commit| commit.began.duration_since(began).as_millis())
+                    .collect::<Vec<_>>(),
+                ended < u128::from(SHUTDOWN_MS),
+                keys.iter().all(|key| spy.held(SCHEDULE_MAP, key).is_none()),
+                unapplied,
+                row < lowest && marked < lowest,
+            ),
+            (true, vec![0, 500, 1_500, 3_500, 7_500], true, true, 4, true),
+            "(stop, commit starts in ms, ended before the deadline, nothing stored, frames \
+             unapplied, applied below them)"
         );
     }
 
@@ -12491,7 +12464,7 @@ mod tests {
             tokio::task::yield_now().await;
             tokio::task::yield_now().await;
         }
-        assert_eq!((tripped, before, spy.call_count()), (true, 3, 3));
+        assert_eq!((tripped, before, spy.call_count()), (true, 1, 1));
     }
 
     #[tokio::test(start_paused = true)]
@@ -12524,46 +12497,6 @@ mod tests {
             (buffered_at_t, drained.is_some(), stored),
             (100, true, 100),
             "drained after {drained:?} ms"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn keys_of_one_partition_are_stored_out_of_write_order_and_the_watermarks_follow() {
-        let spy = Arc::new(crate::storage::map_data_store::WatermarkKeeping::new(
-            SpyDataStore::retaining(),
-        ));
-        let store = schedule_store_with_wal(&spy, schedule_config());
-        let partition = 7;
-        let keys = keys_of_partition(partition, 2);
-        spy.refuse_key(&keys[0]);
-        store
-            .add(SCHEDULE_MAP, &keys[0], &lww("first", 1), 1)
-            .await
-            .unwrap();
-        let first_wal_seq = store.test_pending_wal_sequences(partition)[0].0;
-        // The first entry is the only pending one, so the flushed watermark is
-        // its entry sequence.
-        let first_entry_seq = store.flushed_watermark();
-        store
-            .add(SCHEDULE_MAP, &keys[1], &lww("second", 1), 1)
-            .await
-            .unwrap();
-        advance(60_000).await;
-        let while_refused = (
-            spy.held(SCHEDULE_MAP, &keys[1]).is_some(),
-            store.test_wal_watermark(partition) == Some(Ok(first_wal_seq - 1)),
-            store.flushed_watermark() == first_entry_seq,
-        );
-        spy.accept_every_key();
-        let drained = poll_until(10_000, || store.test_is_idle()).await.is_some();
-        let after = (
-            store.test_wal_watermark(partition)
-                == Some(Ok(store.test_max_assigned_wal_sequence(partition))),
-            store.flushed_watermark() == store.assigned_write_sequence(),
-        );
-        assert_eq!(
-            (while_refused, drained, after),
-            ((true, true, true), true, (true, true))
         );
     }
 
@@ -12632,141 +12565,15 @@ mod tests {
         );
     }
 
-    /// `refused` keys are written first and are never accepted, then one key
-    /// the store accepts every two seconds for two minutes. Says: how many of
-    /// those were stored, the longest wait of one of them in milliseconds, the
-    /// buffered-key count at the end, and whether a hold was ever in force.
-    async fn healthy_keys_after_refused_ones(refused: usize) -> (usize, u64, u64, bool) {
-        let spy = Arc::new(SpyDataStore::retaining());
-        let store = schedule_store(&spy, schedule_config());
-        for i in 0..refused {
-            let key = format!("r{i}");
-            spy.refuse_key(&key);
-            store
-                .add(SCHEDULE_MAP, &key, &lww("v", 1), 1)
-                .await
-                .unwrap();
-        }
-        let mut stored = 0usize;
-        let mut slowest = 0u64;
-        let mut hold_seen = false;
-        for i in 0..60 {
-            let round = tokio::time::Instant::now();
-            let key = format!("h{i}");
-            store
-                .add(SCHEDULE_MAP, &key, &lww("h", 1), 1)
-                .await
-                .unwrap();
-            let waited = poll_until(60_000, || {
-                hold_seen |= store.test_store_hold_active();
-                spy.held(SCHEDULE_MAP, &key).is_some()
-            })
-            .await;
-            if let Some(waited) = waited {
-                stored += 1;
-                slowest = slowest.max(waited);
-            }
-            let next = round + tokio::time::Duration::from_millis(2_000);
-            if tokio::time::Instant::now() < next {
-                tokio::time::sleep_until(next).await;
-            }
-        }
-        (stored, slowest, store.pending_operation_count(), hold_seen)
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn healthy_keys_written_after_refused_ones_are_never_starved() {
-        let (stored, slowest, pending, hold_seen) = healthy_keys_after_refused_ones(10).await;
-        assert_eq!(
-            (stored, slowest <= 5_110, pending, hold_seen),
-            (60, true, 10, true),
-            "slowest healthy key = {slowest} ms"
-        );
-    }
-
-    /// A key the store accepts is refused during an outage of the whole
-    /// store; the store then returns for everything but `rejected` records
-    /// written at that instant, which it never accepts. Says: refusals of the
-    /// key during the outage, after how many milliseconds it was stored, and —
-    /// between the first call on the last rejected record to be tried and the
-    /// key's accepted call — the refused store calls and the milliseconds.
-    async fn a_refused_healthy_key_among_rejected_records(
-        rejected: usize,
-        limit_ms: u64,
-    ) -> (usize, Option<u64>, Option<usize>, Option<u64>) {
-        let spy = Arc::new(SpyDataStore::retaining());
-        let store = schedule_store(&spy, schedule_config());
-        spy.refuse_everything(true);
-        store.add(SCHEDULE_MAP, "H", &lww("h", 1), 1).await.unwrap();
-        poll_until(60_000, || spy.calls_for("H") == 5).await;
-        let refusals_in_outage = spy.calls_for("H");
-        spy.refuse_everything(false);
-        for i in 0..rejected {
-            let key = format!("rejected{i}");
-            spy.refuse_key(&key);
-            store
-                .add(SCHEDULE_MAP, &key, &lww("v", 1), 2)
-                .await
-                .unwrap();
-        }
-        let waited = poll_until(limit_ms, || spy.held(SCHEDULE_MAP, "H").is_some()).await;
-        let calls = spy.timeline();
-        let last_first_try = (0..rejected)
-            .map(|i| {
-                let key = format!("rejected{i}");
-                calls.iter().position(|call| call.key == key)
-            })
-            .collect::<Option<Vec<usize>>>()
-            .and_then(|firsts| firsts.into_iter().max());
-        let accepted_at = calls
-            .iter()
-            .position(|call| call.key == "H" && call.accepted);
-        let stretch = match (last_first_try, accepted_at) {
-            (Some(from), Some(to)) if from < to => Some((
-                calls[from + 1..to]
-                    .iter()
-                    .filter(|call| !call.accepted)
-                    .count(),
-                u64::try_from(
-                    calls[to]
-                        .began
-                        .duration_since(calls[from].began)
-                        .as_millis(),
-                )
-                .unwrap_or(u64::MAX),
-            )),
-            _ => None,
-        };
-        (
-            refusals_in_outage,
-            waited,
-            stretch.map(|(refused, _)| refused),
-            stretch.map(|(_, ms)| ms),
-        )
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_refused_healthy_key_is_reached_after_at_most_one_probe_per_rejected_key() {
-        let (refusals, waited, refused_between, stretch_ms) =
-            a_refused_healthy_key_among_rejected_records(30, 600_000).await;
-        assert_eq!(
-            (
-                refusals,
-                waited.is_some(),
-                refused_between.is_some_and(|refused| refused <= 30),
-                stretch_ms.is_some_and(|ms| ms <= 158_110),
-            ),
-            (5, true, true, true),
-            "waited {waited:?} ms, {refused_between:?} refused calls in {stretch_ms:?} ms"
-        );
-    }
-
     #[tokio::test(start_paused = true)]
     async fn a_store_that_refuses_slowly_is_called_once_at_a_time_and_left_alone_for_a_hold() {
         let spy = Arc::new(SpyDataStore::retaining());
         spy.refuse_everything(true);
         // Longer than the backoff cap: a hold counted from the start of a call
-        // would be over before the call answered.
+        // would be over before the call answered. Counted from each return,
+        // the holds of 500, 1000, 2000, 4000 ms and then 5000 ms put the
+        // commits 8.5, 9, 10, 12 and then 13 s apart: 11 begin in the 120 s
+        // below.
         spy.set_answer_delay_ms(8_000);
         let store = schedule_store(&spy, schedule_config());
         for i in 0..100 {
@@ -12786,88 +12593,16 @@ mod tests {
             .iter()
             .map(|call| call.began.duration_since(calls[0].began).as_millis())
             .collect();
-        let left_alone = calls.windows(2).skip(2).all(|pair| {
+        let left_alone = calls.windows(2).all(|pair| {
             pair[0].returned.is_some_and(|returned| {
                 pair[1].began >= returned + tokio::time::Duration::from_millis(500)
             })
         });
         assert_eq!(
-            (
-                spy.most_in_flight(),
-                begun <= 12,
-                begun >= 9,
-                left_alone,
-                hold_seen
-            ),
-            (1, true, true, true, true),
+            (spy.most_in_flight(), begun, left_alone, hold_seen),
+            (1, 11, true, true),
             "calls begun = {begun}, at ms {begins_ms:?}"
         );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn never_refused_entries_are_stored_before_refused_ones_in_a_pass() {
-        let spy = Arc::new(SpyDataStore::retaining());
-        let store = schedule_store(&spy, schedule_config());
-        for i in 0..5 {
-            let key = format!("r{i}");
-            spy.refuse_key(&key);
-            store
-                .add(SCHEDULE_MAP, &key, &lww("v", 1), 1)
-                .await
-                .unwrap();
-        }
-        // Refused once and due again, written onto the queued entries: passes
-        // cannot bring five keys there without a hold beginning first.
-        let now = tokio::time::Instant::now();
-        for mut queue in store.queues.iter_mut() {
-            for entry in queue.value_mut().entries.values_mut() {
-                entry.retry_count = 1;
-                entry.next_attempt = Some(now);
-            }
-        }
-        for i in 0..5 {
-            store
-                .add(SCHEDULE_MAP, &format!("h{i}"), &lww("h", 1), 2)
-                .await
-                .unwrap();
-        }
-        store.soft_flush().await.unwrap();
-        advance(10).await;
-        let healthy_stored = (0..5)
-            .filter(|i| spy.held(SCHEDULE_MAP, &format!("h{i}")).is_some())
-            .count();
-        assert_eq!((healthy_stored, store.test_store_hold_active()), (5, true));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn refused_entries_are_attempted_longest_waiting_first() {
-        let spy = Arc::new(SpyDataStore::retaining());
-        let store = schedule_store(&spy, schedule_config());
-        // So that an instant two seconds in the past exists on this clock.
-        advance(3_000).await;
-        store.add(SCHEDULE_MAP, "X", &lww("x", 1), 1).await.unwrap();
-        store.add(SCHEDULE_MAP, "Y", &lww("y", 1), 1).await.unwrap();
-        store.add(SCHEDULE_MAP, "Z", &lww("z", 1), 2).await.unwrap();
-        let now = tokio::time::Instant::now();
-        for mut queue in store.queues.iter_mut() {
-            for entry in queue.value_mut().entries.values_mut() {
-                match entry.key.as_str() {
-                    "X" => {
-                        entry.retry_count = 5;
-                        entry.next_attempt = Some(now - tokio::time::Duration::from_secs(2));
-                    }
-                    "Y" => {
-                        entry.retry_count = 1;
-                        entry.next_attempt = Some(now - tokio::time::Duration::from_secs(1));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        store.soft_flush().await.unwrap();
-        advance(10).await;
-        let order: Vec<String> = spy.timeline().into_iter().map(|call| call.key).collect();
-        assert_eq!(order, ["Z", "X", "Y"]);
     }
 
     // -----------------------------------------------------------------------
@@ -12919,9 +12654,10 @@ mod tests {
             .unwrap();
         let count_while_held = store.pending_operation_count();
         proceed.notify_one();
-        let closed = poll_until(10_000, || !store.test_pass_open() && spy.call_count() >= 3)
+        let closed = poll_until(10_000, || !store.test_pass_open() && spy.call_count() >= 1)
             .await
             .is_some();
+        let held = store.test_store_hold_active();
 
         let e_wal_sequences = store
             .queues
@@ -12942,16 +12678,14 @@ mod tests {
             .sum();
         let pending_sequences = store.pending_seqs().len();
         let loaded = store.load(SCHEDULE_MAP, "E").await.unwrap();
-        // The pass's commit, then its two halves `[A, B, C]` and `[D, E]`:
-        // each stops at its first refused write, and both halves refused
-        // start the hold with every entry back untouched.
+        // The pass's one commit stops at its first refused write, on A, and
+        // starts the hold with every entry back untouched.
         let called: Vec<String> = spy.timeline().into_iter().map(|call| call.key).collect();
         assert_eq!(
             (
-                (held_by_a_pass, closed),
+                (held_by_a_pass, closed, held),
                 (spy.call_count(), spy.calls_for("D") + spy.calls_for("E")),
                 called,
-                KEYS.map(|key| store.test_retry_state(SCHEDULE_MAP, key)),
                 (
                     count_while_held,
                     store.pending_operation_count(),
@@ -12961,336 +12695,16 @@ mod tests {
                 loaded,
             ),
             (
-                (true, true),
-                (3, 1),
-                vec!["A".to_string(), "A".to_string(), "D".to_string()],
-                [Some((0, None)); 5],
+                (true, true, true),
+                (1, 0),
+                vec!["A".to_string()],
                 (6, 5, 5),
                 (Some(2), 0),
                 Some(lww("v2", 2)),
             ),
-            "((held by a pass, pass closed), (store calls, calls on D and E), keys called, \
-             retry states of A..E, (count while held, count, pending entry sequences), (WAL \
-             sequences E's queued entry owns, WAL sequences in flight), load of E)"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_accepted_probe_ends_the_hold_and_the_next_trip_starts_at_the_first_length() {
-        // From the return of the call that tripped the pass to the first probe.
-        fn first_probe_gap(calls: &[SpyTimedCall]) -> Option<u128> {
-            let tripped = calls.get(2).and_then(|call| call.returned)?;
-            let probe = calls.get(3)?;
-            Some(probe.began.duration_since(tripped).as_millis())
-        }
-        fn is_the_first_length(gap: Option<u128>) -> bool {
-            gap.is_some_and(|ms| (500..=610).contains(&ms))
-        }
-
-        let spy = Arc::new(SpyDataStore::retaining());
-        spy.refuse_everything(true);
-        let store = schedule_store(&spy, schedule_config());
-        for i in 0..4 {
-            store
-                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 1)
-                .await
-                .unwrap();
-        }
-        let mut hold_seen = false;
-        let mut most_failed_probes = 0;
-        for _ in 0..200 {
-            advance(100).await;
-            hold_seen |= store.test_store_hold_active();
-            most_failed_probes = most_failed_probes.max(store.test_failed_probes());
-        }
-        let first_trip = spy.timeline();
-        spy.refuse_everything(false);
-        let _ = poll_until(30_000, || store.test_is_idle()).await;
-        let after_the_accepted_probe = (store.test_store_hold_active(), store.test_failed_probes());
-
-        let before_second = spy.call_count();
-        spy.refuse_everything(true);
-        for i in 0..4 {
-            store
-                .add(SCHEDULE_MAP, &format!("n{i}"), &lww("v", 1), 1)
-                .await
-                .unwrap();
-        }
-        // The first refused commit after the accepted probe is halved down
-        // to single entries — seven calls at one instant, no hold — and each
-        // entry waits out its first backoff; when the four are due again
-        // their commit and its two halves are refused, and that trip starts
-        // a hold at the first length.
-        advance(100).await;
-        let held_after_the_split = store.test_store_hold_active();
-        advance(4_900).await;
-        let second = spy.timeline().split_off(before_second);
-        let split_at_one_instant =
-            second.len() >= 11 && second[..7].iter().all(|call| call.began == second[0].began);
-        let due_again_gap = second
-            .get(6)
-            .and_then(|call| call.returned)
-            .zip(second.get(7))
-            .map(|(split_returned, call)| call.began.duration_since(split_returned).as_millis());
-        let second_trip = second
-            .get(7..)
-            .map(<[SpyTimedCall]>::to_vec)
-            .unwrap_or_default();
-        let first_gap = first_probe_gap(&first_trip);
-        let second_gap = first_probe_gap(&second_trip);
-        assert_eq!(
-            (
-                hold_seen,
-                most_failed_probes >= 2,
-                after_the_accepted_probe.0,
-                after_the_accepted_probe.1,
-                is_the_first_length(first_gap),
-                (split_at_one_instant, held_after_the_split),
-                due_again_gap.is_some_and(|ms| (1_000..=1_110).contains(&ms)),
-                is_the_first_length(second_gap),
-            ),
-            (true, true, false, 0, true, (true, false), true, true),
-            "most failed probes = {most_failed_probes}, gaps: {first_gap:?} ms, \
-             due again after {due_again_gap:?} ms, {second_gap:?} ms"
-        );
-    }
-
-    /// One refused half never starts a hold: the refused record is isolated
-    /// by halving, the others are stored in the same pass.
-    #[tokio::test(start_paused = true)]
-    async fn one_refused_record_among_healthy_ones_starts_no_hold() {
-        const KEYS: [&str; 5] = ["A", "B", "C", "D", "E"];
-
-        let spy = Arc::new(SpyDataStore::retaining());
-        spy.refuse_key("A");
-        let store = schedule_store(&spy, schedule_config());
-        for (store_time, key) in (1i64..).zip(KEYS) {
-            store
-                .add(SCHEDULE_MAP, key, &lww("v", 1), store_time)
-                .await
-                .unwrap();
-        }
-        store.soft_flush().await.unwrap();
-        let _ = poll_until(1_000, || spy.call_count() > 0).await;
-        advance(10).await;
-        // The pass `[A..E]`, its halves `[A, B, C]` (refused) and `[D, E]`,
-        // then `[A, B]` (refused) and `[C]`, then `[A]` alone and `[B]`; each
-        // commit stops at its first refused write.
-        let called: Vec<String> = spy.timeline().into_iter().map(|call| call.key).collect();
-        assert_eq!(
-            (
-                called,
-                store.test_store_hold_active(),
-                KEYS[1..]
-                    .iter()
-                    .map(|key| spy.held(SCHEDULE_MAP, key).is_some())
-                    .collect::<Vec<_>>(),
-                store
-                    .test_retry_state(SCHEDULE_MAP, "A")
-                    .map(|(retry_count, next_attempt)| (retry_count, next_attempt.is_some())),
-            ),
-            (
-                ["A", "A", "D", "E", "A", "C", "A", "B"]
-                    .map(String::from)
-                    .to_vec(),
-                false,
-                vec![true; 4],
-                Some((1, true)),
-            )
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_probe_does_not_take_an_entry_whose_time_has_not_come() {
-        let spy = Arc::new(SpyDataStore::retaining());
-        spy.refuse_everything(true);
-        let store = schedule_store(&spy, schedule_config());
-        for i in 0..3 {
-            store
-                .add(SCHEDULE_MAP, &format!("k{i}"), &lww("v", 1), 1)
-                .await
-                .unwrap();
-        }
-        poll_until(30_000, || calls_answered(&spy) >= 3)
-            .await
-            .expect("three refusals");
-        let third_returned = spy.timeline()[2].returned.expect("the third call returned");
-        // A hold puts its entries back untouched, so they would be due for
-        // its first probe; refused once and inside their own backoff,
-        // written onto the queued entries, they are not.
-        for mut queue in store.queues.iter_mut() {
-            for entry in queue.value_mut().entries.values_mut() {
-                entry.retry_count = 1;
-                entry.next_attempt =
-                    Some(third_returned + tokio::time::Duration::from_millis(1_000));
-            }
-        }
-        // The hold is over by now and every entry is still inside its own
-        // backoff: nothing is due for a probe.
-        tokio::time::sleep_until(third_returned + tokio::time::Duration::from_millis(900)).await;
-        let later = (
-            spy.call_count(),
-            store.test_store_hold_active(),
-            store.test_failed_probes(),
-        );
-        let _ = poll_until(30_000, || spy.call_count() >= 4).await;
-        let fourth_gap = spy
-            .timeline()
-            .get(3)
-            .map(|call| call.began.duration_since(third_returned).as_millis());
-        assert_eq!(
-            (
-                later.0,
-                later.1,
-                later.2,
-                fourth_gap.is_some_and(|ms| ms >= 1_000)
-            ),
-            (3, true, 0, true),
-            "the fourth call began {fourth_gap:?} ms after the third returned"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_probe_whose_key_was_rewritten_before_it_was_taken_stores_the_new_value_in_that_pass()
-    {
-        let spy = Arc::new(SpyDataStore::retaining());
-        for key in ["a", "b", "c"] {
-            spy.refuse_key(key);
-        }
-        let store = schedule_store(&spy, schedule_config());
-        for key in ["a", "b", "c"] {
-            store.add(SCHEDULE_MAP, key, &lww("v", 1), 1).await.unwrap();
-        }
-        let _ = poll_until(1_000, || store.test_store_hold_active()).await;
-        let mut park = store.test_park_between_probe_choice_and_removal();
-        // Never refused and the newest: the next probe.
-        store
-            .add(SCHEDULE_MAP, "D", &lww("d1", 1), 1)
-            .await
-            .unwrap();
-        let parked = park.parked.take().expect("armed");
-        let park_reached = tokio::time::timeout(tokio::time::Duration::from_secs(2), parked)
-            .await
-            .is_ok_and(|parked| parked.is_ok());
-        // The chosen key gets a new entry, with a new entry sequence, while
-        // the flush task stands between its choice and the removal.
-        store
-            .add(SCHEDULE_MAP, "D", &lww("d2", 2), 1)
-            .await
-            .unwrap();
-        let closed_before = store.test_passes_closed();
-        park.release();
-        let _ = poll_until(1_000, || {
-            !store.test_pass_open() && store.test_passes_closed() > closed_before
-        })
-        .await;
-        // The hold put a, b and c back untouched, so they are due when the
-        // probe is accepted, and that pass halves their refused commit down
-        // to single entries: `[a, b, c]`, `[a, b]`, `[c]`, `[a]`, `[b]`.
-        let timeline = spy.timeline();
-        let fourth = timeline
-            .get(3)
-            .map(|call| (call.key.clone(), call.accepted));
-        let refused_alone = ["a", "b", "c"].map(|key| {
-            store
-                .test_retry_state(SCHEDULE_MAP, key)
-                .map(|(retry_count, next_attempt)| (retry_count, next_attempt.is_some()))
-        });
-        assert_eq!(
-            (
-                park_reached,
-                spy.call_count(),
-                fourth,
-                spy.held(SCHEDULE_MAP, "D") == Some(lww("d2", 2)),
-                store.test_retry_state(SCHEDULE_MAP, "D").is_some(),
-                store.test_store_hold_active(),
-                store.test_failed_probes(),
-                refused_alone,
-            ),
-            (
-                true,
-                9,
-                Some(("D".to_string(), true)),
-                true,
-                false,
-                false,
-                0,
-                [Some((1, true)); 3],
-            )
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_accepted_probe_is_followed_by_a_normal_pass_over_what_is_due() {
-        let spy = Arc::new(SpyDataStore::retaining());
-        for key in ["a", "b", "c"] {
-            spy.refuse_key(key);
-        }
-        let store = schedule_store(&spy, schedule_config());
-        for key in ["a", "b", "c"] {
-            store.add(SCHEDULE_MAP, key, &lww("v", 1), 1).await.unwrap();
-        }
-        let hold_at_the_writes = poll_until(1_000, || store.test_store_hold_active())
-            .await
-            .is_some();
-        // Both never refused and due, with one `store_time`: E, the newer, is
-        // the probe and D is what the rest of that pass has to store.
-        for key in ["D", "E"] {
-            store.add(SCHEDULE_MAP, key, &lww("v", 1), 1).await.unwrap();
-        }
-        let _ = poll_until(1_000, || calls_answered(&spy) >= 4).await;
-        let fourth = spy.timeline().get(3).cloned();
-        if let Some(returned) = fourth.as_ref().and_then(|call| call.returned) {
-            // One poll step after the probe answered and no more: a D left to
-            // the next pass arrives a whole interval later.
-            tokio::time::sleep_until(returned + tokio::time::Duration::from_millis(10)).await;
-        }
-        assert_eq!(
-            (
-                hold_at_the_writes,
-                fourth.is_some_and(|call| call.key == "E"),
-                spy.held(SCHEDULE_MAP, "D").is_some(),
-                store.test_store_hold_active(),
-                store.test_failed_probes(),
-            ),
-            (true, true, true, false, 0)
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn the_probe_is_the_never_refused_entry_with_the_latest_store_time_whatever_its_sequence()
-    {
-        let spy = Arc::new(SpyDataStore::retaining());
-        for key in ["r0", "r1", "r2"] {
-            spy.refuse_key(key);
-        }
-        let store = schedule_store(&spy, schedule_config());
-        for key in ["r0", "r1", "r2"] {
-            store.add(SCHEDULE_MAP, key, &lww("v", 1), 1).await.unwrap();
-        }
-        let hold_at_the_writes = poll_until(1_000, || store.test_store_hold_active())
-            .await
-            .is_some();
-        store
-            .add(SCHEDULE_MAP, "A", &lww("a1", 1), 1)
-            .await
-            .unwrap();
-        store.add(SCHEDULE_MAP, "B", &lww("b", 1), 2).await.unwrap();
-        // A rewrite of a queued entry takes a new entry sequence and keeps the
-        // `store_time` of the entry it replaces: A is now the newer by
-        // sequence and still the older by `store_time`.
-        store
-            .add(SCHEDULE_MAP, "A", &lww("a2", 2), 3)
-            .await
-            .unwrap();
-        let a_is_newer_by_sequence = queued_sequence(&store, "A")
-            .zip(queued_sequence(&store, "B"))
-            .is_some_and(|(a, b)| a > b);
-        let _ = poll_until(1_000, || spy.call_count() >= 4).await;
-        let fourth_key = spy.timeline().get(3).map(|call| call.key.clone());
-        assert_eq!(
-            (hold_at_the_writes, a_is_newer_by_sequence, fourth_key),
-            (true, true, Some("B".to_string()))
+            "((held by a pass, pass closed, hold), (store calls, calls on D and E), keys called, \
+             (count while held, count, pending entry sequences), (WAL sequences E's queued \
+             entry owns, WAL sequences in flight), load of E)"
         );
     }
 
@@ -13449,74 +12863,48 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_entry_refused_a_hundred_times_backs_off_at_the_cap_and_the_flush_task_lives() {
+    async fn a_refused_pass_count_at_its_maximum_holds_for_the_cap_and_the_flush_task_lives() {
         let spy = Arc::new(SpyDataStore::retaining());
         spy.refuse_everything(true);
-        let store = schedule_store(&spy, schedule_config());
+        // The flush task does not wake by itself during the test: the passes
+        // are run here, each with the count written into its schedule,
+        // because a hundred refused passes take minutes of holds to reach.
+        let store = schedule_store(
+            &spy,
+            WriteBehindConfig {
+                flush_interval_ms: 3_600_000,
+                ..schedule_config()
+            },
+        );
         store.add(SCHEDULE_MAP, "k", &lww("v", 1), 1).await.unwrap();
-        // A hundred refusals take hours of backoff to reach through passes, so
-        // the count is written onto the queued entry.
-        for mut queue in store.queues.iter_mut() {
-            for entry in queue.value_mut().entries.values_mut() {
-                entry.retry_count = 100;
-            }
-        }
-        let now = tokio::time::Instant::now();
-        store.soft_flush().await.unwrap();
-        // Yields only: the clock does not move, so the refusal is answered at
-        // `now` and the next attempt is counted from it.
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
+        let mut after = Vec::new();
+        for written in [100, u32::MAX] {
+            let mut schedule = RetrySchedule {
+                refused_passes: written,
+                ..RetrySchedule::default()
+            };
+            // Nothing below sleeps, so the refusal is answered at `now` and
+            // the hold is counted from it.
+            let now = tokio::time::Instant::now();
+            let (stored, _) = store.run_flush_pass(&mut schedule, i64::MAX, now).await;
+            after.push((
+                stored,
+                schedule.refused_passes,
+                schedule.hold_until.map(|until| until.duration_since(now)),
+            ));
         }
         let flush_task_lives = store.background_failure().borrow().is_none();
+        let cap = Some(tokio::time::Duration::from_millis(5_000));
         assert_eq!(
-            (
-                spy.call_count(),
-                flush_task_lives,
-                store.test_retry_state(SCHEDULE_MAP, "k"),
-            ),
-            (
-                1,
-                true,
-                Some((101, Some(now + tokio::time::Duration::from_millis(5_000))))
-            )
+            (spy.call_count(), flush_task_lives, after),
+            (2, true, vec![(0, 101, cap), (0, u32::MAX, cap)])
         );
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_refusal_count_at_its_maximum_stays_there() {
+    async fn the_buffered_time_survives_a_rewrite_and_a_retirement() {
         let spy = Arc::new(SpyDataStore::retaining());
         spy.refuse_everything(true);
-        let store = schedule_store(&spy, schedule_config());
-        store.add(SCHEDULE_MAP, "k", &lww("v", 1), 1).await.unwrap();
-        for mut queue in store.queues.iter_mut() {
-            for entry in queue.value_mut().entries.values_mut() {
-                entry.retry_count = u32::MAX;
-            }
-        }
-        let now = tokio::time::Instant::now();
-        store.soft_flush().await.unwrap();
-        // Yields only, so the clock stands at `now` when the refusal answers.
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
-        let flush_task_lives = store.background_failure().borrow().is_none();
-        assert_eq!(
-            (flush_task_lives, store.test_retry_state(SCHEDULE_MAP, "k")),
-            (
-                true,
-                Some((
-                    u32::MAX,
-                    Some(now + tokio::time::Duration::from_millis(5_000))
-                ))
-            )
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn the_first_refusal_and_buffered_times_survive_a_rewrite_and_a_retirement() {
-        let spy = Arc::new(SpyDataStore::retaining());
-        spy.refuse_key("A");
         let store = schedule_store(&spy, schedule_config());
         store
             .add(SCHEDULE_MAP, "A", &lww("a1", 1), 1)
@@ -13526,15 +12914,11 @@ mod tests {
         poll_until(30_000, || calls_answered(&spy) >= 1)
             .await
             .expect("the first refusal");
-        let first_refusal = spy.timeline()[0].returned;
-        // Both belong to the key, not to one write of it. The paused clock
-        // has moved since the first write, so a later write's own instant
-        // differs from it.
+        // It belongs to the key, not to one write of it. The paused clock has
+        // moved since the first write, so a later write's own instant differs
+        // from it.
         let kept = |store: &WriteBehindDataStore| {
-            first_refusal.is_some()
-                && store.test_first_refused(SCHEDULE_MAP, "A") == first_refusal
-                && first_buffered.is_some()
-                && store.test_buffered_at(SCHEDULE_MAP, "A") == first_buffered
+            first_buffered.is_some() && store.test_buffered_at(SCHEDULE_MAP, "A") == first_buffered
         };
         let after_the_refusal = kept(&store);
 
@@ -13582,7 +12966,6 @@ mod tests {
     #[test]
     fn refusals_are_counted_and_the_retry_and_buffer_gauges_follow() {
         const REFUSALS: &str = "topgun_write_behind_flush_refusals_total";
-        const RETRYING: &str = "topgun_write_behind_retrying_entries";
         const BUFFERED: &str = "topgun_write_behind_buffered_entries";
         const AGE: &str = "topgun_write_behind_oldest_refusal_age_seconds";
         const HOLD: &str = "topgun_write_behind_store_hold";
@@ -13622,22 +13005,20 @@ mod tests {
                 (at_8s, at_9s, handle.render())
             })
         });
+        // Commits at 0.1, 0.6, 1.6, 3.6 and 7.6 s, each refused, so a hold
+        // has been in force since 0.1 s.
         let first = (
             value_of(&at_8s, REFUSALS),
-            value_of(&at_8s, RETRYING),
             value_of(&at_8s, BUFFERED),
             value_of(&at_8s, AGE).map(|age| (7.0..=8.0).contains(&age)),
             value_of(&at_8s, HOLD),
         );
         let second = (
-            value_of(&at_9s, RETRYING).map(|retrying| retrying >= 1.0),
             value_of(&at_9s, BUFFERED),
-            // At most one walk interval old.
-            value_of(&at_9s, AGE).map(|age| age >= 7.0),
+            value_of(&at_9s, AGE).map(|age| (8.0..=9.0).contains(&age)),
             value_of(&at_9s, HOLD),
         );
         let third = (
-            value_of(&healed, RETRYING),
             value_of(&healed, BUFFERED),
             value_of(&healed, AGE),
             value_of(&healed, HOLD),
@@ -13645,9 +13026,9 @@ mod tests {
         assert_eq!(
             (first, second, third),
             (
-                (Some(4.0), Some(1.0), Some(1.0), Some(true), Some(0.0)),
-                (Some(true), Some(4.0), Some(true), Some(1.0)),
-                (Some(0.0), Some(0.0), Some(0.0), Some(0.0)),
+                (Some(5.0), Some(1.0), Some(true), Some(1.0)),
+                (Some(4.0), Some(true), Some(1.0)),
+                (Some(0.0), Some(0.0), Some(0.0)),
             )
         );
     }
@@ -13746,16 +13127,17 @@ mod tests {
                 event.level == tracing::Level::WARN
                     && event.says(RETRY_WARNING)
                     && [
-                        "retrying",
+                        "buffered",
                         "oldest_refusal_age_s",
                         "hold",
-                        "map",
-                        "key",
-                        "attempts",
+                        "refused_passes",
                         "error",
                     ]
                     .iter()
                     .all(|field| event.fields.contains_key(*field))
+                    && ["retrying", "map", "key", "attempts"]
+                        .iter()
+                        .all(|field| !event.fields.contains_key(*field))
             })
             .count();
         let cleared = events
@@ -13770,29 +13152,6 @@ mod tests {
                 .map(|event| (event.level, &event.fields))
                 .collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    fn a_backlog_that_never_warned_clears_without_a_recovery_line() {
-        let events = events_on_a_paused_clock(async {
-            let spy = Arc::new(SpyDataStore::retaining());
-            spy.refuse_key("k");
-            let store = schedule_store(&spy, schedule_config());
-            store.add(SCHEDULE_MAP, "k", &lww("v", 1), 1).await.unwrap();
-            let _ = poll_until(30_000, || calls_answered(&spy) >= 1).await;
-            spy.accept_every_key();
-            let _ = poll_until(60_000, || store.test_is_idle()).await;
-            advance(1_000).await;
-        });
-        let warnings = events
-            .iter()
-            .filter(|event| event.says(RETRY_WARNING))
-            .count();
-        let cleared = events
-            .iter()
-            .filter(|event| event.says(BACKLOG_CLEARED))
-            .count();
-        assert_eq!((warnings, cleared), (0, 0));
     }
 
     /// The bootstrap opens, recovers and seeds over a fresh durable store, and
@@ -13861,19 +13220,6 @@ mod tests {
         })
         .await;
         assert!(closed.is_some(), "the requested pass never closed");
-    }
-
-    /// The `retry_count` of the queued entry of `key`, if one is queued.
-    fn queued_retry_count(store: &WriteBehindDataStore, key: &str) -> Option<u32> {
-        store
-            .queues
-            .get(&partition_for(PACING_MAP, key))
-            .and_then(|queue| {
-                queue
-                    .entries
-                    .get(&(PACING_MAP.to_string(), key.to_string()))
-                    .map(|entry| entry.retry_count)
-            })
     }
 
     #[test]
@@ -14100,39 +13446,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pass_that_stores_nothing_ends_the_run() {
-        let spy = Arc::new(SpyDataStore::new());
-        let store = schedule_store(
-            &spy,
-            WriteBehindConfig {
-                backoff_base_ms: 0,
-                backoff_cap_ms: 0,
-                ..pacing_config()
-            },
-        );
-        // One more than a pass takes, every one refused at encoding: the pass
-        // is cut and stores nothing, and with no backoff its entries are due
-        // again at once.
-        for i in 0..=PASS_MAX_ENTRIES {
-            let key = format!("k{i}");
-            store.test_refuse_encoding(PACING_MAP, &key);
-            store
-                .add(PACING_MAP, &key, &lww("v", 1), now_millis())
-                .await
-                .expect("accepted");
-        }
-        let passes = store.test_passes_closed();
-        store.soft_flush().await.expect("soft_flush");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert_eq!(
-            (store.test_passes_closed() - passes, spy.call_count()),
-            (1, 0),
-            "(passes, store calls): a cut pass that stored nothing must end the run, \
-             even with its entries due again"
-        );
-    }
-
-    #[tokio::test]
     async fn a_pass_cut_by_the_byte_cap_runs_on() {
         let spy = Arc::new(SpyDataStore::new());
         let store = schedule_store(&spy, pacing_config());
@@ -14217,10 +13530,10 @@ mod tests {
 
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
-        let (after_split, after_rewrite) = metrics::with_local_recorder(&recorder, || {
+        let (after_refusal, after_rewrite) = metrics::with_local_recorder(&recorder, || {
             paused_runtime().block_on(async {
                 let spy = Arc::new(SpyDataStore::new());
-                spy.refuse_key("A");
+                spy.refuse_everything(true);
                 let store = schedule_store(
                     &spy,
                     WriteBehindConfig {
@@ -14241,16 +13554,17 @@ mod tests {
                     .unwrap();
                 advance(1_000).await;
                 one_requested_pass(&store).await;
-                let after_split = (
-                    spy.calls_for("A") >= 2,
+                let after_refusal = (
+                    spy.calls_for("A"),
                     spy.accepted_for("B"),
-                    queued_retry_count(&store, "A"),
-                    store.store_hold.load(Ordering::SeqCst),
+                    store.test_buffered_at(PACING_MAP, "A").is_some(),
+                    store.test_store_hold_active(),
                     rendered_value(&handle.render(), AGE).map(|age| (5.0..6.0).contains(&age)),
                 );
 
                 // A rewrite keeps the key's first buffered instant. The walk
-                // runs at most once a second, so the second reading waits one.
+                // runs at most once a second, so the second reading waits one;
+                // by then the hold is over and the pass is refused again.
                 store
                     .add(PACING_MAP, "A", &lww("a2", 2), now_millis())
                     .await
@@ -14258,16 +13572,16 @@ mod tests {
                 advance(1_100).await;
                 one_requested_pass(&store).await;
                 let after_rewrite = (
-                    queued_retry_count(&store, "A").is_some(),
+                    store.test_buffered_at(PACING_MAP, "A").is_some(),
                     rendered_value(&handle.render(), AGE),
                 );
-                (after_split, after_rewrite)
+                (after_refusal, after_rewrite)
             })
         });
         assert_eq!(
-            after_split,
-            (true, 1, Some(1), false, Some(true)),
-            "(A refused in the commit and alone, B stored, A's retry count, hold, age in [5, 6))"
+            after_refusal,
+            (1, 0, true, true, Some(true)),
+            "(calls on A, B stored, A buffered, hold, age in [5, 6))"
         );
         assert!(
             after_rewrite.0 && after_rewrite.1.is_some_and(|age| (6.0..7.0).contains(&age)),
@@ -14408,7 +13722,7 @@ mod tests {
                             .await
                             .unwrap();
                     }
-                    let held = poll_until(10_000, || store.store_hold.load(Ordering::SeqCst)).await;
+                    let held = poll_until(10_000, || store.test_store_hold_active()).await;
                     assert!(held.is_some(), "the refused commit must start a hold");
                     // Counted from the confirmed hold over exactly 3 s of the
                     // paused clock, whose wakes come every millisecond: walks
@@ -14423,7 +13737,7 @@ mod tests {
                     for _ in 0..10_000 {
                         let before = store.report_walks.load(Ordering::SeqCst);
                         advance(1).await;
-                        if !store.store_hold.load(Ordering::SeqCst) {
+                        if !store.test_store_hold_active() {
                             walked_when_the_hold_ended =
                                 store.report_walks.load(Ordering::SeqCst) > before;
                             break;
@@ -14508,39 +13822,36 @@ mod tests {
                         ..WriteBehindConfig::default()
                     },
                 );
-                // Of never-refused entries the newest is the probe, so B is;
-                // the store refuses A alone.
-                spy.refuse_key("A");
+                spy.refuse_everything(true);
                 for key in ["A", "B"] {
                     store
                         .add(PACING_MAP, key, &lww("v", 1), now_millis())
                         .await
                         .unwrap();
                 }
-                let example = || RefusedExample {
-                    map: PACING_MAP.to_string(),
-                    key: "A".to_string(),
-                    attempts: 1,
-                    error: "refused".to_string(),
-                };
                 let mut schedule = RetrySchedule::default();
                 let walks = || store.report_walks.load(Ordering::SeqCst);
                 let now = tokio::time::Instant::now();
                 // Every step below lies inside one walk interval.
                 store.report_retries(&mut schedule);
                 let first = walks();
-                store.start_hold(&mut schedule, now, example());
+                // The pass is refused and starts the hold.
+                store
+                    .run_flush_pass(&mut schedule, store.due_deadline(), now)
+                    .await;
+                store.report_retries(&mut schedule);
                 let at_the_hold = walks() - first;
-                // The hold ends as an accepted probe ends it, and another
+                // The hold ends as an accepted pass ends it, and another
                 // begins before any report: the hold flag reads as before.
-                schedule.hold_until = None;
-                schedule.hold_changes += 1;
+                store.end_hold(&mut schedule);
+                store.hold_after_refusal(&mut schedule, now, &anyhow::anyhow!("refused"));
                 let before = walks();
-                store.start_hold(&mut schedule, now, example());
+                store.report_retries(&mut schedule);
                 let at_the_flip = walks() - before;
-                // The probe is due 0.5 s on, still inside the walk interval:
-                // it is accepted and ends the hold, and the refused A stays.
+                // The next pass is due 0.5 s on, still inside the walk
+                // interval: it is accepted and ends the hold.
                 advance(600).await;
+                spy.refuse_everything(false);
                 let before = walks();
                 store
                     .run_flush_pass(
@@ -14555,7 +13866,7 @@ mod tests {
                     at_the_flip,
                     (
                         schedule.hold_until.is_none(),
-                        spy.accepted_for("B"),
+                        spy.accepted_for("A") + spy.accepted_for("B"),
                         store.pending_operation_count(),
                         walks() - before,
                     ),
@@ -14564,10 +13875,10 @@ mod tests {
         });
         assert_eq!(
             walks,
-            (1, 1, (true, 1, 1, 1)),
+            (1, 1, (true, 2, 0, 1)),
             "(walks when a hold began, walks when one ended and another began between two \
-             reports, (hold ended, B stored, buffered, walks) after the probe pass): each change \
-             of the hold must be walked at once, also when something stays buffered"
+             reports, (hold ended, keys stored, buffered, walks) after the accepted pass): each \
+             change of the hold must be walked at once"
         );
     }
 
@@ -14707,11 +14018,11 @@ mod tests {
                         .unwrap();
                 }
                 assert_eq!(store.pending_operation_count(), ENTRIES);
-                store.retrying.store(true, Ordering::Relaxed);
                 let mut schedule = RetrySchedule {
                     hold_until: Some(
                         tokio::time::Instant::now() + std::time::Duration::from_secs(60),
                     ),
+                    hold_began: Some(tokio::time::Instant::now()),
                     ..RetrySchedule::default()
                 };
                 (0..CALLS)
@@ -15010,14 +14321,15 @@ mod tests {
                     Arc::clone(&spy) as Arc<dyn MapDataStore>,
                     0,
                 );
-                // A refused entry is not attempted again within a case, so a
-                // pass holds something at a step boundary only between `Hold`
-                // and `Settle`.
+                // Passes run only when a step asks for one and are awaited, so
+                // a pass holds something at a step boundary only between
+                // `Hold` and `Settle`. A hold of zero length leaves every pass
+                // free to commit, and the closing drain with it.
                 let store = WriteBehindDataStore::new(
                     Arc::clone(&inner) as Arc<dyn MapDataStore>,
                     WriteBehindConfig {
-                        backoff_base_ms: 600_000,
-                        backoff_cap_ms: 600_000,
+                        backoff_base_ms: 0,
+                        backoff_cap_ms: 0,
                         ..on_request_config(0, 0)
                     },
                 );
@@ -19387,15 +18699,6 @@ mod store_broken_tests {
                 "every entry of the pass, the one the commit failed on included, is back on \
                  its queue"
             );
-            for entry in &entries {
-                assert_eq!(
-                    (entry.retry_count, entry.next_attempt, entry.first_refused),
-                    (0, None, None),
-                    "a broken store says nothing about a record: the entry {} goes back \
-                     untouched",
-                    entry.key
-                );
-            }
 
             // Two more pass attempts. A broken store starts no pass any more,
             // so none closes; each is given time to make the call it must not.
@@ -19469,8 +18772,8 @@ mod store_broken_tests {
 
             assert_eq!(
                 inner.calls(),
-                3,
-                "the pass's commit and its two halves are refused before the hold trips"
+                1,
+                "the pass's one refused commit starts the hold"
             );
             assert!(
                 store.background_failure().borrow().is_none(),
@@ -19478,22 +18781,13 @@ mod store_broken_tests {
             );
             let entries = queued_entries(&store);
             assert_eq!(entries.len(), KEYS.len(), "every entry is back");
-            for entry in &entries {
-                assert_eq!(
-                    (entry.retry_count, entry.next_attempt, entry.first_refused),
-                    (0, None, None),
-                    "a hold puts {} back untouched",
-                    entry.key
-                );
-            }
             assert!(
-                store.store_hold.load(Ordering::SeqCst),
-                "both halves refused start the store-wide hold"
+                store.test_store_hold_active(),
+                "a refused commit starts the store-wide hold"
             );
-            assert_eq!(store.failed_probes.load(Ordering::SeqCst), 0);
 
             one_pass(&store).await;
-            assert_eq!(inner.calls(), 3, "no call while the hold is in force");
+            assert_eq!(inner.calls(), 1, "no call while the hold is in force");
 
             store
                 .add(MAP, "k4", &value("k4"), now_millis())
@@ -19502,11 +18796,13 @@ mod store_broken_tests {
             bounded_hard_flush(&store)
                 .await
                 .expect("a drain over unknown refusals ends as on the base");
+            // The drain honours the hold the flush began, and that hold
+            // (60 s) ends past the 5 s deadline: no drain call, the four
+            // entries abandoned.
             assert_eq!(
                 inner.calls(),
-                3 + 7,
-                "the drain halves the commit of the four entries down to single entries: \
-                 2 * 4 - 1 commits, each refused"
+                1,
+                "the drain makes no call inside the hold in force"
             );
         });
         // The double keeps no WAL, so the four abandoned entries are read from
@@ -20162,7 +19458,10 @@ mod store_broken_tests {
 mod tenant_drop_tests {
     use super::*;
     use crate::storage::datastores::engine_store::EngineMapDataStore;
-    use crate::storage::datastores::kv_engine::{KeyRange, KvEngine, MemKvEngine};
+    use crate::storage::datastores::kv_engine::{
+        KeyRange, KvCapabilities, KvEngine, KvError, KvResult, KvSnapshot, MemKvEngine, WriteBatch,
+        WriteOptions,
+    };
     use crate::storage::map_data_store::StoreBrokenCause;
     use crate::storage::record::OrMapEntry;
     use crate::storage::wal::{WalRecovery, WalWriter};
@@ -20289,12 +19588,66 @@ mod tenant_drop_tests {
         }
     }
 
+    /// The memory engine, refusing every write while `refuse` is set: to the
+    /// write-behind store, a store that refuses whatever it is given, with an
+    /// error that says nothing about its health.
+    struct RefusingEngine {
+        inner: MemKvEngine,
+        refuse: AtomicBool,
+    }
+
+    impl KvEngine for RefusingEngine {
+        fn capabilities(&self) -> KvCapabilities {
+            self.inner.capabilities()
+        }
+
+        fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
+            self.inner.get(key)
+        }
+
+        fn write(&self, batch: WriteBatch, opts: WriteOptions) -> KvResult<()> {
+            if self.refuse.load(Ordering::SeqCst) {
+                return Err(KvError::Other(anyhow::anyhow!("the engine refuses writes")));
+            }
+            self.inner.write(batch, opts)
+        }
+
+        fn delete(&self, key: &[u8], opts: WriteOptions) -> KvResult<()> {
+            self.inner.delete(key, opts)
+        }
+
+        fn delete_range(&self, start: &[u8], end: &[u8], opts: WriteOptions) -> KvResult<()> {
+            self.inner.delete_range(start, end, opts)
+        }
+
+        fn snapshot(&self) -> KvResult<Box<dyn KvSnapshot + '_>> {
+            self.inner.snapshot()
+        }
+
+        fn ingest(
+            &self,
+            range: KeyRange,
+            sorted: Vec<(Vec<u8>, Vec<u8>)>,
+            opts: WriteOptions,
+        ) -> KvResult<()> {
+            self.inner.ingest(range, sorted, opts)
+        }
+
+        fn sync(&self) -> KvResult<()> {
+            self.inner.sync()
+        }
+
+        fn shutdown(&self) -> KvResult<()> {
+            self.inner.shutdown()
+        }
+    }
+
     /// One process: an engine store over a memory engine (kept across
     /// restarts), a WAL in a temporary directory, a write-behind store.
     struct Node {
-        engine: Arc<MemKvEngine>,
+        engine: Arc<RefusingEngine>,
         wal_dir: tempfile::TempDir,
-        inner: Arc<EngineMapDataStore<MemKvEngine>>,
+        inner: Arc<EngineMapDataStore<RefusingEngine>>,
         wal: Arc<TestWal>,
         store: Arc<WriteBehindDataStore>,
     }
@@ -20302,17 +19655,25 @@ mod tenant_drop_tests {
     impl Node {
         async fn fresh(config: WriteBehindConfig) -> Self {
             Self::start(
-                Arc::new(MemKvEngine::new()),
+                Arc::new(RefusingEngine {
+                    inner: MemKvEngine::new(),
+                    refuse: AtomicBool::new(false),
+                }),
                 tempfile::tempdir().unwrap(),
                 config,
             )
             .await
         }
 
+        /// Makes the engine refuse, or stop refusing, every write.
+        fn refuse_writes(&self, refuse: bool) {
+            self.engine.refuse.store(refuse, Ordering::SeqCst);
+        }
+
         /// A start as the server makes it: open the store, recover the WAL,
         /// then the write-behind store above the highest sequence seen.
         async fn start(
-            engine: Arc<MemKvEngine>,
+            engine: Arc<RefusingEngine>,
             wal_dir: tempfile::TempDir,
             config: WriteBehindConfig,
         ) -> Self {
@@ -20548,26 +19909,31 @@ mod tenant_drop_tests {
         }
     }
 
-    /// `AC10c`: a frame of `b.m` held above the durable watermark by a refused
-    /// write of another map in the same partition holds the drop until the
-    /// refusal clears; afterwards no replay brings `b.m` back.
+    /// `AC10c`: a refused write of another map in the same partition holds the
+    /// drop, though `b.m` is stored, until the store takes that write — the
+    /// partition's frames are not all below the durable watermark before;
+    /// afterwards no replay brings `b.m` back.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ac10c_a_drop_waits_while_a_refused_write_holds_the_watermark() {
         let node = Node::fresh(config(20_000)).await;
         let partition = partition_for(OWNED, "k1");
         let refused = key_in(OTHER, partition);
-        node.store.test_refuse_encoding(OTHER, &refused);
-        node.store.add(OTHER, &refused, &lww("r"), 1).await.unwrap();
         node.store.add(OWNED, "k1", &lww("v1"), 1).await.unwrap();
         node.wait_stored(OWNED, "k1").await;
+        node.refuse_writes(true);
+        node.store.add(OTHER, &refused, &lww("r"), 1).await.unwrap();
+        eventually("the store refuses the write", || {
+            node.store.test_store_hold_active()
+        })
+        .await;
 
         let drop_call = node.spawn_drop(TENANT);
         tokio::time::sleep(SETTLE).await;
         assert!(
             !drop_call.is_finished(),
-            "the drop must wait until the watermark covers the b.m frame"
+            "the drop must wait until the watermark covers the partition's frames"
         );
-        node.store.test_accept_encoding(OTHER, &refused);
+        node.refuse_writes(false);
         assert_eq!(drop_call.await.unwrap().unwrap(), done(&[OWNED]));
         node.assert_owned_map_gone(&["k1"]).await;
 
@@ -20583,10 +19949,14 @@ mod tenant_drop_tests {
         let node = Node::fresh(config(300)).await;
         let partition = partition_for(OWNED, "k1");
         let refused = key_in(OTHER, partition);
-        node.store.test_refuse_encoding(OTHER, &refused);
-        node.store.add(OTHER, &refused, &lww("r"), 1).await.unwrap();
         node.store.add(OWNED, "k1", &lww("v1"), 1).await.unwrap();
         node.wait_stored(OWNED, "k1").await;
+        node.refuse_writes(true);
+        node.store.add(OTHER, &refused, &lww("r"), 1).await.unwrap();
+        eventually("the store refuses the write", || {
+            node.store.test_store_hold_active()
+        })
+        .await;
 
         let err = node.store.drop_tenant(TENANT).await.unwrap_err();
         assert!(err.to_string().contains("not yet durable"), "{err:#}");
@@ -20714,10 +20084,6 @@ mod tenant_drop_tests {
             value_of(&rendered, "topgun_write_behind_oldest_refusal_age_seconds"),
             Some(0.0),
             "{rendered}"
-        );
-        assert_eq!(
-            value_of(&rendered, "topgun_write_behind_retrying_entries"),
-            Some(0.0)
         );
         assert_eq!(
             value_of(&rendered, "topgun_write_behind_flush_refusals_total"),
