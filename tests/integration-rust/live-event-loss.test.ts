@@ -276,15 +276,28 @@ function makeClient(port: number, userId: string): TopGunClient {
   });
 }
 
-/** The last disconnect (a change away from CONNECTED) and the CONNECTED after it. */
+/**
+ * The last disconnect and the first CONNECTED after it. A disconnect is a
+ * change into a state outside SYNCING and CONNECTED: a further AUTH_ACK on the
+ * same socket (an older client's duplicate handshake ack) moves CONNECTED →
+ * SYNCING → CONNECTED without losing the connection or its live query, so it
+ * moves neither time. `changes` starts after the first CONNECTED, so with no
+ * disconnect both are null.
+ */
 function lastReconnect(changes: Change[]): {
   disconnectAt: number | null;
   connectedAt: number | null;
 } {
   let disconnectAt: number | null = null;
-  for (const c of changes) if (c.from === SyncState.CONNECTED) disconnectAt = c.at;
-  const last = changes[changes.length - 1];
-  const connectedAt = last && last.to === SyncState.CONNECTED ? last.at : null;
+  let connectedAt: number | null = null;
+  for (const c of changes) {
+    if (c.to === SyncState.CONNECTED) {
+      if (disconnectAt !== null) connectedAt ??= c.at;
+    } else if (c.to !== SyncState.SYNCING) {
+      disconnectAt = c.at;
+      connectedAt = null;
+    }
+  }
   return { disconnectAt, connectedAt };
 }
 
