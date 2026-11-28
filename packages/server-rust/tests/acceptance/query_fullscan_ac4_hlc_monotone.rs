@@ -20,7 +20,7 @@ use topgun_core::types::Value;
 use tower::ServiceExt;
 
 use topgun_server::network::config::ConnectionConfig;
-use topgun_server::network::connection::{ConnectionKind, ConnectionRegistry, OutboundMessage};
+use topgun_server::network::connection::{ConnectionKind, ConnectionRegistry};
 use topgun_server::service::domain::query::QueryRegistry;
 use topgun_server::service::domain::QueryService;
 use topgun_server::service::operation::{
@@ -128,14 +128,13 @@ async fn full_scan_accepts_all_records_with_monotone_hlc() {
             matches!(returned, OperationResponse::Empty),
             "a live subscribe enqueues its snapshot itself"
         );
-        match rx.try_recv() {
-            Ok(OutboundMessage::Binary(bytes)) => {
-                match rmp_serde::from_slice::<Message>(&bytes).expect("decodes") {
-                    Message::QueryResp(resp) => resp,
-                    other => panic!("expected QueryResp, got {other:?}"),
-                }
-            }
-            other => panic!("expected the enqueued snapshot, got {other:?}"),
+        let frame = rx.try_recv().expect("the enqueued snapshot");
+        let Some(bytes) = frame.payload() else {
+            panic!("expected the enqueued snapshot, got {frame:?}");
+        };
+        match rmp_serde::from_slice::<Message>(bytes).expect("decodes") {
+            Message::QueryResp(resp) => resp,
+            other => panic!("expected QueryResp, got {other:?}"),
         }
     };
 

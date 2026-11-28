@@ -97,8 +97,9 @@ fn int(value: &rmpv::Value) -> i64 {
 /// whether a snapshot arrived.
 fn replay(rx: &mut mpsc::Receiver<OutboundMessage>, rows: &mut BTreeMap<String, i64>) -> bool {
     let mut snapshot = false;
-    while let Ok(OutboundMessage::Binary(bytes)) = rx.try_recv() {
-        match rmp_serde::from_slice::<Message>(&bytes).expect("decodes") {
+    while let Ok(frame) = rx.try_recv() {
+        let Some(bytes) = frame.payload() else { break };
+        match rmp_serde::from_slice::<Message>(bytes).expect("decodes") {
             Message::QueryResp(resp) if resp.payload.query_id == QUERY_ID => {
                 assert!(!snapshot, "one snapshot per subscribe");
                 assert_eq!(resp.payload.code, None, "a delivered snapshot");

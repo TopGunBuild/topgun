@@ -108,14 +108,13 @@ async fn run_subscribe(
             matches!(returned, OperationResponse::Empty),
             "a live subscribe enqueues its snapshot itself"
         );
-        match rx.try_recv() {
-            Ok(OutboundMessage::Binary(bytes)) => {
-                match rmp_serde::from_slice::<Message>(&bytes).expect("decodes") {
-                    Message::QueryResp(resp) => resp,
-                    other => panic!("expected QueryResp, got {other:?}"),
-                }
-            }
-            other => panic!("expected the enqueued snapshot, got {other:?}"),
+        let frame = rx.try_recv().expect("the enqueued snapshot");
+        let Some(bytes) = frame.payload() else {
+            panic!("expected the enqueued snapshot, got {frame:?}");
+        };
+        match rmp_serde::from_slice::<Message>(bytes).expect("decodes") {
+            Message::QueryResp(resp) => resp,
+            other => panic!("expected QueryResp, got {other:?}"),
         }
     }
 }

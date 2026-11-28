@@ -13,13 +13,13 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use dashmap::DashMap;
 use tokio::sync::mpsc::error::TrySendError;
 use topgun_core::LWWRecord;
 use tower::Service;
 
 use topgun_core::messages::base::{ChangeEventType, Query};
-use topgun_core::messages::client_events::QueryUpdatePayload;
 use topgun_core::messages::query::{QueryRespMessage, QueryRespPayload, QueryResultEntry};
 use topgun_core::messages::vector::{
     VectorSearchPayload, VectorSearchRespPayload, VectorSearchResult,
@@ -39,7 +39,8 @@ use crate::query::window::{LiveWindow, WindowDelta};
 use tracing::Instrument;
 
 use crate::network::connection::{
-    BroadcastOutcome, ConnectionId, ConnectionRegistry, OutboundMessage, OwedLoss,
+    encode_query_update, BroadcastOutcome, ConnectionId, ConnectionRegistry, OutboundMessage,
+    OwedLoss,
 };
 use crate::service::domain::index::attribute::AttributeExtractor;
 use crate::service::domain::index::query_optimizer::index_aware_evaluate;
@@ -133,6 +134,46 @@ fn matches_query(query: &Query, data: &rmpv::Value) -> bool {
         evaluate_where(wh, data)
     } else {
         true
+    }
+}
+
+/// msgpack `nil`, the value of every `LEAVE`.
+const ENCODED_NIL: &[u8] = &[0xc0];
+
+#[cfg(test)]
+thread_local! {
+    /// Values [`encode_value`] encoded on this thread.
+    static VALUE_ENCODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Whether [`encode_value`] fails on this thread, standing in for a
+    /// serializer error no `rmpv::Value` triggers.
+    static VALUE_ENCODE_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Encodes a `QUERY_UPDATE` value with the serializer the whole message would
+/// use, as [`encode_query_update`] requires; `None` (logged) if it fails.
+fn encode_value(map_name: &str, key: &str, value: &rmpv::Value) -> Option<Bytes> {
+    #[cfg(test)]
+    VALUE_ENCODES.with(|n| n.set(n.get() + 1));
+    let encoded = rmp_serde::to_vec_named(value);
+    #[cfg(test)]
+    let encoded = if VALUE_ENCODE_FAILS.with(std::cell::Cell::get) {
+        Err(rmp_serde::encode::Error::Syntax("injected".to_string()))
+    } else {
+        encoded
+    };
+    match encoded {
+        Ok(bytes) => Some(Bytes::from(bytes)),
+        Err(error) => {
+            tracing::error!(
+                map = map_name,
+                key,
+                kind = "query_update",
+                %error,
+                "a live event owed to subscribers could not be encoded; \
+                 disconnecting them"
+            );
+            None
+        }
     }
 }
 
@@ -273,6 +314,10 @@ impl QueryRegistry {
         let new_value = new_record
             .filter(|r| lww_is_live(&r.timestamp, r.ttl_ms, now))
             .and_then(|r| r.value.as_ref());
+        // The written key's value encoded once per projection, shared by every
+        // subscription that sends it; `None` is a failed encode, which every one
+        // of them loses (`TG-LIVE-003`).
+        let mut written: HashMap<Option<&[String]>, Option<Bytes>> = HashMap::new();
         for sub in &subs {
             let matches = new_value.is_some_and(|v| matches_query(&sub.query, v));
             if sub.delta_buffer.route(key, new_record, matches) {
@@ -295,27 +340,25 @@ impl QueryRegistry {
                 continue;
             }
             for delta in deltas {
-                let msg = Message::QueryUpdate {
-                    payload: QueryUpdatePayload {
-                        query_id: sub.query_id.clone(),
-                        key: delta.key,
-                        value: delta.value,
-                        change_type: delta.event,
-                    },
+                // Only the written key's ENTER or UPDATE carries the same value in
+                // every window (the write's, projected); a promoted row carries the
+                // value its own window retained, which can differ per window (the
+                // writer's own window skips its writes), so it is encoded here.
+                let value = if matches!(delta.event, ChangeEventType::LEAVE) {
+                    Some(Bytes::from_static(ENCODED_NIL))
+                } else if delta.key == key {
+                    written
+                        .entry(sub.fields.as_deref())
+                        .or_insert_with(|| encode_value(map_name, key, &delta.value))
+                        .clone()
+                } else {
+                    encode_value(map_name, &delta.key, &delta.value)
                 };
-                let outcome = match rmp_serde::to_vec_named(&msg) {
-                    Ok(bytes) => handle.try_send_owed(OutboundMessage::Binary(bytes)),
-                    Err(error) => {
-                        tracing::error!(
-                            map = map_name,
-                            key,
-                            kind = "query_update",
-                            %error,
-                            "a live event owed to subscribers could not be encoded; \
-                             disconnecting them"
-                        );
-                        handle.owed_event_lost(OwedLoss::EncodeFailed)
-                    }
+                let outcome = match value {
+                    Some(value) => handle.try_send_owed(OutboundMessage::Binary(
+                        encode_query_update(&sub.query_id, &delta.key, &value, &delta.event),
+                    )),
+                    None => handle.owed_event_lost(OwedLoss::EncodeFailed),
                 };
                 // After a loss the rest of this subscription's deltas would only
                 // land on a connection that is being disconnected.
@@ -1908,6 +1951,7 @@ mod tests {
     use crate::storage::impls::StorageConfig;
     use crate::storage::record::RecordValue;
     use crate::storage::RecordStoreFactory;
+    use topgun_core::messages::client_events::QueryUpdatePayload;
 
     fn make_timestamp() -> Timestamp {
         Timestamp {
@@ -1977,8 +2021,9 @@ mod tests {
             matches!(resp, OperationResponse::Empty),
             "a live subscribe enqueues its snapshot itself"
         );
-        while let Ok(OutboundMessage::Binary(bytes)) = rx.try_recv() {
-            match rmp_serde::from_slice::<Message>(&bytes).expect("decodes") {
+        while let Ok(frame) = rx.try_recv() {
+            let Some(bytes) = frame.payload() else { break };
+            match rmp_serde::from_slice::<Message>(bytes).expect("decodes") {
                 Message::QueryResp(resp) => return resp,
                 Message::QueryUpdate { payload } => {
                     panic!("a QUERY_UPDATE precedes the snapshot: {payload:?}")
@@ -2771,8 +2816,9 @@ mod tests {
         rx: &mut tokio::sync::mpsc::Receiver<OutboundMessage>,
     ) -> Vec<(String, String)> {
         let mut updates = Vec::new();
-        while let Ok(OutboundMessage::Binary(bytes)) = rx.try_recv() {
-            if let Message::QueryUpdate { payload } = rmp_serde::from_slice(&bytes).unwrap() {
+        while let Ok(frame) = rx.try_recv() {
+            let Some(bytes) = frame.payload() else { break };
+            if let Message::QueryUpdate { payload } = rmp_serde::from_slice(bytes).unwrap() {
                 updates.push((payload.query_id, payload.key));
             }
         }
@@ -4810,8 +4856,9 @@ mod tests {
     /// order (`SERVER_EVENT`s and other queries' frames are skipped).
     fn query_frames(rx: &mut Rx, query_id: &str) -> Vec<Message> {
         let mut frames = Vec::new();
-        while let Ok(OutboundMessage::Binary(bytes)) = rx.try_recv() {
-            let msg: Message = rmp_serde::from_slice(&bytes).expect("decodes");
+        while let Ok(frame) = rx.try_recv() {
+            let Some(bytes) = frame.payload() else { break };
+            let msg: Message = rmp_serde::from_slice(bytes).expect("decodes");
             let id = match &msg {
                 Message::QueryResp(resp) => resp.payload.query_id.as_str(),
                 Message::QueryUpdate { payload } => payload.query_id.as_str(),
@@ -4933,8 +4980,8 @@ mod tests {
     fn binary_frames(rx: &mut Rx) -> Vec<Message> {
         let mut frames = Vec::new();
         while let Ok(frame) = rx.try_recv() {
-            if let OutboundMessage::Binary(bytes) = frame {
-                frames.push(rmp_serde::from_slice(&bytes).expect("decodes"));
+            if let Some(bytes) = frame.payload() {
+                frames.push(rmp_serde::from_slice(bytes).expect("decodes"));
             }
         }
         frames
@@ -6343,6 +6390,194 @@ mod tests {
         println!(
             "close_lock_hold median: {:.3} ms",
             runs[runs.len() / 2].as_secs_f64() * 1e3
+        );
+    }
+
+    // ---- one encode per value ----
+
+    /// Registers a live query `query_id` of `conn` on map `m`.
+    fn live_on_m(
+        registry: &QueryRegistry,
+        conn: ConnectionId,
+        query_id: &str,
+        query: Query,
+        fields: Option<Vec<String>>,
+    ) {
+        registry.register(QuerySubscription {
+            query_id: query_id.to_string(),
+            connection_id: conn,
+            map_name: "m".to_string(),
+            live_window: Arc::new(LiveWindow::new(
+                query.sort.clone().unwrap_or_default(),
+                query.limit,
+            )),
+            query,
+            fields,
+            delta_buffer: inactive_buffer(),
+        });
+    }
+
+    /// Delivers a write of `key` in `m` (`None` removes it), excluding `exclude`.
+    fn write_m(
+        registry: &QueryRegistry,
+        connections: &ConnectionRegistry,
+        key: &str,
+        value: Option<rmpv::Value>,
+        exclude: Option<ConnectionId>,
+    ) {
+        let record = value.map(lww_record);
+        registry.deliver_mutation(connections, "m", key, record.as_ref(), exclude, || 0);
+    }
+
+    /// The `QUERY_UPDATE` payloads waiting on `rx`.
+    fn update_payloads(rx: &mut Rx) -> Vec<QueryUpdatePayload> {
+        binary_frames(rx)
+            .into_iter()
+            .filter_map(|msg| match msg {
+                Message::QueryUpdate { payload } => Some(payload),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn value_encodes() -> usize {
+        VALUE_ENCODES.with(std::cell::Cell::get)
+    }
+
+    fn ab() -> rmpv::Value {
+        rmpv::Value::Map(vec![
+            (rmpv::Value::from("a"), rmpv::Value::from(1)),
+            (rmpv::Value::from("b"), rmpv::Value::from(2)),
+        ])
+    }
+
+    #[test]
+    fn a_written_value_is_encoded_once_per_projection_and_a_leave_never() {
+        let registry = QueryRegistry::new();
+        let connections = ConnectionRegistry::new();
+        let mut rxs = Vec::new();
+        for i in 0..3 {
+            let (conn, rx) = connections.register(ConnectionKind::Client, &test_config());
+            live_on_m(&registry, conn.id, &format!("q{i}"), Query::default(), None);
+            rxs.push(rx);
+        }
+
+        let before = value_encodes();
+        write_m(&registry, &connections, "k1", Some(ab()), None);
+        assert_eq!(
+            value_encodes() - before,
+            1,
+            "3 subscriptions, one projection"
+        );
+        for (i, rx) in rxs.iter_mut().enumerate() {
+            let updates = update_payloads(rx);
+            assert_eq!(updates.len(), 1, "{updates:?}");
+            assert_eq!(updates[0].query_id, format!("q{i}"));
+            assert_eq!(updates[0].key, "k1");
+            assert_eq!(updates[0].value, ab());
+            assert_eq!(updates[0].change_type, ChangeEventType::ENTER);
+        }
+
+        let (conn, mut projected_rx) = connections.register(ConnectionKind::Client, &test_config());
+        live_on_m(
+            &registry,
+            conn.id,
+            "qa",
+            Query::default(),
+            Some(vec!["a".to_string()]),
+        );
+        let before = value_encodes();
+        write_m(&registry, &connections, "k2", Some(ab()), None);
+        assert_eq!(value_encodes() - before, 2, "two projections");
+        let projected = update_payloads(&mut projected_rx);
+        assert_eq!(projected.len(), 1, "{projected:?}");
+        assert_eq!(
+            projected[0].value,
+            rmpv::Value::Map(vec![(rmpv::Value::from("a"), rmpv::Value::from(1))])
+        );
+
+        let before = value_encodes();
+        write_m(&registry, &connections, "k2", None, None);
+        assert_eq!(value_encodes() - before, 0, "a LEAVE is encoded nil");
+        let leaves = update_payloads(&mut projected_rx);
+        assert_eq!(leaves.len(), 1, "{leaves:?}");
+        assert_eq!(leaves[0].value, rmpv::Value::Nil);
+        assert_eq!(leaves[0].change_type, ChangeEventType::LEAVE);
+    }
+
+    /// The writer's window skips its own write, so a later promotion of that
+    /// key carries a different value in the writer's window than in another's.
+    #[test]
+    fn a_promoted_row_carries_the_value_its_own_window_holds() {
+        let registry = QueryRegistry::new();
+        let connections = ConnectionRegistry::new();
+        let (writer, mut writer_rx) = connections.register(ConnectionKind::Client, &test_config());
+        let (other, mut other_rx) = connections.register(ConnectionKind::Client, &test_config());
+        live_on_m(&registry, writer.id, "qw", by_v(1), None);
+        live_on_m(&registry, other.id, "qo", by_v(1), None);
+        write_m(&registry, &connections, "k1", Some(v(1)), None);
+        write_m(&registry, &connections, "k2", Some(v(2)), None);
+        write_m(&registry, &connections, "k2", Some(v(5)), Some(writer.id));
+        let _ = binary_frames(&mut writer_rx);
+        let _ = binary_frames(&mut other_rx);
+
+        write_m(&registry, &connections, "k1", None, None);
+        let promoted = |rx: &mut Rx| -> Vec<rmpv::Value> {
+            update_payloads(rx)
+                .into_iter()
+                .filter(|p| p.key == "k2" && p.change_type == ChangeEventType::ENTER)
+                .map(|p| p.value)
+                .collect()
+        };
+        assert_eq!(promoted(&mut writer_rx), [v(2)], "the writer's window");
+        assert_eq!(promoted(&mut other_rx), [v(5)], "the other window");
+    }
+
+    #[test]
+    fn a_failed_encode_disconnects_every_subscription_that_shares_the_value() {
+        let registry = QueryRegistry::new();
+        let connections = ConnectionRegistry::new();
+        let mut subscribers = Vec::new();
+        for i in 0..3 {
+            let (conn, rx) = connections.register(ConnectionKind::Client, &test_config());
+            live_on_m(&registry, conn.id, &format!("q{i}"), Query::default(), None);
+            subscribers.push((conn, rx));
+        }
+        VALUE_ENCODE_FAILS.with(|fails| fails.set(true));
+        write_m(&registry, &connections, "k1", Some(ab()), None);
+        VALUE_ENCODE_FAILS.with(|fails| fails.set(false));
+        for (conn, rx) in &mut subscribers {
+            assert!(conn.is_cancelled(), "every subscriber is disconnected");
+            assert!(conn.owed_closed());
+            assert!(binary_frames(rx).is_empty());
+        }
+    }
+
+    #[test]
+    fn query_frames_reads_past_a_shared_server_event() {
+        use topgun_core::messages::client_events::{ServerEventPayload, ServerEventType};
+        let registry = QueryRegistry::new();
+        let connections = ConnectionRegistry::new();
+        let (conn, mut rx) = connections.register(ConnectionKind::Client, &test_config());
+        live_on_m(&registry, conn.id, "q", Query::default(), None);
+        let event = rmp_serde::to_vec_named(&Message::ServerEvent {
+            payload: ServerEventPayload {
+                map_name: "m".to_string(),
+                event_type: ServerEventType::PUT,
+                key: "k1".to_string(),
+                record: Some(lww_record(ab())),
+                or_record: None,
+                or_tag: None,
+            },
+        })
+        .expect("encodes");
+        connections.send_owed_to_connections(&[conn.id].into_iter().collect(), &event);
+        write_m(&registry, &connections, "k1", Some(ab()), None);
+
+        let frames = query_frames(&mut rx, "q");
+        assert!(
+            matches!(&frames[..], [Message::QueryUpdate { payload }] if payload.key == "k1"),
+            "the QUERY_UPDATE after the shared SERVER_EVENT: {frames:?}"
         );
     }
 }
