@@ -296,6 +296,27 @@ describe('switching principal on an open socket', () => {
     expect(sockets().flatMap((s) => s.auths())).toEqual([jwt('u1', 900)]);
   });
 
+  test('a provider result that resolves after its socket was lost is never sent', async () => {
+    let releaseFirst: (token: string) => void = () => undefined;
+    let calls = 0;
+    const provider = jest.fn(() => {
+      calls += 1;
+      return calls === 1
+        ? new Promise<string | null>((resolve) => (releaseFirst = resolve))
+        : Promise.resolve(jwt('g1', 900));
+    });
+    createEngine().setTokenProvider(provider);
+    const first = await opened();
+    first.close();
+    expect(await socketCountWithin(2, 2_000)).toBe(2);
+    const second = await opened();
+    expect(second.auths()).toEqual([jwt('g1', 900)]);
+
+    releaseFirst(jwt('g1', 600));
+    await settle(0);
+    expect(sockets().flatMap((s) => s.auths())).toEqual([jwt('g1', 900)]);
+  });
+
   test('a provider switch resets the confirmed-apply high-water mark; a refresh does not', async () => {
     const ws = await admitted(sequence(jwt('g1', 20), jwt('g1', 900)));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the mark is engine-private
