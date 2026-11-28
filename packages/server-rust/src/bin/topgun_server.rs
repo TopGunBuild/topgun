@@ -627,6 +627,27 @@ fn guest_claim_from_env(
     Ok(Some(claim))
 }
 
+/// Parses `TOPGUN_CLOSE_ON_TOKEN_EXPIRY`: whether a WebSocket connection closes
+/// once its token's `exp` plus the leeway has passed. Unset is on; `true`, `1`,
+/// `on`, `yes` and `false`, `0`, `off`, `no` (any case) are read; anything else,
+/// the empty string and a value that is not valid Unicode are fatal, so a value
+/// the operator set is never read as the default.
+fn close_on_token_expiry_from_env(raw: Option<std::ffi::OsString>) -> Result<bool, String> {
+    let Some(raw) = raw else {
+        return Ok(true);
+    };
+    let value = raw
+        .into_string()
+        .map_err(|_| "auth: TOPGUN_CLOSE_ON_TOKEN_EXPIRY is not valid Unicode".to_string())?;
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" | "yes" => Ok(true),
+        "false" | "0" | "off" | "no" => Ok(false),
+        _ => Err(format!(
+            "auth: TOPGUN_CLOSE_ON_TOKEN_EXPIRY={value:?} is not one of true, false, 1, 0, on, off, yes, no"
+        )),
+    }
+}
+
 /// Emits the single operator-facing boot summary.
 ///
 /// Reads against this line are how an operator confirms the effective memory
@@ -646,6 +667,7 @@ fn log_boot_summary(
     rbac_configured: bool,
     tenant_claim: Option<&str>,
     guest_claim: Option<&str>,
+    close_on_token_expiry: bool,
     expiry_sweep: &SweepConfig,
     store_engine: &str,
     engine: &EngineSettings,
@@ -672,6 +694,7 @@ fn log_boot_summary(
         // tenancy off.
         tenant_claim = %tenant_claim.map_or_else(|| "off".to_string(), |c| format!("{c:?}")),
         guest_claim = %guest_claim.map_or_else(|| "off".to_string(), |c| format!("{c:?}")),
+        close_on_token_expiry,
         expiry_sweep_interval_ms = expiry_sweep.interval_ms,
         expiry_sweep_rows_per_sec = expiry_sweep.rows_per_sec,
         store_engine,
@@ -892,6 +915,7 @@ async fn main() -> anyhow::Result<()> {
     // invisible to out-of-process scrapers such as the soak harness. The handle
     // is threaded into AppState so the `/metrics` handler can render it.
     let observability = Arc::new(topgun_server::service::middleware::init_observability());
+    topgun_server::network::handlers::websocket::register_token_expiry_metrics();
 
     let args = Args::parse();
     // Refused here, before any listener is bound or the WAL is recovered: the
@@ -928,6 +952,9 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
     };
+    let close_on_token_expiry =
+        close_on_token_expiry_from_env(std::env::var_os("TOPGUN_CLOSE_ON_TOKEN_EXPIRY"))
+            .unwrap_or_else(|fatal| exit_fatal(&fatal));
 
     // Deliberate-exposure opt-out: when set to 1 or true, downgrade the
     // fail-closed refusal of a no-auth + non-loopback bind back to a loud warning
@@ -1352,6 +1379,7 @@ async fn main() -> anyhow::Result<()> {
         rbac_configured,
         tenant_claim.as_deref(),
         guest_claim.as_deref(),
+        close_on_token_expiry,
         &sweep_config,
         match backend {
             StorageBackend::Rocksdb => "rocksdb",
@@ -1450,6 +1478,7 @@ async fn main() -> anyhow::Result<()> {
                 trust_forwarded_for,
                 tenant_claim,
                 guest_claim,
+                close_on_token_expiry,
                 ..NetworkConfig::default()
             },
             jwt_secret,
@@ -2161,8 +2190,8 @@ mod tests {
     }
 
     use super::{
-        admin_bind_posture, guest_claim_from_env, log_boot_summary, tenant_claim_from_env,
-        BindPosture, SweepConfig,
+        admin_bind_posture, close_on_token_expiry_from_env, guest_claim_from_env, log_boot_summary,
+        tenant_claim_from_env, BindPosture, SweepConfig,
     };
     use super::{EvictionConfig, WriteBehindConfig};
     use std::io;
@@ -2261,6 +2290,8 @@ mod tests {
         let tenant_off = tenant_claim_from_env(None, false).unwrap();
         let guest_on = guest_claim_from_env(Some("tg_guest".into()), false, None).unwrap();
         let guest_off = guest_claim_from_env(None, false, None).unwrap();
+        let closing_off = close_on_token_expiry_from_env(Some("FALSE".into())).unwrap();
+        let closing_on = close_on_token_expiry_from_env(None).unwrap();
         // Parsed as the binary parses them, to values neither default has.
         let sweep = SweepConfig::from_env_values(Some("12345"), Some("777"), 5000).unwrap();
         // Resolved as the binary resolves them: 192 is no default, and the
@@ -2269,9 +2300,9 @@ mod tests {
             super::EngineSettings::resolve(Some(std::ffi::OsStr::new("192"))).expect("192");
         let engine_unset = super::EngineSettings::resolve(None).expect("unset");
         tracing::subscriber::with_default(subscriber, || {
-            for (tenant_claim, guest_claim, engine) in [
-                (&tenant_on, &guest_on, &engine_set),
-                (&tenant_off, &guest_off, &engine_unset),
+            for (tenant_claim, guest_claim, closing, engine) in [
+                (&tenant_on, &guest_on, closing_off, &engine_set),
+                (&tenant_off, &guest_off, closing_on, &engine_unset),
             ] {
                 log_boot_summary(
                     &EvictionConfig::default(),
@@ -2282,6 +2313,7 @@ mod tests {
                     false,
                     tenant_claim.as_deref(),
                     guest_claim.as_deref(),
+                    closing,
                     &sweep,
                     "rocksdb",
                     engine,
@@ -2325,6 +2357,12 @@ mod tests {
         assert!(
             rendered.contains("guest_claim=\"tg_guest\"") && rendered.contains("guest_claim=off"),
             "the operator-facing boot line must name the EFFECTIVE guest claim, or off; \
+             captured: {rendered}"
+        );
+        assert!(
+            rendered.contains("close_on_token_expiry=false")
+                && rendered.contains("close_on_token_expiry=true"),
+            "the operator-facing boot line must carry the EFFECTIVE expiry closing; \
              captured: {rendered}"
         );
         assert!(
@@ -2376,6 +2414,48 @@ mod tests {
             rendered.contains("allocator=system"),
             "the operator-facing boot line must name the allocator the binary runs; \
              captured: {rendered}"
+        );
+    }
+
+    #[test]
+    fn close_on_token_expiry_unset_is_on() {
+        assert_eq!(close_on_token_expiry_from_env(None), Ok(true));
+    }
+
+    #[test]
+    fn close_on_token_expiry_reads_the_documented_words_in_any_case() {
+        for (raw, on) in [
+            ("true", true),
+            ("1", true),
+            ("ON", true),
+            ("Yes", true),
+            ("false", false),
+            ("FALSE", false),
+            ("0", false),
+            ("off", false),
+            ("No", false),
+        ] {
+            assert_eq!(
+                close_on_token_expiry_from_env(Some(raw.into())),
+                Ok(on),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn close_on_token_expiry_unknown_empty_or_not_unicode_is_fatal() {
+        use std::os::unix::ffi::OsStringExt;
+        for raw in ["garbage", "", " true", "enabled"] {
+            let err = close_on_token_expiry_from_env(Some(raw.into())).unwrap_err();
+            assert!(
+                err.starts_with("auth: TOPGUN_CLOSE_ON_TOKEN_EXPIRY="),
+                "{raw:?}: {err}"
+            );
+        }
+        assert_eq!(
+            close_on_token_expiry_from_env(Some(std::ffi::OsString::from_vec(vec![b'1', 0xff]))),
+            Err("auth: TOPGUN_CLOSE_ON_TOKEN_EXPIRY is not valid Unicode".to_string())
         );
     }
 

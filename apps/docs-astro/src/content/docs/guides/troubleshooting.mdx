@@ -99,6 +99,13 @@ This guide covers common issues you may encounter when using TopGun, organized b
   // client.setAuthTokenProvider(async () => fetchFreshToken());
   ```
 
+### Connection closed after `AUTH_FAIL` with code 4401 or 4409
+
+**Symptom:** An authenticated connection receives `AUTH_FAIL` with a `code` and then closes.
+
+- **`4401`: the token expired.** The server closes a connection once its token's `exp` plus 60 seconds has passed, and refuses an expired token with this code at the handshake and on a refresh. Send a new `AUTH` with a fresh token on the open connection before then, or reconnect with a token that has not expired. The MCP server and `ClusterClient` keep one token for their whole session: give them a token that outlives it, or start the server with `TOPGUN_CLOSE_ON_TOKEN_EXPIRY=false` to keep connections open past `exp`.
+- **`4409`: the refresh named another principal.** An `AUTH` sent on an open connection carried a valid token for another `sub`, tenant, kind (guest or user) or set of roles. A connection keeps the principal it authenticated as; open a new connection to change it.
+
 ---
 
 ## IndexedDB Persistence

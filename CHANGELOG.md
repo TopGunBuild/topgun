@@ -10,6 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Changed (server): a WebSocket connection closes when its token expires (`TG-AUTH-001`).** At
+  the token's `exp` plus the 60 s JWT leeway the server sends `AUTH_FAIL` with `code: 4401`, closes
+  the connection and counts it in `topgun_ws_token_expiry_closes_total`; a handshake with an
+  expired token is refused with the same code. Before, a connection outlived its token for as long
+  as it stayed open. `TOPGUN_CLOSE_ON_TOKEN_EXPIRY=false` keeps the earlier behaviour; any value
+  other than `true`, `1`, `on`, `yes`, `false`, `0`, `off`, `no` (any case) stops the server at
+  startup, and the startup summary line reports `close_on_token_expiry`. A client can refresh in
+  band by sending a new `AUTH` on the open connection: a token for the same tenant, `sub`, kind and
+  set of roles moves the deadline and is acknowledged; any other token gets `AUTH_FAIL` (`4409`
+  another principal, `4401` expired, no code otherwise) and the close, whether or not the closing
+  is on. Before, such an `AUTH` was ignored. `4401` and `4409` are `AUTH_FAIL` codes, not WebSocket
+  close codes. The MCP server and `ClusterClient` hold one token and do not refresh: with the
+  closing on, give them tokens that outlive their sessions.
+- **Security (server): the admin API refuses guest tokens.** With `TOPGUN_GUEST_CLAIM` set, a token
+  whose guest claim is `true` is refused with 403 whatever its roles, and one whose guest claim is
+  not a boolean with 401. Before, a guest token carrying the `admin` role was admitted.
 - **Added (server): a guest's device credential is kept in memory only (`TG-AUTH-002`).** A guest
   connection is given a device credential of the same shape as a user's, but signed with a key the
   server draws at start and never stores, so a guest leaves no row in `_topgun_device_credentials`.

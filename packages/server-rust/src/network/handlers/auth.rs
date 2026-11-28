@@ -105,6 +105,34 @@ pub enum AuthError {
     Serialization(#[from] rmp_serde::encode::Error),
 }
 
+/// `AUTH_FAIL.code` for a token whose `exp` (plus the leeway) has passed, at the
+/// handshake, on an in-band refresh, or when a live socket reaches its deadline
+/// (`TG-AUTH-001`). It is not a WebSocket close code.
+pub const AUTH_FAIL_TOKEN_EXPIRED: u32 = 4401;
+
+/// `AUTH_FAIL.code` for an in-band refresh whose token verifies but names another
+/// principal than the connection's (`TG-AUTH-001`).
+pub const AUTH_FAIL_PRINCIPAL_CHANGED: u32 = 4409;
+
+/// Why a client token was refused. `expired` is set when the token's signature
+/// verified and its `exp` plus the leeway has passed; once it has expired its
+/// other claims are not checked. It lets the client tell "fetch a fresh token"
+/// apart from every other refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TokenRefusal {
+    pub(crate) reason: String,
+    pub(crate) expired: bool,
+}
+
+impl From<String> for TokenRefusal {
+    fn from(reason: String) -> Self {
+        Self {
+            reason,
+            expired: false,
+        }
+    }
+}
+
 /// JWT claims extracted from the authentication token.
 ///
 /// Uses the standard `sub` (subject) claim for user identification per RFC 7519.
@@ -227,11 +255,14 @@ impl AuthHandler {
 
     /// Process an incoming AUTH message.
     ///
-    /// Returns `Ok(Principal)` on success so the caller can update
-    /// `ConnectionMetadata` and send `AUTH_ACK` with the user's identity.
+    /// Returns the principal and the token's `exp` on success so the caller can
+    /// update `ConnectionMetadata`, send `AUTH_ACK` with the user's identity and
+    /// hold the connection's expiry deadline.
     ///
     /// On failure, sends exactly one `AUTH_FAIL` via the outbound channel and
-    /// returns `Err(AuthError)`. The caller should close the connection.
+    /// returns `Err(AuthError)`. The caller should close the connection. A token
+    /// whose signature verified and whose `exp` has passed gets `code` 4401, so
+    /// a client whose clock is behind the server's learns to fetch a fresh token.
     ///
     /// The `leeway` parameter specifies the clock skew tolerance in seconds.
     /// Tokens expired within this window are still accepted to handle clock
@@ -254,11 +285,12 @@ impl AuthHandler {
         tx: &mpsc::Sender<OutboundMessage>,
         leeway: u64,
         insecure_forward_auth_errors: bool,
-    ) -> Result<Principal, AuthError> {
-        let reason = match self.verify_token(&auth_msg.token, leeway).await {
-            Ok(principal) => return Ok(principal),
-            Err(reason) => reason,
-        };
+    ) -> Result<(Principal, u64), AuthError> {
+        let TokenRefusal { reason, expired } =
+            match self.verify_token_with_expiry(&auth_msg.token, leeway).await {
+                Ok(verified) => return Ok(verified),
+                Err(refusal) => refusal,
+            };
         warn!(reason = %reason, "client authentication failed");
         let client_error = if insecure_forward_auth_errors {
             reason.clone()
@@ -267,7 +299,7 @@ impl AuthHandler {
         };
         let fail_msg = Message::AuthFail(AuthFailData {
             error: Some(client_error),
-            ..Default::default()
+            code: expired.then_some(AUTH_FAIL_TOKEN_EXPIRED),
         });
         let bytes = rmp_serde::to_vec_named(&fail_msg)?;
         tx.send(OutboundMessage::Binary(bytes)).await?;
@@ -292,6 +324,26 @@ impl AuthHandler {
     /// guest principals are on, `tg_link` is present and not a string, or the
     /// custom validator refuses it.
     pub(crate) async fn verify_token(&self, token: &str, leeway: u64) -> Result<Principal, String> {
+        self.verify_token_with_expiry(token, leeway)
+            .await
+            .map(|(principal, _)| principal)
+            .map_err(|refusal| refusal.reason)
+    }
+
+    /// [`verify_token`](Self::verify_token), also returning the token's `exp`
+    /// (seconds since the epoch) and telling an expired token apart from every
+    /// other refusal.
+    ///
+    /// # Errors
+    ///
+    /// As [`verify_token`](Self::verify_token); `expired` is set when the
+    /// signature verified and `exp` plus `leeway` has passed; `nbf`, `iss`,
+    /// `aud` and the server's own claim checks do not run on such a token.
+    pub(crate) async fn verify_token_with_expiry(
+        &self,
+        token: &str,
+        leeway: u64,
+    ) -> Result<(Principal, u64), TokenRefusal> {
         let (algorithm, key) = decode_jwt_key(&self.jwt_secret)?;
         let mut validation = Validation::new(algorithm);
         // Apply optional issuer/audience checks (off unless configured). Do NOT
@@ -305,8 +357,17 @@ impl AuthHandler {
         validation.leeway = leeway;
 
         let raw_claims = jsonwebtoken::decode::<serde_json::Value>(token, &key, &validation)
-            .map_err(|e| format!("{e}"))?
+            .map_err(|e| TokenRefusal {
+                expired: matches!(e.kind(), jsonwebtoken::errors::ErrorKind::ExpiredSignature),
+                reason: format!("{e}"),
+            })?
             .claims;
+        // The decode above requires `exp` and parses it as an unsigned integer,
+        // so this refuses nothing it admitted; it only keeps a deadline from
+        // ever being read as absent.
+        let exp = raw_claims["exp"]
+            .as_u64()
+            .ok_or_else(|| "missing or non-integer exp claim in JWT".to_string())?;
 
         // Anonymous identity is not permitted; callers must always provide `sub`.
         let user_id = raw_claims["sub"]
@@ -345,7 +406,7 @@ impl AuthHandler {
             Some(claim) => match raw_claims.get(claim) {
                 None | Some(serde_json::Value::Bool(false)) => PrincipalKind::User,
                 Some(serde_json::Value::Bool(true)) => PrincipalKind::Guest,
-                Some(_) => return Err(format!("invalid guest claim `{claim}` in JWT")),
+                Some(_) => return Err(format!("invalid guest claim `{claim}` in JWT").into()),
             },
         };
         // `tg_link` is reserved for linking a guest to the user it becomes, and
@@ -356,7 +417,7 @@ impl AuthHandler {
             Some(serde_json::Value::String(_)) => {
                 debug!(user_id = %user_id, "tg_link claim ignored: it is reserved");
             }
-            Some(_) => return Err("invalid tg_link claim in JWT".to_string()),
+            Some(_) => return Err("invalid tg_link claim in JWT".to_string().into()),
         }
 
         if let Some(ref validator) = self.auth_validator {
@@ -370,12 +431,15 @@ impl AuthHandler {
 
         debug!(user_id = %user_id, ?roles, ?kind, "JWT verified successfully");
 
-        Ok(Principal {
-            id: user_id,
-            roles,
-            tenant,
-            kind,
-        })
+        Ok((
+            Principal {
+                id: user_id,
+                roles,
+                tenant,
+                kind,
+            },
+            exp,
+        ))
     }
 }
 
@@ -445,7 +509,7 @@ mod tests {
         };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
-        let principal = result.unwrap();
+        let (principal, _) = result.unwrap();
         assert_eq!(principal.id, "user-1");
     }
 
@@ -461,11 +525,31 @@ mod tests {
         };
         let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
         assert!(result.is_err(), "expected Err for expired token");
-        // AUTH_FAIL must have been sent on the channel (AC12 for expired path)
-        assert!(
-            rx.try_recv().is_ok(),
-            "AUTH_FAIL should be sent when token is rejected"
+        assert_eq!(
+            auth_fail_code(&mut rx),
+            Some(AUTH_FAIL_TOKEN_EXPIRED),
+            "an expired token is refused with code 4401"
         );
+        // Any other refusal carries no code: a token signed with another key.
+        let other = AuthHandler::new("another-secret".to_owned(), None);
+        let auth_msg = AuthMessage {
+            token: make_token(Some("user-1"), 3600),
+            protocol_version: None,
+            device_token: None,
+        };
+        assert!(other.handle_auth(&auth_msg, &tx, 60, false).await.is_err());
+        assert_eq!(auth_fail_code(&mut rx), None, "a bad signature has no code");
+    }
+
+    /// Decodes the one queued `AUTH_FAIL` and returns its `code`.
+    fn auth_fail_code(rx: &mut mpsc::Receiver<OutboundMessage>) -> Option<u32> {
+        let Ok(OutboundMessage::Binary(bytes)) = rx.try_recv() else {
+            panic!("AUTH_FAIL should be sent when the token is refused");
+        };
+        match rmp_serde::from_slice::<Message>(&bytes) {
+            Ok(Message::AuthFail(fail)) => fail.code,
+            other => panic!("expected AUTH_FAIL, got {other:?}"),
+        }
     }
 
     // AC3: token expired 30 seconds ago is accepted when leeway is 60s
@@ -625,7 +709,7 @@ RQIDAQAB
             result.is_ok(),
             "RS256 token with matching public key should be accepted, got {result:?}"
         );
-        assert_eq!(result.unwrap().id, "rs-user-1");
+        assert_eq!(result.unwrap().0.id, "rs-user-1");
     }
 
     // RS256 token signed with TEST_RSA_PRIVATE_PEM is rejected when the handler
@@ -801,7 +885,10 @@ RQIDAQAB
             protocol_version: None,
             device_token: None,
         };
-        handler.handle_auth(&auth_msg, &tx, 60, false).await
+        handler
+            .handle_auth(&auth_msg, &tx, 60, false)
+            .await
+            .map(|(principal, _)| principal)
     }
 
     // Configured audience accepts a matching `aud`.
@@ -887,7 +974,10 @@ RQIDAQAB
             protocol_version: None,
             device_token: None,
         };
-        let result = handler.handle_auth(&auth_msg, &tx, 60, false).await;
+        let result = handler
+            .handle_auth(&auth_msg, &tx, 60, false)
+            .await
+            .map(|(principal, _)| principal);
         drop(tx);
         let mut frames = 0;
         while rx.recv().await.is_some() {
@@ -1114,7 +1204,7 @@ RQIDAQAB
             result.is_ok(),
             "expected Ok when no validator configured, got {result:?}"
         );
-        assert_eq!(result.unwrap().id, "user-99");
+        assert_eq!(result.unwrap().0.id, "user-99");
     }
 
     // AC7: Rejecting validator with insecure_forward_auth_errors=false
