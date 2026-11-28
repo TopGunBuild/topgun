@@ -24,6 +24,7 @@ import type { HybridQueryHandle, HybridQueryFilter } from './HybridQueryHandle';
 import { TopicHandle } from './TopicHandle';
 import { logger } from './utils/logger';
 import { unrefTimer } from './utils/unrefTimer';
+import { decodeJwtExp } from './utils/jwtExp';
 import { isRestorableOpMapName, keyBelongsToLongerHeldName } from './utils/mapName';
 import {
   loadOrMapKeyTombstones,
@@ -225,6 +226,11 @@ const orMapMarkerKey = (mapName: string): string => `__sys__:${mapName}:ormap`;
 // connection's ACKs. Deliberately NOT of the form `__sys__:*:ormap|tombstones`
 // so it is never matched as a held-map name by the enumeration regex.
 const ORMAP_BACKFILL_DONE_KEY = '__sys__:ormapBackfillDone';
+
+/** `AUTH_FAIL.code` of a token the server refused as expired (TG-AUTH-001). */
+const AUTH_FAIL_TOKEN_EXPIRED = 4401;
+/** `AUTH_FAIL.code` of an in-band token that names another principal than the socket's. */
+const AUTH_FAIL_PRINCIPAL_CHANGED = 4409;
 // Discovers a held OR-Map name from either meta-marker: the eager `:ormap`
 // existence marker (post-fix + backfilled stores) OR the legacy `:tombstones`
 // key (belt-and-suspenders — a pre-fix store that HAS a tombstone but somehow
@@ -454,6 +460,51 @@ export class SyncEngine {
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
   private onAuthRequired: ((error: AuthRequiredError) => void) | null = null;
+
+  /**
+   * Raised by every setAuthToken / setTokenProvider. A provider call reads it
+   * before it awaits and again afterwards, together with the connection
+   * generation: if either moved, the credentials or the socket it was fetched
+   * for are gone, and its token must not be sent on whatever replaced them.
+   */
+  private credentialEpoch = 0;
+  /**
+   * The handshake AUTH of the current socket: started (the provider may still
+   * be pending) or sent. One handshake AUTH per socket: the server reads a
+   * second one as an in-band refresh, and a provider that answers the two
+   * calls with different principals would have the socket closed at once.
+   */
+  private handshakeAuth: 'none' | 'pending' | 'sent' = 'none';
+  /** The token of the handshake AUTH sent on the current socket. */
+  private handshakeToken: string | null = null;
+  /**
+   * The token the server last admitted this socket with: its handshake token,
+   * then each refresh token it acknowledged. An expiry refusal is charged to
+   * it, never to a refresh token the server has not acknowledged.
+   */
+  private admittedToken: string | null = null;
+  /** The token the server refused as expired, and its unverified `exp`. */
+  private expiredToken: { token: string; exp: number | null } | null = null;
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The refresh AUTH awaiting its AUTH_ACK on this socket, with its timeout. */
+  private refreshInFlight: { token: string; timer: ReturnType<typeof setTimeout> } | null = null;
+  /**
+   * Set when a refresh got no answer: a server that drops in-band AUTH would
+   * otherwise be sent one refresh after another for the same token.
+   */
+  private refreshStopped = false;
+  /**
+   * The socketless provider loop that runs after an expiry refusal while the
+   * provider returns a token the server already refused as expired.
+   */
+  private expiryRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private expiryRecoveryAttempt = 0;
+  private expiryRecoveryActive = false;
+  private readonly REFRESH_FLOOR_MS = 30_000;
+  private readonly REFRESH_LEAD_MS = 60_000;
+  private readonly REFRESH_TIMEOUT_MS = 10_000;
+  private readonly EXPIRY_RECOVERY_BASE_MS = 1_000;
+  private readonly EXPIRY_RECOVERY_MAX_MS = 30_000;
 
   // Server-issued device identity. The deviceToken is an opaque credential the
   // client presents on AUTH so the server can rebind the same device identity
@@ -732,6 +783,10 @@ export class SyncEngine {
    * Called when connection is established (initial or reconnect).
    */
   private handleConnectionEstablished(): void {
+    this.handshakeAuth = 'none';
+    this.handshakeToken = null;
+    this.admittedToken = null;
+    this.refreshStopped = false;
     if (this.authToken || this.tokenProvider) {
       // Client already has credentials — send auth immediately without waiting
       // for AUTH_REQUIRED (preserves today's behaviour; matches servers that
@@ -783,6 +838,8 @@ export class SyncEngine {
     // A sync response still being handled must not be counted into, or send a
     // request ahead of, the Merkle walk the next connection opens.
     this.connectionGeneration += 1;
+    this.clearRefresh();
+    this.handshakeAuth = 'none';
     this.orMapSyncHandler.onConnectionLost();
   }
 
@@ -839,6 +896,12 @@ export class SyncEngine {
     // invalid self-transition.
     if (this.stateMachine.getState() === SyncState.CONNECTING) {
       this.stateMachine.transition(SyncState.AUTHENTICATING);
+    }
+    if (this.handshakeAuth !== 'none') {
+      // The handshake AUTH of this socket is already out (or its provider call is
+      // pending): the server announces AUTH_REQUIRED before it reads anything, and
+      // it would read a second AUTH as an in-band refresh.
+      return;
     }
     if (this.authToken || this.tokenProvider) {
       this.sendAuth();
@@ -1825,24 +1888,8 @@ export class SyncEngine {
   public setAuthToken(token: string): void {
     this.authToken = token;
     this.tokenProvider = null;
-    // A new token may name a different principal, whose server-side per-device cursor
-    // is independent. Reset the local confirmed-apply high-water-mark so ACKs for the
-    // new identity are not suppressed by the prior identity's epoch (server-side
-    // monotone-max makes a redundant re-ACK under the same principal a harmless no-op).
-    this.lastAckedEpoch = 0;
-
-    const state = this.stateMachine.getState();
-    if (state === SyncState.AUTHENTICATING) {
-      // Already connected and waiting for token — send it now
-      this.sendAuth();
-    } else if (state === SyncState.BACKOFF || state === SyncState.DISCONNECTED) {
-      // Force immediate reconnect if we were waiting for retry timer
-      logger.info('Auth token set during backoff/disconnect. Reconnecting immediately.');
-      this.webSocketManager.clearReconnectTimer();
-      // Reset backoff since user provided new credentials
-      this.webSocketManager.resetBackoff();
-      this.webSocketManager.connect();
-    }
+    this.credentialsChanged();
+    this.applyNewCredentials(true);
   }
 
   /**
@@ -1867,20 +1914,98 @@ export class SyncEngine {
 
   public setTokenProvider(provider: () => Promise<string | null>): void {
     this.tokenProvider = provider;
+    this.credentialsChanged();
+    this.applyNewCredentials(false);
+  }
+
+  /**
+   * What every new token or provider resets: the expiry verdict on an earlier
+   * token, a stopped refresh, the socketless expiry loop, and the
+   * confirmed-apply high-water mark. A new token may name a different
+   * principal, whose server-side per-device cursor is independent, so ACKs for
+   * the new identity must not be suppressed by the prior identity's epoch
+   * (server-side monotone-max makes a redundant re-ACK under the same principal
+   * a harmless no-op).
+   */
+  private credentialsChanged(): void {
+    this.credentialEpoch += 1;
+    this.lastAckedEpoch = 0;
+    this.expiredToken = null;
+    this.refreshStopped = false;
+    this.clearRefresh();
+  }
+
+  /**
+   * Brings the connection onto the credentials just set. An authenticated
+   * socket keeps the principal it was admitted as, and the server closes it
+   * when a refresh names another one, so it is replaced. So is a socket whose
+   * handshake AUTH is already out: a second AUTH there would be read as a
+   * refresh. A socket still waiting for its handshake sends it now. A static
+   * token also ends a wait for the next reconnect attempt.
+   */
+  private applyNewCredentials(reconnectWhenDown: boolean): void {
+    if (this.expiryRecoveryActive) {
+      // The socket was closed after an expiry refusal and nothing reopens it on
+      // its own.
+      this.stopExpiryRecovery();
+      this.webSocketManager.connect();
+      return;
+    }
     const state = this.stateMachine.getState();
-    if (state === SyncState.AUTHENTICATING) {
+    if (
+      state === SyncState.CONNECTED ||
+      state === SyncState.SYNCING ||
+      (state === SyncState.AUTHENTICATING && this.handshakeAuth === 'sent')
+    ) {
+      logger.info('Credentials changed on an open connection. Reconnecting.');
+      this.webSocketManager.getConnectionProvider().forceReconnect();
+    } else if (state === SyncState.AUTHENTICATING) {
+      // Already connected and waiting for a token — send it now.
       this.sendAuth();
+    } else if (
+      reconnectWhenDown &&
+      (state === SyncState.BACKOFF || state === SyncState.DISCONNECTED)
+    ) {
+      // Force immediate reconnect if we were waiting for retry timer
+      logger.info('Auth token set during backoff/disconnect. Reconnecting immediately.');
+      this.webSocketManager.clearReconnectTimer();
+      // Reset backoff since user provided new credentials
+      this.webSocketManager.resetBackoff();
+      this.webSocketManager.connect();
     }
   }
 
+  /** True when `token` must not be sent: the server already refused it, or one no newer, as expired. */
+  private isRefusedAsExpired(token: string): boolean {
+    const refused = this.expiredToken;
+    if (!refused) return false;
+    if (token === refused.token) return true;
+    const exp = decodeJwtExp(token);
+    return refused.exp !== null && exp !== null && exp <= refused.exp;
+  }
+
+  /**
+   * The handshake AUTH of the current socket. The token comes from the
+   * provider when one is set; a provider result that arrives after the socket
+   * or the credentials changed is dropped, never sent.
+   */
   private async sendAuth(): Promise<void> {
-    if (this.tokenProvider) {
+    const generation = this.connectionGeneration;
+    const epoch = this.credentialEpoch;
+    const stale = () =>
+      this.connectionGeneration !== generation || this.credentialEpoch !== epoch || this.closed;
+    this.handshakeAuth = 'pending';
+    const provider = this.tokenProvider;
+    if (provider) {
       try {
-        const token = await this.tokenProvider();
+        const token = await provider();
+        if (stale()) return;
         if (token) {
           this.authToken = token;
         }
       } catch (err) {
+        if (stale()) return;
+        this.handshakeAuth = 'none';
         logger.error({ err }, 'Failed to get token from provider');
         return;
       }
@@ -1890,6 +2015,7 @@ export class SyncEngine {
     // cold restart rebinds the same identity even if the socket opened before the
     // boot-time load resolved. Shares the single memoized read with loadOpLog.
     await this.ensureDeviceCredentialLoaded();
+    if (stale()) return;
 
     const token = this.authToken;
 
@@ -1899,7 +2025,18 @@ export class SyncEngine {
     //   - Token-less/NO_AUTH → device identity is presented on a dedicated DEVICE_HELLO
     //     (see handleConnectionEstablished), never an empty-token AUTH (a real JWT server
     //     would AUTH_FAIL + disconnect it).
-    if (!token) return;
+    if (!token) {
+      this.handshakeAuth = 'none';
+      return;
+    }
+
+    if (provider && this.isRefusedAsExpired(token)) {
+      // Sending it would only earn the same refusal; the provider is asked
+      // again without holding a socket open.
+      logger.warn('The token provider returned a token the server refused as expired.');
+      this.startExpiryRecovery(false);
+      return;
+    }
 
     // Credentialed AUTH: bundle the persisted deviceToken so the server present-or-mints
     // the device identity in the same round-trip and returns it on AUTH_ACK.
@@ -1907,7 +2044,160 @@ export class SyncEngine {
     if (this.deviceToken) {
       authMessage.deviceToken = this.deviceToken;
     }
+    this.handshakeAuth = 'sent';
+    this.handshakeToken = token;
     this.sendMessage(authMessage);
+  }
+
+  /**
+   * Closes the socket once after an expiry refusal and asks the provider for a
+   * token on a timer of its own (1 s doubling to 30 s, jittered 0.5–1.5×),
+   * without a socket: a provider that keeps returning the refused token must
+   * not cost the server one WebSocket upgrade per cycle. The socket reopens
+   * once the provider returns a token the server has not refused as expired.
+   */
+  private startExpiryRecovery(askNow: boolean): void {
+    this.stopExpiryRecovery();
+    this.expiryRecoveryActive = true;
+    this.webSocketManager.close();
+    if (this.isOnline()) {
+      // close() detaches the socket before closing it, so no disconnect event
+      // reaches the engine: it leaves the connection here itself.
+      this.stateMachine.transition(SyncState.DISCONNECTED);
+      this.handleConnectionLost();
+    }
+    if (askNow) {
+      void this.askProviderAfterExpiry();
+    } else {
+      this.scheduleExpiryRecovery();
+    }
+  }
+
+  private scheduleExpiryRecovery(): void {
+    const base = Math.min(
+      this.EXPIRY_RECOVERY_MAX_MS,
+      this.EXPIRY_RECOVERY_BASE_MS * Math.pow(2, this.expiryRecoveryAttempt),
+    );
+    this.expiryRecoveryAttempt += 1;
+    const delay = Math.floor(base * (0.5 + Math.random()));
+    this.expiryRecoveryTimer = unrefTimer(
+      setTimeout(() => {
+        this.expiryRecoveryTimer = null;
+        void this.askProviderAfterExpiry();
+      }, delay),
+    );
+  }
+
+  private async askProviderAfterExpiry(): Promise<void> {
+    const provider = this.tokenProvider;
+    const epoch = this.credentialEpoch;
+    if (!provider || !this.expiryRecoveryActive) return;
+    let token: string | null = null;
+    try {
+      token = await provider();
+    } catch (err) {
+      logger.error({ err }, 'Failed to get token from provider');
+    }
+    if (this.credentialEpoch !== epoch || !this.expiryRecoveryActive || this.closed) return;
+    if (token && !this.isRefusedAsExpired(token)) {
+      this.authToken = token;
+      this.stopExpiryRecovery();
+      this.webSocketManager.connect();
+      return;
+    }
+    this.scheduleExpiryRecovery();
+  }
+
+  private stopExpiryRecovery(): void {
+    this.expiryRecoveryActive = false;
+    this.expiryRecoveryAttempt = 0;
+    if (this.expiryRecoveryTimer) {
+      clearTimeout(this.expiryRecoveryTimer);
+      this.expiryRecoveryTimer = null;
+    }
+  }
+
+  /**
+   * Arms the proactive refresh for the token the server admitted this socket
+   * with. It fires `max(30 s, R − min(60 s, R / 2))` after arming, `R` the
+   * time left until the token's `exp`: never before half the remaining
+   * lifetime, and never sooner than 30 s, so a client clock far ahead of the
+   * issuer refreshes at most every 30 s.
+   */
+  private armRefresh(): void {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+    if (!this.tokenProvider || this.refreshStopped || !this.isAuthenticated()) return;
+    const exp = this.admittedToken === null ? null : decodeJwtExp(this.admittedToken);
+    if (exp === null) return;
+    const remaining = exp * 1000 - Date.now();
+    const delay = Math.max(
+      this.REFRESH_FLOOR_MS,
+      remaining - Math.min(this.REFRESH_LEAD_MS, remaining / 2),
+    );
+    this.refreshTimer = unrefTimer(
+      setTimeout(() => {
+        this.refreshTimer = null;
+        void this.refreshToken();
+      }, delay),
+    );
+  }
+
+  /**
+   * Asks the provider for a newer token and presents it on the open socket. An
+   * identical token, a `null` or a provider error sends nothing and re-arms.
+   */
+  private async refreshToken(): Promise<void> {
+    const provider = this.tokenProvider;
+    if (!provider) return;
+    const generation = this.connectionGeneration;
+    const epoch = this.credentialEpoch;
+    let token: string | null = null;
+    try {
+      token = await provider();
+    } catch (err) {
+      logger.error({ err }, 'Failed to get token from provider for the refresh');
+    }
+    if (
+      this.connectionGeneration !== generation ||
+      this.credentialEpoch !== epoch ||
+      this.closed ||
+      !this.isAuthenticated()
+    ) {
+      return;
+    }
+    if (!token || token === this.admittedToken) {
+      this.armRefresh();
+      return;
+    }
+    const timer = unrefTimer(
+      setTimeout(() => {
+        // The connection stays: the token it was admitted with still holds
+        // until its own deadline. A server that never answers an in-band AUTH
+        // is not asked again for this socket.
+        this.refreshInFlight = null;
+        this.refreshStopped = true;
+        logger.warn(
+          { timeoutMs: this.REFRESH_TIMEOUT_MS },
+          'The server did not answer the token refresh; no further refresh on this connection',
+        );
+      }, this.REFRESH_TIMEOUT_MS),
+    );
+    this.refreshInFlight = { token, timer };
+    this.sendMessage({ type: 'AUTH', token } satisfies AuthMessage);
+  }
+
+  private clearRefresh(): void {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+    if (this.refreshInFlight) {
+      clearTimeout(this.refreshInFlight.timer);
+      this.refreshInFlight = null;
+    }
   }
 
   /**
@@ -2121,6 +2411,22 @@ export class SyncEngine {
   }
 
   private handleAuthAck(message?: AuthAckMessage): void {
+    if (message && this.isAuthenticated() && this.handshakeAuth === 'sent') {
+      // The socket is already admitted by its handshake AUTH, so this answers an
+      // in-band refresh, or a refresh whose answer came after its timeout: the
+      // connection goes on as it was, with nothing to replay or restore.
+      const refresh = this.refreshInFlight;
+      if (refresh) {
+        clearTimeout(refresh.timer);
+        this.refreshInFlight = null;
+        this.authToken = refresh.token;
+        this.admittedToken = refresh.token;
+        logger.info('Token refreshed');
+        this.armRefresh();
+      }
+      return;
+    }
+
     logger.info('Authenticated successfully');
 
     // A real AUTH_ACK resolves the opportunistic device handshake — cancel the
@@ -2171,10 +2477,39 @@ export class SyncEngine {
     // After initial sync setup, transition to CONNECTED
     // In a real implementation, you might wait for SYNC_COMPLETE message
     this.stateMachine.transition(SyncState.CONNECTED);
+
+    if (message) {
+      this.admittedToken = this.handshakeToken;
+      this.armRefresh();
+    }
   }
 
   private handleAuthFail(message: AuthFailMessage): void {
-    logger.error({ error: message.error }, 'Authentication failed');
+    logger.error({ error: message.error, code: message.code }, 'Authentication failed');
+    if (message.code === AUTH_FAIL_PRINCIPAL_CHANGED) {
+      // The token verified, but for another principal than the socket's: the
+      // credentials are good, only the socket is not. The server closes it.
+      if (this.refreshInFlight) {
+        this.authToken = this.refreshInFlight.token;
+      }
+      this.lastAckedEpoch = 0;
+      this.webSocketManager.getConnectionProvider().forceReconnect();
+      return;
+    }
+    if (message.code === AUTH_FAIL_TOKEN_EXPIRED) {
+      // The verdict belongs to the token the socket was admitted with: a refresh
+      // the server has not acknowledged may have crossed the connection's
+      // deadline, and holding back that newer token would stall reconnecting.
+      const refused = this.admittedToken ?? this.handshakeToken ?? this.authToken;
+      if (refused) {
+        this.expiredToken = { token: refused, exp: decodeJwtExp(refused) };
+      }
+      this.authToken = null;
+      if (this.tokenProvider) {
+        this.startExpiryRecovery(true);
+      }
+      return;
+    }
     this.authToken = null; // Clear invalid token
     // Stay in AUTHENTICATING or go to ERROR depending on severity
     // For now, let the connection close naturally or retry with new token
@@ -3122,6 +3457,8 @@ export class SyncEngine {
     this.writeRejectionEmitter.clear();
 
     this.clearResendTimer();
+    this.clearRefresh();
+    this.stopExpiryRecovery();
 
     // The one place the sent-batch registry is emptied. Neither a lost
     // connection nor a new authentication does it: an ack for a batch sent

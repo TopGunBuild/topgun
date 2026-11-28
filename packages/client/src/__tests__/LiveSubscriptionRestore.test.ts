@@ -576,7 +576,7 @@ describe('Live subscription restore on reconnect', () => {
     });
   });
 
-  it('two AUTH frames on one socket do not double the restore', async () => {
+  it('AUTH_REQUIRED after the handshake AUTH adds no AUTH, and a second AUTH_ACK no restore', async () => {
     engine = createEngine(true);
     await connect(engine, true);
     new QueryHandle(engine, MAP, {}).subscribe(() => {});
@@ -587,8 +587,9 @@ describe('Live subscription restore on reconnect', () => {
     const ws = await dropAndReopen();
     ws.simulateMessage({ type: 'AUTH_REQUIRED' });
     await flushMicrotasks();
-    expect(framesOf(ws, 'AUTH')).toHaveLength(2);
+    expect(framesOf(ws, 'AUTH')).toHaveLength(1);
 
+    await ack(ws, true);
     await ack(ws, true);
     expect(countByType(ws)).toEqual({
       QUERY_SUB: 1,

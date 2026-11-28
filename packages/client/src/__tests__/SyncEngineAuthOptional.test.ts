@@ -448,9 +448,10 @@ describe('SyncEngine — auth-optional fast path', () => {
     );
     expect(invalidTransitionWarn).toBeUndefined();
 
-    // sendAuth() IS called again (re-auth), so an extra AUTH frame is sent.
+    // The handshake AUTH is already out, so no second one follows: the server would
+    // read it as an in-band refresh.
     const sentCountAfter = ws.sentMessages.filter((m) => m.type === 'AUTH').length;
-    expect(sentCountAfter).toBeGreaterThan(sentCountBefore);
+    expect(sentCountAfter).toBe(sentCountBefore);
 
     warnSpy.mockRestore();
     engine.close();

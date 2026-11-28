@@ -342,10 +342,28 @@ export class TopGunClient<TSchema extends Record<string, any> = any> {
     // this.syncEngine.start();
   }
 
+  /**
+   * Authenticates with a static token and drops any token provider. A token
+   * set while the client is connected, or while its handshake is under way,
+   * replaces the connection: the client reconnects as the token's principal,
+   * and pending writes are sent again under it. A static token is never
+   * refreshed; once the server refuses it as expired, the client asks for a
+   * new one through `onAuthRequired`.
+   */
   public setAuthToken(token: string): void {
     this.syncEngine.setAuthToken(token);
   }
 
+  /**
+   * Authenticates with tokens from `provider`, asked on every connection and
+   * again before the current token's `exp`, so the connection is refreshed in
+   * place instead of being closed at expiry. Setting a provider while the
+   * client is connected replaces the connection (a guest logging in passes the
+   * user's provider here); pending writes are sent again under the new
+   * principal, and any the server refuses are reported on `onWriteRejected`.
+   * After an expiry refusal the client does not resend that token or an older
+   * one: it asks the provider again, backing off, until it returns a newer one.
+   */
   public setAuthTokenProvider(provider: () => Promise<string | null>): void {
     this.syncEngine.setTokenProvider(provider);
   }

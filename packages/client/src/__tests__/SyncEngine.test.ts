@@ -257,7 +257,7 @@ describe('SyncEngine', () => {
   });
 
   describe('Authentication', () => {
-    test('should respond to AUTH_REQUIRED by sending AUTH', async () => {
+    test('AUTH_REQUIRED after the handshake AUTH sends no second AUTH', async () => {
       syncEngine = new SyncEngine(config);
       syncEngine.setAuthToken('my-token');
       await jest.runAllTimersAsync();
@@ -268,8 +268,9 @@ describe('SyncEngine', () => {
       ws.simulateMessage({ type: 'AUTH_REQUIRED' });
       await jest.runAllTimersAsync();
 
-      const authMessage = ws.sentMessages.find((m) => m.type === 'AUTH');
-      expect(authMessage).toBeDefined();
+      // The server announces AUTH_REQUIRED before it reads anything and would read
+      // a second AUTH on the socket as an in-band refresh.
+      expect(ws.sentMessages.find((m) => m.type === 'AUTH')).toBeUndefined();
     });
 
     test('should set isAuthenticated=true on AUTH_ACK', async () => {
