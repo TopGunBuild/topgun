@@ -14,6 +14,7 @@ use dashmap::DashMap;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
+use topgun_core::messages::base::ChangeEventType;
 use topgun_core::{Principal, Timestamp};
 use tracing::warn;
 
@@ -64,6 +65,25 @@ impl OutboundMessage {
             Self::Close(_) => None,
         }
     }
+}
+
+/// Encodes a `QUERY_UPDATE` frame from its fields and its value's msgpack
+/// bytes, byte for byte as `rmp_serde::to_vec_named(&Message::QueryUpdate { .. })`
+/// encodes it, so a value encoded once can be spliced into the frame of every
+/// subscription that sends it.
+///
+/// `value` must be `rmp_serde::to_vec_named` of the value, the serializer the
+/// whole message would use: `rmpv`'s own encoder writes some values (a string
+/// that is not UTF-8) differently.
+#[must_use]
+pub fn encode_query_update(
+    query_id: &str,
+    key: &str,
+    value: &[u8],
+    change_type: &ChangeEventType,
+) -> Vec<u8> {
+    let _ = (query_id, key, value, change_type);
+    unimplemented!()
 }
 
 /// Outcome of a best-effort broadcast send to a (possibly slow) consumer.
