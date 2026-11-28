@@ -82,8 +82,31 @@ pub fn encode_query_update(
     value: &[u8],
     change_type: &ChangeEventType,
 ) -> Vec<u8> {
-    let _ = (query_id, key, value, change_type);
-    unimplemented!()
+    // The message is an internally tagged enum: `type` first, then the
+    // payload's four fields in declaration order, every map of fixed arity.
+    const HEAD: &[u8] = b"\x82\xa4type\xacQUERY_UPDATE\xa7payload\x84\xa7queryId";
+    // A `Vec` never refuses a write, and `rmp::encode::write_str` is the
+    // function `rmp_serde` writes every string with, headers included.
+    fn push_str(frame: &mut Vec<u8>, s: &str) {
+        let _ = rmp::encode::write_str(frame, s);
+    }
+    let change_type = match change_type {
+        ChangeEventType::ENTER => "ENTER",
+        ChangeEventType::UPDATE => "UPDATE",
+        ChangeEventType::LEAVE => "LEAVE",
+    };
+    // 42: the other three field names (21 bytes), three string headers of at
+    // most 5 bytes and the longest change type (6).
+    let mut frame = Vec::with_capacity(HEAD.len() + query_id.len() + key.len() + value.len() + 42);
+    frame.extend_from_slice(HEAD);
+    push_str(&mut frame, query_id);
+    frame.extend_from_slice(b"\xa3key");
+    push_str(&mut frame, key);
+    frame.extend_from_slice(b"\xa5value");
+    frame.extend_from_slice(value);
+    frame.extend_from_slice(b"\xaachangeType");
+    push_str(&mut frame, change_type);
+    frame
 }
 
 /// Outcome of a best-effort broadcast send to a (possibly slow) consumer.
@@ -666,7 +689,8 @@ impl ConnectionRegistry {
             .collect()
     }
 
-    /// Sends a binary live-event message to all connections of a given kind.
+    /// Sends a binary live-event message to all connections of a given kind,
+    /// copied once and shared by every target.
     ///
     /// Uses non-blocking [`try_send_broadcast`](ConnectionHandle::try_send_broadcast)
     /// so a single slow connection cannot block the broadcast. A full channel
@@ -674,37 +698,41 @@ impl ConnectionRegistry {
     /// slow-consumer state; a persistently-slow client is disconnected to force
     /// reconnect + resync rather than diverging silently.
     pub fn broadcast(&self, msg_bytes: &[u8], kind: ConnectionKind) {
+        let bytes = Bytes::copy_from_slice(msg_bytes);
         for entry in &self.connections {
             let handle = entry.value();
             if handle.kind == kind {
-                let _ = handle.try_send_broadcast(OutboundMessage::Binary(msg_bytes.to_vec()));
+                let _ = handle.try_send_broadcast(OutboundMessage::Shared(bytes.clone()));
             }
         }
     }
 
-    /// Sends a binary live-event message to a specific set of connection IDs.
+    /// Sends a binary live-event message to a specific set of connection IDs,
+    /// copied once and shared by every target.
     ///
     /// Same slow-consumer semantics as [`broadcast`](Self::broadcast): missing
     /// connections are skipped, a full channel drops the event and advances the
     /// target's slow-consumer state (disconnecting a persistently-slow client).
     pub fn send_to_connections(&self, ids: &HashSet<ConnectionId>, msg_bytes: &[u8]) {
+        let bytes = Bytes::copy_from_slice(msg_bytes);
         for id in ids {
             if let Some(handle) = self.get(*id) {
-                let _ = handle.try_send_broadcast(OutboundMessage::Binary(msg_bytes.to_vec()));
+                let _ = handle.try_send_broadcast(OutboundMessage::Shared(bytes.clone()));
             }
         }
     }
 
     /// Sends a live event the connections of `ids` are owed (`TG-LIVE-003`):
-    /// missing ids and connections that already lost an owed event are skipped
-    /// before the bytes are copied; every other target gets
-    /// [`try_send_owed`](ConnectionHandle::try_send_owed), so a target whose
-    /// queue is full is disconnected at that loss.
+    /// the bytes are copied once and shared by every target; missing ids and
+    /// connections that already lost an owed event are skipped, and every other
+    /// target gets [`try_send_owed`](ConnectionHandle::try_send_owed), so a
+    /// target whose queue is full is disconnected at that loss.
     pub fn send_owed_to_connections(&self, ids: &HashSet<ConnectionId>, msg_bytes: &[u8]) {
+        let bytes = Bytes::copy_from_slice(msg_bytes);
         for id in ids {
             if let Some(handle) = self.get(*id) {
                 if !handle.owed_closed() {
-                    handle.try_send_owed(OutboundMessage::Binary(msg_bytes.to_vec()));
+                    handle.try_send_owed(OutboundMessage::Shared(bytes.clone()));
                 }
             }
         }
@@ -1774,6 +1802,172 @@ mod tests {
             assert!(
                 registry.is_current_owner(&key, owner) && !registry.is_current_owner(&key, loser),
                 "exactly one claimant is authorized; the loser is fenced out"
+            );
+        }
+    }
+
+    // ---- one copy per fan-out, the spliced QUERY_UPDATE ----
+
+    /// The address of the bytes of the next frame on `rx`.
+    fn frame_ptr(rx: &mut mpsc::Receiver<OutboundMessage>) -> *const u8 {
+        let frame = rx.try_recv().expect("a frame was sent");
+        frame.payload().expect("a binary frame").as_ptr()
+    }
+
+    #[test]
+    fn every_fan_out_shares_one_copy_of_the_bytes_between_its_targets() {
+        let registry = ConnectionRegistry::new();
+        let (a, mut a_rx) = registry.register(ConnectionKind::Client, &test_config());
+        let (b, mut b_rx) = registry.register(ConnectionKind::Client, &test_config());
+        let ids: HashSet<ConnectionId> = [a.id, b.id].into_iter().collect();
+        let msg = [1u8, 2, 3];
+
+        registry.broadcast(&msg, ConnectionKind::Client);
+        assert_eq!(frame_ptr(&mut a_rx), frame_ptr(&mut b_rx), "broadcast");
+        registry.send_to_connections(&ids, &msg);
+        assert_eq!(
+            frame_ptr(&mut a_rx),
+            frame_ptr(&mut b_rx),
+            "send_to_connections"
+        );
+        registry.send_owed_to_connections(&ids, &msg);
+        assert_eq!(
+            frame_ptr(&mut a_rx),
+            frame_ptr(&mut b_rx),
+            "send_owed_to_connections"
+        );
+    }
+
+    /// The frame `rmp_serde` encodes for these fields.
+    fn named_query_update(
+        query_id: &str,
+        key: &str,
+        value: &rmpv::Value,
+        change_type: &ChangeEventType,
+    ) -> Vec<u8> {
+        rmp_serde::to_vec_named(&topgun_core::messages::Message::QueryUpdate {
+            payload: topgun_core::messages::client_events::QueryUpdatePayload {
+                query_id: query_id.to_string(),
+                key: key.to_string(),
+                value: value.clone(),
+                change_type: change_type.clone(),
+            },
+        })
+        .expect("encodes")
+    }
+
+    fn spliced_query_update(
+        query_id: &str,
+        key: &str,
+        value: &rmpv::Value,
+        change_type: &ChangeEventType,
+    ) -> Vec<u8> {
+        let value = rmp_serde::to_vec_named(value).expect("encodes");
+        encode_query_update(query_id, key, &value, change_type)
+    }
+
+    /// The string and container lengths at which msgpack changes header.
+    const LENGTH_BOUNDARIES: [usize; 10] = [0, 15, 16, 31, 32, 255, 256, 65535, 65536, 70000];
+
+    fn change_types() -> [ChangeEventType; 3] {
+        [
+            ChangeEventType::ENTER,
+            ChangeEventType::UPDATE,
+            ChangeEventType::LEAVE,
+        ]
+    }
+
+    #[test]
+    fn the_spliced_query_update_equals_the_named_encoding_at_every_header_boundary() {
+        for len in LENGTH_BOUNDARIES {
+            let text = "k".repeat(len);
+            let values = [
+                rmpv::Value::from(text.as_str()),
+                rmpv::Value::Array(vec![rmpv::Value::Nil; len]),
+                rmpv::Value::Map(
+                    (0..len)
+                        .map(|i| (rmpv::Value::from(i), rmpv::Value::Boolean(true)))
+                        .collect(),
+                ),
+                rmpv::Value::Binary(vec![7; len]),
+            ];
+            for change_type in &change_types() {
+                for (query_id, key) in [(text.as_str(), "k"), ("q", text.as_str())] {
+                    for value in &values {
+                        assert!(
+                            spliced_query_update(query_id, key, value, change_type)
+                                == named_query_update(query_id, key, value, change_type),
+                            "length {len}, {change_type:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Any msgpack value, a string that is not UTF-8, ext and floats included.
+    fn any_value() -> impl proptest::strategy::Strategy<Value = rmpv::Value> {
+        use proptest::prelude::*;
+        let not_utf8 = proptest::collection::vec(0x80u8..=0xff, 1..40).prop_map(|bytes| {
+            let mut encoded = Vec::new();
+            rmp::encode::write_str_len(&mut encoded, u32::try_from(bytes.len()).unwrap()).unwrap();
+            encoded.extend_from_slice(&bytes);
+            rmpv::decode::read_value(&mut encoded.as_slice()).expect("decodes")
+        });
+        let leaf = prop_oneof![
+            Just(rmpv::Value::Nil),
+            any::<bool>().prop_map(rmpv::Value::Boolean),
+            any::<i64>().prop_map(rmpv::Value::from),
+            any::<u64>().prop_map(rmpv::Value::from),
+            prop_oneof![
+                Just(i64::MIN),
+                Just(-33),
+                Just(-32),
+                Just(127),
+                Just(128),
+                Just(65535),
+                Just(65536)
+            ]
+            .prop_map(rmpv::Value::from),
+            any::<f32>().prop_map(rmpv::Value::F32),
+            any::<f64>().prop_map(rmpv::Value::F64),
+            ".{0,40}".prop_map(|s| rmpv::Value::from(s.as_str())),
+            not_utf8,
+            proptest::collection::vec(any::<u8>(), 0..40).prop_map(rmpv::Value::Binary),
+            (any::<i8>(), proptest::collection::vec(any::<u8>(), 0..20))
+                .prop_map(|(tag, data)| rmpv::Value::Ext(tag, data)),
+        ];
+        leaf.prop_recursive(3, 64, 17, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..17).prop_map(rmpv::Value::Array),
+                proptest::collection::vec((inner.clone(), inner), 0..17).prop_map(rmpv::Value::Map),
+            ]
+        })
+    }
+
+    /// A string whose byte length is at or near a header boundary, or any
+    /// string, non-ASCII included.
+    fn any_text() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        prop_oneof![
+            (proptest::sample::select(&LENGTH_BOUNDARIES[..9]), "[a-z]")
+                .prop_map(|(len, c)| c.repeat(len)),
+            ".{0,40}",
+            "[а-яё€😀]{0,40}",
+        ]
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_spliced_query_update_equals_the_named_encoding(
+            query_id in any_text(),
+            key in any_text(),
+            value in any_value(),
+            change_type in proptest::sample::select(change_types().to_vec()),
+        ) {
+            proptest::prop_assert!(
+                spliced_query_update(&query_id, &key, &value, &change_type)
+                    == named_query_update(&query_id, &key, &value, &change_type)
             );
         }
     }
