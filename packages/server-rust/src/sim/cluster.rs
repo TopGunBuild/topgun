@@ -1329,9 +1329,9 @@ mod tests {
         let from_node_id = from_node.node_id.clone();
         tokio::spawn(async move {
             while let Some(msg) = outbound_rx.recv().await {
-                if let OutboundMessage::Binary(bytes) = msg {
+                if let Some(bytes) = msg.payload() {
                     // Forward the binary frame to the target node's dispatch loop.
-                    let _ = handle_cluster_peer_frame(&bytes, from_node_id.clone(), &to_inbound_tx);
+                    let _ = handle_cluster_peer_frame(bytes, from_node_id.clone(), &to_inbound_tx);
                 }
             }
         })
@@ -2760,9 +2760,9 @@ mod tests {
     ) -> Vec<(String, topgun_core::messages::base::ChangeEventType)> {
         let mut out = Vec::new();
         while let Ok(msg) = rx.try_recv() {
-            if let OutboundMessage::Binary(bytes) = msg {
+            if let Some(bytes) = msg.payload() {
                 if let Ok(topgun_core::messages::Message::QueryUpdate { payload }) =
-                    rmp_serde::from_slice::<topgun_core::messages::Message>(&bytes)
+                    rmp_serde::from_slice::<topgun_core::messages::Message>(bytes)
                 {
                     if payload.query_id == query_id {
                         out.push((payload.key, payload.change_type));
