@@ -14,6 +14,12 @@
  * A second server, on a durable store, proves the lifetime of a guest's device
  * credential: it re-binds within the server process and is replaced after a
  * restart, while a user's credential survives the restart.
+ *
+ * A third drives real TopGunClients, each in a process of its own
+ * (helpers/auth-client.ts): a guest that switches to a user reconnects as the
+ * user, a guest write the user's policies refuse is reported on
+ * `onWriteRejected`, and two storage-less guest tabs of one visitor stay
+ * independent when one of them logs in.
  */
 
 import * as fs from 'fs';
@@ -30,6 +36,7 @@ import {
   SpawnedServer,
   TestClient,
 } from './helpers';
+import { AuthClient } from './helpers/auth-client';
 
 const JWT_SECRET = 'test-e2e-secret';
 const GUEST_CLAIM = 'tg_guest';
@@ -239,4 +246,171 @@ describe('Integration: guest device identity (TG-AUTH-002)', () => {
       undefined,
     ]);
   });
+});
+
+describe('Integration: a client switching from guest to user (TG-AUTH-001)', () => {
+  const GUEST_ONLY = 'acme.visitor';
+  const USER_ONLY = 'acme.conv';
+  let dir = '';
+  let port = 0;
+  let server: SpawnedServer | null = null;
+  const clients: AuthClient[] = [];
+
+  /** Guests may write only `acme.visitor.**`, users only `acme.conv.**`. */
+  const start = async (fixedPort?: number): Promise<void> => {
+    server = await spawnRustServer({
+      port: fixedPort,
+      env: {
+        TOPGUN_GUEST_CLAIM: GUEST_CLAIM,
+        STORAGE_BACKEND: 'rocksdb',
+        TOPGUN_DATA_DIR: path.join(dir, 'topgun-data'),
+        TOPGUN_REDB_PATH: path.join(dir, 'topgun.redb'),
+        TOPGUN_WAL_DIR: path.join(dir, 'wal'),
+      },
+    });
+    port = server.port;
+  };
+
+  const stop = async (): Promise<void> => {
+    const stopping = server!;
+    server = null;
+    await stopping.cleanup();
+    await waitUntil(
+      () => stopping.process.exitCode !== null || stopping.process.signalCode !== null,
+      20_000,
+    );
+  };
+
+  const client = (startWith: { provider: string } | { token: string }): AuthClient => {
+    const c = new AuthClient(port, startWith);
+    clients.push(c);
+    return c;
+  };
+
+  const connected = (c: AuthClient, ms = 10_000) =>
+    c.until('CONNECTED', (s) => s.state === 'CONNECTED', ms);
+
+  /** Resolves once the client has one more OP_ACK than `before` and nothing pending. */
+  const acked = (c: AuthClient, before: number) =>
+    c.until('the write acknowledged', (s) => s.opAcks > before && s.pending === 0, 10_000);
+
+  beforeAll(async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'topgun-guest-switch-'));
+    await start();
+    await createPolicy(port, { id: 'allow-all', mapPattern: '**', action: 'all', effect: 'allow' });
+    await createPolicy(port, {
+      id: 'guests-write-visitor-maps-only',
+      mapPattern: `${USER_ONLY}.**`,
+      action: 'write',
+      effect: 'deny',
+      conditionExpr: "auth.kind == 'guest'",
+    });
+    await createPolicy(port, {
+      id: 'users-do-not-write-visitor-maps',
+      mapPattern: `${GUEST_ONLY}.**`,
+      action: 'write',
+      effect: 'deny',
+      conditionExpr: "auth.kind == 'user'",
+    });
+  });
+
+  afterAll(async () => {
+    await Promise.all(clients.map((c) => c.exit()));
+    if (server) await server.cleanup();
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('a guest switching to a user reconnects', async () => {
+    for (const how of ['setProvider', 'setToken'] as const) {
+      const c = client({ provider: token('g1', true) });
+      await connected(c);
+      const from = c.status.changes.length;
+      const userToken = token('u1', false);
+      const switchedAt = Date.now();
+      c.send({ type: how, token: userToken });
+
+      const s = await c.until(
+        `${how}: CONNECTED as the user`,
+        (st) =>
+          st.state === 'CONNECTED' &&
+          st.changes.length > from &&
+          st.auths[st.auths.length - 1]?.token === userToken,
+        3_000,
+      );
+      const after = s.changes.slice(from);
+      expect(after.map((ch) => ch.to)).toEqual([
+        'DISCONNECTED',
+        'CONNECTING',
+        'AUTHENTICATING',
+        'SYNCING',
+        'CONNECTED',
+      ]);
+      expect(after[1].at - switchedAt).toBeLessThanOrEqual(2_000);
+      expect(after[4].at - switchedAt).toBeLessThanOrEqual(3_000);
+      expect(s.sockets).toBe(2);
+
+      // Only a user may write here, so the acknowledgement names the new principal.
+      c.send({ type: 'write', map: `${USER_ONLY}.u1`, key: how, value: { text: 'hello' } });
+      const written = await acked(c, s.opAcks);
+      expect(written.rejections).toEqual([]);
+      expect(written.fails).toEqual([]);
+    }
+  });
+
+  test('guest tabs are independent', async () => {
+    const tabA = client({ provider: token('g-tab', true) });
+    const tabB = client({ provider: token('g-tab', true) });
+    const [a, b] = await Promise.all([connected(tabA), connected(tabB)]);
+    await tabA.until('a device id', (s) => s.deviceId !== null, 5_000);
+    const deviceB = (await tabB.until('a device id', (s) => s.deviceId !== null, 5_000)).deviceId;
+    expect(tabA.status.deviceId).not.toBe(deviceB);
+    expect(a.sockets).toBe(1);
+    expect(b.sockets).toBe(1);
+
+    const userToken = token('u-tab', false);
+    tabA.send({ type: 'setProvider', token: userToken });
+    await tabA.until(
+      'tab A CONNECTED as the user',
+      (s) => s.state === 'CONNECTED' && s.auths[s.auths.length - 1]?.token === userToken,
+      5_000,
+    );
+
+    const before = (await tabB.fresh()).opAcks;
+    tabB.send({ type: 'write', map: `${GUEST_ONLY}.g-tab.notes`, key: 'b', value: { text: 'hi' } });
+    const written = await acked(tabB, before);
+    expect(written.state).toBe('CONNECTED');
+    expect(written.sockets).toBe(1);
+    expect(written.changes.map((ch) => ch.to)).not.toContain('DISCONNECTED');
+    expect(written.rejections).toEqual([]);
+    expect(written.deviceId).toBe(deviceB);
+  });
+
+  test('refused guest writes are reported after login', async () => {
+    const c = client({ provider: token('g1', true) });
+    await connected(c);
+    const fixedPort = port;
+
+    await stop();
+    await c.until('the socket lost', (s) => s.state !== 'CONNECTED', 10_000);
+    c.send({ type: 'write', map: `${GUEST_ONLY}.g1.notes`, key: 'n1', value: { text: 'mine' } });
+    await c.until('the write pending', (s) => s.pending === 1, 5_000);
+    const userToken = token('u1', false);
+    c.send({ type: 'setProvider', token: userToken });
+    // Set while the server is down, the provider changes no connection: the
+    // client goes on with its reconnect attempts.
+    const whileDown = await c.fresh();
+    expect(whileDown.state).not.toBe('CONNECTED');
+
+    await start(fixedPort);
+    const s = await c.until(
+      'the refused guest write reported',
+      (st) => st.state === 'CONNECTED' && st.rejections.length > 0,
+      45_000,
+    );
+    expect(s.auths[s.auths.length - 1].token).toBe(userToken);
+    expect(s.rejections).toEqual([
+      expect.objectContaining({ mapName: `${GUEST_ONLY}.g1.notes`, key: 'n1', cause: 'forbidden' }),
+    ]);
+    expect(s.pending).toBe(0);
+  }, 120_000);
 });

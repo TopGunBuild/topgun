@@ -15,6 +15,13 @@
  *   deadline; one with changed roles gets 4409 and the close; an `AUTH` inside
  *   a `BATCH` envelope changes nothing;
  * - on a NO_AUTH server an `AUTH` frame gets no reply and the socket serves on.
+ *
+ * A TopGunClient in a process of its own (helpers/auth-client.ts) shows the
+ * client's half: with a token provider it refreshes in band before the
+ * deadline and keeps its socket; after an expiry refusal it reconnects with a
+ * fresh token, never resends the refused one (or an older one) and opens no
+ * socket while the provider keeps returning it; a static token refused as
+ * expired is not resent and `onAuthRequired` is called.
  */
 
 import * as jwt from 'jsonwebtoken';
@@ -27,6 +34,7 @@ import {
   SpawnedServer,
   TestClient,
 } from './helpers';
+import { AuthClient } from './helpers/auth-client';
 
 const JWT_SECRET = 'test-e2e-secret';
 const CLOSES = 'topgun_ws_token_expiry_closes_total';
@@ -220,4 +228,118 @@ describe('Integration: sockets close at token expiry (TG-AUTH-001)', () => {
     });
     await waitUntil(() => received(client, 'OP_ACK').length === 1, 5000);
   });
+});
+
+describe('Integration: a TopGunClient across token lifetimes (TG-AUTH-001)', () => {
+  let server: SpawnedServer;
+  const clients: AuthClient[] = [];
+
+  /** A token for `sub` whose `exp` is `expIn` seconds from now and `iat` 60 s before it. */
+  function lived(sub: string, expIn: number): string {
+    const exp = Math.floor(Date.now() / 1000) + expIn;
+    return jwt.sign({ sub, roles: ['USER'], exp, iat: exp - 60 }, JWT_SECRET);
+  }
+
+  const client = (startWith: { provider: string } | { token: string }): AuthClient => {
+    const c = new AuthClient(server.port, startWith);
+    clients.push(c);
+    return c;
+  };
+
+  beforeAll(async () => {
+    server = await spawnRustServer();
+  });
+
+  afterAll(async () => {
+    await Promise.all(clients.map((c) => c.exit()));
+    await server.cleanup();
+  });
+
+  test('a provider refresh keeps the socket', async () => {
+    // Admitted within the leeway; the server closes the socket 40 s after the
+    // handshake unless the client refreshes before then.
+    const first = lived('refreshing', -20);
+    const c = client({ provider: first });
+    const admitted = await c.until('CONNECTED', (s) => s.state === 'CONNECTED', 10_000);
+    const ackAt = admitted.acks[0].at;
+    c.send({ type: 'watch', map: 'refresh.m' });
+    const settled = await c.until('the query subscribed', (s) => s.querySubs === 1, 5_000);
+    const changesAtAck = settled.changes.length;
+
+    // Until the 30 s floor every provider call gets the token the socket holds,
+    // so only the refresh timer can extend the deadline.
+    await sleep(Math.max(0, ackAt + 20_000 - Date.now()));
+    const fresh = lived('refreshing', 3600);
+    c.send({ type: 'providerToken', token: fresh });
+
+    await sleep(Math.max(0, ackAt + 45_000 - Date.now()));
+    const s = await c.fresh();
+    expect(s.auths.map((a) => a.token)).toEqual([first, fresh]);
+    const refreshAfter = s.auths[1].at - ackAt;
+    expect(refreshAfter).toBeGreaterThanOrEqual(29_500);
+    expect(refreshAfter).toBeLessThan(40_000);
+    expect(s.acks).toHaveLength(2);
+    expect(s.fails).toEqual([]);
+    expect(s.state).toBe('CONNECTED');
+    expect(s.sockets).toBe(1);
+    expect(s.changes).toHaveLength(changesAtAck);
+    expect(s.querySubs).toBe(1);
+  }, 90_000);
+
+  test('reconnect after expiry fetches a fresh token', async () => {
+    const stale = lived('expiring', -55);
+    const c = client({ provider: stale });
+    await c.until('CONNECTED', (s) => s.state === 'CONNECTED', 10_000);
+    const refused = await c.until('the expiry refusal', (s) => s.fails.length > 0, 15_000);
+    expect(refused.fails.map((f) => f.code)).toEqual([4401]);
+
+    const fresh = lived('expiring', 3600);
+    c.send({ type: 'providerToken', token: fresh });
+    const s = await c.until(
+      'CONNECTED again',
+      (st) => st.state === 'CONNECTED' && st.auths[st.auths.length - 1]?.token === fresh,
+      10_000,
+    );
+    expect(s.fails).toHaveLength(1);
+    expect(s.auths.map((a) => a.token)).toEqual([stale, fresh]);
+  }, 60_000);
+
+  test('a provider that returns the refused token does not loop', async () => {
+    const stale = lived('stuck', -55);
+    const c = client({ provider: stale });
+    await c.until('CONNECTED', (s) => s.state === 'CONNECTED', 10_000);
+    const refused = await c.until('the expiry refusal', (s) => s.fails.length > 0, 15_000);
+    const failAt = refused.fails[0].at;
+    const socketsAtFail = refused.sockets;
+
+    // An older token is held back as well.
+    await sleep(10_000);
+    c.send({ type: 'providerToken', token: lived('stuck', -70) });
+    await sleep(Math.max(0, failAt + 20_000 - Date.now()));
+    const held = await c.fresh();
+    expect(held.providerCalls.filter((at) => at >= failAt).length).toBeGreaterThanOrEqual(2);
+    expect(held.auths.filter((a) => a.at >= failAt)).toEqual([]);
+    expect(held.sockets - socketsAtFail).toBeLessThanOrEqual(1);
+    expect(held.state).not.toBe('CONNECTED');
+
+    const fresh = lived('stuck', 3600);
+    c.send({ type: 'providerToken', token: fresh });
+    const s = await c.until(
+      'CONNECTED with the fresh token',
+      (st) => st.state === 'CONNECTED' && st.auths[st.auths.length - 1]?.token === fresh,
+      50_000,
+    );
+    expect(s.auths.map((a) => a.token)).toEqual([stale, fresh]);
+    expect(s.fails).toHaveLength(1);
+  }, 120_000);
+
+  test('a static token refused as expired is not resent', async () => {
+    const stale = lived('static', -55);
+    const c = client({ token: stale });
+    await c.until('CONNECTED', (s) => s.state === 'CONNECTED', 10_000);
+    await c.until('the expiry refusal', (s) => s.fails.length > 0, 15_000);
+    const s = await c.until('onAuthRequired', (st) => st.authRequired > 0, 15_000);
+    expect(s.fails.map((f) => f.code)).toEqual([4401]);
+    expect(s.auths.map((a) => a.token)).toEqual([stale]);
+  }, 60_000);
 });

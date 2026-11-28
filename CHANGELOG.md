@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Changed (client): `setAuthToken` and `setAuthTokenProvider` on a connected client reconnect.**
+  Called while the client is connected, or after its handshake `AUTH` went out, either one closes
+  the connection and opens a new one with the new credentials, and pending writes are sent again
+  under the new principal; a write the new principal's policies refuse is reported on
+  `onWriteRejected`. Before, the new credentials took effect only at the next reconnect. A guest
+  that logs in switches with `setAuthTokenProvider(userProvider)`. With a token provider the client
+  now refreshes in band: it asks the provider again at `max(30 s, R - min(60 s, R/2))` after each
+  `AUTH_ACK` (`R` the time left until the token's `exp`) and sends a different token on the open
+  connection, which keeps its state, queries and subscriptions; with no answer in 10 s it keeps the
+  connection and sends no further refresh on it. Each connection now carries one handshake `AUTH`;
+  before, `AUTH_REQUIRED` made the client send a second one. After `AUTH_FAIL` `4401` the client
+  never sends the refused token, or one whose `exp` is not later, again: with a provider it closes
+  the connection and asks the provider again, after 1 s doubling to 30 s, before it opens a new
+  one; without a provider it drops the token and calls `onAuthRequired`, as before. After `4409`
+  it keeps the token and reconnects. `ClusterClient` and the MCP server are unchanged.
 - **Changed (server): a WebSocket connection closes when its token expires (`TG-AUTH-001`).** At
   the token's `exp` plus the 60 s JWT leeway the server sends `AUTH_FAIL` with `code: 4401`, closes
   the connection and counts it in `topgun_ws_token_expiry_closes_total`; a handshake with an
